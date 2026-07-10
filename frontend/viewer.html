@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viewer</title>
+<link rel="stylesheet" href="/css/viewer.css">
+</head>
+<body>
+<header>
+  <span id="v-path"></span>
+  <span id="v-meta"></span>
+</header>
+<pre id="content"></pre>
+<script>
+(async () => {
+  const pathEl = document.getElementById("v-path");
+  const metaEl = document.getElementById("v-meta");
+  const pre = document.getElementById("content");
+  const path = new URLSearchParams(location.search).get("path") || "";
+  pathEl.textContent = path || "(no path)";
+  if (!path) {
+    pre.classList.add("err");
+    pre.textContent = "no ?path= given";
+    return;
+  }
+  document.title = path.split(/[\\/]/).pop() || path;
+  const fmtSize = (n) => n < 1024 ? n + " B"
+    : n < 1024 * 1024 ? (n / 1024).toFixed(1) + " KiB"
+    : (n / (1024 * 1024)).toFixed(1) + " MiB";
+  try {
+    const res = await fetch("/api/file?path=" + encodeURIComponent(path));
+    if (!res.ok) {
+      pre.classList.add("err");
+      pre.textContent =
+        res.status === 404 ? "not found" :
+        res.status === 400 ? "not a readable file" :
+        "error " + res.status;
+      return;
+    }
+    const data = await res.json();
+    pathEl.textContent = data.path;
+    metaEl.textContent = fmtSize(data.size);
+    if (data.truncated) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "truncated";
+      metaEl.appendChild(tag);
+    }
+    pre.textContent = data.text;
+  } catch (e) {
+    pre.classList.add("err");
+    pre.textContent = "request failed";
+  }
+})();
+</script>
+</body>
+</html>
