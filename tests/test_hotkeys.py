@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 
 import pytest
@@ -93,6 +94,8 @@ def test_manager_lifecycle_and_register():
         mgr.start()
         result = mgr.register("ctrl+alt+f11", lambda: None)
         assert isinstance(result, bool)  # may be False if taken on this machine
+        if os.name != "nt":
+            assert result is False
         t0 = time.monotonic()
         mgr.stop()
         assert time.monotonic() - t0 < 2.0

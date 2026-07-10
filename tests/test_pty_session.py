@@ -1,6 +1,22 @@
 import asyncio
+import os
 
-from quickterm.pty_session import PtySession
+if os.name == "nt":
+    from quickterm.pty_session import PtySession
+else:
+    from quickterm.pty_posix import PtySession
+
+
+def _short(script: str) -> tuple[str, list[str]]:
+    if os.name == "nt":
+        return "cmd.exe", ["/c", script]
+    return "/bin/sh", ["-c", script]
+
+
+def _interactive() -> tuple[str, list[str], bytes]:
+    if os.name == "nt":
+        return "cmd.exe", ["/q", "/k"], b"\r\n"
+    return "/bin/sh", [], b"\n"
 
 
 async def _spawn(cmd, args, cols=80, rows=25):
@@ -21,7 +37,8 @@ async def _spawn(cmd, args, cols=80, rows=25):
 
 
 async def test_echo_output_exit_and_resize():
-    sess, chunks, exited, codes = await _spawn("cmd.exe", ["/c", "echo hi"])
+    cmd, args = _short("echo hi")
+    sess, chunks, exited, codes = await _spawn(cmd, args)
     assert sess.pid > 0
     sess.resize(100, 40)  # live resize
     await asyncio.wait_for(exited.wait(), timeout=15)
@@ -34,30 +51,32 @@ async def test_echo_output_exit_and_resize():
 
 
 async def test_nonzero_exit_code():
-    sess, _, exited, codes = await _spawn("cmd.exe", ["/c", "exit 3"])
+    cmd, args = _short("exit 3")
+    sess, _, exited, codes = await _spawn(cmd, args)
     await asyncio.wait_for(exited.wait(), timeout=15)
     assert codes == [3]
     assert sess.exit_code == 3
 
 
 async def test_write_reaches_process():
-    # cmd waits on stdin; write a command, expect its output
-    sess, chunks, exited, _ = await _spawn("cmd.exe", ["/q", "/k"])
+    cmd, args, newline = _interactive()
+    sess, chunks, exited, _ = await _spawn(cmd, args)
     await asyncio.sleep(0.5)
     assert sess.alive
-    sess.write(b"echo marker_xyz\r\n")
+    sess.write(b"echo marker_xyz" + newline)
 
     async def saw_marker() -> None:
         while b"marker_xyz" not in b"".join(chunks):
             await asyncio.sleep(0.05)
 
     await asyncio.wait_for(saw_marker(), timeout=10)
-    sess.write(b"exit\r\n")
+    sess.write(b"exit" + newline)
     await asyncio.wait_for(exited.wait(), timeout=15)
 
 
 async def test_kill_terminates_tree():
-    sess, _, exited, _ = await _spawn("cmd.exe", ["/q", "/k"])
+    cmd, args, _ = _interactive()
+    sess, _, exited, _ = await _spawn(cmd, args)
     await asyncio.sleep(0.3)
     assert sess.alive
     sess.kill()

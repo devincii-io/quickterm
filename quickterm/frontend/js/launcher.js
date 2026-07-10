@@ -1,3 +1,5 @@
+import { icon } from "./icons.js";
+
 function shellLabel(profile) {
   const labels = {
     "powershell-core": "PowerShell 7",
@@ -16,14 +18,17 @@ function element(tag, className, text) {
   return node;
 }
 
-function menuItem(label, detail, icon) {
+// mark: a short monogram string ("PS") or an icon name passed as {icon: "..."}.
+function menuItem(label, detail, mark) {
   const button = element("button", "dropdown-item");
   button.type = "button";
-  const mark = element("span", "dropdown-item-mark", icon || ">");
+  const markEl = element("span", "dropdown-item-mark");
+  if (mark && typeof mark === "object" && mark.icon) markEl.append(icon(mark.icon, 13));
+  else markEl.textContent = mark || ">";
   const copy = element("span", "dropdown-item-copy");
   copy.append(element("strong", "", label));
   if (detail) copy.append(element("small", "", detail));
-  button.append(mark, copy);
+  button.append(markEl, copy);
   return button;
 }
 
@@ -55,8 +60,20 @@ function dropdownShell(className) {
   return { root, trigger, menu, setOpen };
 }
 
+function chevron() {
+  const wrap = element("span", "dropdown-chevron");
+  wrap.append(icon("chevron-down", 14));
+  return wrap;
+}
+
 function sectionLabel(text) {
   return element("div", "dropdown-section-label", text);
+}
+
+function selectedMark() {
+  const mark = element("span", "dropdown-selected-mark");
+  mark.append(icon("check", 12));
+  return mark;
 }
 
 function buildWorkspaceDropdown(options) {
@@ -68,13 +85,16 @@ function buildWorkspaceDropdown(options) {
       element("small", "", "Workspace"),
       element("strong", "", options.currentWorkspace || "Scratch"),
     );
-    trigger.append(element("span", `workspace-state ${options.currentWorkspace ? "saved" : "scratch"}`), copy, element("span", "dropdown-chevron", "⌄"));
+    trigger.append(element("span", `workspace-state ${options.currentWorkspace ? "saved" : "scratch"}`), copy, chevron());
   };
   renderTrigger();
 
   menu.append(sectionLabel("Workspace mode"));
-  const scratch = menuItem("Scratch", "Disposable · closes with the app", "○");
-  if (!options.currentWorkspace) scratch.classList.add("selected");
+  const scratch = menuItem("Scratch", "Disposable · closes with the app", { icon: "circle-dashed" });
+  if (!options.currentWorkspace) {
+    scratch.classList.add("selected");
+    scratch.append(selectedMark());
+  }
   scratch.addEventListener("click", () => {
     setOpen(false);
     options.onWorkspace(null);
@@ -84,16 +104,20 @@ function buildWorkspaceDropdown(options) {
     menu.append(element("div", "dropdown-empty", "No workspaces saved yet"));
   }
   for (const name of options.workspaces) {
-    const item = menuItem(name, name === options.currentWorkspace ? "Currently open" : "Sessions and layout saved", "◇");
-    if (name === options.currentWorkspace) item.classList.add("selected");
+    const item = menuItem(name, name === options.currentWorkspace ? "Currently open" : "Sessions and layout saved", { icon: "diamond" });
+    if (name === options.currentWorkspace) {
+      item.classList.add("selected");
+      item.append(selectedMark());
+    }
     item.addEventListener("click", () => {
       setOpen(false);
       options.onWorkspace(name);
     });
     menu.append(item);
   }
-  const footer = element("button", "dropdown-footer", "Manage workspaces →");
+  const footer = element("button", "dropdown-footer");
   footer.type = "button";
+  footer.append(element("span", "", "Manage workspaces"), icon("chevron-right", 13));
   footer.addEventListener("click", () => {
     setOpen(false);
     options.onManage();
@@ -102,17 +126,25 @@ function buildWorkspaceDropdown(options) {
   return root;
 }
 
+// Known system terminal metadata; anything else from the server inventory
+// still shows up with generic defaults, so posix shells work unchanged.
+const SYSTEM_META = {
+  "powershell-core": { detail: "Modern PowerShell", mark: "PS", args: ["-NoLogo"] },
+  "windows-powershell": { detail: "Built into Windows", mark: "PS", args: ["-NoLogo"] },
+  "command-prompt": { detail: "Classic Windows shell", mark: "C:\\", args: [] },
+  wsl: { detail: "Linux on Windows", mark: "LX", args: [] },
+  bash: { detail: "GNU Bash", mark: "$", args: ["-l"] },
+  zsh: { detail: "Z shell", mark: "%", args: ["-l"] },
+  fish: { detail: "Friendly shell", mark: "><>", args: ["-l"] },
+};
+
 function systemChoices(inventory) {
-  const types = new Map((inventory.types || []).map((type) => [type.id, type]));
-  return [
-    { id: "powershell-core", label: "PowerShell 7", detail: "Modern PowerShell", cmd: "pwsh.exe", args: ["-NoLogo"], icon: "PS" },
-    { id: "windows-powershell", label: "Windows PowerShell", detail: "Built into Windows", cmd: "powershell.exe", args: ["-NoLogo"], icon: "PS" },
-    { id: "command-prompt", label: "Command Prompt", detail: "Classic Windows shell", cmd: "cmd.exe", args: [], icon: "C:\\" },
-    { id: "wsl", label: "WSL", detail: "Linux on Windows", cmd: "wsl.exe", args: [], icon: "LX" },
-  ].filter((choice) => {
-    const detected = types.get(choice.id);
-    return detected ? detected.available !== false : choice.id !== "powershell-core";
-  });
+  return (inventory.types || [])
+    .filter((type) => type.executable && type.available !== false && type.id !== "custom")
+    .map((type) => {
+      const meta = SYSTEM_META[type.id] || { detail: type.executable, mark: ">", args: [] };
+      return { id: type.id, label: type.label, detail: meta.detail, cmd: type.executable, args: meta.args, mark: meta.mark };
+    });
 }
 
 function buildTerminalControl(options) {
@@ -132,7 +164,7 @@ function buildTerminalControl(options) {
     value.append(element("strong", "", selected ? selected.label : "No terminal found"));
     if (selected) value.append(element("em", "", selected.detail || ""));
     copy.append(value);
-    trigger.append(copy, element("span", "dropdown-chevron", "⌄"));
+    trigger.append(copy, chevron());
   };
 
   const select = (choice) => {
@@ -142,7 +174,7 @@ function buildTerminalControl(options) {
   };
 
   menu.append(sectionLabel("Personal"));
-  if (!options.profiles.length) menu.append(element("div", "dropdown-empty", "Create profiles in Settings"));
+  if (!options.profiles.length) menu.append(element("div", "dropdown-empty", "No personal terminals yet — create one in Settings"));
   for (const profile of options.profiles) {
     const item = menuItem(profile.name, shellLabel(profile), (profile.name || "> ").slice(0, 2).toUpperCase());
     item.addEventListener("click", () => select({ kind: "profile", profile, label: profile.name, detail: shellLabel(profile) }));
@@ -151,7 +183,7 @@ function buildTerminalControl(options) {
 
   menu.append(sectionLabel("System terminals"));
   for (const system of systems) {
-    const item = menuItem(system.label, system.detail, system.icon);
+    const item = menuItem(system.label, system.detail, system.mark);
     if (system.id !== "wsl") {
       item.addEventListener("click", () => select({ kind: "system", ...system }));
       menu.append(item);
@@ -160,7 +192,9 @@ function buildTerminalControl(options) {
 
     const distros = options.inventory.wsl_distributions || [];
     const group = element("div", "dropdown-nested-group");
-    item.append(element("span", "nested-chevron", "›"));
+    const nestedChevron = element("span", "nested-chevron");
+    nestedChevron.append(icon("chevron-right", 14));
+    item.append(nestedChevron);
     const distroList = element("div", "dropdown-nested");
     distroList.hidden = true;
     if (!distros.length) {
@@ -195,7 +229,7 @@ function buildTerminalControl(options) {
 
   const openButton = element("button", "launch-button");
   openButton.type = "button";
-  openButton.append(element("span", "", "Open"), element("span", "", "↗"));
+  openButton.append(element("span", "", "Open"), icon("arrow-up-right", 14));
   openButton.addEventListener("click", () => {
     if (!selected) return;
     if (selected.kind === "profile") options.onRunProfile(selected.profile);
@@ -212,17 +246,32 @@ export function initLauncher(el, options) {
   el.textContent = "";
 
   const brand = element("div", "launcher-brand");
-  brand.innerHTML = '<span class="brand-mark"><i></i><i></i><i></i></span>' +
-    '<span class="brand-copy"><strong>QuickTerm</strong><small>workspaces</small></span>';
+  if (options.logoUrl) {
+    const frame = element("span", "brand-logo-frame");
+    const image = element("img", "brand-logo");
+    image.src = options.logoUrl;
+    image.alt = "";
+    image.addEventListener("error", () => frame.replaceWith(defaultBrandMark()));
+    frame.append(image);
+    brand.append(frame);
+  } else {
+    brand.append(defaultBrandMark());
+  }
+  const brandCopy = element("span", "brand-copy");
+  brandCopy.append(
+    element("strong", "", "QuickTerm"),
+    element("small", "", options.currentWorkspace || "workspaces"),
+  );
+  brand.append(brandCopy);
   el.append(brand, buildWorkspaceDropdown(options), buildTerminalControl(options));
 
   const nav = element("nav", "launcher-nav");
   nav.setAttribute("aria-label", "Application");
-  const icons = { dashboard: "◇", settings: "◫", help: "?" };
+  const navIcons = { dashboard: "dashboard", settings: "settings", help: "help" };
   for (const [label, onClick] of options.chrome || []) {
     const button = element("button", "nav-button");
     button.type = "button";
-    button.append(element("span", "", icons[label] || "·"), element("span", "", label));
+    button.append(icon(navIcons[label] || "terminal", 15), element("span", "", label));
     button.addEventListener("click", onClick);
     nav.append(button);
   }
@@ -239,4 +288,10 @@ export function initLauncher(el, options) {
   document.addEventListener("click", () => {
     document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns"));
   }, { signal: abort.signal });
+}
+
+function defaultBrandMark() {
+  const mark = element("span", "brand-mark");
+  mark.append(element("i"), element("i"), element("i"));
+  return mark;
 }

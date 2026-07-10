@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import importlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from quickterm.session_manager import Attachment, SessionManager
 
 FILE_READ_CAP = 512 * 1024
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 
 def _asdict(obj: Any) -> Any:
@@ -30,12 +31,53 @@ def _asdict(obj: Any) -> Any:
     return dict(vars(obj))
 
 
+def _allowed_origins(cfg: "AppConfig") -> tuple[set[str], set[str]]:
+    hosts = {f"127.0.0.1:{cfg.port}", f"localhost:{cfg.port}", f"[::1]:{cfg.port}"}
+    if cfg.host not in ("127.0.0.1", "localhost", "0.0.0.0", "::"):
+        hosts.add(f"{cfg.host}:{cfg.port}")
+    return hosts, {f"http://{h}" for h in hosts}
+
+
 def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
     app = FastAPI(title="QuickTerm")
+    allowed_hosts, allowed_origins = _allowed_origins(cfg)
+
+    # Local-only trust boundary: the API answers the QuickTerm window and
+    # nothing else. The Host allowlist defeats DNS-rebinding (a hostile page
+    # pointing its own domain at 127.0.0.1), and the Origin allowlist defeats
+    # cross-origin requests from other sites in the same browser — including
+    # WebSocket connections, which browsers allow cross-origin by default.
+    @app.middleware("http")
+    async def _local_guard(request: Request, call_next):
+        if request.headers.get("host", "") not in allowed_hosts:
+            return Response("forbidden: bad host", status_code=403)
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in allowed_origins:
+            return Response("forbidden: bad origin", status_code=403)
+        return await call_next(request)
+
+    def _ws_allowed(ws: WebSocket) -> bool:
+        if ws.headers.get("host", "") not in allowed_hosts:
+            return False
+        origin = ws.headers.get("origin")
+        # browsers always send Origin on WS; absent means a native local client
+        return origin is None or origin in allowed_origins
+
+    @app.get("/api/health")
+    def health() -> dict:
+        from quickterm import __version__
+
+        return {"app": "quickterm", "version": __version__}
 
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
-        return [_asdict(info) for info in manager.list()]
+        count = getattr(manager, "attachment_count", None)
+        out = []
+        for info in manager.list():
+            d = _asdict(info)
+            d["attachments"] = count(info.id) if count else 0
+            out.append(d)
+        return out
 
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:
@@ -74,6 +116,18 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
             raise HTTPException(404, "no such session")
         manager.kill(sid)
         return Response(status_code=204)
+
+    @app.patch("/api/sessions/{sid}")
+    async def rename_session(sid: str, request: Request) -> dict:
+        session = manager.get(sid)
+        if session is None:
+            raise HTTPException(404, "no such session")
+        body = await request.json()
+        name = str(body.get("name") or "").strip() if isinstance(body, dict) else ""
+        if not name:
+            raise HTTPException(400, "body must be {'name': <non-empty string>}")
+        session.info.name = name[:80]
+        return _asdict(session.info)
 
     @app.post("/api/sessions/cleanup")
     async def cleanup_sessions(request: Request) -> Response:
@@ -114,7 +168,10 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
         body = await request.json()
         if not isinstance(body, dict) or "layout" not in body:
             raise HTTPException(400, "body must be {'layout': ...}")
-        workspace.save_workspace(workspace.Workspace(name=name, layout=body["layout"]))
+        logo = body.get("logo")
+        workspace.save_workspace(
+            workspace.Workspace(name=name, layout=body["layout"], logo=logo)
+        )
         return Response(status_code=204)
 
     @app.delete("/api/workspaces/{name}")
@@ -123,8 +180,11 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
 
         saved = workspace.load_workspace(name)
         if saved is not None:
+            # Reap the workspace's background sessions, but never one a client
+            # is attached to right now — deleting a workspace must not kill
+            # terminals that are open in someone's current layout.
             for sid in _layout_session_ids(saved.layout):
-                if manager.get(sid) is not None:
+                if manager.get(sid) is not None and not manager.has_attachments(sid):
                     manager.kill(sid)
         workspace.delete_workspace(name)
         return Response(status_code=204)
@@ -139,6 +199,9 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
     def get_config() -> dict:
         return {
             "font_family": cfg.font_family,
+            "theme": cfg.theme,
+            "custom_theme": dict(cfg.custom_theme),
+            "logo": cfg.logo,
             "default_profile": cfg.default_profile,
             "profiles": [_asdict(p) for p in cfg.profiles],
             "snippets": [_asdict(s) for s in cfg.snippets],
@@ -163,7 +226,10 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
             raise HTTPException(400, f"invalid config: {exc}") from exc
         config_mod.save_config(new_cfg)
         # apply live-updatable fields in place; port/hotkeys need a restart
-        for name in ("font_family", "default_profile", "profiles", "snippets", "voice"):
+        for name in (
+            "font_family", "theme", "custom_theme", "logo", "idle_timeout_s",
+            "default_profile", "profiles", "snippets", "voice",
+        ):
             setattr(cfg, name, getattr(new_cfg, name))
         return Response(status_code=204)
 
@@ -184,8 +250,44 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
             "text": data.decode("utf-8", errors="replace"),
         }
 
+    @app.post("/api/assets")
+    async def upload_asset(request: Request) -> dict:
+        assets = importlib.import_module("quickterm.assets")
+        content_type = request.headers.get("content-type", "")
+        data = await request.body()
+        try:
+            asset_id = assets.save_asset(data, content_type)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"id": asset_id, "url": f"/api/assets/{asset_id}"}
+
+    @app.get("/api/assets/{asset_id}")
+    def get_asset(asset_id: str) -> FileResponse:
+        assets = importlib.import_module("quickterm.assets")
+        path = assets.asset_path(asset_id)
+        if path is None:
+            raise HTTPException(404, "no such asset")
+        return FileResponse(
+            path,
+            media_type=assets.content_type_for(asset_id),
+            headers={
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.delete("/api/assets/{asset_id}")
+    def remove_asset(asset_id: str) -> Response:
+        assets = importlib.import_module("quickterm.assets")
+        assets.delete_asset(asset_id)
+        return Response(status_code=204)
+
     @app.websocket("/ws/session/{sid}")
     async def ws_session(ws: WebSocket, sid: str) -> None:
+        if not _ws_allowed(ws):
+            await ws.close(code=4403)
+            return
         session = manager.get(sid)
         await ws.accept()
         if session is None:
@@ -244,6 +346,11 @@ def _resolve_profile(prof: Any) -> tuple[str, list[str], str | None]:
         if start:
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
         return "wsl.exe", args, None
+    if terminal_type in ("bash", "zsh", "fish"):
+        shell = prof.cmd or terminal_type
+        if start:
+            return shell, ["-lc", f"{start}; exec {shell} -l"], cwd
+        return shell, ["-l"], cwd
     return prof.cmd, existing_args, cwd
 
 
@@ -260,6 +367,8 @@ def _layout_session_ids(node: Any) -> set[str]:
 
 
 def _terminal_inventory() -> dict:
+    if os.name != "nt":
+        return _posix_inventory()
     types = [
         ("powershell-core", "PowerShell 7", "pwsh.exe"),
         ("windows-powershell", "Windows PowerShell", "powershell.exe"),
@@ -298,6 +407,26 @@ def _terminal_inventory() -> dict:
         ],
         "wsl_distributions": distributions,
     }
+
+
+def _posix_inventory() -> dict:
+    # user's login shell first, then other common shells found on PATH
+    login = os.environ.get("SHELL") or ""
+    login_name = Path(login).name if login else ""
+    order = [login_name] + [s for s in ("zsh", "bash", "fish") if s != login_name]
+    types = []
+    for shell in order:
+        if not shell:
+            continue
+        exe = shutil.which(shell)
+        types.append({
+            "id": shell,
+            "label": shell.capitalize() + (" (login shell)" if shell == login_name else ""),
+            "executable": exe or shell,
+            "available": exe is not None,
+        })
+    types.append({"id": "custom", "label": "Custom command", "executable": None, "available": True})
+    return {"types": types, "wsl_distributions": []}
 
 
 async def _live_phase(

@@ -4,6 +4,7 @@ import { Palette } from "./palette.js";
 import { Panels } from "./panels.js";
 import { initLauncher } from "./launcher.js";
 import { initKeys } from "./keys.js";
+import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 
 document.title = "QuickTerm";
@@ -56,9 +57,13 @@ async function boot() {
   let workspaceSaveTimer = null;
   let transitioning = true;
   let panels;
+  let workspaceLogo = null;
+
+  applyChromeTheme(cfg.theme, cfg.custom_theme);
 
   const layout = new LayoutManager($("grid"), $("zoom-host"), {
     fontFamily: cfg.font_family || "JetBrains Mono",
+    theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
     onFocusChange: (pane) => {
       if (pane && pane.session && pane.state === "attached") api.postFocus(pane.session.id).catch(() => {});
     },
@@ -71,9 +76,17 @@ async function boot() {
 
   function defaultProfile() {
     return profiles.find((profile) => profile.name === cfg.default_profile)
-      || profiles.find((profile) => profile.name.toLowerCase() === "powershell")
       || profiles[0]
       || null;
+  }
+
+  // With no personal profiles, fall back to the first available system shell.
+  function defaultSystemSpec() {
+    const types = (terminalInventory && terminalInventory.types) || [];
+    const usable = types.find((type) => type.executable && type.available !== false && type.id !== "custom");
+    if (!usable) return null;
+    const args = usable.id === "powershell-core" || usable.id === "windows-powershell" ? ["-NoLogo"] : [];
+    return { cmd: usable.executable, args, name: usable.label };
   }
 
   function autoDir(pane) {
@@ -98,6 +111,7 @@ async function boot() {
       pane.launchSpec = null;
       if (cwd) pane.cwd = cwd;
       pane.attach(info);
+      pane.spawnedFresh = true;
       if (!currentWorkspace) scratchSessionIds.add(info.id);
       if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
@@ -117,6 +131,7 @@ async function boot() {
       pane.cwd = launchSpec.cwd;
       pane.launchSpec = launchSpec;
       pane.attach(info);
+      pane.spawnedFresh = true;
       if (!currentWorkspace) scratchSessionIds.add(info.id);
       if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
@@ -130,7 +145,11 @@ async function boot() {
 
   function spawnDefaultInto(pane) {
     const profile = defaultProfile();
-    return profile ? spawnInto(pane, profile.name, profile.cwd || null) : Promise.resolve(null);
+    if (profile) return spawnInto(pane, profile.name, profile.cwd || null);
+    const system = defaultSystemSpec();
+    if (system) return spawnSpecInto(pane, system);
+    pane.showNotice("[no shell found — add one in settings]");
+    return Promise.resolve(null);
   }
 
   async function runProfile(profile) {
@@ -167,7 +186,11 @@ async function boot() {
   async function persistCurrentWorkspace() {
     if (!currentWorkspace || transitioning || !layout.root) return;
     clearTimeout(workspaceSaveTimer);
-    await workspace.save(currentWorkspace, layout.serialize()).catch(() => {});
+    await workspace.save(
+      currentWorkspace,
+      layout.serialize(),
+      workspaceLogo,
+    ).catch(() => {});
   }
 
   function scheduleWorkspaceSave() {
@@ -183,8 +206,10 @@ async function boot() {
   }
 
   async function restoreWorkspace(name) {
-    const savedLayout = await workspace.load(name).catch(() => null);
-    if (!savedLayout) return false;
+    const saved = await workspace.details(name).catch(() => null);
+    if (!saved || !saved.layout) return false;
+    const savedLayout = saved.layout;
+    workspaceLogo = saved.logo || null;
     const liveSessions = await api.getSessions().catch(() => []);
     const byId = new Map(liveSessions.filter((session) => session.alive).map((session) => [session.id, session]));
     const panes = layout.restore(savedLayout);
@@ -206,6 +231,7 @@ async function boot() {
 
   async function startScratch() {
     currentWorkspace = null;
+    workspaceLogo = null;
     rememberWorkspace(null);
     const pane = layout.restore(null)[0];
     await spawnDefaultInto(pane);
@@ -216,8 +242,11 @@ async function boot() {
     if ((name || null) === currentWorkspace) return;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
-    if (currentWorkspace) await workspace.save(currentWorkspace, layout.serialize()).catch(() => {});
-    else await cleanupScratchSessions();
+    if (currentWorkspace) {
+      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo).catch(() => {});
+    } else {
+      await cleanupScratchSessions();
+    }
 
     if (name) {
       currentWorkspace = name;
@@ -242,11 +271,31 @@ async function boot() {
     splitH: () => { const pane = layout.splitFocused("h"); if (pane) spawnDefaultInto(pane); },
     splitV: () => { const pane = layout.splitFocused("v"); if (pane) spawnDefaultInto(pane); },
     zoom: () => layout.toggleZoom(),
-    closePane: () => { layout.closePane(); refreshStatusSoon(); },
+    // Closing a pane detaches its session. If this pane spawned the session
+    // itself and nothing was ever typed into it, kill it too so untouched
+    // shells don't pile up as background clutter. Reattached sessions and
+    // sessions other windows are using are never auto-killed.
+    closePane: () => {
+      const pane = layout.focused;
+      const session = pane && pane.session;
+      const freshUnused = pane ? pane.spawnedFresh && !pane.userWrote : false;
+      layout.closePane();
+      refreshStatusSoon();
+      if (!session || !freshUnused) return;
+      setTimeout(() => { // let our own detach land server-side first
+        api.getSessions().then((list) => {
+          const live = list.find((item) => item.id === session.id);
+          if (live && live.alive && !(live.attachments > 0)) {
+            api.killSession(session.id).catch(() => {});
+            // the server removes killed sessions after a short grace period
+            setTimeout(refreshStatus, 1300);
+          }
+        }).catch(() => {});
+      }, 350);
+    },
     killFocusedSession: () => {
       const pane = layout.focused;
       if (pane && pane.session) {
-        scratchSessionIds.delete(pane.session.id);
         api.killSession(pane.session.id).catch(() => {});
         refreshStatusSoon();
       }
@@ -254,39 +303,49 @@ async function boot() {
     sendSnippet: (snippet) => { if (layout.focused) layout.focused.sendText(snippet.text); },
     saveWorkspace: async (name) => {
       const cleanName = name.trim();
-      if (!cleanName) return;
+      if (!cleanName || cleanName.startsWith(".")) return;
+      const wasScratch = !currentWorkspace;
       currentWorkspace = cleanName;
-      scratchSessionIds.clear();
+      if (wasScratch) scratchSessionIds.clear();
       rememberWorkspace(cleanName);
-      await workspace.save(cleanName, layout.serialize());
+      await workspace.save(cleanName, layout.serialize(), workspaceLogo);
       if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
       workspaceNames.sort((a, b) => a.localeCompare(b));
       buildLauncher();
       refreshStatusSoon();
     },
     loadWorkspace: (name) => switchWorkspace(name),
+    // Deleting a workspace never touches the current layout: the server only
+    // kills sessions nobody is attached to, and deleting the workspace you're
+    // in simply turns the live layout into a scratch layout in place.
     deleteWorkspace: async (name) => {
       const deletingCurrent = currentWorkspace === name;
       if (deletingCurrent) {
-        await workspace.save(name, layout.serialize()).catch(() => {});
+        clearTimeout(workspaceSaveTimer);
         currentWorkspace = null;
+        workspaceLogo = null;
         rememberWorkspace(null);
+        for (const sid of app.attachedSessionIds()) scratchSessionIds.add(sid);
       }
       await api.deleteWorkspace(name).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== name);
-      if (deletingCurrent) {
-        transitioning = true;
-        await startScratch();
-        transitioning = false;
-      }
       buildLauncher();
       refreshStatusSoon();
+      scheduleWorkspaceSave(); // live layout continues as scratch
     },
     onWorkspacesChanged: async () => {
       workspaceNames = await api.listWorkspaces().catch(() => workspaceNames);
       buildLauncher();
     },
     currentWorkspace: () => currentWorkspace,
+    workspaceLogo: () => workspaceLogo,
+    setWorkspaceLogo: async (assetId) => {
+      if (!currentWorkspace) return false;
+      workspaceLogo = assetId || null;
+      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo);
+      buildLauncher();
+      return true;
+    },
     attachedSessionIds: () => layout.panes()
       .filter((pane) => pane.session && pane.state === "attached")
       .map((pane) => pane.session.id),
@@ -303,6 +362,8 @@ async function boot() {
       terminalInventory = freshInventory;
       app.profiles = profiles;
       app.snippets = snippets;
+      applyChromeTheme(fresh.theme, fresh.custom_theme);
+      layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
       buildLauncher();
     },
   };
@@ -327,6 +388,7 @@ async function boot() {
       inventory: terminalInventory,
       workspaces: workspaceNames,
       currentWorkspace,
+      logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
       onRunProfile: runProfile,
       onRunSystem: runSystemTerminal,
       onWorkspace: switchWorkspace,
@@ -359,11 +421,11 @@ async function boot() {
   }
 
   function persistOnExit() {
-    if (currentWorkspace && layout.root) {
+    if (currentWorkspace && layout.root && !transitioning) {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ layout: layout.serialize() }),
+        body: JSON.stringify({ layout: layout.serialize(), logo: workspaceLogo }),
         keepalive: true,
       }).catch(() => {});
     } else if (scratchSessionIds.size) {
@@ -386,11 +448,13 @@ async function boot() {
     const restored = await restoreWorkspace(currentWorkspace);
     if (!restored) await startScratch();
   } else {
-    const workspaceData = await Promise.all(workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)));
+    const workspaceData = await Promise.all(
+      workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)),
+    );
     const preserved = new Set();
     for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
-    const disposable = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
-    if (disposable.length) await api.cleanupSessions(disposable).catch(() => {});
+    const orphans = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
+    if (orphans.length) await api.cleanupSessions(orphans).catch(() => {});
     const pane = layout.init();
     await spawnDefaultInto(pane);
   }

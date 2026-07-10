@@ -3,13 +3,22 @@
 
 import * as api from "./api.js";
 
-export async function save(name, layoutTree) {
-  await api.putWorkspace(name, layoutTree);
+export async function save(name, layoutTree, logo) {
+  await api.putWorkspace(name, layoutTree, logo);
 }
 
 export async function load(name) {
   const ws = await api.getWorkspace(name);
   return ws ? ws.layout : null;
+}
+
+export function details(name) {
+  return api.getWorkspace(name);
+}
+
+export async function loadLogo(name) {
+  const ws = await api.getWorkspace(name).catch(() => null);
+  return ws ? ws.logo || null : null;
 }
 
 export function list() {

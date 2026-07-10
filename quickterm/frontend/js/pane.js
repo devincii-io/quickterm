@@ -5,6 +5,7 @@
 // term.write callbacks; reconnect with backoff on unexpected close.
 
 import * as api from "./api.js";
+import { getTheme, DEFAULT_THEME } from "./themes.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
@@ -12,40 +13,19 @@ const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
 
-// Graphite/amber identity: muted ANSI set, amber reserved for cursor/accents.
-export const XTERM_THEME = {
-  background: "#1E2124",
-  foreground: "#D6D3C9",
-  cursor: "#E0A030",
-  cursorAccent: "#1E2124",
-  selectionBackground: "#3A4046",
-  black: "#22262A",
-  red: "#B4544B",
-  green: "#7C9B6E",
-  yellow: "#C89543",
-  blue: "#6E8898",
-  magenta: "#9A7F9E",
-  cyan: "#6FA090",
-  white: "#B9B6AD",
-  brightBlack: "#4C545C",
-  brightRed: "#C97B70",
-  brightGreen: "#98B58B",
-  brightYellow: "#E0A030",
-  brightBlue: "#8FA9BA",
-  brightMagenta: "#B49CB8",
-  brightCyan: "#8FBCAC",
-  brightWhite: "#D6D3C9",
-};
-
 export class Pane {
   constructor(opts = {}) {
     this.fontFamily = opts.fontFamily || "JetBrains Mono";
+    this.theme = opts.theme || getTheme(DEFAULT_THEME).xterm;
     this.onFocusRequest = opts.onFocusRequest || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
     this.profileName = opts.profile || null;
     this.cwd = opts.cwd || null;
     this.savedSessionId = opts.sessionId || null;
     this.launchSpec = opts.launchSpec || null;
+    this.title = opts.title || null; // user-given name, wins over session name
+    this.userWrote = false;    // real keystrokes/paste in this pane
+    this.spawnedFresh = false; // session was created by this pane (vs reattached)
 
     this.session = null;
     this.state = "empty"; // empty | attached | exited
@@ -70,15 +50,22 @@ export class Pane {
     const el = document.createElement("div");
     el.className = "pane";
     el.innerHTML =
+      '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span></div>' +
       '<div class="term-host"></div>' +
-      '<div class="pane-empty">no session &middot; ctrl+p</div>' +
+      '<div class="pane-empty">no session &middot; ctrl+shift+p</div>' +
       '<div class="pane-dim"></div>' +
       '<div class="pane-exitbar" hidden></div>';
     this.el = el;
+    el.style.background = this.theme.background;
     this.termHost = el.querySelector(".term-host");
     this.emptyEl = el.querySelector(".pane-empty");
     this.exitBar = el.querySelector(".pane-exitbar");
+    this.tabEl = el.querySelector(".pane-tab");
+    this.tabNameEl = el.querySelector(".pane-tab-name");
+    this.tabDotEl = el.querySelector(".pane-tab-dot");
+    this.tabEl.addEventListener("dblclick", (e) => { e.stopPropagation(); this._startRename(); });
     el.addEventListener("mousedown", () => this.onFocusRequest(this));
+    this._renderTab();
 
     this._ro = new ResizeObserver(() => this.fitSoon());
     this._ro.observe(el);
@@ -93,6 +80,62 @@ export class Pane {
     if (focused && this.term) this.term.focus();
   }
 
+  setTheme(theme) {
+    this.theme = theme;
+    this.el.style.background = theme.background;
+    if (this.term) this.term.options.theme = theme;
+  }
+
+  displayName() {
+    return this.title
+      || (this.session && this.session.name)
+      || this.profileName
+      || (this.launchSpec && this.launchSpec.name)
+      || "terminal";
+  }
+
+  // Stable hue from the name so the same terminal keeps its color everywhere.
+  _renderTab() {
+    const name = this.displayName();
+    this.tabNameEl.textContent = name;
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+    this.tabDotEl.style.background = `hsl(${((hash % 360) + 360) % 360} 42% 62%)`;
+  }
+
+  _startRename() {
+    if (this.tabEl.querySelector("input")) return;
+    const input = document.createElement("input");
+    input.className = "pane-tab-input";
+    input.value = this.displayName();
+    input.spellcheck = false;
+    this.tabNameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      input.replaceWith(this.tabNameEl);
+      if (!save || !value || value === this.displayName()) { this._renderTab(); return; }
+      this.title = value;
+      this._renderTab();
+      if (this.session) {
+        api.renameSession(this.session.id, value).then((info) => {
+          if (info && this.session && this.session.id === info.id) this.session = info;
+        }).catch(() => {});
+      }
+      this.onStateChange(this); // persist the new title into the workspace
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") commit(true);
+      else if (e.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+  }
+
   showNotice(text) {
     this.exitBar.textContent = text;
     this.exitBar.hidden = false;
@@ -100,6 +143,7 @@ export class Pane {
 
   sendText(text) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited) {
+      this.userWrote = true;
       this.ws.send(ENC.encode(text));
     }
   }
@@ -126,6 +170,7 @@ export class Pane {
     this.exitBar.hidden = true;
     this.emptyEl.hidden = true;
     this.state = "attached";
+    this._renderTab();
     if (!this.term) this._createTerm();
     this._connect();
     this.onStateChange(this);
@@ -162,8 +207,37 @@ export class Pane {
       scrollback: 5000,
       minimumContrastRatio: 1,
       allowProposedApi: true,
-      theme: XTERM_THEME,
+      theme: this.theme,
     });
+    // Ctrl+Shift+C/V copy & paste, scoped to the terminal so the plain
+    // Ctrl+C/V (SIGINT / literal paste event) keep their terminal meaning.
+    this.term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return true;
+      const key = e.key.toLowerCase();
+      if (key === "c") {
+        const selection = this.term.getSelection();
+        if (!selection) return true;
+        if (navigator.clipboard) navigator.clipboard.writeText(selection).catch(() => {});
+        e.preventDefault();
+        return false;
+      }
+      if (key === "v") {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then((text) => {
+            if (text && this._phase === "live" && !this._exited) {
+              this.userWrote = true;
+              this.term.paste(text);
+            }
+          }).catch(() => {});
+        }
+        e.preventDefault();
+        return false;
+      }
+      return true;
+    });
+    // Real keystrokes only: onData also fires for xterm's automatic replies
+    // to terminal queries (DA/DSR), which must not count as user activity.
+    this.term.onKey(() => { this.userWrote = true; });
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);

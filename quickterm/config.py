@@ -38,15 +38,9 @@ class VoiceConfig:
 
 
 def _default_profiles() -> list[Profile]:
-    return [
-        Profile(
-            name="powershell",
-            cmd="powershell.exe",
-            args=["-NoLogo"],
-            terminal_type="windows-powershell",
-        ),
-        Profile(name="cmd", cmd="cmd.exe", terminal_type="command-prompt"),
-    ]
+    # Personal profiles are user-created only; system shells (PowerShell, cmd,
+    # WSL, bash, ...) are detected live and offered by the launcher instead.
+    return []
 
 
 def _default_snippets() -> list[Snippet]:
@@ -62,15 +56,28 @@ class AppConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    theme: str = "graphite"
+    # colors for the "custom" theme id; empty until the user defines one
+    custom_theme: dict[str, str] = field(default_factory=dict)
+    # global brand logo shown top-left (asset id, or empty for the built-in mark)
+    logo: str | None = None
+    # reap detached, silent sessions after this many seconds (0 disables)
+    idle_timeout_s: int = 300
     summon_hotkey: str = "ctrl+alt+grave"
-    default_profile: str = "powershell"
+    default_profile: str = ""  # empty = first profile, else first system shell
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
 
 
 def config_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    base = os.environ.get("APPDATA")
+    if not base:
+        base = (
+            str(Path.home() / "AppData" / "Roaming")
+            if os.name == "nt"
+            else os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        )
     path = Path(base) / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
     return path

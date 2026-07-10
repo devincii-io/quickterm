@@ -44,14 +44,18 @@ class AppConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    theme: str = "graphite"
+    custom_theme: dict[str, str] = {}
+    logo: str | None = None
+    idle_timeout_s: int = 300
     summon_hotkey: str = "ctrl+alt+grave"   # quake-style summon/hide
-    default_profile: str = "powershell"
+    default_profile: str = ""
     profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
     voice: VoiceConfig = ...
 
 def config_dir() -> Path
-def load_config() -> AppConfig     # missing file -> write default config w/ powershell + cmd profiles
+def load_config() -> AppConfig
 def save_config(cfg: AppConfig) -> None
 ```
 
@@ -139,6 +143,7 @@ falls back to spawning `profile` or `launch_spec`.
 class Workspace:
     name: str
     layout: dict   # tree above
+    logo: str | None = None
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
@@ -152,7 +157,7 @@ def delete_workspace(name: str) -> None
 def create_app(manager: SessionManager, cfg: AppConfig) -> FastAPI
 ```
 
-Static: serve `frontend/` at `/` (index.html default), `frontend/viewer.html` at `/viewer`.
+Static: serve packaged `quickterm/frontend/` at `/` and its viewer at `/viewer`.
 
 REST (JSON, under `/api`):
 
@@ -160,19 +165,23 @@ REST (JSON, under `/api`):
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo]` |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides) |
+| PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` |
-| PUT | /api/workspaces/{name} | `{layout}` → 204 |
+| PUT | /api/workspaces/{name} | `{layout, logo?}` → 204 |
 | DELETE | /api/workspaces/{name} | kill sessions referenced by the workspace, delete it → 204 |
 | POST | /api/focus | `{session_id}` → 204 (sets manager.focused_session_id) |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
 | GET | /api/config/full | → complete `AppConfig` |
 | PUT | /api/config | complete `AppConfig` → 204 |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions |
+| POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
+| GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
+| DELETE | /api/assets/{id} | → 204 |
 | GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
@@ -189,7 +198,8 @@ WebSocket `/ws/session/{id}` — attach protocol, in order:
 Client is responsible for replay-then-resize: set xterm to replay size, write
 scrollback, THEN resize to real size and send resize message.
 
-Server binds 127.0.0.1 only. No auth (localhost-only by design).
+Server binds 127.0.0.1 by default. Host and Origin allowlists protect the local
+HTTP and WebSocket surface against DNS rebinding and cross-origin browser use.
 
 ## quickterm/app.py
 

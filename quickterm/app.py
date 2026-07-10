@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 import webbrowser
+from logging.handlers import RotatingFileHandler
 from typing import TYPE_CHECKING, Any, Callable
 
 import uvicorn
 
+from quickterm import __version__
 from quickterm.server import create_app
 
 if TYPE_CHECKING:
@@ -20,17 +25,51 @@ if TYPE_CHECKING:
     from quickterm.session_manager import SessionManager
 
 MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
+REAP_INTERVAL_S = 30
+log = logging.getLogger("quickterm")
 
 
 def main() -> None:
-    _check_windows_build()
+    if sys.platform == "win32":
+        _check_windows_build()
     from quickterm.config import load_config
 
     cfg = load_config()
+    _setup_logging()
+    log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
+    # One backend per port: a second launch just summons the existing window.
+    if _already_running(cfg.port):
+        log.info("QuickTerm already running on port %s; opening window", cfg.port)
+        _launch_window(cfg.port)
+        return
     try:
         asyncio.run(_serve(cfg))
     except KeyboardInterrupt:
         pass
+
+
+def _setup_logging() -> None:
+    from quickterm.config import config_dir
+
+    log_dir = config_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_dir / "quickterm.log", maxBytes=512 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        root.setLevel(logging.INFO)
+        root.addHandler(handler)
+
+
+def _already_running(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return isinstance(data, dict) and data.get("app") == "quickterm"
+    except Exception:
+        return False
 
 
 def _check_windows_build() -> None:
@@ -52,10 +91,12 @@ async def _serve(cfg: "AppConfig") -> None:
     )
     hotkeys = _start_hotkeys(loop, manager, cfg)
     boot = asyncio.ensure_future(_after_ready(server, manager, cfg))
+    reaper = asyncio.ensure_future(_reap_loop(manager, cfg))
     try:
         await server.serve()
     finally:
         boot.cancel()
+        reaper.cancel()
         if hotkeys is not None:
             try:
                 hotkeys.stop()
@@ -69,6 +110,44 @@ async def _after_ready(server: uvicorn.Server, manager: "SessionManager", cfg: "
         await asyncio.sleep(0.05)
     _spawn_autostart(manager, cfg)
     _launch_window(cfg.port)
+
+
+async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
+    # Periodically clear background clutter: detached, silent sessions that no
+    # saved workspace (scratch included) still references.
+    while True:
+        await asyncio.sleep(REAP_INTERVAL_S)
+        try:
+            reaped = manager.reap_idle(cfg.idle_timeout_s, _workspace_session_ids())
+            if reaped:
+                log.info("reaped %d idle session(s): %s", len(reaped), ", ".join(reaped))
+        except Exception:
+            log.exception("reaper pass failed")
+
+
+def _workspace_session_ids() -> set[str]:
+    import quickterm.workspace as workspace
+
+    ids: set[str] = set()
+    for name in workspace.list_workspaces():
+        if name.startswith("."):
+            continue
+        ws = workspace.load_workspace(name)
+        if ws is not None:
+            _collect_session_ids(ws.layout, ids)
+    return ids
+
+
+def _collect_session_ids(node: Any, out: set[str]) -> None:
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "split":
+        for child in node.get("children", []):
+            _collect_session_ids(child, out)
+        return
+    sid = node.get("session_id")
+    if isinstance(sid, str) and sid:
+        out.add(sid)
 
 
 def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
@@ -159,7 +238,7 @@ def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> No
 
 
 def _find_browser() -> str | None:
-    for name in ("msedge", "chrome"):
+    for name in ("msedge", "chrome", "google-chrome", "chromium", "chromium-browser"):
         found = shutil.which(name)
         if found:
             return found

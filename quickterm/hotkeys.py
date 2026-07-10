@@ -10,6 +10,7 @@ import asyncio
 import ctypes
 import itertools
 import logging
+import os
 import queue
 import re
 import threading
@@ -113,6 +114,8 @@ class HotkeyManager:
         self._ids = itertools.count(1)
 
     def start(self) -> None:
+        if os.name != "nt":
+            return
         if self._thread is not None and self._thread.is_alive():
             return
         self._ready = threading.Event()
@@ -136,6 +139,8 @@ class HotkeyManager:
             mods, vk = parse_binding(binding)
         except ValueError as e:
             log.warning("hotkey %r not registered: %s", binding, e)
+            return False
+        if os.name != "nt":
             return False
         if self._thread is None or not self._thread.is_alive():
             self.start()

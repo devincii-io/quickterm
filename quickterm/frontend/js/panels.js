@@ -1,4 +1,15 @@
 import * as api from "./api.js";
+import { icon } from "./icons.js";
+import {
+  CUSTOM_THEME,
+  CUSTOM_THEME_DEFAULTS,
+  DEFAULT_THEME,
+  TERMINAL_THEMES,
+  customColors,
+  getTheme,
+} from "./themes.js";
+
+const DASHBOARD_REFRESH_MS = 5000;
 
 const TERMINAL_TYPES = [
   { id: "powershell-core", label: "PowerShell 7", executable: "pwsh.exe" },
@@ -69,6 +80,7 @@ export class Panels {
   close() {
     this.open = null;
     this.overlay.hidden = true;
+    this._stopDashboardRefresh();
     this.app.refocusTerm();
   }
 
@@ -78,19 +90,49 @@ export class Panels {
   }
 
   show(name) {
+    const refreshing = this.open === name;
     this.open = name;
     this.overlay.hidden = false;
     this.panelEl.dataset.view = name;
-    this.bodyEl.textContent = "";
+    if (name !== "dashboard") this._stopDashboardRefresh();
     const titles = {
       dashboard: ["Your workspaces", "Pick up where you left off, or start something new."],
       settings: ["Settings", "Make QuickTerm feel right for the way you work."],
       help: ["Quick guide", "Everything you need, without a manual."],
     };
     [this.titleEl.textContent, this.subtitleEl.textContent] = titles[name] || titles.help;
-    if (name === "dashboard") this._dashboard();
-    else if (name === "settings") this._settings();
-    else this._help();
+    if (name === "dashboard") {
+      this._dashboard(refreshing);
+      this._startDashboardRefresh();
+    } else if (name === "settings") {
+      this.bodyEl.textContent = "";
+      this._settings();
+    } else {
+      this.bodyEl.textContent = "";
+      this._help();
+    }
+  }
+
+  // Live data on the dashboard (session list, pane counts) keeps itself
+  // fresh; refreshes render in place without flashing or moving the scroll.
+  _startDashboardRefresh() {
+    this._stopDashboardRefresh();
+    this._dashTimer = setInterval(() => {
+      if (this.open === "dashboard" && !this._dashLoading) this._dashboard(true);
+    }, DASHBOARD_REFRESH_MS);
+  }
+
+  _stopDashboardRefresh() {
+    clearInterval(this._dashTimer);
+    this._dashTimer = null;
+  }
+
+  // Collapse an element smoothly before a list refresh removes it.
+  _leave(el) {
+    el.style.height = `${el.offsetHeight}px`;
+    void el.offsetHeight; // commit the fixed height before transitioning
+    el.classList.add("leaving");
+    return new Promise((resolve) => setTimeout(resolve, 260));
   }
 
   _sectionHeading(title, subtitle) {
@@ -159,19 +201,32 @@ export class Panels {
     return preview;
   }
 
-  async _dashboard() {
-    const loading = make("div", "panel-loading", "Collecting your workspace…");
-    this.bodyEl.append(loading);
-    const [names, sessions] = await Promise.all([
-      api.listWorkspaces().catch(() => []),
-      api.getSessions().catch(() => []),
-    ]);
-    const workspaces = await Promise.all(names.map(async (name) => ({
-      name,
-      data: await api.getWorkspace(name).catch(() => null),
-    })));
+  async _dashboard(refreshing = false) {
+    this._dashLoading = true;
+    if (!refreshing) {
+      this.bodyEl.textContent = "";
+      this.bodyEl.append(make("div", "panel-loading", "Collecting your workspace…"));
+    }
+    const scrollTop = refreshing ? this.bodyEl.scrollTop : 0;
+    let workspaces;
+    let sessions;
+    try {
+      const [names, sessionList] = await Promise.all([
+        api.listWorkspaces().catch(() => []),
+        api.getSessions().catch(() => []),
+      ]);
+      sessions = sessionList;
+      workspaces = await Promise.all(names.map(async (name) => ({
+        name,
+        data: await api.getWorkspace(name).catch(() => null),
+      })));
+    } finally {
+      this._dashLoading = false;
+    }
     if (this.open !== "dashboard") return;
     this.bodyEl.textContent = "";
+    if (refreshing) this.bodyEl.classList.add("no-entrance");
+    else this.bodyEl.classList.remove("no-entrance");
 
     const hero = make("div", "dashboard-hero");
     const heroCopy = make("div", "hero-copy");
@@ -203,7 +258,7 @@ export class Panels {
       }
       saveButton.disabled = true;
       await this.app.saveWorkspace(name);
-      if (this.open === "dashboard") this.show("dashboard");
+      if (this.open === "dashboard") this._dashboard(true);
     };
     saveButton.addEventListener("click", save);
     saveInput.addEventListener("keydown", (event) => {
@@ -227,12 +282,22 @@ export class Panels {
       card.style.setProperty("--card-index", index);
       const top = make("div", "workspace-card-top");
       const badge = make("span", "workspace-badge", isCurrent ? "Open now" : `${countPanes(layout)} pane${countPanes(layout) === 1 ? "" : "s"}`);
-      const menu = this._button("Delete", "text-button danger-text");
+      if (workspace.data && workspace.data.logo) {
+        const logo = make("img", "workspace-card-logo");
+        logo.src = api.assetUrl(workspace.data.logo);
+        logo.alt = "";
+        top.append(logo);
+      }
+      const menu = this._button("", "text-button danger-text");
+      menu.append(icon("trash", 13), make("span", "", "Delete"));
       menu.addEventListener("click", async (event) => {
         event.stopPropagation();
+        menu.disabled = true;
+        const gone = this._leave(card);
         if (this.app.deleteWorkspace) await this.app.deleteWorkspace(workspace.name);
         else await api.deleteWorkspace(workspace.name).catch(() => {});
-        if (this.open === "dashboard") this.show("dashboard");
+        await gone;
+        if (this.open === "dashboard") this._dashboard(true);
       });
       top.append(badge, menu);
       const preview = this._layoutPreview(layout);
@@ -256,13 +321,16 @@ export class Panels {
     const profiles = make("section", "dashboard-list-card");
     profiles.append(this._sectionHeading("Quick launch", "Your terminal profiles"));
     const profileList = make("div", "quick-profile-list");
+    if (!this.app.profiles.length) profileList.append(make("p", "quiet-empty", "No personal terminals yet. Create one in Settings — system shells are always available in the launcher."));
     for (const profile of this.app.profiles.slice(0, 6)) {
       const row = make("button", "quick-profile");
       row.type = "button";
       const mark = make("span", "profile-mark", (profile.name || "> ").slice(0, 2).toUpperCase());
       const copy = make("span", "quick-profile-copy");
       copy.append(make("strong", "", profile.name), make("small", "", this._terminalLabel(profile)));
-      row.append(mark, copy, make("span", "profile-arrow", "↗"));
+      const arrow = make("span", "profile-arrow");
+      arrow.append(icon("arrow-up-right", 13));
+      row.append(mark, copy, arrow);
       row.addEventListener("click", () => {
         this.close();
         this.app.runProfile(profile);
@@ -291,11 +359,15 @@ export class Panels {
         });
         row.append(attach);
       }
-      const kill = this._button("×", "icon-button danger-text");
+      const kill = this._button("", "icon-button danger-text");
+      kill.append(icon("power", 13));
       kill.title = "End session";
       kill.addEventListener("click", async () => {
+        kill.disabled = true;
+        const gone = this._leave(row);
         await api.killSession(session.id).catch(() => {});
-        if (this.open === "dashboard") this.show("dashboard");
+        await gone;
+        if (this.open === "dashboard") this._dashboard(true);
       });
       row.append(kill);
       liveList.append(row);
@@ -303,6 +375,7 @@ export class Panels {
     live.append(liveList);
     lower.append(profiles, live);
     this.bodyEl.append(lower);
+    this.bodyEl.scrollTop = scrollTop;
   }
 
   _terminalLabel(profile) {
@@ -376,7 +449,7 @@ export class Panels {
         }
       }
       const profiles = this.settingsDraft.profiles || [];
-      if (!profiles.length || profiles.some((profile) => !(profile.name || "").trim())) {
+      if (profiles.some((profile) => !(profile.name || "").trim())) {
         message.textContent = "Every terminal profile needs a name.";
         message.classList.add("error");
         return;
@@ -414,14 +487,36 @@ export class Panels {
     group.append(make("h3", "settings-group-title", "Appearance"));
     const font = this._textInput(cfg.font_family, "JetBrains Mono");
     font.addEventListener("input", () => { cfg.font_family = font.value; });
-    const defaultProfile = this._select((cfg.profiles || []).map((profile) => ({ value: profile.name, label: profile.name })), cfg.default_profile);
+    const profileOptions = [
+      { value: "", label: "System default shell" },
+      ...(cfg.profiles || []).map((profile) => ({ value: profile.name, label: profile.name })),
+    ];
+    const defaultProfile = this._select(profileOptions, cfg.default_profile || "");
     defaultProfile.addEventListener("change", () => { cfg.default_profile = defaultProfile.value; });
     const fields = make("div", "settings-grid two-column");
-    fields.append(this._field("Terminal font", font, "Use any monospace font installed on Windows."), this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."));
+    fields.append(this._field("Terminal font", font, "Use any monospace font installed on this computer."), this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."));
     group.append(fields);
-    const palette = make("div", "theme-preview active");
-    palette.innerHTML = '<span class="theme-swatch"><i></i><i></i><i></i></span><span><strong>Graphite</strong><small>Warm, quiet and easy on the eyes</small></span><b>Selected</b>';
-    group.append(palette);
+    group.append(this._themePicker(cfg));
+
+    const branding = make("div", "settings-group");
+    branding.append(make("h3", "settings-group-title", "Branding"));
+    branding.append(this._logoPicker({
+      title: "App logo",
+      value: cfg.logo,
+      hint: "Shown whenever a workspace does not have its own logo.",
+      onChange: async (assetId) => { cfg.logo = assetId; },
+    }));
+    const workspaceName = this.app.currentWorkspace && this.app.currentWorkspace();
+    if (workspaceName) {
+      branding.append(this._logoPicker({
+        title: `${workspaceName} logo`,
+        value: this.app.workspaceLogo ? this.app.workspaceLogo() : null,
+        hint: "Overrides the app logo only while this workspace is open.",
+        onChange: async (assetId) => { await this.app.setWorkspaceLogo(assetId); },
+      }));
+    } else {
+      branding.append(make("p", "branding-scratch-note", "Open or save a named workspace to give it a separate logo."));
+    }
 
     const behavior = make("div", "settings-group");
     behavior.append(make("h3", "settings-group-title", "Application"));
@@ -437,26 +532,174 @@ export class Panels {
       { value: String(2 * 1024 * 1024), label: "2 MB" },
     ], String(cfg.scrollback_bytes));
     scrollback.addEventListener("change", () => { cfg.scrollback_bytes = Number(scrollback.value); });
+    const idleTimeout = this._select([
+      { value: "0", label: "Never" },
+      { value: "300", label: "5 minutes" },
+      { value: "900", label: "15 minutes" },
+      { value: "1800", label: "30 minutes" },
+      { value: "3600", label: "1 hour" },
+    ], String(cfg.idle_timeout_s ?? 300));
+    idleTimeout.addEventListener("change", () => { cfg.idle_timeout_s = Number(idleTimeout.value); });
     const appFields = make("div", "settings-grid two-column");
-    appFields.append(this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."), this._field("Local server port", port, "Only available on this computer."), this._field("Session scrollback", scrollback, "History retained for each live session."));
+    appFields.append(
+      this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."),
+      this._field("Local server port", port, "Only available on this computer."),
+      this._field("Session scrollback", scrollback, "History retained for each live session."),
+      this._field("Reap detached sessions", idleTimeout, "Silent sessions outside named workspaces are ended after this time."),
+    );
     behavior.append(appFields);
-    host.append(group, behavior);
+    host.append(group, branding, behavior);
+  }
+
+  _themePicker(cfg) {
+    const wrap = make("div", "theme-picker");
+    wrap.append(make("h4", "theme-picker-title", "App theme"), make("p", "field-hint", "Colors the application chrome and every open terminal when you save."));
+    const grid = make("div", "theme-grid");
+    const current = () => cfg.theme || DEFAULT_THEME;
+    const entries = [
+      ...Object.entries(TERMINAL_THEMES),
+      [CUSTOM_THEME, getTheme(CUSTOM_THEME, cfg.custom_theme)],
+    ];
+    const cards = new Map();
+    const editor = make("div", "custom-theme-editor");
+    const renderStrip = (card, def) => {
+      const strip = card.querySelector(".theme-strip");
+      strip.style.background = def.xterm.background;
+      strip.querySelector(".theme-strip-prompt").style.color = def.xterm.foreground;
+      const dots = strip.querySelectorAll(".theme-strip-dot");
+      ["red", "yellow", "green", "cyan", "blue", "magenta"].forEach((key, index) => {
+        dots[index].style.background = def.xterm[key];
+      });
+    };
+    for (const [id, def] of entries) {
+      const card = make("button", "theme-card");
+      card.type = "button";
+      card.dataset.theme = id;
+      card.classList.toggle("active", current() === id);
+      const strip = make("span", "theme-strip");
+      const prompt = make("i", "theme-strip-prompt", "~ $");
+      strip.append(prompt);
+      for (const key of ["red", "yellow", "green", "cyan", "blue", "magenta"]) {
+        const dot = make("i", "theme-strip-dot");
+        strip.append(dot);
+      }
+      card.append(strip, make("strong", "", def.label), make("small", "", def.note));
+      renderStrip(card, def);
+      card.addEventListener("click", () => {
+        cfg.theme = id;
+        for (const other of grid.children) other.classList.toggle("active", other === card);
+        editor.hidden = id !== CUSTOM_THEME;
+      });
+      grid.append(card);
+      cards.set(id, card);
+    }
+    cfg.custom_theme = customColors(cfg.custom_theme || {});
+    for (const [key, fallback] of Object.entries(CUSTOM_THEME_DEFAULTS)) {
+      const label = make("label", "custom-color-field");
+      const input = make("input");
+      input.type = "color";
+      input.value = cfg.custom_theme[key] || fallback;
+      label.append(input, make("span", "", key.replace(/^./, (char) => char.toUpperCase())));
+      input.addEventListener("input", () => {
+        cfg.custom_theme[key] = input.value.toUpperCase();
+        renderStrip(cards.get(CUSTOM_THEME), getTheme(CUSTOM_THEME, cfg.custom_theme));
+      });
+      editor.append(label);
+    }
+    editor.hidden = current() !== CUSTOM_THEME;
+    wrap.append(grid, editor);
+    return wrap;
+  }
+
+  _logoPicker({ title, value, hint, onChange }) {
+    const row = make("div", "logo-picker");
+    const preview = make("div", "logo-preview");
+    const image = make("img");
+    const fallback = make("span", "logo-preview-fallback", "QT");
+    const render = (assetId) => {
+      preview.textContent = "";
+      if (assetId) {
+        image.src = api.assetUrl(assetId);
+        preview.append(image);
+      } else {
+        preview.append(fallback);
+      }
+    };
+    render(value);
+    const copy = make("div", "logo-picker-copy");
+    copy.append(make("strong", "", title), make("small", "", hint));
+    const status = make("span", "logo-picker-status", "Square PNG/WebP or simple SVG recommended · max 1 MB");
+    copy.append(status);
+    const file = make("input");
+    file.type = "file";
+    file.accept = "image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/x-icon";
+    file.hidden = true;
+    const choose = this._button("Choose image", "secondary-button compact");
+    choose.addEventListener("click", () => file.click());
+    const remove = this._button("Reset", "text-button");
+    remove.disabled = !value;
+    remove.addEventListener("click", async () => {
+      await onChange(null);
+      value = null;
+      remove.disabled = true;
+      render(null);
+      status.textContent = "Using the built-in QuickTerm mark.";
+    });
+    file.addEventListener("change", async () => {
+      const selected = file.files && file.files[0];
+      if (!selected) return;
+      if (selected.size > 1024 * 1024) {
+        status.textContent = "That image is larger than 1 MB.";
+        status.classList.add("error");
+        return;
+      }
+      choose.disabled = true;
+      status.classList.remove("error");
+      status.textContent = "Uploading…";
+      try {
+        const uploaded = await api.uploadAsset(selected);
+        await onChange(uploaded.id);
+        value = uploaded.id;
+        remove.disabled = false;
+        render(value);
+        status.textContent = "Ready. Save settings to apply the global logo.";
+      } catch (error) {
+        status.textContent = `Upload failed (${error.status || "connection error"}).`;
+        status.classList.add("error");
+      } finally {
+        choose.disabled = false;
+        file.value = "";
+      }
+    });
+    const actions = make("div", "logo-picker-actions");
+    actions.append(choose, remove, file);
+    row.append(preview, copy, actions);
+    return row;
   }
 
   _settingsTerminals(host, rerender) {
     const cfg = this.settingsDraft;
-    const heading = this._sectionHeading("Terminal profiles", "Choose a shell, then add an optional command to run when it opens.");
-    const add = this._button("＋ Add terminal", "primary-button compact");
+    const heading = this._sectionHeading("Terminal profiles", "Your own terminals: a shell plus folder, command and shortcut. System shells are always available in the launcher without any setup.");
+    const add = this._button("", "primary-button compact");
+    add.append(icon("plus", 13), make("span", "", "Add terminal"));
     add.addEventListener("click", () => {
       let n = 1;
       const names = new Set(cfg.profiles.map((profile) => profile.name));
       while (names.has(`Terminal ${n}`)) n += 1;
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: "powershell.exe", args: ["-NoLogo"], cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: "windows-powershell", wsl_distro: null, start_command: null });
+      const available = (this.terminalInventory.types || []).find((type) => type.executable && type.available !== false);
+      const base = available || { id: "custom", executable: "" };
+      const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
     heading.append(add);
     host.append(heading);
+    if (!cfg.profiles.length) {
+      const empty = make("div", "profiles-empty");
+      empty.append(make("p", "", "No personal terminals yet. The launcher already offers every shell installed on this computer — add a profile when you want a preset folder, start command or global shortcut."));
+      host.append(empty);
+    }
 
     const inventoryTypes = (this.terminalInventory.types || TERMINAL_TYPES).map((type) => ({
       value: type.id,
@@ -469,8 +712,8 @@ export class Panels {
       const identity = make("div", "terminal-identity");
       identity.append(make("span", "profile-mark large", (profile.name || "> ").slice(0, 2).toUpperCase()), make("div", "", undefined));
       identity.lastElementChild.append(make("h3", "", profile.name || "Untitled terminal"), make("p", "", this._terminalLabel(profile)));
-      const remove = this._button("Remove", "text-button danger-text");
-      remove.disabled = cfg.profiles.length === 1;
+      const remove = this._button("", "text-button danger-text");
+      remove.append(icon("trash", 13), make("span", "", "Remove"));
       remove.addEventListener("click", () => {
         cfg.profiles.splice(index, 1);
         if (cfg.default_profile === profile.name) cfg.default_profile = cfg.profiles[0]?.name || "";
@@ -578,9 +821,10 @@ export class Panels {
     this.bodyEl.append(intro);
     const grid = make("div", "help-grid");
     const shortcuts = [
-      ["Ctrl P", "Open command palette"], ["Alt H", "Split side by side"],
-      ["Alt V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
-      ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
+      ["Ctrl Shift P", "Open command palette"], ["Alt Shift H", "Split side by side"],
+      ["Alt Shift V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
+      ["Alt Shift Z", "Focus one pane"], ["Alt Shift W", "Detach current pane"],
+      ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
     ];
     const keyCard = make("section", "help-card");
     keyCard.append(make("h3", "", "Keyboard shortcuts"));
@@ -592,6 +836,7 @@ export class Panels {
     const conceptCard = make("section", "help-card");
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
+      ["Your keys stay yours", "QuickTerm only claims Ctrl+Shift and Alt+Shift combos. Ctrl+P, Alt+letters and every other key reach the shell untouched."],
       ["Profiles", "Reusable terminal types, folders and start commands."],
       ["Workspaces", "Named arrangements that restore your split layout."],
       ["Live sessions", "Background terminals you can detach and return to."],

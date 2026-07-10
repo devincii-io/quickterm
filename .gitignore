@@ -5,3 +5,7 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+*.spec.bak
+*-local-command-*.txt
+.coverage
+htmlcov/

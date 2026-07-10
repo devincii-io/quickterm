@@ -54,6 +54,10 @@ class FakeConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    theme: str = "graphite"
+    custom_theme: dict = field(default_factory=dict)
+    logo: str | None = None
+    idle_timeout_s: int = 300
     summon_hotkey: str = "ctrl+alt+grave"
     default_profile: str = "powershell"
     profiles: list = field(default_factory=list)
@@ -136,6 +140,9 @@ class FakeSessionManager:
         self.killed.append(sid)
         self.sessions.pop(sid, None)
 
+    def has_attachments(self, sid: str) -> bool:
+        return sid in getattr(self, "attached_ids", set())
+
     def attach(self, sid: str) -> FakeAttachment:
         att = FakeAttachment()
         for chunk in self.initial_live:
@@ -168,7 +175,8 @@ def cfg() -> FakeConfig:
 
 @pytest.fixture
 def client(manager, cfg) -> TestClient:
-    with TestClient(create_app(manager, cfg)) as c:
+    # base_url must match the server's Host allowlist (see _local_guard)
+    with TestClient(create_app(manager, cfg), base_url=f"http://127.0.0.1:{cfg.port}") as c:
         yield c
 
 
@@ -180,6 +188,7 @@ def fake_workspace(monkeypatch):
     class Workspace:
         name: str
         layout: dict
+        logo: str | None = None
 
     store: dict[str, Workspace] = {}
     mod.Workspace = Workspace
@@ -201,6 +210,12 @@ def _wait_for(predicate, timeout: float = 3.0) -> None:
 
 
 # --- REST: sessions ---------------------------------------------------------
+
+
+def test_health(client):
+    body = client.get("/api/health").json()
+    assert body["app"] == "quickterm"
+    assert body["version"]
 
 
 def test_list_sessions(client, manager):
@@ -371,7 +386,7 @@ def test_workspace_crud(client, fake_workspace):
     assert r.status_code == 204
     assert client.get("/api/workspaces").json() == ["dev"]
     ws = client.get("/api/workspaces/dev").json()
-    assert ws == {"name": "dev", "layout": layout}
+    assert ws == {"name": "dev", "layout": layout, "logo": None}
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert client.get("/api/workspaces").json() == []
@@ -394,7 +409,24 @@ def test_deleting_workspace_kills_its_saved_sessions(client, manager, fake_works
     }
     assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
     assert client.delete("/api/workspaces/dev").status_code == 204
-    assert manager.killed == [first.id, second.id]
+    assert sorted(manager.killed) == sorted([first.id, second.id])
+
+
+def test_deleting_workspace_spares_attached_sessions(client, manager, fake_workspace):
+    detached = manager.add_session(name="idle")
+    attached = manager.add_session(name="in-use")
+    manager.attached_ids = {attached.id}
+    layout = {
+        "type": "split",
+        "dir": "h",
+        "children": [
+            {"type": "pane", "session_id": detached.id},
+            {"type": "pane", "session_id": attached.id},
+        ],
+    }
+    assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
+    assert client.delete("/api/workspaces/dev").status_code == 204
+    assert manager.killed == [detached.id]  # the attached terminal survives
 
 
 # --- REST: file viewer ------------------------------------------------------
@@ -443,7 +475,7 @@ def test_ws_attach_protocol(client, manager):
     info = manager.add_session(scrollback=b"old-output", cols=80, rows=24)
     manager.initial_live = [b"live-1", b"live-2"]
 
-    with client.websocket_connect(f"/ws/session/{info.id}") as ws:
+    with client.websocket_connect(f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}) as ws:
         # 1. replay_size at recorded size
         assert json.loads(ws.receive_text()) == {"type": "replay_size", "cols": 80, "rows": 24}
         # 2. one binary scrollback frame
@@ -469,7 +501,7 @@ def test_ws_attach_protocol(client, manager):
 
 
 def test_ws_unknown_session_closes_4404(client):
-    with client.websocket_connect("/ws/session/00000000") as ws:
+    with client.websocket_connect("/ws/session/00000000", headers={"host": "127.0.0.1:8620"}) as ws:
         msg = ws.receive()
     assert msg["type"] == "websocket.close"
     assert msg["code"] == 4404
@@ -482,8 +514,34 @@ def test_ws_detach_on_client_disconnect(client, manager):
     # the CancelledError at __exit__ is a test-client artifact, not a server bug.
     # 3.14 de-aliased concurrent.futures.CancelledError from asyncio's — catch both.
     with contextlib.suppress(asyncio.CancelledError, concurrent.futures.CancelledError):
-        with client.websocket_connect(f"/ws/session/{info.id}") as ws:
+        with client.websocket_connect(f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}) as ws:
             ws.receive_text()   # replay_size
             ws.receive_bytes()  # scrollback (empty frame)
             ws.receive_text()   # replay_done
     _wait_for(lambda: manager.last_attachment is not None and manager.last_attachment.detached)
+
+
+# --- security guard -----------------------------------------------------------
+
+
+def test_guard_rejects_foreign_host(manager, cfg):
+    # DNS rebinding: attacker's domain resolves to 127.0.0.1 -> Host mismatch
+    with TestClient(create_app(manager, cfg), base_url="http://evil.example:8620") as c:
+        assert c.get("/api/sessions").status_code == 403
+
+
+def test_guard_rejects_cross_origin(client):
+    r = client.get("/api/sessions", headers={"origin": "https://evil.example"})
+    assert r.status_code == 403
+    ok = client.get("/api/sessions", headers={"origin": "http://127.0.0.1:8620"})
+    assert ok.status_code == 200
+
+
+def test_ws_rejects_cross_origin(client, manager):
+    info = manager.add_session(scrollback=b"x")
+    with pytest.raises(Exception):
+        with client.websocket_connect(
+            f"/ws/session/{info.id}",
+            headers={"host": "127.0.0.1:8620", "origin": "https://evil.example"},
+        ):
+            pass

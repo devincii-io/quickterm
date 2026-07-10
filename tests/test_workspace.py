@@ -26,11 +26,12 @@ def fake_appdata(tmp_path, monkeypatch):
 
 
 def test_save_load_roundtrip():
-    save_workspace(Workspace(name="main", layout=LAYOUT))
+    save_workspace(Workspace(name="main", layout=LAYOUT, logo="brand.svg"))
     ws = load_workspace("main")
     assert ws is not None
     assert ws.name == "main"
     assert ws.layout == LAYOUT
+    assert ws.logo == "brand.svg"
 
 
 def test_list_and_delete():

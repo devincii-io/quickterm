@@ -19,13 +19,15 @@ export class LayoutManager {
     this.zoomed = false;
   }
 
-  newPane(profile, cwd, sessionId, launchSpec) {
+  newPane(profile, cwd, sessionId, launchSpec, title) {
     return new Pane({
       fontFamily: this.opts.fontFamily,
+      theme: this.opts.theme,
       profile: profile || null,
       cwd: cwd || null,
       sessionId: sessionId || null,
       launchSpec: launchSpec || null,
+      title: title || null,
       onFocusRequest: (p) => this.focusPane(p),
       onStateChange: (p) => { if (this.opts.onPaneState) this.opts.onPaneState(p); },
     });
@@ -59,6 +61,11 @@ export class LayoutManager {
 
   fitAll() {
     for (const p of this.panes()) p.fitSoon();
+  }
+
+  setTheme(theme) {
+    this.opts.theme = theme;
+    for (const p of this.panes()) p.setTheme(theme);
   }
 
   // ---- structural ops ----
@@ -180,6 +187,7 @@ export class LayoutManager {
       if (node.pane.cwd) out.cwd = node.pane.cwd;
       if (node.pane.session && node.pane.session.id) out.session_id = node.pane.session.id;
       if (node.pane.launchSpec) out.launch_spec = node.pane.launchSpec;
+      if (node.pane.title) out.title = node.pane.title;
       return out;
     }
     return {
@@ -210,6 +218,7 @@ export class LayoutManager {
         n && n.cwd,
         n && n.session_id,
         n && n.launch_spec,
+        n && n.title,
       );
       return { type: "pane", pane };
     };

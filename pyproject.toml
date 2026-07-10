@@ -1,12 +1,25 @@
 [project]
 name = "quickterm"
 version = "0.1.0"
-description = "Native-feeling terminal host for Windows: ConPTY terminals, split panes, persistent sessions, quick-launch profiles, local voice input."
+description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"
+authors = [{ name = "Devin Isaac" }]
+keywords = ["terminal", "workspace", "conpty", "wsl", "pty"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Terminals",
+]
 requires-python = ">=3.12"
 dependencies = [
-    "pywinpty>=2.0",
+    "pywinpty>=2.0; sys_platform == 'win32'",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
 ]
@@ -20,19 +33,27 @@ voice = [
 [project.scripts]
 quickterm = "quickterm.app:main"
 
+[project.urls]
+Homepage = "https://github.com/devincii-io/quickterm"
+Repository = "https://github.com/devincii-io/quickterm"
+Issues = "https://github.com/devincii-io/quickterm/issues"
+Changelog = "https://github.com/devincii-io/quickterm/releases"
+
 [dependency-groups]
 dev = [
     "ruff",
     "pytest",
     "pytest-asyncio",
     "httpx",
+    "pyinstaller>=6.0; sys_platform == 'win32'",
 ]
 
 [build-system]
-requires = ["uv_build>=0.11,<0.13"]
+requires = ["uv_build>=0.11.28,<0.12"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
+module-name = "quickterm"
 module-root = ""
 
 [tool.pytest.ini_options]

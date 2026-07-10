@@ -14,6 +14,7 @@ from .config import config_dir
 class Workspace:
     name: str
     layout: dict
+    logo: str | None = None  # per-workspace brand override (asset id)
 
 
 def _workspaces_dir() -> Path:
@@ -40,12 +41,16 @@ def load_workspace(name: str) -> Workspace | None:
     if not path.exists():
         return None
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return Workspace(name=raw.get("name", name), layout=raw.get("layout", {}))
+    return Workspace(
+        name=raw.get("name", name),
+        layout=raw.get("layout", {}),
+        logo=raw.get("logo"),
+    )
 
 
 def save_workspace(ws: Workspace) -> None:
     _path_for(ws.name).write_text(
-        json.dumps({"name": ws.name, "layout": ws.layout}, indent=2),
+        json.dumps({"name": ws.name, "layout": ws.layout, "logo": ws.logo}, indent=2),
         encoding="utf-8",
     )
 

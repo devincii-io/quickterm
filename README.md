@@ -1,10 +1,22 @@
 # QuickTerm
 
-A native-feeling terminal host for Windows: real ConPTY terminals, a split-pane
-window manager, persistent sessions, quick-launch profiles, and local
-push-to-talk voice input. Everything local, no cloud services, no Electron.
+A calm, local terminal workspace: split panes, named workspaces, persistent
+sessions, quick-launch profiles, WSL integration, and optional local voice
+input. Everything stays on your computer. No Electron, accounts, or telemetry.
 
-Requires Windows 10 1809+ and [uv](https://docs.astral.sh/uv/).
+## Install
+
+### Windows application
+
+Download `QuickTerm-*-windows-x64.zip` from the
+[latest release](https://github.com/devincii-io/quickterm/releases/latest),
+extract it, and run `QuickTerm.exe`. Windows may show a SmartScreen warning
+until release binaries are code-signed.
+
+### From source
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Windows 10 1809+
+uses ConPTY; Linux uses the native POSIX PTY backend.
 
 ## Run
 
@@ -34,11 +46,12 @@ use; size is configurable (`voice.model_size` in the config).
 
 | Key | Action |
 |---|---|
-| `Ctrl+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
-| `Alt+H` / `Alt+V` | Split pane horizontally / vertically |
+| `Ctrl+Shift+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
+| `Alt+Shift+H` / `Alt+Shift+V` | Split pane horizontally / vertically |
 | `Alt+Arrows` | Move focus between panes |
-| `Alt+Z` | Zoom focused pane |
-| `Alt+W` | Close pane (detaches — session keeps running) |
+| `Alt+Shift+Z` | Zoom focused pane |
+| `Alt+Shift+W` | Close pane (detaches — session keeps running) |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
 | `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable) |
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
@@ -61,22 +74,28 @@ The same fields are available in the config file:
  "start_command": "source .venv/bin/activate"}
 ```
 
-Snippets (palette-pasteable text blocks), the summon hotkey, port, scrollback
-size, font family, and voice settings live in the same file. Named workspaces
-are saved to `%APPDATA%\quickterm\workspaces\` and can be switched from the
-designed dropdown in the app bar or from the dashboard.
+Snippets, custom themes, global and per-workspace logos, the idle-session
+timeout, summon hotkey, port, scrollback size, font, and voice settings live in
+the same file. Named workspaces are saved under the QuickTerm config directory
+and can be switched from the app bar or dashboard. Logs rotate under `logs/` in
+that directory.
 
 ## Development
 
 ```
 uv sync --all-extras --dev
-uv run pytest
 uv run ruff check quickterm tests
+uv run pytest -q
+uv build --no-sources
 ```
 
-Architecture: one backend process owns all PTYs (`pty_session.py`,
-`session_manager.py`); browser tabs are dumb views attaching over a binary
-WebSocket protocol (`server.py`); the frontend is plain ES modules + vendored
-xterm.js, no build step. See `plan.md` and `docs/CONTRACTS.md`.
+Architecture: one backend process owns all PTYs (`pty_session.py` /
+`pty_posix.py`, `session_manager.py`); views attach over a binary WebSocket
+protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
+xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
+
+Pull requests run the test matrix on Windows and Linux. Tags matching `v*`
+build the standalone Windows executable and publish a GitHub release with
+generated notes and SHA-256 checksums.
 
 MIT licensed.

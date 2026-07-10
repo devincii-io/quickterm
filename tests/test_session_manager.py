@@ -1,8 +1,19 @@
 import asyncio
+import os
 
 import pytest
 
 from quickterm.session_manager import QUEUE_MAXSIZE, SessionManager
+
+
+def _short(script: str) -> tuple[str, list[str]]:
+    if os.name == "nt":
+        return "cmd.exe", ["/c", script]
+    return "/bin/sh", ["-c", script]
+
+
+def _interactive() -> tuple[str, list[str]]:
+    return ("cmd.exe", ["/q", "/k"]) if os.name == "nt" else ("/bin/sh", [])
 
 
 async def _drain(att, timeout=15) -> bytes:
@@ -23,7 +34,8 @@ async def manager():
 
 
 async def test_spawn_attach_output_and_sentinel(manager):
-    info = manager.spawn(cmd="cmd.exe", args=["/c", "echo hi"], name="t1")
+    cmd, args = _short("echo hi")
+    info = manager.spawn(cmd=cmd, args=args, name="t1")
     assert info.alive and info.cols == 120 and info.rows == 30
     assert len(info.id) == 8
     att = manager.attach(info.id)
@@ -36,7 +48,8 @@ async def test_spawn_attach_output_and_sentinel(manager):
 
 
 async def test_scrollback_and_late_attach(manager):
-    info = manager.spawn(cmd="cmd.exe", args=["/c", "echo scrollme"], cols=90, rows=20)
+    cmd, args = _short("echo scrollme")
+    info = manager.spawn(cmd=cmd, args=args, cols=90, rows=20)
     att = manager.attach(info.id)
     await _drain(att)
     data, cols, rows = manager.get(info.id).scrollback()
@@ -50,10 +63,13 @@ async def test_scrollback_and_late_attach(manager):
 async def test_scrollback_ring_truncates():
     mgr = SessionManager(asyncio.get_running_loop(), scrollback_bytes=64)
     try:
-        info = mgr.spawn(
-            cmd="cmd.exe",
-            args=["/c", "for /l %i in (1,1,40) do @echo 0123456789"],
+        script = (
+            "for /l %i in (1,1,40) do @echo 0123456789"
+            if os.name == "nt"
+            else "i=0; while [ $i -lt 40 ]; do echo 0123456789; i=$((i+1)); done"
         )
+        cmd, args = _short(script)
+        info = mgr.spawn(cmd=cmd, args=args)
         att = mgr.attach(info.id)
         full = await _drain(att)
         assert len(full) > 64  # queue saw everything
@@ -65,7 +81,8 @@ async def test_scrollback_ring_truncates():
 
 
 async def test_slow_subscriber_drops_oldest_only(manager):
-    info = manager.spawn(cmd="cmd.exe", args=["/c", "echo hi"])
+    cmd, args = _short("echo hi")
+    info = manager.spawn(cmd=cmd, args=args)
     att = manager.attach(info.id)
     sess = manager.get(info.id)
     # saturate the queue directly, then push one more chunk
@@ -79,8 +96,21 @@ async def test_slow_subscriber_drops_oldest_only(manager):
     assert items[-1] == b"NEW"  # newest kept, oldest dropped
 
 
+async def test_idle_reaper_spares_attached_and_workspace_sessions(manager):
+    cmd, args = _interactive()
+    first = manager.spawn(cmd=cmd, args=args, name="idle")
+    second = manager.spawn(cmd=cmd, args=args, name="protected")
+    attached = manager.attach(first.id)
+    manager.get(first.id).last_activity -= 600
+    manager.get(second.id).last_activity -= 600
+    assert manager.reap_idle(300, {second.id}) == []
+    attached.detach()
+    assert manager.reap_idle(300, {second.id}) == [first.id]
+
+
 async def test_kill_and_list_and_focus(manager):
-    info = manager.spawn(cmd="cmd.exe", args=["/q", "/k"], name="longlived")
+    cmd, args = _interactive()
+    info = manager.spawn(cmd=cmd, args=args, name="longlived")
     assert any(s.id == info.id for s in manager.list())
     manager.focused_session_id = info.id
     att = manager.attach(info.id)

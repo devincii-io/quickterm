@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import uuid
 from dataclasses import dataclass
 
-from .pty_session import PtySession
+if os.name == "nt":
+    from .pty_session import PtySession
+else:
+    from .pty_posix import PtySession
 
 QUEUE_MAXSIZE = 256
 _KILL_REMOVE_GRACE_S = 1.0
@@ -21,6 +26,7 @@ class SessionInfo:
     exit_code: int | None
     cols: int
     rows: int
+    touched: bool = False  # True once the user has written any input
 
 
 class Attachment:
@@ -43,6 +49,7 @@ class Session:
         self._ring_cols = info.cols
         self._ring_rows = info.rows
         self._attachments: set[Attachment] = set()
+        self.last_activity = time.monotonic()  # updated on output and input
 
     def scrollback(self) -> tuple[bytes, int, int]:
         return bytes(self._ring), self._ring_cols, self._ring_rows
@@ -125,7 +132,17 @@ class SessionManager:
     def write(self, sid: str, data: bytes) -> None:
         s = self._sessions.get(sid)
         if s and s.pty and s.info.alive:
+            s.info.touched = True
+            s.last_activity = time.monotonic()
             s.pty.write(data)
+
+    def has_attachments(self, sid: str) -> bool:
+        s = self._sessions.get(sid)
+        return bool(s and s._attachments)
+
+    def attachment_count(self, sid: str) -> int:
+        s = self._sessions.get(sid)
+        return len(s._attachments) if s else 0
 
     def resize(self, sid: str, cols: int, rows: int) -> None:
         s = self._sessions.get(sid)
@@ -155,9 +172,30 @@ class SessionManager:
                 s.pty.kill()
         self._sessions.clear()
 
+    def reap_idle(self, timeout_s: int, protected: set[str] | None = None) -> list[str]:
+        """Kill background clutter: sessions nobody is attached to that a saved
+        workspace does not reference. A live session is only reaped once it has
+        been silent (no output, no input) for `timeout_s`; an already-exited one
+        goes immediately. Attached and workspace-persisted sessions are safe.
+        """
+        protected = protected or set()
+        now = time.monotonic()
+        doomed: list[str] = []
+        for sid, s in self._sessions.items():
+            if s._attachments or sid in protected:
+                continue
+            if not s.info.alive:
+                doomed.append(sid)
+            elif timeout_s > 0 and now - s.last_activity > timeout_s:
+                doomed.append(sid)
+        for sid in doomed:
+            self.kill(sid)
+        return doomed
+
     # loop-thread callbacks from PtySession
 
     def _on_output(self, session: Session, data: bytes) -> None:
+        session.last_activity = time.monotonic()
         session._record(data)
         session._fanout(data)
 

@@ -22,9 +22,14 @@ def test_load_config_writes_default_file(fake_appdata):
     cfg = load_config()
     path = fake_appdata / "quickterm" / "config.json"
     assert path.exists()
-    names = [p.name for p in cfg.profiles]
-    assert "powershell" in names
-    assert "cmd" in names
+    # personal profiles are user-created only; system shells come from the
+    # live inventory, so a fresh config starts empty
+    assert cfg.profiles == []
+    assert cfg.default_profile == ""
+    assert cfg.theme == "graphite"
+    assert cfg.custom_theme == {}
+    assert cfg.logo is None
+    assert cfg.idle_timeout_s == 300
     assert cfg.scrollback_bytes == 512 * 1024
     assert len(cfg.snippets) >= 1
 
