@@ -22,6 +22,9 @@ class Profile:
     env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
     keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
     autostart: bool = False
+    terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/custom
+    wsl_distro: str | None = None
+    start_command: str | None = None  # run inside supported shells, then remain interactive
 
 @dataclass
 class Snippet:
@@ -162,6 +165,9 @@ REST (JSON, under `/api`):
 | DELETE | /api/workspaces/{name} | → 204 |
 | POST | /api/focus | `{session_id}` → 204 (sets manager.focused_session_id) |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
+| GET | /api/config/full | → complete `AppConfig` |
+| PUT | /api/config | complete `AppConfig` → 204 |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions |
 | GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
@@ -233,7 +239,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use
   `term.write(data, cb)` callbacks for backpressure.
 - Focus: 2px amber rail + dim inactive; POST /api/focus on change.
-- Launcher strip: profiles as flat function-key keycaps (the signature element).
+- Launcher: compact profile dropdown with an explicit open action and dashboard/settings/help navigation.
+- Dashboard: saved workspace cards with layout previews, quick profile launch, and live-session attach/kill controls.
+- Settings: tabbed General/Terminals/Voice/Advanced editor. Terminal profiles expose shell type,
+  detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
 - Command palette Ctrl+P: fuzzy over profiles / actions (split h/v, zoom, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
@@ -245,9 +254,8 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `/api/file`, renders read-only monospace text, same design tokens. Opened
   via palette action ("view file: <path>") with `window.open(..., "_blank",
   "popup,width=900,height=700")`. Hidden by default — no button in main chrome.
-- Design tokens: exactly the palette/type/layout/motion rules in plan.md
-  §Design Direction. Monospace-only UI, uppercase letter-spaced labels,
-  square corners, amber `#E0A030` only for focus/active.
+- Design tokens: graphite surfaces with warm amber focus, a softer system UI face
+  around the monospace terminal, restrained rounded corners, and reduced-motion support.
 
 ## Testing
 

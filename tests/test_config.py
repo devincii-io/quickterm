@@ -31,14 +31,25 @@ def test_load_config_writes_default_file(fake_appdata):
 
 def test_save_load_roundtrip(fake_appdata):
     cfg = AppConfig(port=9999, default_profile="cmd")
-    cfg.profiles.append(Profile(name="claude", cmd="claude", cwd="C:/dev", autostart=True))
+    cfg.profiles.append(Profile(
+        name="ubuntu",
+        cmd="wsl.exe",
+        cwd="~/dev",
+        autostart=True,
+        terminal_type="wsl",
+        wsl_distro="Ubuntu",
+        start_command="source .venv/bin/activate",
+    ))
     save_config(cfg)
     loaded = load_config()
     assert loaded.port == 9999
     assert loaded.default_profile == "cmd"
-    claude = next(p for p in loaded.profiles if p.name == "claude")
-    assert claude.cwd == "C:/dev"
-    assert claude.autostart is True
+    ubuntu = next(p for p in loaded.profiles if p.name == "ubuntu")
+    assert ubuntu.cwd == "~/dev"
+    assert ubuntu.autostart is True
+    assert ubuntu.terminal_type == "wsl"
+    assert ubuntu.wsl_distro == "Ubuntu"
+    assert ubuntu.start_command == "source .venv/bin/activate"
 
 
 def test_unknown_keys_ignored(fake_appdata):

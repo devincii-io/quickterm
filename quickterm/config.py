@@ -40,12 +40,12 @@ class VoiceConfig:
 def _default_profiles() -> list[Profile]:
     return [
         Profile(
-            name="PowerShell",
+            name="powershell",
             cmd="powershell.exe",
             args=["-NoLogo"],
             terminal_type="windows-powershell",
         ),
-        Profile(name="Command Prompt", cmd="cmd.exe", terminal_type="command-prompt"),
+        Profile(name="cmd", cmd="cmd.exe", terminal_type="command-prompt"),
     ]
 
 
@@ -63,7 +63,7 @@ class AppConfig:
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
     summon_hotkey: str = "ctrl+alt+grave"
-    default_profile: str = "PowerShell"
+    default_profile: str = "powershell"
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)

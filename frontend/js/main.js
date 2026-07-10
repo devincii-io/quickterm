@@ -212,7 +212,19 @@ async function boot() {
     layout.focusPane(pane);
     api.postFocus(alive[0].id).catch(() => {});
   } else {
-    spawnDefaultInto(pane);
+    const starters = profiles.filter((profile) => profile.autostart);
+    if (!starters.length) {
+      spawnDefaultInto(pane);
+    } else {
+      spawnInto(pane, starters[0].name, starters[0].cwd || null);
+      let current = pane;
+      for (const profile of starters.slice(1, 8)) {
+        current = layout.splitPane(current, autoDir(current));
+        if (!current) break;
+        spawnInto(current, profile.name, profile.cwd || null);
+      }
+      layout.focusPane(pane);
+    }
   }
 }
 

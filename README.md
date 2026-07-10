@@ -45,11 +45,18 @@ set via `keybinding` in the profile config.
 ## Configuration
 
 `%APPDATA%\quickterm\config.json` — created with defaults on first run.
-Profiles are plain entries:
+Terminal profiles can be managed from **Settings → Terminals**. Choose
+PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a detected
+distribution), or a custom executable. Profiles can also set a starting folder,
+an optional command to run inside the shell, a global shortcut, and autostart.
+
+The same fields are available in the config file:
 
 ```json
-{"name": "claude", "cmd": "claude", "args": [], "cwd": "C:/dev/proj",
- "env": {}, "keybinding": "ctrl+alt+1", "autostart": false}
+{"name": "project", "cmd": "wsl.exe", "args": [], "cwd": "~/dev/project",
+ "env": {}, "keybinding": "ctrl+alt+1", "autostart": false,
+ "terminal_type": "wsl", "wsl_distro": "Ubuntu",
+ "start_command": "source .venv/bin/activate"}
 ```
 
 Snippets (palette-pasteable text blocks), the summon hotkey, port, scrollback

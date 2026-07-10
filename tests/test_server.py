@@ -29,6 +29,9 @@ class FakeProfile:
     env: dict = field(default_factory=dict)
     keybinding: str | None = None
     autostart: bool = False
+    terminal_type: str | None = None
+    wsl_distro: str | None = None
+    start_command: str | None = None
 
 
 @dataclass
@@ -232,6 +235,40 @@ def test_spawn_cmd_overrides_profile(client, manager):
     r = client.post("/api/sessions", json={"profile": "claude", "cmd": "other.exe"})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "other.exe"
+
+
+def test_spawn_profile_start_command(client, manager, cfg):
+    cfg.profiles.append(FakeProfile(
+        name="project",
+        cmd="pwsh.exe",
+        terminal_type="powershell-core",
+        start_command="uv run dev",
+        cwd="C:/dev/project",
+    ))
+    r = client.post("/api/sessions", json={"profile": "project"})
+    assert r.status_code == 200
+    assert manager.last_spawn["cmd"] == "pwsh.exe"
+    assert manager.last_spawn["args"] == ["-NoLogo", "-NoExit", "-Command", "uv run dev"]
+    assert manager.last_spawn["cwd"] == "C:/dev/project"
+
+
+def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg):
+    cfg.profiles.append(FakeProfile(
+        name="ubuntu",
+        cmd="wsl.exe",
+        terminal_type="wsl",
+        wsl_distro="Ubuntu-24.04",
+        start_command="source .venv/bin/activate",
+        cwd="~/dev/project",
+    ))
+    r = client.post("/api/sessions", json={"profile": "ubuntu"})
+    assert r.status_code == 200
+    assert manager.last_spawn["cmd"] == "wsl.exe"
+    assert manager.last_spawn["args"] == [
+        "-d", "Ubuntu-24.04", "--cd", "~/dev/project", "--", "bash", "-lc",
+        "source .venv/bin/activate; exec bash -l",
+    ]
+    assert manager.last_spawn["cwd"] is None
 
 
 def test_spawn_unknown_profile_404(client):
