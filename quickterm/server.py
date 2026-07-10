@@ -75,6 +75,15 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
         manager.kill(sid)
         return Response(status_code=204)
 
+    @app.post("/api/sessions/cleanup")
+    async def cleanup_sessions(request: Request) -> Response:
+        body = await request.json()
+        session_ids = body.get("session_ids", []) if isinstance(body, dict) else []
+        for sid in session_ids:
+            if isinstance(sid, str) and manager.get(sid) is not None:
+                manager.kill(sid)
+        return Response(status_code=204)
+
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:
         return [_asdict(p) for p in cfg.profiles]
@@ -112,6 +121,11 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
     def remove_workspace(name: str) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
+        saved = workspace.load_workspace(name)
+        if saved is not None:
+            for sid in _layout_session_ids(saved.layout):
+                if manager.get(sid) is not None:
+                    manager.kill(sid)
         workspace.delete_workspace(name)
         return Response(status_code=204)
 
@@ -231,6 +245,18 @@ def _resolve_profile(prof: Any) -> tuple[str, list[str], str | None]:
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
         return "wsl.exe", args, None
     return prof.cmd, existing_args, cwd
+
+
+def _layout_session_ids(node: Any) -> set[str]:
+    if not isinstance(node, dict):
+        return set()
+    if node.get("type") == "split":
+        found: set[str] = set()
+        for child in node.get("children", []):
+            found.update(_layout_session_ids(child))
+        return found
+    sid = node.get("session_id")
+    return {sid} if isinstance(sid, str) and sid else set()
 
 
 def _terminal_inventory() -> dict:

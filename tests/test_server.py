@@ -287,6 +287,16 @@ def test_kill_session(client, manager):
     assert client.delete("/api/sessions/deadbeef").status_code == 404
 
 
+def test_cleanup_sessions(client, manager):
+    first = manager.add_session(name="scratch-1")
+    second = manager.add_session(name="scratch-2")
+    kept = manager.add_session(name="workspace")
+    r = client.post("/api/sessions/cleanup", json={"session_ids": [first.id, second.id]})
+    assert r.status_code == 204
+    assert manager.killed == [first.id, second.id]
+    assert manager.get(kept.id) is not None
+
+
 # --- REST: profiles / snippets / focus / config -----------------------------
 
 
@@ -369,6 +379,22 @@ def test_workspace_crud(client, fake_workspace):
 
 def test_workspace_put_requires_layout(client, fake_workspace):
     assert client.put("/api/workspaces/dev", json={"nope": 1}).status_code == 400
+
+
+def test_deleting_workspace_kills_its_saved_sessions(client, manager, fake_workspace):
+    first = manager.add_session(name="one")
+    second = manager.add_session(name="two")
+    layout = {
+        "type": "split",
+        "dir": "h",
+        "children": [
+            {"type": "pane", "session_id": first.id},
+            {"type": "pane", "session_id": second.id},
+        ],
+    }
+    assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
+    assert client.delete("/api/workspaces/dev").status_code == 204
+    assert manager.killed == [first.id, second.id]
 
 
 # --- REST: file viewer ------------------------------------------------------

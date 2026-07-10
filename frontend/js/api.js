@@ -23,6 +23,7 @@ export const getSnippets = () => req("GET", "/api/snippets");
 export const getSessions = () => req("GET", "/api/sessions");
 export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
 export const listWorkspaces = () => req("GET", "/api/workspaces");
 export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURIComponent(name)}`);
 export const putWorkspace = (name, layout) => req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { layout });

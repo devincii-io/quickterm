@@ -222,13 +222,16 @@ export class Panels {
     for (const [index, workspace] of workspaces.entries()) {
       const layout = workspace.data && workspace.data.layout;
       const card = make("article", "workspace-card");
+      const isCurrent = this.app.currentWorkspace && this.app.currentWorkspace() === workspace.name;
+      if (isCurrent) card.classList.add("current");
       card.style.setProperty("--card-index", index);
       const top = make("div", "workspace-card-top");
-      const badge = make("span", "workspace-badge", `${countPanes(layout)} pane${countPanes(layout) === 1 ? "" : "s"}`);
+      const badge = make("span", "workspace-badge", isCurrent ? "Open now" : `${countPanes(layout)} pane${countPanes(layout) === 1 ? "" : "s"}`);
       const menu = this._button("Delete", "text-button danger-text");
       menu.addEventListener("click", async (event) => {
         event.stopPropagation();
-        await api.deleteWorkspace(workspace.name).catch(() => {});
+        if (this.app.deleteWorkspace) await this.app.deleteWorkspace(workspace.name);
+        else await api.deleteWorkspace(workspace.name).catch(() => {});
         if (this.open === "dashboard") this.show("dashboard");
       });
       top.append(badge, menu);

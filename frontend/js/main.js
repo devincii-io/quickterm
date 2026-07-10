@@ -1,6 +1,3 @@
-// Boot: fetch config/profiles/sessions, build chrome, create the layout
-// with one pane running the default profile (or reattach a live session).
-
 import * as api from "./api.js";
 import { LayoutManager } from "./layout.js";
 import { Palette } from "./palette.js";
@@ -12,72 +9,148 @@ import * as workspace from "./workspace.js";
 document.title = "QuickTerm";
 
 const $ = (id) => document.getElementById(id);
+const ACTIVE_WORKSPACE_KEY = "quickterm.activeWorkspace";
+
+function storedWorkspace() {
+  try { return localStorage.getItem(ACTIVE_WORKSPACE_KEY); } catch (_) { return null; }
+}
+
+function rememberWorkspace(name) {
+  try {
+    if (name) localStorage.setItem(ACTIVE_WORKSPACE_KEY, name);
+    else localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
+  } catch (_) { /* storage may be disabled */ }
+}
+
+function sessionIdsInLayout(node, out = new Set()) {
+  if (!node) return out;
+  if (node.type === "split") {
+    for (const child of node.children || []) sessionIdsInLayout(child, out);
+  } else if (node.session_id) {
+    out.add(node.session_id);
+  }
+  return out;
+}
 
 async function boot() {
   let cfg = { font_family: "JetBrains Mono", profiles: [], snippets: [], voice_available: false };
-  const [c, p, s] = await Promise.all([
+  const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
     api.getProfiles().catch(() => null),
     api.getSessions().catch(() => []),
+    api.listWorkspaces().catch(() => []),
+    api.getTerminalOptions().catch(() => ({ types: [], wsl_distributions: [] })),
   ]);
-  if (c) cfg = c;
-  let profiles = p || cfg.profiles || [];
+  if (loadedConfig) cfg = loadedConfig;
+  let profiles = loadedProfiles || cfg.profiles || [];
   let snippets = cfg.snippets || [];
-  const initialSessions = s || [];
+  let workspaceNames = loadedWorkspaces || [];
+  let terminalInventory = loadedInventory;
+  const remembered = storedWorkspace();
+  let currentWorkspace = remembered && workspaceNames.includes(remembered) ? remembered : null;
+  if (!currentWorkspace) rememberWorkspace(null);
 
-  let currentWorkspace = "default";
+  const initialSessions = (loadedSessions || []).filter((session) => session.alive);
+  const scratchSessionIds = new Set();
   let statusTimer = null;
+  let workspaceSaveTimer = null;
+  let transitioning = true;
+  let panels;
 
   const layout = new LayoutManager($("grid"), $("zoom-host"), {
     fontFamily: cfg.font_family || "JetBrains Mono",
     onFocusChange: (pane) => {
-      if (pane && pane.session && pane.state === "attached") {
-        api.postFocus(pane.session.id).catch(() => {});
-      }
+      if (pane && pane.session && pane.state === "attached") api.postFocus(pane.session.id).catch(() => {});
     },
-    onPaneState: () => refreshStatusSoon(),
+    onPaneState: () => {
+      refreshStatusSoon();
+      scheduleWorkspaceSave();
+    },
+    onLayoutChange: () => scheduleWorkspaceSave(),
   });
 
   function defaultProfile() {
-    return (
-      profiles.find((x) => x.name === cfg.default_profile) ||
-      profiles.find((x) => x.name === "powershell") ||
-      profiles[0] ||
-      null
-    );
+    return profiles.find((profile) => profile.name === cfg.default_profile)
+      || profiles.find((profile) => profile.name.toLowerCase() === "powershell")
+      || profiles[0]
+      || null;
   }
 
   function autoDir(pane) {
-    const r = pane.el.getBoundingClientRect();
-    return r.width > r.height * 1.8 ? "h" : "v";
+    const rect = pane.el.getBoundingClientRect();
+    return rect.width > rect.height * 1.8 ? "h" : "v";
+  }
+
+  function serializableSpec(spec) {
+    return {
+      cmd: spec.cmd,
+      args: [...(spec.args || [])],
+      cwd: spec.cwd || null,
+      env: { ...(spec.env || {}) },
+      name: spec.name || spec.label || spec.cmd,
+    };
   }
 
   async function spawnInto(pane, profileName, cwd) {
     try {
       const info = await api.createSession({ profile: profileName });
       pane.profileName = profileName;
+      pane.launchSpec = null;
       if (cwd) pane.cwd = cwd;
       pane.attach(info);
+      if (!currentWorkspace) scratchSessionIds.add(info.id);
       if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
+      scheduleWorkspaceSave();
       refreshStatusSoon();
-    } catch (e) {
+      return info;
+    } catch (_) {
       pane.showNotice(`[spawn failed: ${profileName}]`);
+      return null;
+    }
+  }
+
+  async function spawnSpecInto(pane, spec) {
+    const launchSpec = serializableSpec(spec);
+    try {
+      const info = await api.createSession(launchSpec);
+      pane.profileName = null;
+      pane.cwd = launchSpec.cwd;
+      pane.launchSpec = launchSpec;
+      pane.attach(info);
+      if (!currentWorkspace) scratchSessionIds.add(info.id);
+      if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
+      scheduleWorkspaceSave();
+      refreshStatusSoon();
+      return info;
+    } catch (_) {
+      pane.showNotice(`[spawn failed: ${launchSpec.name}]`);
+      return null;
     }
   }
 
   function spawnDefaultInto(pane) {
-    const dp = defaultProfile();
-    if (dp) spawnInto(pane, dp.name, dp.cwd || null);
+    const profile = defaultProfile();
+    return profile ? spawnInto(pane, profile.name, profile.cwd || null) : Promise.resolve(null);
   }
 
-  // Spawn a profile into the focused pane region: replace if the pane is
-  // empty/exited, otherwise split and spawn into the new pane.
   async function runProfile(profile) {
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     await spawnInto(pane, profile.name, profile.cwd || null);
+  }
+
+  async function runSystemTerminal(system) {
+    let pane = layout.focused || layout.init();
+    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane) return;
+    layout.focusPane(pane);
+    await spawnSpecInto(pane, {
+      cmd: system.cmd,
+      args: system.args || [],
+      name: system.label,
+    });
   }
 
   function attachSession(info) {
@@ -87,57 +160,147 @@ async function boot() {
     layout.focusPane(pane);
     pane.attach(info);
     api.postFocus(info.id).catch(() => {});
+    scheduleWorkspaceSave();
     refreshStatusSoon();
+  }
+
+  async function persistCurrentWorkspace() {
+    if (!currentWorkspace || transitioning || !layout.root) return;
+    clearTimeout(workspaceSaveTimer);
+    await workspace.save(currentWorkspace, layout.serialize()).catch(() => {});
+  }
+
+  function scheduleWorkspaceSave() {
+    if (!currentWorkspace || transitioning) return;
+    clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = setTimeout(() => persistCurrentWorkspace(), 300);
+  }
+
+  async function cleanupScratchSessions() {
+    const ids = [...scratchSessionIds];
+    scratchSessionIds.clear();
+    if (ids.length) await api.cleanupSessions(ids).catch(() => {});
+  }
+
+  async function restoreWorkspace(name) {
+    const savedLayout = await workspace.load(name).catch(() => null);
+    if (!savedLayout) return false;
+    const liveSessions = await api.getSessions().catch(() => []);
+    const byId = new Map(liveSessions.filter((session) => session.alive).map((session) => [session.id, session]));
+    const panes = layout.restore(savedLayout);
+    for (const pane of panes) {
+      const live = pane.savedSessionId && byId.get(pane.savedSessionId);
+      if (live) {
+        pane.attach(live);
+      } else if (pane.profileName) {
+        await spawnInto(pane, pane.profileName, pane.cwd);
+      } else if (pane.launchSpec) {
+        await spawnSpecInto(pane, pane.launchSpec);
+      } else {
+        await spawnDefaultInto(pane);
+      }
+    }
+    if (panes.length) layout.focusPane(panes[0]);
+    return true;
+  }
+
+  async function startScratch() {
+    currentWorkspace = null;
+    rememberWorkspace(null);
+    const pane = layout.restore(null)[0];
+    await spawnDefaultInto(pane);
+    layout.focusPane(pane);
+  }
+
+  async function switchWorkspace(name) {
+    if ((name || null) === currentWorkspace) return;
+    transitioning = true;
+    clearTimeout(workspaceSaveTimer);
+    if (currentWorkspace) await workspace.save(currentWorkspace, layout.serialize()).catch(() => {});
+    else await cleanupScratchSessions();
+
+    if (name) {
+      currentWorkspace = name;
+      rememberWorkspace(name);
+      const restored = await restoreWorkspace(name);
+      if (!restored) await startScratch();
+    } else {
+      await startScratch();
+    }
+    transitioning = false;
+    buildLauncher();
+    refreshStatusSoon();
+    scheduleWorkspaceSave();
   }
 
   const app = {
     profiles,
     snippets,
     runProfile,
+    runSystemTerminal,
     attachSession,
-    splitH: () => { const np = layout.splitFocused("h"); if (np) spawnDefaultInto(np); },
-    splitV: () => { const np = layout.splitFocused("v"); if (np) spawnDefaultInto(np); },
+    splitH: () => { const pane = layout.splitFocused("h"); if (pane) spawnDefaultInto(pane); },
+    splitV: () => { const pane = layout.splitFocused("v"); if (pane) spawnDefaultInto(pane); },
     zoom: () => layout.toggleZoom(),
     closePane: () => { layout.closePane(); refreshStatusSoon(); },
     killFocusedSession: () => {
       const pane = layout.focused;
       if (pane && pane.session) {
+        scratchSessionIds.delete(pane.session.id);
         api.killSession(pane.session.id).catch(() => {});
         refreshStatusSoon();
       }
     },
-    sendSnippet: (sn) => {
-      if (layout.focused) layout.focused.sendText(sn.text);
-    },
+    sendSnippet: (snippet) => { if (layout.focused) layout.focused.sendText(snippet.text); },
     saveWorkspace: async (name) => {
-      try {
-        await workspace.save(name, layout.serialize());
-        currentWorkspace = name;
-        refreshStatusSoon();
-      } catch (e) { /* backend rejected; leave name unchanged */ }
-    },
-    loadWorkspace: async (name) => {
-      let lay;
-      try { lay = await workspace.load(name); } catch (e) { return; }
-      const panes = layout.restore(lay);
-      currentWorkspace = name;
-      for (const pane of panes) {
-        if (pane.profileName) spawnInto(pane, pane.profileName, pane.cwd);
-      }
+      const cleanName = name.trim();
+      if (!cleanName) return;
+      currentWorkspace = cleanName;
+      scratchSessionIds.clear();
+      rememberWorkspace(cleanName);
+      await workspace.save(cleanName, layout.serialize());
+      if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
+      workspaceNames.sort((a, b) => a.localeCompare(b));
+      buildLauncher();
       refreshStatusSoon();
     },
-    attachedSessionIds: () =>
-      layout.panes()
-        .filter((x) => x.session && x.state === "attached")
-        .map((x) => x.session.id),
+    loadWorkspace: (name) => switchWorkspace(name),
+    deleteWorkspace: async (name) => {
+      const deletingCurrent = currentWorkspace === name;
+      if (deletingCurrent) {
+        await workspace.save(name, layout.serialize()).catch(() => {});
+        currentWorkspace = null;
+        rememberWorkspace(null);
+      }
+      await api.deleteWorkspace(name).catch(() => {});
+      workspaceNames = workspaceNames.filter((item) => item !== name);
+      if (deletingCurrent) {
+        transitioning = true;
+        await startScratch();
+        transitioning = false;
+      }
+      buildLauncher();
+      refreshStatusSoon();
+    },
+    onWorkspacesChanged: async () => {
+      workspaceNames = await api.listWorkspaces().catch(() => workspaceNames);
+      buildLauncher();
+    },
+    currentWorkspace: () => currentWorkspace,
+    attachedSessionIds: () => layout.panes()
+      .filter((pane) => pane.session && pane.state === "attached")
+      .map((pane) => pane.session.id),
     refocusTerm: () => { if (layout.focused) layout.focused.setFocused(true); },
-    // settings saved: refresh profiles/snippets and rebuild the launcher
     onConfigSaved: async () => {
-      const fresh = await api.getConfig().catch(() => null);
+      const [fresh, freshInventory] = await Promise.all([
+        api.getConfig().catch(() => null),
+        api.getTerminalOptions().catch(() => terminalInventory),
+      ]);
       if (!fresh) return;
       cfg = fresh;
       profiles = fresh.profiles || [];
       snippets = fresh.snippets || [];
+      terminalInventory = freshInventory;
       app.profiles = profiles;
       app.snippets = snippets;
       buildLauncher();
@@ -145,7 +308,7 @@ async function boot() {
   };
 
   const palette = new Palette(app);
-  const panels = new Panels(app);
+  panels = new Panels(app);
   app.openPanel = (name) => panels.show(name);
 
   initKeys({
@@ -155,28 +318,33 @@ async function boot() {
     splitV: app.splitV,
     zoom: app.zoom,
     closePane: app.closePane,
-    focusDir: (d) => layout.focusDir(d),
+    focusDir: (direction) => layout.focusDir(direction),
   });
 
   function buildLauncher() {
-    initLauncher($("launcher"), profiles, (profile) => runProfile(profile), [
-      ["dashboard", () => panels.toggle("dashboard")],
-      ["settings", () => panels.toggle("settings")],
-      ["help", () => panels.toggle("help")],
-    ]);
+    initLauncher($("launcher"), {
+      profiles,
+      inventory: terminalInventory,
+      workspaces: workspaceNames,
+      currentWorkspace,
+      onRunProfile: runProfile,
+      onRunSystem: runSystemTerminal,
+      onWorkspace: switchWorkspace,
+      onManage: () => panels.toggle("dashboard"),
+      chrome: [
+        ["dashboard", () => panels.toggle("dashboard")],
+        ["settings", () => panels.toggle("settings")],
+        ["help", () => panels.toggle("help")],
+      ],
+    });
   }
-  buildLauncher();
-
-  // ---- status bar ----
 
   function refreshStatus() {
-    $("sb-workspace").textContent = `ws ${currentWorkspace}`;
+    $("sb-workspace").textContent = currentWorkspace ? `ws ${currentWorkspace}` : "scratch · disposable";
     api.getSessions().then((list) => {
-      const n = list.filter((x) => x.alive).length;
-      $("sb-sessions").textContent = `${n} session${n === 1 ? "" : "s"}`;
-    }).catch(() => {
-      $("sb-sessions").textContent = "offline";
-    });
+      const count = list.filter((session) => session.alive).length;
+      $("sb-sessions").textContent = `${count} session${count === 1 ? "" : "s"}`;
+    }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 
   function refreshStatusSoon() {
@@ -185,47 +353,51 @@ async function boot() {
   }
 
   function tickClock() {
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    $("sb-clock").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const date = new Date();
+    const pad = (number) => String(number).padStart(2, "0");
+    $("sb-clock").textContent = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
+
+  function persistOnExit() {
+    if (currentWorkspace && layout.root) {
+      fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ layout: layout.serialize() }),
+        keepalive: true,
+      }).catch(() => {});
+    } else if (scratchSessionIds.size) {
+      fetch("/api/sessions/cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_ids: [...scratchSessionIds] }),
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+  window.addEventListener("pagehide", persistOnExit);
 
   $("voice-indicator").textContent = cfg.voice_available ? "voice" : "";
   tickClock();
   setInterval(tickClock, 15000);
-  refreshStatus();
   setInterval(refreshStatus, 10000);
 
-  // ---- initial layout: reattach all live sessions (spiral grid, capped)
-  // or spawn the default profile into a single pane ----
-
-  const pane = layout.init();
-  const alive = initialSessions.filter((x) => x.alive);
-  if (alive.length) {
-    pane.attach(alive[0]);
-    let p = pane;
-    for (const info of alive.slice(1, 8)) {
-      p = layout.splitPane(p, autoDir(p));
-      if (!p) break;
-      p.attach(info);
-    }
-    layout.focusPane(pane);
-    api.postFocus(alive[0].id).catch(() => {});
+  if (currentWorkspace) {
+    const restored = await restoreWorkspace(currentWorkspace);
+    if (!restored) await startScratch();
   } else {
-    const starters = profiles.filter((profile) => profile.autostart);
-    if (!starters.length) {
-      spawnDefaultInto(pane);
-    } else {
-      spawnInto(pane, starters[0].name, starters[0].cwd || null);
-      let current = pane;
-      for (const profile of starters.slice(1, 8)) {
-        current = layout.splitPane(current, autoDir(current));
-        if (!current) break;
-        spawnInto(current, profile.name, profile.cwd || null);
-      }
-      layout.focusPane(pane);
-    }
+    const workspaceData = await Promise.all(workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)));
+    const preserved = new Set();
+    for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
+    const disposable = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
+    if (disposable.length) await api.cleanupSessions(disposable).catch(() => {});
+    const pane = layout.init();
+    await spawnDefaultInto(pane);
   }
+  transitioning = false;
+  buildLauncher();
+  refreshStatus();
+  scheduleWorkspaceSave();
 }
 
 boot();

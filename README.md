@@ -14,8 +14,10 @@ uv run quickterm
 ```
 
 The backend starts on `127.0.0.1:8620` and opens a chromeless browser app
-window. Sessions live in the backend process — closing the window does not
-kill your terminals; reopen and reattach with full scrollback.
+window. The workspace selector controls persistence: **Scratch** is disposable
+and its sessions are closed when you leave, while a named workspace autosaves
+its exact split arrangement and live session IDs for reattachment with full
+scrollback.
 
 ### Voice input (optional)
 
@@ -60,9 +62,9 @@ The same fields are available in the config file:
 ```
 
 Snippets (palette-pasteable text blocks), the summon hotkey, port, scrollback
-size, font family, and voice settings live in the same file. Workspaces
-(named split layouts + profiles) are saved to `%APPDATA%\quickterm\workspaces\`
-via the palette.
+size, font family, and voice settings live in the same file. Named workspaces
+are saved to `%APPDATA%\quickterm\workspaces\` and can be switched from the
+designed dropdown in the app bar or from the dashboard.
 
 ## Development
 

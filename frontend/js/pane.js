@@ -44,6 +44,8 @@ export class Pane {
     this.onStateChange = opts.onStateChange || (() => {});
     this.profileName = opts.profile || null;
     this.cwd = opts.cwd || null;
+    this.savedSessionId = opts.sessionId || null;
+    this.launchSpec = opts.launchSpec || null;
 
     this.session = null;
     this.state = "empty"; // empty | attached | exited
@@ -116,6 +118,7 @@ export class Pane {
     clearTimeout(this._reconnectTimer);
     this._teardownWs();
     this.session = info;
+    this.savedSessionId = info.id;
     if (info.profile) this.profileName = info.profile;
     this._exited = false;
     this._detached = false;

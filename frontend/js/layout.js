@@ -19,11 +19,13 @@ export class LayoutManager {
     this.zoomed = false;
   }
 
-  newPane(profile, cwd) {
+  newPane(profile, cwd, sessionId, launchSpec) {
     return new Pane({
       fontFamily: this.opts.fontFamily,
       profile: profile || null,
       cwd: cwd || null,
+      sessionId: sessionId || null,
+      launchSpec: launchSpec || null,
       onFocusRequest: (p) => this.focusPane(p),
       onStateChange: (p) => { if (this.opts.onPaneState) this.opts.onPaneState(p); },
     });
@@ -76,6 +78,7 @@ export class LayoutManager {
     this._replaceNode(hit.node, split, hit.parent);
     this.render();
     this.focusPane(fresh);
+    this._changed();
     return fresh;
   }
 
@@ -95,6 +98,7 @@ export class LayoutManager {
       this.root = { type: "pane", pane: fresh };
       this.render();
       this.focusPane(fresh);
+      this._changed();
       return;
     }
     const sibling = hit.parent.children.find((c) => c !== hit.node);
@@ -103,6 +107,7 @@ export class LayoutManager {
     this.render();
     const next = this.panes(sibling)[0] || this.panes()[0] || null;
     if (next) this.focusPane(next);
+    this._changed();
   }
 
   toggleZoom() {
@@ -173,6 +178,8 @@ export class LayoutManager {
     if (node.type === "pane") {
       const out = { type: "pane", profile: node.pane.profileName };
       if (node.pane.cwd) out.cwd = node.pane.cwd;
+      if (node.pane.session && node.pane.session.id) out.session_id = node.pane.session.id;
+      if (node.pane.launchSpec) out.launch_spec = node.pane.launchSpec;
       return out;
     }
     return {
@@ -198,7 +205,12 @@ export class LayoutManager {
           children: n.children.map(build),
         };
       }
-      const pane = this.newPane(n && n.profile, n && n.cwd);
+      const pane = this.newPane(
+        n && n.profile,
+        n && n.cwd,
+        n && n.session_id,
+        n && n.launch_spec,
+      );
       return { type: "pane", pane };
     };
     this.root = layout ? build(layout) : { type: "pane", pane: this.newPane() };
@@ -250,6 +262,7 @@ export class LayoutManager {
         window.removeEventListener("mouseup", up);
         document.body.classList.remove("dragging");
         this.fitAll();
+        this._changed();
       };
       document.body.classList.add("dragging");
       window.addEventListener("mousemove", move);
@@ -282,5 +295,9 @@ export class LayoutManager {
   _replaceNode(oldNode, newNode, parent) {
     if (!parent) this.root = newNode;
     else parent.children[parent.children.indexOf(oldNode)] = newNode;
+  }
+
+  _changed() {
+    if (this.opts.onLayoutChange) this.opts.onLayoutChange(this.serialize());
   }
 }

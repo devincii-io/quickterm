@@ -127,8 +127,12 @@ Layout tree (JSON-serializable, shared with the frontend — SAME schema):
 
 ```json
 {"type": "split", "dir": "h", "ratio": 0.5, "children": [node, node]}
-{"type": "pane", "profile": "claude", "cwd": "C:/dev/proj"}
+{"type": "pane", "profile": "claude", "cwd": "C:/dev/proj", "session_id": "a1b2c3d4"}
 ```
+
+Pane nodes may also contain `launch_spec` for system terminals opened without a
+saved profile. `session_id` is preferred when restoring; a missing/dead session
+falls back to spawning `profile` or `launch_spec`.
 
 ```python
 @dataclass
@@ -156,13 +160,14 @@ REST (JSON, under `/api`):
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo]` |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides) |
+| POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` |
 | PUT | /api/workspaces/{name} | `{layout}` → 204 |
-| DELETE | /api/workspaces/{name} | → 204 |
+| DELETE | /api/workspaces/{name} | kill sessions referenced by the workspace, delete it → 204 |
 | POST | /api/focus | `{session_id}` → 204 (sets manager.focused_session_id) |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
 | GET | /api/config/full | → complete `AppConfig` |
@@ -241,6 +246,8 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Focus: 2px amber rail + dim inactive; POST /api/focus on change.
 - Launcher: compact profile dropdown with an explicit open action and dashboard/settings/help navigation.
 - Dashboard: saved workspace cards with layout previews, quick profile launch, and live-session attach/kill controls.
+- App bar workspace dropdown: Scratch is disposable; named workspaces autosave layout and session IDs and restore the exact live sessions. The last active named workspace is remembered locally.
+- App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several.
 - Settings: tabbed General/Terminals/Voice/Advanced editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
 - Command palette Ctrl+P: fuzzy over profiles / actions (split h/v, zoom, kill,
