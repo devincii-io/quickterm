@@ -26,3 +26,14 @@ def test_rejects_oversized_and_traversal():
     with pytest.raises(ValueError, match="too large"):
         assets.save_asset(b"x" * (assets.MAX_ASSET_BYTES + 1), "image/webp")
     assert assets.asset_path("../secret.png") is None
+
+
+def test_packaged_brand_assets_exist_and_are_wired_into_frontend():
+    from pathlib import Path
+
+    frontend = Path("quickterm/frontend")
+    assert (frontend / "assets/icon-16.png").read_bytes().startswith(b"\x89PNG")
+    assert (frontend / "assets/icon-32.png").read_bytes().startswith(b"\x89PNG")
+    assert Path("quickterm/resources/quickterm.ico").read_bytes().startswith(b"\x00\x00\x01\x00")
+    html = (frontend / "index.html").read_text(encoding="utf-8")
+    assert 'href="/assets/icon-32.png"' in html

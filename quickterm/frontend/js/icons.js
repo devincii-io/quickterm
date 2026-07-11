@@ -22,10 +22,13 @@ const PATHS = {
     '<path d="M6 6.5l1 13a1.6 1.6 0 0 0 1.6 1.5h6.8a1.6 1.6 0 0 0 1.6-1.5l1-13"/>',
   power: '<path d="M12 3v8"/><path d="M6.6 6.6a8 8 0 1 0 10.8 0"/>',
   terminal: '<polyline points="4.5 6.5 10.5 12 4.5 17.5"/><line x1="12.5" y1="18" x2="20" y2="18"/>',
+  shield: '<path d="M12 3 20 6v5.5c0 4.8-3.2 8-8 9.5-4.8-1.5-8-4.7-8-9.5V6z"/><path d="M12 7v10M7 12h10"/>',
   circle: '<circle cx="12" cy="12" r="7.5"/>',
   "circle-dashed": '<circle cx="12" cy="12" r="7.5" stroke-dasharray="3.4 3.6"/>',
   diamond: '<path d="M12 3.2 20.8 12 12 20.8 3.2 12z"/>',
   link: '<path d="M10 14a5 5 0 0 0 7.1 0l2.4-2.4a5 5 0 0 0-7.1-7.1L11 5.9"/><path d="M14 10a5 5 0 0 0-7.1 0l-2.4 2.4a5 5 0 0 0 7.1 7.1L13 18.1"/>',
+  "new-window":
+    '<rect x="3" y="4.5" width="13" height="13" rx="1.8"/><path d="M15 3.5h5.5V9"/><line x1="20" y1="4" x2="13.5" y2="10.5"/>',
 };
 
 const SVG_NS = "http://www.w3.org/2000/svg";

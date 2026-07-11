@@ -56,6 +56,7 @@ class AppConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    font_size: int = 14
     theme: str = "graphite"
     # colors for the "custom" theme id; empty until the user defines one
     custom_theme: dict[str, str] = field(default_factory=dict)

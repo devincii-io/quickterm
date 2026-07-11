@@ -33,8 +33,31 @@ function sessionIdsInLayout(node, out = new Set()) {
   return out;
 }
 
+const MIN_FONT = 9;
+const MAX_FONT = 30;
+const DEFAULT_FONT = 14;
+const clampFont = (px) => Math.max(MIN_FONT, Math.min(MAX_FONT, Math.round(px || DEFAULT_FONT)));
+
+// The window is launched at .../#t=<token>. Capture it before any API call,
+// stash it in sessionStorage so a reload (which loses the fragment) still works,
+// then scrub it from the URL so it does not linger in history. sessionStorage is
+// per-tab and same-origin, so other local programs cannot read it.
+function captureToken() {
+  const match = /[#&]t=([^&]+)/.exec(location.hash || "");
+  let value = match ? decodeURIComponent(match[1]) : "";
+  if (!value) { try { value = sessionStorage.getItem("qt.token") || ""; } catch (_) { /* ignore */ } }
+  if (value) {
+    api.setToken(value);
+    try { sessionStorage.setItem("qt.token", value); } catch (_) { /* ignore */ }
+  }
+  if (match) {
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (_) { /* ignore */ }
+  }
+}
+
 async function boot() {
-  let cfg = { font_family: "JetBrains Mono", profiles: [], snippets: [], voice_available: false };
+  captureToken();
+  let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, profiles: [], snippets: [], voice_available: false };
   const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
     api.getProfiles().catch(() => null),
@@ -58,11 +81,15 @@ async function boot() {
   let transitioning = true;
   let panels;
   let workspaceLogo = null;
+  let fontSize = clampFont(cfg.font_size);
+  let fontSaveTimer = null;
 
   applyChromeTheme(cfg.theme, cfg.custom_theme);
+  if (cfg.elevated) document.body.classList.add("elevated");
 
   const layout = new LayoutManager($("grid"), $("zoom-host"), {
     fontFamily: cfg.font_family || "JetBrains Mono",
+    fontSize,
     theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
     onFocusChange: (pane) => {
       if (pane && pane.session && pane.state === "attached") api.postFocus(pane.session.id).catch(() => {});
@@ -170,6 +197,18 @@ async function boot() {
       args: system.args || [],
       name: system.label,
     });
+  }
+
+  function elevateProfile(profile) {
+    return api.elevateTerminal({ profile: profile.name }).catch(() => {});
+  }
+
+  function elevateSystemTerminal(system) {
+    return api.elevateTerminal({
+      cmd: system.cmd,
+      args: system.args || [],
+      name: system.label,
+    }).catch(() => {});
   }
 
   function attachSession(info) {
@@ -364,6 +403,7 @@ async function boot() {
       app.snippets = snippets;
       applyChromeTheme(fresh.theme, fresh.custom_theme);
       layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
+      setFontSize(fresh.font_size, false);
       buildLauncher();
     },
   };
@@ -371,6 +411,41 @@ async function boot() {
   const palette = new Palette(app);
   panels = new Panels(app);
   app.openPanel = (name) => panels.show(name);
+
+  // Terminal text size: applied live to every pane, persisted to config so it
+  // survives restarts and shows up in Settings. Saving is debounced so holding
+  // the shortcut does not spam the backend.
+  function persistFontSize() {
+    clearTimeout(fontSaveTimer);
+    fontSaveTimer = setTimeout(() => {
+      api.getFullConfig().then((full) => {
+        if (!full) return;
+        full.font_size = fontSize;
+        cfg.font_size = fontSize;
+        return api.putConfig(full);
+      }).catch(() => {});
+    }, 700);
+  }
+
+  function setFontSize(px, persist = true) {
+    const next = clampFont(px);
+    if (next === fontSize && persist) return;
+    fontSize = next;
+    layout.setFontSize(fontSize);
+    if (persist) persistFontSize();
+  }
+  app.setFontSize = setFontSize;
+  app.fontSize = () => fontSize;
+
+  // Live theme preview: apply the chrome and every terminal's colors instantly
+  // (Settings calls this the moment you click a theme) without persisting.
+  // Reverting is just re-applying the committed config theme, which is what
+  // appliedTheme() reports.
+  app.previewTheme = (themeId, custom) => {
+    applyChromeTheme(themeId, custom || {});
+    layout.setTheme(getTheme(themeId, custom || {}).xterm);
+  };
+  app.appliedTheme = () => ({ theme: cfg.theme, custom_theme: cfg.custom_theme || {} });
 
   initKeys({
     togglePalette: () => { panels.close(); palette.toggle(); },
@@ -380,6 +455,9 @@ async function boot() {
     zoom: app.zoom,
     closePane: app.closePane,
     focusDir: (direction) => layout.focusDir(direction),
+    fontBigger: () => setFontSize(fontSize + 1),
+    fontSmaller: () => setFontSize(fontSize - 1),
+    fontReset: () => setFontSize(DEFAULT_FONT),
   });
 
   function buildLauncher() {
@@ -391,8 +469,12 @@ async function boot() {
       logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
       onRunProfile: runProfile,
       onRunSystem: runSystemTerminal,
+      onElevateProfile: elevateProfile,
+      onElevateSystem: elevateSystemTerminal,
       onWorkspace: switchWorkspace,
       onManage: () => panels.toggle("dashboard"),
+      elevated: Boolean(cfg.elevated),
+      onNewWindow: () => api.openNewWindow().catch(() => {}),
       chrome: [
         ["dashboard", () => panels.toggle("dashboard")],
         ["settings", () => panels.toggle("settings")],
@@ -424,14 +506,14 @@ async function boot() {
     if (currentWorkspace && layout.root && !transitioning) {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...api.authHeaders() },
         body: JSON.stringify({ layout: layout.serialize(), logo: workspaceLogo }),
         keepalive: true,
       }).catch(() => {});
     } else if (scratchSessionIds.size) {
       fetch("/api/sessions/cleanup", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...api.authHeaders() },
         body: JSON.stringify({ session_ids: [...scratchSessionIds] }),
         keepalive: true,
       }).catch(() => {});
@@ -448,15 +530,24 @@ async function boot() {
     const restored = await restoreWorkspace(currentWorkspace);
     if (!restored) await startScratch();
   } else {
-    const workspaceData = await Promise.all(
-      workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)),
-    );
-    const preserved = new Set();
-    for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
-    const orphans = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
-    if (orphans.length) await api.cleanupSessions(orphans).catch(() => {});
     const pane = layout.init();
-    await spawnDefaultInto(pane);
+    const administratorSession = initialSessions.find((session) =>
+      (session.name || "").startsWith("Administrator - "));
+    if (administratorSession) {
+      pane.attach(administratorSession);
+      scratchSessionIds.add(administratorSession.id);
+      layout.focusPane(pane);
+      api.postFocus(administratorSession.id).catch(() => {});
+    } else {
+      const workspaceData = await Promise.all(
+        workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)),
+      );
+      const preserved = new Set();
+      for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
+      const orphans = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
+      if (orphans.length) await api.cleanupSessions(orphans).catch(() => {});
+      await spawnDefaultInto(pane);
+    }
   }
   transitioning = false;
   buildLauncher();

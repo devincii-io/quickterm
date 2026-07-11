@@ -16,6 +16,7 @@ const FIT_DEBOUNCE_MS = 50;
 export class Pane {
   constructor(opts = {}) {
     this.fontFamily = opts.fontFamily || "JetBrains Mono";
+    this.fontSize = opts.fontSize || 14;
     this.theme = opts.theme || getTheme(DEFAULT_THEME).xterm;
     this.onFocusRequest = opts.onFocusRequest || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
@@ -52,7 +53,7 @@ export class Pane {
     el.innerHTML =
       '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span></div>' +
       '<div class="term-host"></div>' +
-      '<div class="pane-empty">no session &middot; ctrl+shift+p</div>' +
+      '<div class="pane-empty">no session &middot; alt+p</div>' +
       '<div class="pane-dim"></div>' +
       '<div class="pane-exitbar" hidden></div>';
     this.el = el;
@@ -84,6 +85,14 @@ export class Pane {
     this.theme = theme;
     this.el.style.background = theme.background;
     if (this.term) this.term.options.theme = theme;
+  }
+
+  setFontSize(px) {
+    this.fontSize = px;
+    if (this.term) {
+      this.term.options.fontSize = px;
+      this.fitSoon();
+    }
   }
 
   displayName() {
@@ -201,13 +210,16 @@ export class Pane {
   _createTerm() {
     this.term = new Terminal({
       fontFamily: `"${this.fontFamily}", "JetBrains Mono", "Cascadia Mono", Consolas, monospace`,
-      fontSize: 13,
+      fontSize: this.fontSize,
       cursorBlink: false,
       cursorStyle: "block",
       scrollback: 5000,
       minimumContrastRatio: 1,
       allowProposedApi: true,
       theme: this.theme,
+      // On Windows the backend PTY is ConPTY; telling xterm lets it apply the
+      // ConPTY reflow/sequence handling and fixes Windows-specific key quirks.
+      ...(/Windows/i.test(navigator.userAgent) ? { windowsPty: { backend: "conpty" } } : {}),
     });
     // Ctrl+Shift+C/V copy & paste, scoped to the terminal so the plain
     // Ctrl+C/V (SIGINT / literal paste event) keep their terminal meaning.
@@ -250,7 +262,8 @@ export class Pane {
       this.term.loadAddon(gl);
       this._webgl = gl;
     } catch (e) {
-      this._webgl = null; // canvas/DOM renderer fallback
+      this._webgl = null; // DOM renderer fallback (much slower on heavy output)
+      console.warn("QuickTerm: WebGL renderer unavailable, using DOM renderer", e);
     }
     // Only forward while live: replayed scrollback contains terminal queries
     // (DA/DSR) that xterm auto-answers during the async replay parse — those
@@ -277,7 +290,8 @@ export class Pane {
     this._queue.length = 0;
     this._pending = 0;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`);
+    const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
+    const ws = new WebSocket(url, api.wsSubprotocols());
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => { this._backoff = BACKOFF_MIN; };
@@ -336,15 +350,33 @@ export class Pane {
 
   // Write queued output; when >PENDING_LIMIT bytes are unacknowledged by
   // xterm's write callbacks, stop and resume as callbacks drain the count.
+  // Queued chunks are merged into one write per tick — fewer parser calls and
+  // callbacks than writing each frame separately.
   _pump() {
     while (this._queue.length && this._pending < PENDING_LIMIT) {
-      const chunk = this._queue.shift();
-      this._pending += chunk.byteLength;
-      this.term.write(chunk, () => {
-        this._pending -= chunk.byteLength;
+      const data = this._drainQueue();
+      this._pending += data.byteLength;
+      this.term.write(data, () => {
+        this._pending -= data.byteLength;
         if (this._queue.length && this._phase === "live") this._pump();
       });
     }
+  }
+
+  // Concatenate all currently queued chunks (capped) into one Uint8Array.
+  _drainQueue() {
+    if (this._queue.length === 1) return this._queue.shift();
+    let total = 0;
+    const batch = [];
+    while (this._queue.length && total < PENDING_LIMIT) {
+      const c = this._queue.shift();
+      batch.push(c);
+      total += c.byteLength;
+    }
+    const data = new Uint8Array(total);
+    let off = 0;
+    for (const c of batch) { data.set(c, off); off += c.byteLength; }
+    return data;
   }
 
   _sendResize() {

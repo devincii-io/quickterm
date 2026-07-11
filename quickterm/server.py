@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 
 FILE_READ_CAP = 512 * 1024
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+# Max bytes merged into one live output frame. Bounds per-send loop time so the
+# input pump interleaves; big enough to collapse bursts into few frames.
+_SEND_COALESCE_BYTES = 128 * 1024
 
 
 def _asdict(obj: Any) -> Any:
@@ -38,9 +41,22 @@ def _allowed_origins(cfg: "AppConfig") -> tuple[set[str], set[str]]:
     return hosts, {f"http://{h}" for h in hosts}
 
 
-def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
-    app = FastAPI(title="QuickTerm")
+def create_app(
+    manager: "SessionManager", cfg: "AppConfig", token: str = "", elevated: bool = False
+) -> FastAPI:
+    from quickterm import auth
+
+    app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
     allowed_hosts, allowed_origins = _allowed_origins(cfg)
+
+    def _token_required(request: Request) -> bool:
+        # Sensitive surface = everything under /api that isn't a public probe or a
+        # logo loaded by <img> (which can't send headers). Static frontend files
+        # carry no secrets and stay open so the shell can bootstrap.
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/health":
+            return False
+        return not (request.method == "GET" and path.startswith("/api/assets/"))
 
     # Local-only trust boundary: the API answers the QuickTerm window and
     # nothing else. The Host allowlist defeats DNS-rebinding (a hostile page
@@ -54,14 +70,33 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
         origin = request.headers.get("origin")
         if origin is not None and origin not in allowed_origins:
             return Response("forbidden: bad origin", status_code=403)
-        return await call_next(request)
+        if token and _token_required(request) and request.headers.get(auth.HEADER) != token:
+            return Response("forbidden: bad token", status_code=403)
+        response = await call_next(request)
+        # Frontend assets carry ETag/Last-Modified but no Cache-Control, so
+        # browsers cache them heuristically and can serve a stale UI after the
+        # app updates. Force revalidation for the shell (the immutable, hashed
+        # /api/assets responses set their own long-lived caching).
+        path = request.url.path
+        if not path.startswith("/api") and not path.startswith("/ws"):
+            response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
     def _ws_allowed(ws: WebSocket) -> bool:
         if ws.headers.get("host", "") not in allowed_hosts:
             return False
         origin = ws.headers.get("origin")
         # browsers always send Origin on WS; absent means a native local client
-        return origin is None or origin in allowed_origins
+        if not (origin is None or origin in allowed_origins):
+            return False
+        if token:
+            # Browsers cannot set headers on a WS; the token rides in as a
+            # Sec-WebSocket-Protocol entry instead (see auth.SUBPROTOCOL_PREFIX).
+            offered = ws.headers.get("sec-websocket-protocol", "")
+            wanted = auth.SUBPROTOCOL_PREFIX + token
+            if wanted not in [p.strip() for p in offered.split(",")]:
+                return False
+        return True
 
     @app.get("/api/health")
     def health() -> dict:
@@ -199,6 +234,7 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
     def get_config() -> dict:
         return {
             "font_family": cfg.font_family,
+            "font_size": cfg.font_size,
             "theme": cfg.theme,
             "custom_theme": dict(cfg.custom_theme),
             "logo": cfg.logo,
@@ -206,6 +242,7 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
             "profiles": [_asdict(p) for p in cfg.profiles],
             "snippets": [_asdict(s) for s in cfg.snippets],
             "voice_available": _voice_available(),
+            "elevated": elevated,
         }
 
     @app.get("/api/config/full")
@@ -215,6 +252,41 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
     @app.get("/api/system/terminals")
     def get_system_terminals() -> dict:
         return _terminal_inventory()
+
+    @app.post("/api/elevate")
+    async def elevate_terminal(request: Request) -> dict:
+        if os.name != "nt":
+            raise HTTPException(400, "administrator terminals are only available on Windows")
+        body = await request.json()
+        profile_name = body.get("profile")
+        if profile_name is not None:
+            prof = next((p for p in cfg.profiles if p.name == profile_name), None)
+            if prof is None:
+                raise HTTPException(404, f"unknown profile: {profile_name}")
+            cmd, args, cwd = _resolve_profile(prof)
+            spec = {
+                "cmd": cmd,
+                "args": args,
+                "cwd": cwd,
+                "env": dict(prof.env),
+                "name": prof.name,
+            }
+        else:
+            spec = body
+        try:
+            from quickterm.elevation import launch
+
+            launch(spec)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, str(exc)) from exc
+        return {"launched": True}
+
+    @app.post("/api/window/new")
+    def open_window() -> dict:
+        # Token-gated (under /api), so only the app's own window can summon more.
+        from quickterm.app import open_new_window
+
+        return {"opened": open_new_window()}
 
     @app.put("/api/config")
     async def put_config(request: Request) -> Response:
@@ -227,7 +299,7 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
         config_mod.save_config(new_cfg)
         # apply live-updatable fields in place; port/hotkeys need a restart
         for name in (
-            "font_family", "theme", "custom_theme", "logo", "idle_timeout_s",
+            "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
             "default_profile", "profiles", "snippets", "voice",
         ):
             setattr(cfg, name, getattr(new_cfg, name))
@@ -289,7 +361,8 @@ def create_app(manager: "SessionManager", cfg: "AppConfig") -> FastAPI:
             await ws.close(code=4403)
             return
         session = manager.get(sid)
-        await ws.accept()
+        # Echo the token subprotocol back to complete negotiation cleanly.
+        await ws.accept(subprotocol=(auth.SUBPROTOCOL_PREFIX + token) if token else None)
         if session is None:
             await ws.close(code=4404)
             return
@@ -369,15 +442,48 @@ def _layout_session_ids(node: Any) -> set[str]:
 def _terminal_inventory() -> dict:
     if os.name != "nt":
         return _posix_inventory()
-    types = [
-        ("powershell-core", "PowerShell 7", "pwsh.exe"),
-        ("windows-powershell", "Windows PowerShell", "powershell.exe"),
-        ("command-prompt", "Command Prompt", "cmd.exe"),
-        ("wsl", "WSL", "wsl.exe"),
-        ("custom", "Custom command", None),
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    pwsh_candidates = [program_files / "PowerShell" / "7" / "pwsh.exe"]
+    pwsh_candidates.extend(sorted((program_files / "PowerShell").glob("*/pwsh.exe"), reverse=True))
+    shells = [
+        (
+            "powershell-core",
+            "PowerShell 7",
+            _first_executable("pwsh.exe", *pwsh_candidates),
+        ),
+        (
+            "windows-powershell",
+            "Windows PowerShell",
+            _first_executable(
+                "powershell.exe",
+                system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+            ),
+        ),
+        (
+            "command-prompt",
+            "Command Prompt",
+            _first_executable("cmd.exe", system_root / "System32" / "cmd.exe"),
+        ),
+        (
+            "wsl",
+            "WSL",
+            _first_executable("wsl.exe", system_root / "System32" / "wsl.exe"),
+        ),
+        (
+            "git-bash",
+            "Git Bash",
+            _first_executable(
+                None,
+                program_files / "Git" / "bin" / "bash.exe",
+                program_files_x86 / "Git" / "bin" / "bash.exe",
+            ),
+        ),
+        ("nushell", "Nushell", _first_executable("nu.exe")),
     ]
     distributions: list[str] = []
-    wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+    wsl = next((exe for type_id, _label, exe in shells if type_id == "wsl"), None)
     if wsl:
         try:
             result = subprocess.run(
@@ -385,6 +491,9 @@ def _terminal_inventory() -> dict:
                 capture_output=True,
                 timeout=3,
                 check=False,
+                # no-console GUI build: without this a console window flashes
+                # open every time the launcher refreshes the shell inventory
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             raw = result.stdout
             encoding = "utf-16-le" if b"\x00" in raw else "utf-8"
@@ -401,12 +510,24 @@ def _terminal_inventory() -> dict:
                 "id": type_id,
                 "label": label,
                 "executable": executable,
-                "available": executable is None or shutil.which(executable) is not None,
+                "available": executable is not None,
             }
-            for type_id, label, executable in types
-        ],
+            for type_id, label, executable in shells
+        ] + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
         "wsl_distributions": distributions,
     }
+
+
+def _first_executable(command: str | None, *candidates: Path) -> str | None:
+    """Resolve GUI-app-safe shell paths; PATH alone is not reliable when packaged."""
+    if command:
+        found = shutil.which(command)
+        if found:
+            return str(Path(found))
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _posix_inventory() -> dict:
@@ -453,11 +574,33 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
     while True:
         chunk = await attachment.queue.get()
         if chunk is None:
-            code = session.info.exit_code
-            await ws.send_text(json.dumps({"type": "exit", "code": code}))
-            await ws.close()
+            await _send_exit(ws, session)
             return
-        await ws.send_bytes(chunk)
+        # Coalesce whatever else is already queued into a single frame (capped so
+        # one send can't monopolize the loop and starve input). Raw bytes stay a
+        # plain byte stream to the client, so this is wire-compatible.
+        parts = [chunk]
+        total = len(chunk)
+        exited = False
+        while total < _SEND_COALESCE_BYTES:
+            try:
+                item = attachment.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is None:
+                exited = True
+                break
+            parts.append(item)
+            total += len(item)
+        await ws.send_bytes(parts[0] if len(parts) == 1 else b"".join(parts))
+        if exited:
+            await _send_exit(ws, session)
+            return
+
+
+async def _send_exit(ws: WebSocket, session: Any) -> None:
+    await ws.send_text(json.dumps({"type": "exit", "code": session.info.exit_code}))
+    await ws.close()
 
 
 async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> None:

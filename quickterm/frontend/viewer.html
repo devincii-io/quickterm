@@ -29,7 +29,9 @@
     : n < 1024 * 1024 ? (n / 1024).toFixed(1) + " KiB"
     : (n / (1024 * 1024)).toFixed(1) + " MiB";
   try {
-    const res = await fetch("/api/file?path=" + encodeURIComponent(path));
+    const tokenMatch = /[#&]t=([^&]+)/.exec(location.hash || "");
+    const headers = tokenMatch ? { "X-QuickTerm-Token": decodeURIComponent(tokenMatch[1]) } : {};
+    const res = await fetch("/api/file?path=" + encodeURIComponent(path), { headers });
     if (!res.ok) {
       pre.classList.add("err");
       pre.textContent =

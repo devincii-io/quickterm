@@ -8,10 +8,17 @@ input. Everything stays on your computer. No Electron, accounts, or telemetry.
 
 ### Windows application
 
-Download `QuickTerm-*-windows-x64.zip` from the
-[latest release](https://github.com/devincii-io/quickterm/releases/latest),
-extract it, and run `QuickTerm.exe`. Windows may show a SmartScreen warning
-until release binaries are code-signed.
+Download `QuickTerm-v*-Setup.exe` from the
+[latest release](https://github.com/devincii-io/quickterm/releases/latest) and
+run it. The per-user installer adds Start Menu and optional desktop shortcuts,
+supports in-place upgrades, and includes an uninstaller. It does not require
+administrator access. A portable `.zip` is also available. Windows may show a
+SmartScreen warning until release binaries are code-signed.
+
+QuickTerm opens as its own native desktop window. The launcher detects installed
+PowerShell, Command Prompt, WSL distributions, Git Bash, and Nushell installations.
+Use the **Admin** button beside **Open** to start the selected terminal in a separate
+UAC-approved window; both the window and session are labeled `Administrator`.
 
 ### From source
 
@@ -31,6 +38,14 @@ and its sessions are closed when you leave, while a named workspace autosaves
 its exact split arrangement and live session IDs for reattachment with full
 scrollback.
 
+Closing the window is smart about your work: if any terminal you have actually
+typed into is still running (an SSH session, a dev server, ...), QuickTerm hides
+to the system tray and keeps everything alive — click the tray icon (or press
+the summon hotkey) to bring it back, right-click → **Quit** to exit for real.
+If only untouched shells are open, closing the window simply quits and frees
+the memory. Terminal I/O is streamed with coalesced reads/writes end to end,
+so heavy output (builds, logs) renders fast without making typing laggy.
+
 ### Voice input (optional)
 
 ```
@@ -44,15 +59,20 @@ use; size is configurable (`voice.model_size` in the config).
 
 ## Keys
 
+The whole UI lives on a single modifier — Alt — so every shortcut is two keys.
+Combos the shell needs (`Ctrl+C`, `Ctrl+P`, `Alt+B`/`F` word motions, ...)
+pass through untouched.
+
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
-| `Alt+Shift+H` / `Alt+Shift+V` | Split pane horizontally / vertically |
+| `Alt+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
+| `Alt+H` / `Alt+V` | Split pane side by side / top and bottom |
 | `Alt+Arrows` | Move focus between panes |
-| `Alt+Shift+Z` | Zoom focused pane |
-| `Alt+Shift+W` | Close pane (detaches — session keeps running) |
+| `Alt+Z` | Zoom focused pane |
+| `Alt+W` | Close pane (detaches — session keeps running) |
+| `Alt+Plus` / `Alt+Minus` / `Alt+0` | Grow / shrink / reset terminal text size |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
-| `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable) |
+| `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable — also restores from tray) |
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
 set via `keybinding` in the profile config.
@@ -95,7 +115,8 @@ protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
 xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
 
 Pull requests run the test matrix on Windows and Linux. Tags matching `v*`
-build the standalone Windows executable and publish a GitHub release with
-generated notes and SHA-256 checksums.
+build the standalone Windows executable and per-user installer, then publish a
+GitHub release with a portable archive, Python distributions, generated notes,
+and SHA-256 checksums.
 
 MIT licensed.

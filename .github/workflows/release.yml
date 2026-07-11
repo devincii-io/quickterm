@@ -34,21 +34,44 @@ jobs:
           uv run pytest -q
       - name: Build executable
         run: uv run pyinstaller --noconfirm --clean quickterm.spec
-      - name: Package executable
+      - name: Build installer and portable archive
         shell: pwsh
         run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            choco install innosetup --no-progress --yes
+          }
+          if (!(Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found at $iscc"
+          }
+          & $iscc "/DAppVersion=$version" "packaging\quickterm.iss"
           $archive = "QuickTerm-$env:GITHUB_REF_NAME-windows-x64.zip"
           Compress-Archive -Path "dist/QuickTerm.exe", "README.md", "LICENSE" -DestinationPath $archive
-          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
-          "$hash  $archive" | Set-Content -NoNewline "$archive.sha256"
       - name: Build Python distributions
         run: uv build --no-sources
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $archive = "QuickTerm-$env:GITHUB_REF_NAME-windows-x64.zip"
+          $files = @(
+            $archive,
+            "dist/QuickTerm-v$version-Setup.exe"
+          )
+          $files += Get-ChildItem "dist/*.whl", "dist/*.tar.gz" | ForEach-Object { $_.FullName }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content "SHA256SUMS.txt"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $archive = "QuickTerm-$env:GITHUB_REF_NAME-windows-x64.zip"
-          $assets = @($archive, "$archive.sha256")
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $assets = @($archive, "dist/QuickTerm-v$version-Setup.exe", "SHA256SUMS.txt")
           $assets += Get-ChildItem "dist/*.whl", "dist/*.tar.gz" | ForEach-Object { $_.FullName }
           gh release create $env:GITHUB_REF_NAME @assets --verify-tag --generate-notes --title "QuickTerm $env:GITHUB_REF_NAME"

@@ -54,6 +54,7 @@ class FakeConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    font_size: int = 14
     theme: str = "graphite"
     custom_theme: dict = field(default_factory=dict)
     logo: str | None = None
@@ -482,9 +483,12 @@ def test_ws_attach_protocol(client, manager):
         assert ws.receive_bytes() == b"old-output"
         # 3. replay_done
         assert json.loads(ws.receive_text()) == {"type": "replay_done"}
-        # 4. live binary frames
-        assert ws.receive_bytes() == b"live-1"
-        assert ws.receive_bytes() == b"live-2"
+        # 4. live binary output — raw bytes, which the pump may coalesce into a
+        # single frame (wire-compatible: the client treats it as a byte stream).
+        live = ws.receive_bytes()
+        while live != b"live-1live-2":
+            live += ws.receive_bytes()
+        assert live == b"live-1live-2"
         # client input: raw bytes -> manager.write, resize JSON -> manager.resize
         ws.send_bytes(b"dir\r")
         ws.send_text(json.dumps({"type": "resize", "cols": 132, "rows": 43}))
@@ -545,3 +549,53 @@ def test_ws_rejects_cross_origin(client, manager):
             headers={"host": "127.0.0.1:8620", "origin": "https://evil.example"},
         ):
             pass
+
+
+def test_token_gates_api(manager, cfg):
+    base = f"http://127.0.0.1:{cfg.port}"
+    with TestClient(create_app(manager, cfg, "s3cret"), base_url=base) as c:
+        assert c.get("/api/sessions").status_code == 403  # no token
+        assert c.get("/api/sessions", headers={"x-quickterm-token": "nope"}).status_code == 403
+        assert c.get("/api/sessions", headers={"x-quickterm-token": "s3cret"}).status_code == 200
+        assert c.get("/api/health").status_code == 200  # public probe stays open
+
+
+def test_ws_requires_token(manager, cfg):
+    info = manager.add_session(scrollback=b"x")
+    host = {"host": f"127.0.0.1:{cfg.port}"}
+    with TestClient(create_app(manager, cfg, "s3cret"), base_url=f"http://127.0.0.1:{cfg.port}") as c:
+        with pytest.raises(Exception):  # missing token subprotocol
+            with c.websocket_connect(f"/ws/session/{info.id}", headers=host):
+                pass
+        with c.websocket_connect(
+            f"/ws/session/{info.id}", headers=host, subprotocols=["qtauth.s3cret"]
+        ) as ws:
+            assert ws.receive_json()["type"] == "replay_size"
+
+
+def test_config_reports_elevated(manager, cfg):
+    base = f"http://127.0.0.1:{cfg.port}"
+    with TestClient(create_app(manager, cfg, elevated=True), base_url=base) as c:
+        assert c.get("/api/config").json()["elevated"] is True
+    with TestClient(create_app(manager, cfg), base_url=base) as c:
+        assert c.get("/api/config").json()["elevated"] is False
+
+
+def test_new_window_endpoint(client, monkeypatch):
+    import quickterm.app as app_mod
+
+    calls = []
+    monkeypatch.setattr(app_mod, "open_new_window", lambda: (calls.append(1), True)[1])
+    r = client.post("/api/window/new")
+    assert r.status_code == 200 and r.json()["opened"] is True
+    assert calls == [1]
+
+
+def test_open_new_window_argv(monkeypatch):
+    import quickterm.app as app_mod
+
+    captured = {}
+    monkeypatch.setattr(app_mod.subprocess, "Popen", lambda argv, **kw: captured.update(argv=argv))
+    monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
+    assert app_mod.open_new_window() is True
+    assert captured["argv"][1:] == ["-m", "quickterm.app"]

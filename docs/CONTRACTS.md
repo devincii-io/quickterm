@@ -62,7 +62,11 @@ def save_config(cfg: AppConfig) -> None
 ## quickterm/pty_session.py
 
 One ConPTY. Reader thread pushes bytes into the owner's callback via
-`loop.call_soon_threadsafe` — never blocks the event loop.
+`loop.call_soon_threadsafe` — never blocks the event loop. The reader coalesces
+all immediately-available output into one callback (bounded). `write()` only
+enqueues; a dedicated writer thread performs the (possibly blocking) PTY write,
+so a full stdin pipe never stalls the loop. Set `QUICKTERM_DEBUG_IO` to log raw
+in/out bytes.
 
 ```python
 class PtySession:
@@ -97,6 +101,7 @@ class SessionInfo:
 class Session:
     info: SessionInfo
     # ring buffer of raw output bytes, cap = scrollback_bytes
+    # (deque of chunks + byte count; O(chunk) append/trim, joined only at attach)
     def scrollback(self) -> tuple[bytes, int, int]   # (data, cols_at_record, rows_at_record)
 
 class SessionManager:
@@ -213,6 +218,10 @@ def main() -> None
   else webbrowser.open).
 - Spawn autostart profiles on startup.
 - Clean shutdown: manager.shutdown() on exit.
+- Close-to-tray (win32, non-elevated): closing the primary window hides to the
+  system tray (quickterm/tray.py, ctypes Shell_NotifyIcon) iff any live session
+  has `touched=True` — otherwise the app quits. Tray menu: Open / Quit. The
+  summon hotkey also restores a tray-hidden window.
 
 ## quickterm/hotkeys.py
 
@@ -260,7 +269,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several.
 - Settings: tabbed General/Terminals/Voice/Advanced editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
-- Command palette Ctrl+P: fuzzy over profiles / actions (split h/v, zoom, kill,
+- Command palette Alt+P: fuzzy over profiles / actions (split h/v, zoom, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
 - Keybindings (in addition to palette): Alt+H/Alt+V split, Alt+Z zoom,
