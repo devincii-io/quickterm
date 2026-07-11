@@ -21,6 +21,10 @@ class Profile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    # Only terminals from a profile with mcp_access carry the QuickTerm discovery
+    # env (incl. the auth token), so an AI client (quickterm-mcp) works there.
+    # Off by default: the token is not sprayed into every shell you open.
+    mcp_access: bool = False
 
 
 @dataclass
@@ -35,6 +39,25 @@ class VoiceConfig:
     model_size: str = "small"
     hotkey: str = "ctrl+alt+v"
     language: str | None = None
+
+
+@dataclass
+class McpConfig:
+    """Controls the quickterm-mcp bridge (see quickterm/mcp_server.py).
+
+    `enabled` injects discovery env (QUICKTERM_PORT/TOKEN/SESSION_ID/WORKSPACE)
+    into every spawned terminal so an MCP client launched inside a pane finds
+    the backend with no configuration; turning it off keeps the token out of
+    child environments. `allow_input` gates the write path (typing into a
+    terminal from an AI client); reads are always allowed to token holders.
+    """
+
+    enabled: bool = True
+    allow_input: bool = True
+    max_input_bytes: int = 4096
+    # Convenience escape hatch: inject discovery env into EVERY terminal, not
+    # just profiles with mcp_access. Less safe; off by default.
+    inject_all: bool = False
 
 
 def _default_profiles() -> list[Profile]:
@@ -71,6 +94,7 @@ class AppConfig:
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
 
 
 def default_cwd() -> str:
@@ -123,6 +147,8 @@ def config_from_dict(raw: dict) -> AppConfig:
         kwargs["snippets"] = [_parse(Snippet, s) for s in kwargs["snippets"]]
     if "voice" in kwargs:
         kwargs["voice"] = _parse(VoiceConfig, kwargs["voice"])
+    if "mcp" in kwargs:
+        kwargs["mcp"] = _parse(McpConfig, kwargs["mcp"])
     return AppConfig(**kwargs)
 
 

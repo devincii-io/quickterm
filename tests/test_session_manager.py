@@ -3,7 +3,63 @@ import os
 
 import pytest
 
+import quickterm.session_manager as session_manager
 from quickterm.session_manager import QUEUE_MAXSIZE, SessionManager
+
+
+class _RecordingPty:
+    """Stand-in for PtySession that captures the environment it was handed."""
+
+    last: "_RecordingPty | None" = None
+
+    def __init__(self, cmd, args, cwd, env, cols, rows, loop, on_output, on_exit):
+        self.cmd, self.env = cmd, env
+        self.alive, self.exit_code, self.pid = True, None, 4242
+        _RecordingPty.last = self
+
+    def write(self, data):
+        pass
+
+    def resize(self, cols, rows):
+        pass
+
+    def kill(self):
+        pass
+
+
+async def test_spawn_injects_discovery_env_when_opted_in(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    mgr.env_context = {"QUICKTERM_PORT": "8620", "QUICKTERM_TOKEN": "abc"}
+    info = mgr.spawn(cmd="x.exe", workspace="proj", inject_env=True)
+    env = _RecordingPty.last.env
+    assert env["QUICKTERM_PORT"] == "8620"
+    assert env["QUICKTERM_TOKEN"] == "abc"
+    assert env["QUICKTERM_SESSION_ID"] == info.id
+    assert env["QUICKTERM_WORKSPACE"] == "proj"
+    assert info.workspace == "proj"
+
+
+async def test_spawn_env_omits_workspace_when_none(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    info = mgr.spawn(cmd="x.exe", inject_env=True)
+    env = _RecordingPty.last.env
+    assert env["QUICKTERM_SESSION_ID"] == info.id
+    assert "QUICKTERM_WORKSPACE" not in env
+    assert info.workspace is None
+
+
+async def test_spawn_without_opt_in_gets_no_token_but_tags_workspace(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    mgr.env_context = {"QUICKTERM_PORT": "8620", "QUICKTERM_TOKEN": "abc"}
+    info = mgr.spawn(cmd="x.exe", workspace="proj", env={"USER_SET": "1"})
+    env = _RecordingPty.last.env
+    assert "QUICKTERM_TOKEN" not in env
+    assert "QUICKTERM_SESSION_ID" not in env
+    assert env["USER_SET"] == "1"  # the profile's own env is untouched
+    assert info.workspace == "proj"  # scoping metadata still recorded
 
 
 def _short(script: str) -> tuple[str, list[str]]:

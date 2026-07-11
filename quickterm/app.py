@@ -33,6 +33,15 @@ log = logging.getLogger("quickterm")
 
 
 def main() -> None:
+    # Dual-mode: `QuickTerm.exe mcp ...` re-serves this same binary as the
+    # quickterm-mcp bridge over stdio, so the frozen build ships the MCP server
+    # without a second executable. Intercept before any GUI/window setup.
+    raw = sys.argv[1:]
+    if raw and raw[0] == "mcp":
+        from quickterm.mcp_server import main as mcp_main
+
+        mcp_main(raw[1:])
+        return
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
@@ -415,11 +424,13 @@ def _collect_session_ids(node: Any, out: set[str]) -> None:
 def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
     for prof in cfg.profiles:
         if prof.autostart:
-            _spawn_profile(manager, prof)
+            _spawn_profile(manager, prof, cfg)
 
 
-def _spawn_profile(manager: "SessionManager", prof: "Profile") -> None:
+def _spawn_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
     try:
+        from quickterm.server import _wants_discovery_env
+
         manager.spawn(
             name=prof.name,
             profile=prof.name,
@@ -427,6 +438,7 @@ def _spawn_profile(manager: "SessionManager", prof: "Profile") -> None:
             args=list(prof.args),
             cwd=prof.cwd,
             env=dict(prof.env),
+            inject_env=_wants_discovery_env(cfg, prof),
         )
     except Exception:
         pass  # a broken profile must not take down startup
@@ -442,7 +454,7 @@ def _start_hotkeys(
         hk = hotkeys_mod.HotkeyManager(loop)
         for prof in cfg.profiles:
             if prof.keybinding:
-                hk.register(prof.keybinding, _profile_callback(manager, prof))
+                hk.register(prof.keybinding, _profile_callback(manager, prof, cfg))
         toggle = getattr(hotkeys_mod, "toggle_window", None) or getattr(
             hotkeys_mod, "summon_window", None
         )
@@ -455,8 +467,10 @@ def _start_hotkeys(
         return None
 
 
-def _profile_callback(manager: "SessionManager", prof: "Profile") -> Callable[[], None]:
-    return lambda: _spawn_profile(manager, prof)
+def _profile_callback(
+    manager: "SessionManager", prof: "Profile", cfg: "AppConfig"
+) -> Callable[[], None]:
+    return lambda: _spawn_profile(manager, prof, cfg)
 
 
 def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> None:

@@ -15,6 +15,10 @@ hiddenimports += [
     "quickterm.update",
     "quickterm.workspace",
     "quickterm.config",
+    # Reached via importlib in server.py (/api/mcp/setup) and re-served by the
+    # `QuickTerm.exe mcp` subcommand; auth is its lazy dependency for the token.
+    "quickterm.mcp_server",
+    "quickterm.auth",
 ]
 
 # pywinpty spawns two helper executables at runtime to host the pseudoconsole

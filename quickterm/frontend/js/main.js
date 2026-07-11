@@ -160,9 +160,18 @@ async function boot() {
     };
   }
 
+  // The workspace a new session is born into, tagged so a co-located MCP client
+  // (quickterm-mcp) can scope to it. Only real named workspaces are tagged —
+  // an unsaved/scratch layout stays untagged so a later rename isn't stale.
+  function spawnWorkspaceTag() {
+    return currentWorkspace && currentWorkspace !== SCRATCH_WS ? currentWorkspace : undefined;
+  }
+
   async function spawnInto(pane, profileName, cwd) {
     try {
-      const info = await api.createSession({ profile: profileName, cwd: cwd || undefined });
+      const info = await api.createSession({
+        profile: profileName, cwd: cwd || undefined, workspace: spawnWorkspaceTag(),
+      });
       pane.profileName = profileName;
       pane.launchSpec = null;
       if (cwd) pane.cwd = cwd;
@@ -182,7 +191,8 @@ async function boot() {
   async function spawnSpecInto(pane, spec) {
     const launchSpec = serializableSpec(spec);
     try {
-      const info = await api.createSession(launchSpec);
+      // workspace tags the request only (not the persisted launchSpec).
+      const info = await api.createSession({ ...launchSpec, workspace: spawnWorkspaceTag() });
       pane.profileName = null;
       pane.cwd = launchSpec.cwd;
       pane.launchSpec = launchSpec;
@@ -535,15 +545,29 @@ async function boot() {
     saveWorkspace: async (name) => {
       const cleanName = name.trim();
       if (app.validateWorkspaceName(cleanName)) return;
-      const wasScratch = !currentWorkspace;
-      currentWorkspace = cleanName;
-      if (wasScratch) {
+      // Naming is the only way to create a workspace, so this always promotes
+      // the current (scratch) layout IN PLACE: every session moves into the
+      // named workspace and the disposable "scratch" is cleared — no terminal
+      // is killed, and scratch never lingers beside the workspace it became.
+      const promotingScratchWs = currentWorkspace === SCRATCH_WS;
+      if (!currentWorkspace) {
+        // Never-adopted scratch: promote its background sessions too.
         workspaceSessionIds = new Set(scratchSessionIds);
         scratchSessionIds.clear();
       }
       for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
+      clearTimeout(workspaceSaveTimer);
+      currentWorkspace = cleanName;
       rememberWorkspace(cleanName);
       await workspace.save(cleanName, layout.serialize(), workspaceLogo, [...ownedSessionIds()]);
+      if (promotingScratchWs) {
+        // Strip the scratch file's ownership before deleting it, so the backend
+        // delete (which reaps a workspace's detached sessions) can't take the
+        // terminals we just migrated. Then drop the ephemeral file and name.
+        await workspace.save(SCRATCH_WS, { type: "pane" }, null, []).catch(() => {});
+        await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
+        workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
+      }
       if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
       workspaceNames.sort((a, b) => a.localeCompare(b));
       buildLauncher();

@@ -88,13 +88,41 @@ moving one from another workspace requires the explicit **Attach from another
 workspace…** menu. Scratch follows the same ownership rule during the current
 run, but Scratch and all of its sessions are discarded when QuickTerm quits.
 
+## AI access (MCP)
+
+QuickTerm ships an MCP (Model Context Protocol) bridge, `quickterm-mcp`, that
+lets an AI client — Claude Code, Claude Desktop, any MCP client — see and drive
+the terminals in **one workspace**: read a terminal's output, type commands,
+open new ones. It is scoped to a single workspace (siblings only; other
+workspaces stay invisible) and talks to QuickTerm over its local, token-guarded
+API.
+
+Two one-time steps:
+
+1. In **Settings → Terminals**, turn on **Allow AI tools (MCP)** for the profile
+   you run your agent in. Only that profile's terminals carry the QuickTerm
+   token — it is not injected into every shell you open.
+2. Register the bridge with your client. Run `quickterm-mcp --setup` (or, for the
+   installed app, `QuickTerm.exe mcp --setup`) — it prints the exact command:
+
+   ```
+   claude mcp add quickterm -- quickterm-mcp
+   ```
+
+Launched inside such a pane, the bridge auto-discovers the port, token, and
+workspace from the environment — no arguments needed. Writes (typing into a
+terminal) are on by default but capped, audited, and never target the agent's
+own session; toggle them with `mcp.allow_input`. The frozen Windows build serves
+the bridge from the same executable via `QuickTerm.exe mcp`.
+
 ## Configuration
 
 `%APPDATA%\quickterm\config.json` — created with defaults on first run.
 Terminal profiles can be managed from **Settings → Terminals**. Choose
 PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a detected
 distribution), or a custom executable. Profiles can also set a starting folder,
-an optional command to run inside the shell, a global shortcut, and autostart.
+an optional command to run inside the shell, environment variables, a global
+shortcut, autostart, and whether AI tools (MCP) may access the terminal.
 
 The same fields are available in the config file:
 
@@ -102,7 +130,7 @@ The same fields are available in the config file:
 {"name": "project", "cmd": "wsl.exe", "args": [], "cwd": "~/dev/project",
  "env": {}, "keybinding": "ctrl+alt+1", "autostart": false,
  "terminal_type": "wsl", "wsl_distro": "Ubuntu",
- "start_command": "source .venv/bin/activate"}
+ "start_command": "source .venv/bin/activate", "mcp_access": false}
 ```
 
 Snippets, custom themes, global and per-workspace logos, the idle-session

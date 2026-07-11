@@ -32,6 +32,7 @@ class FakeProfile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    mcp_access: bool = False
 
 
 @dataclass
@@ -46,6 +47,13 @@ class FakeVoiceConfig:
     model_size: str = "small"
     hotkey: str = "ctrl+alt+v"
     language: str | None = None
+
+
+@dataclass
+class FakeMcpConfig:
+    enabled: bool = True
+    allow_input: bool = True
+    max_input_bytes: int = 4096
 
 
 @dataclass
@@ -65,6 +73,7 @@ class FakeConfig:
     profiles: list = field(default_factory=list)
     snippets: list = field(default_factory=list)
     voice: FakeVoiceConfig = field(default_factory=FakeVoiceConfig)
+    mcp: FakeMcpConfig = field(default_factory=FakeMcpConfig)
 
 
 @dataclass
@@ -76,6 +85,9 @@ class FakeSessionInfo:
     exit_code: int | None
     cols: int
     rows: int
+    touched: bool = False
+    workspace: str | None = None
+    mcp_touched: bool = False
 
 
 class FakeAttachment:
@@ -121,10 +133,12 @@ class FakeSessionManager:
         return info
 
     def spawn(self, *, name=None, profile=None, cmd, args=(), cwd=None,
-              env=(), cols=120, rows=30) -> FakeSessionInfo:
+              env=(), cols=120, rows=30, workspace=None, inject_env=False) -> FakeSessionInfo:
         self.last_spawn = {"name": name, "profile": profile, "cmd": cmd,
-                           "args": list(args), "cwd": cwd, "env": dict(env)}
-        return self.add_session(name=name or "s", profile=profile, cols=cols, rows=rows)
+                           "args": list(args), "cwd": cwd, "env": dict(env),
+                           "workspace": workspace, "inject_env": inject_env}
+        return self.add_session(name=name or "s", profile=profile, cols=cols,
+                                rows=rows, workspace=workspace)
 
     def list(self) -> list[FakeSessionInfo]:
         return [s.info for s in self.sessions.values()]
@@ -330,6 +344,104 @@ def test_cleanup_sessions(client, manager):
     assert manager.get(kept.id) is not None
 
 
+def test_spawn_tags_workspace(client, manager):
+    r = client.post("/api/sessions", json={"cmd": "cmd.exe", "workspace": "proj"})
+    assert r.status_code == 200
+    assert manager.last_spawn["workspace"] == "proj"
+    # empty/missing workspace is normalized to None
+    client.post("/api/sessions", json={"cmd": "cmd.exe", "workspace": ""})
+    assert manager.last_spawn["workspace"] is None
+
+
+def test_discovery_env_only_for_opted_in_profiles(client, manager, cfg):
+    # Plain shell / explicit cmd: no token env.
+    client.post("/api/sessions", json={"cmd": "cmd.exe"})
+    assert manager.last_spawn["inject_env"] is False
+    # Profile without mcp_access: still no token env.
+    client.post("/api/sessions", json={"profile": "powershell"})
+    assert manager.last_spawn["inject_env"] is False
+    # Profile that opted in: token env injected.
+    cfg.profiles[1].mcp_access = True  # the "claude" profile
+    client.post("/api/sessions", json={"profile": "claude"})
+    assert manager.last_spawn["inject_env"] is True
+
+
+def test_inject_all_overrides_per_profile(client, manager, cfg):
+    cfg.mcp.inject_all = True
+    client.post("/api/sessions", json={"cmd": "cmd.exe"})
+    assert manager.last_spawn["inject_env"] is True
+
+
+def test_discovery_env_off_when_mcp_disabled(client, manager, cfg):
+    cfg.mcp.enabled = False
+    cfg.profiles[1].mcp_access = True
+    client.post("/api/sessions", json={"profile": "claude"})
+    assert manager.last_spawn["inject_env"] is False
+
+
+# --- REST: MCP surface (scrollback / input / activity / setup) --------------
+
+
+def test_scrollback_strips_ansi_and_tails(client, manager):
+    raw = b"\x1b[31mred\x1b[0m\r\nline2\r\nline3\r\n"
+    info = manager.add_session(scrollback=raw)
+    body = client.get(f"/api/sessions/{info.id}/scrollback", params={"lines": 3}).json()
+    assert body["id"] == info.id
+    assert "\x1b" not in body["text"]
+    assert "line2" in body["text"] and "line3" in body["text"]
+    assert "red" not in body["text"]  # tailed off
+    assert body["truncated"] is True
+
+
+def test_scrollback_keeps_ansi_when_asked(client, manager):
+    info = manager.add_session(scrollback=b"\x1b[31mred\x1b[0m")
+    body = client.get(
+        f"/api/sessions/{info.id}/scrollback", params={"strip_ansi": "false"}
+    ).json()
+    assert "\x1b[31m" in body["text"]
+
+
+def test_scrollback_missing_404(client):
+    assert client.get("/api/sessions/deadbeef/scrollback").status_code == 404
+
+
+def test_send_input_writes_marks_and_audits(client, manager):
+    info = manager.add_session()
+    r = client.post(f"/api/sessions/{info.id}/input", json={"text": "ls\r"})
+    assert r.status_code == 200
+    assert r.json()["written"] == 3
+    assert manager.writes == [(info.id, b"ls\r")]
+    assert manager.get(info.id).info.mcp_touched is True
+    activity = client.get("/api/mcp/activity").json()
+    assert activity[0]["session_id"] == info.id
+    assert activity[0]["bytes"] == 3
+
+
+def test_send_input_errors(client, manager, cfg):
+    assert client.post("/api/sessions/deadbeef/input", json={"text": "x"}).status_code == 404
+    dead = manager.add_session(alive=False)
+    assert client.post(f"/api/sessions/{dead.id}/input", json={"text": "x"}).status_code == 409
+    live = manager.add_session()
+    assert client.post(f"/api/sessions/{live.id}/input", json={"nope": 1}).status_code == 400
+    cfg.mcp.max_input_bytes = 4
+    assert client.post(f"/api/sessions/{live.id}/input", json={"text": "toolong"}).status_code == 413
+
+
+def test_send_input_disabled_returns_403(client, manager, cfg):
+    info = manager.add_session()
+    cfg.mcp.allow_input = False
+    r = client.post(f"/api/sessions/{info.id}/input", json={"text": "x"})
+    assert r.status_code == 403
+    assert manager.writes == []
+
+
+def test_mcp_setup_endpoint(client):
+    body = client.get("/api/mcp/setup").json()
+    assert body["add_command"] == "claude mcp add quickterm -- quickterm-mcp"
+    assert body["mcp_json"]["mcpServers"]["quickterm"]["command"] == "quickterm-mcp"
+    assert body["allow_input"] is True
+
+
 # --- REST: profiles / snippets / focus / config -----------------------------
 
 
@@ -345,6 +457,13 @@ def test_focus(client, manager):
     r = client.post("/api/focus", json={"session_id": info.id})
     assert r.status_code == 204
     assert manager.focused_session_id == info.id
+
+
+def test_get_focus(client, manager):
+    assert client.get("/api/focus").json() == {"session_id": None}
+    info = manager.add_session()
+    client.post("/api/focus", json={"session_id": info.id})
+    assert client.get("/api/focus").json() == {"session_id": info.id}
 
 
 def test_config_endpoint(client, cfg):

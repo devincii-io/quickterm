@@ -1,8 +1,43 @@
-# QuickTerm MCP Server — Plan (not yet implemented)
+# QuickTerm MCP Server
 
 Goal: let an AI coworker (Claude Code, Claude Desktop, any MCP client) see and
-optionally drive QuickTerm terminals, with the user in control at every step.
-This is a design document only; nothing here is wired up.
+optionally drive QuickTerm terminals, scoped to one workspace, with the user in
+control.
+
+> **Status: implemented.** See `quickterm/mcp_server.py` (the `quickterm-mcp`
+> console script), the REST additions in `server.py`
+> (`/api/sessions/{id}/scrollback`, `/api/sessions/{id}/input`, `GET /api/focus`,
+> `/api/mcp/activity`, `/api/mcp/setup`), env injection in `session_manager.py`,
+> and `McpConfig` in `config.py`. The binding surface lives in `CONTRACTS.md`;
+> this file is the rationale. What actually shipped differs from the original
+> sketch below in three ways: (1) no `mcp` SDK dependency — the JSON-RPC layer is
+> hand-rolled to keep the bridge dependency-free; (2) auth reuses the existing
+> `X-QuickTerm-Token` header rather than a separate `Bearer` scheme; (3) write
+> tools ship **enabled** by default (`mcp.allow_input=true`), still capped and
+> audited, with `send_input` refusing to target the caller's own session and
+> `kill_session` limited to sessions the bridge itself spawned.
+
+## Setup (the easy path)
+
+Two steps, both one-time:
+
+1. In QuickTerm Settings → Terminals, turn on **Allow AI tools (MCP)** for the
+   profile you run your agent in (e.g. a "Claude" profile). Only that profile's
+   terminals receive the QuickTerm token — it is not injected into every shell.
+   (Or set `mcp.inject_all` in Advanced for the old blanket behavior.)
+2. Register the bridge with your client:
+
+```
+claude mcp add quickterm -- quickterm-mcp     # Claude Code, once
+quickterm-mcp --setup                          # prints this + a .mcp.json block
+```
+
+`GET /api/mcp/setup` returns the same config as JSON for the app UI to surface.
+Inside such a pane, port/token/workspace are auto-discovered — no args needed.
+
+## Original design sketch
+
+(Kept for context; the shipped surface is authoritative in CONTRACTS.md.)
 
 ## Shape
 

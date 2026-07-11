@@ -13,6 +13,7 @@ path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test env
 
 ```
 uv run quickterm                  # run the app (native window; --port N to override)
+uv run quickterm-mcp --setup      # print MCP client setup (the bridge; serves on stdio otherwise)
 uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm.exe
@@ -33,6 +34,18 @@ per-subscriber fan-out queues (drop-oldest per slow subscriber). →
 frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js` — one
 xterm.js + one WS per pane; write-callback backpressure; input only forwarded
 in phase "live".
+
+`mcp_server.py` (`quickterm-mcp`) — a separate, dependency-free stdio MCP server
+that lets an AI client (Claude Code) see and drive one workspace's terminals via
+the loopback REST API. Discovery is automatic in a pane: `SessionManager.spawn`
+injects `QUICKTERM_PORT/TOKEN/SESSION_ID/WORKSPACE` when `inject_env=True` (server
+sets the static part on `manager.env_context`; `_wants_discovery_env` opts in
+only profiles with `mcp_access`, or all under `mcp.inject_all`). Scope = the
+workspace that
+currently owns the caller's own session (file membership wins over the spawn-time
+tag, so a renamed scratch resolves correctly). It is NOT reached via server
+importlib and NOT bundled into the frozen exe — a pip/uv install provides the
+console script; the frozen GUI build does not ship it (follow-up if wanted).
 
 `docs/CONTRACTS.md` is the binding surface spec — update it when changing any
 public surface. `app.py` boots backend + pywebview window; close-to-tray
@@ -117,6 +130,15 @@ Server binds 127.0.0.1. Three-layer guard in `server.py`: Host allowlist
 native local programs — the token does. Keep new /api routes token-gated by
 default. `update.py` only fetches https URLs from the pinned repo's release
 payload and hash-verifies installers.
+
+The token is injected into a terminal's environment (`QUICKTERM_TOKEN`) ONLY for
+profiles with `mcp_access` (or the global `mcp.inject_all` escape hatch) — not
+every shell — so `quickterm-mcp` works there with no config while a random pane
+never receives the secret. Even so, injection doesn't lower the bar: the token
+already lives in a user-private file any of the user's processes can read
+(same-user = trusted). `mcp.allow_input` (default on) gates the AI write path;
+reads are always available to token holders. MCP scope is an agent guardrail,
+not a security boundary.
 
 ## Author / license
 

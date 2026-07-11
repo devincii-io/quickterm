@@ -26,6 +26,23 @@ function make(tag, className, text) {
   return node;
 }
 
+function envToLines(env) {
+  return Object.entries(env || {}).map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
+function parseEnvLines(text) {
+  const env = {};
+  for (const raw of (text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (key) env[key] = line.slice(eq + 1);
+  }
+  return env;
+}
+
 function inferTerminalType(profile) {
   if (profile.terminal_type) return profile.terminal_type;
   const cmd = (profile.cmd || "").toLowerCase().split(/[\\/]/).pop();
@@ -815,7 +832,7 @@ export class Panels {
       const available = (this.terminalInventory.types || []).find((type) => type.executable && type.available !== false);
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, mcp_access: false });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -892,6 +909,15 @@ export class Panels {
       fields.append(this._field("Global shortcut", shortcut, "Applied after restarting QuickTerm."));
       card.append(fields);
 
+      const envArea = make("textarea", "ui-input env-input");
+      envArea.value = envToLines(profile.env);
+      envArea.placeholder = "API_TOKEN=...\nNODE_ENV=development";
+      envArea.spellcheck = false;
+      envArea.rows = 3;
+      envArea.addEventListener("keydown", (event) => event.stopPropagation());
+      envArea.addEventListener("input", () => { profile.env = parseEnvLines(envArea.value); });
+      card.append(this._field("Environment variables", envArea, "One KEY=value per line, merged over the system environment."));
+
       const toggle = make("label", "toggle-row");
       const checkbox = make("input");
       checkbox.type = "checkbox";
@@ -899,6 +925,14 @@ export class Panels {
       checkbox.addEventListener("change", () => { profile.autostart = checkbox.checked; });
       toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Open automatically with a restored workspace"));
       card.append(toggle);
+
+      const mcpToggle = make("label", "toggle-row");
+      const mcpCheckbox = make("input");
+      mcpCheckbox.type = "checkbox";
+      mcpCheckbox.checked = Boolean(profile.mcp_access);
+      mcpCheckbox.addEventListener("change", () => { profile.mcp_access = mcpCheckbox.checked; });
+      mcpToggle.append(mcpCheckbox, make("span", "toggle-control"), make("span", "toggle-copy", "Allow AI tools (MCP) — inject the QuickTerm token so an agent here can see and drive this workspace"));
+      card.append(mcpToggle);
       host.append(card);
     }
   }

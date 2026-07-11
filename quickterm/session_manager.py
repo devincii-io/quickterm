@@ -30,6 +30,8 @@ class SessionInfo:
     cols: int
     rows: int
     touched: bool = False  # True once the user has written any input
+    workspace: str | None = None  # workspace this session was spawned into (MCP scope hint)
+    mcp_touched: bool = False  # True once an MCP client has written into it
 
 
 class Attachment:
@@ -102,6 +104,10 @@ class SessionManager:
         self._cap = scrollback_bytes
         self._sessions: dict[str, Session] = {}
         self.focused_session_id: str | None = None
+        # Static discovery env injected into every spawned terminal (port, token)
+        # so an MCP client launched inside a pane finds the backend. The server
+        # sets this at app build; each spawn adds the per-session id/workspace.
+        self.env_context: dict[str, str] = {}
 
     def spawn(
         self,
@@ -114,6 +120,8 @@ class SessionManager:
         env: dict[str, str] | None = None,
         cols: int = 120,
         rows: int = 30,
+        workspace: str | None = None,
+        inject_env: bool = False,
     ) -> SessionInfo:
         sid = uuid.uuid4().hex[:8]
         info = SessionInfo(
@@ -124,13 +132,25 @@ class SessionManager:
             exit_code=None,
             cols=cols,
             rows=rows,
+            workspace=workspace,
         )
         session = Session(info, self._cap)
+        # The discovery env (incl. the auth token) is injected ONLY when the
+        # caller opts in — so the token is not handed to every shell. The
+        # workspace tag above is set regardless: it is server-side metadata for
+        # scoping, not a secret. Discovery vars win over the profile's env so a
+        # caller cannot spoof the session's own identity.
+        child_env = dict(env or {})
+        if inject_env:
+            child_env.update(self.env_context)
+            child_env["QUICKTERM_SESSION_ID"] = sid
+            if workspace:
+                child_env["QUICKTERM_WORKSPACE"] = workspace
         session.pty = PtySession(
             cmd,
             list(args or []),
             cwd or default_cwd(),
-            dict(env or {}),
+            child_env,
             cols,
             rows,
             self._loop,

@@ -413,6 +413,7 @@ body.zoomed #sb-zoom { display: inline; }
 .snippet-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
 .snippet-card-head .ui-input { flex: 1; }
 .snippet-text { height: auto; min-height: 46px; padding: 9px 11px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.env-input { height: auto; min-height: 46px; padding: 9px 11px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
 
 .about-hero { padding: 19px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .about-identity { display: flex; align-items: baseline; gap: 12px; }
