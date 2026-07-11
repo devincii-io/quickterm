@@ -43,11 +43,23 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "contextmenu"; Description: "Add ""Open QuickTerm here"" to the folder right-click menu"; GroupDescription: "Explorer integration:"
 
 [Files]
 Source: "..\dist\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+
+[Registry]
+; "Open QuickTerm here" — right-click a folder. %V is the folder path, passed
+; to the exe which opens its first terminal there (per-user, HKCU).
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\QuickTerm"; ValueType: string; ValueName: ""; ValueData: "Open QuickTerm here"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\QuickTerm"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\QuickTerm\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%V"""; Tasks: contextmenu
+; And when right-clicking the empty background inside an open folder.
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\QuickTerm"; ValueType: string; ValueName: ""; ValueData: "Open QuickTerm here"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\QuickTerm"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\QuickTerm\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%V"""; Tasks: contextmenu
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

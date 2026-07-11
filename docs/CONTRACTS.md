@@ -219,6 +219,10 @@ def main() -> None
 ```
 
 - Fail fast unless `sys.getwindowsversion().build >= 17763` (Win10 1809).
+- Optional positional `path` arg (Explorer "Open QuickTerm here"): if it is a
+  directory, the window URL carries `?cwd=<dir>` (query before the `#t=` token
+  fragment) and the frontend opens its first terminal there. Works whether or
+  not a backend is already running (a second process opens a new window).
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
   launch browser `--app=http://127.0.0.1:<port>` (try msedge, then chrome,
   else webbrowser.open).

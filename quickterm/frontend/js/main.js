@@ -55,7 +55,17 @@ function captureToken() {
   }
 }
 
+// Explorer "Open QuickTerm here" passes the folder as ?cwd=... (app.py). Read
+// it before captureToken scrubs the fragment; the query itself is preserved.
+function captureOpenDir() {
+  try {
+    const value = new URLSearchParams(location.search).get("cwd");
+    return value || null;
+  } catch (_) { return null; }
+}
+
 async function boot() {
+  const openDir = captureOpenDir();
   captureToken();
   let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, profiles: [], snippets: [], voice_available: false };
   const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
@@ -134,7 +144,7 @@ async function boot() {
 
   async function spawnInto(pane, profileName, cwd) {
     try {
-      const info = await api.createSession({ profile: profileName });
+      const info = await api.createSession({ profile: profileName, cwd: cwd || undefined });
       pane.profileName = profileName;
       pane.launchSpec = null;
       if (cwd) pane.cwd = cwd;
@@ -175,20 +185,22 @@ async function boot() {
   // splits and fresh panes open.
   let selectedTerminal = null;
 
-  function spawnDefaultInto(pane) {
+  function spawnDefaultInto(pane, cwdOverride) {
     if (selectedTerminal) {
       if (selectedTerminal.kind === "profile") {
-        return spawnInto(pane, selectedTerminal.profile.name, selectedTerminal.profile.cwd || null);
+        return spawnInto(pane, selectedTerminal.profile.name, cwdOverride || selectedTerminal.profile.cwd || null);
       }
       return spawnSpecInto(pane, {
         cmd: selectedTerminal.cmd,
         args: selectedTerminal.args || [],
+        cwd: cwdOverride || null,
         name: selectedTerminal.label,
       });
     }
     const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, profile.cwd || null);
+    if (profile) return spawnInto(pane, profile.name, cwdOverride || profile.cwd || null);
     const system = defaultSystemSpec();
+    if (system && cwdOverride) return spawnSpecInto(pane, { ...system, cwd: cwdOverride });
     if (system) return spawnSpecInto(pane, system);
     pane.showNotice("[no shell found — add one in settings]");
     return Promise.resolve(null);
@@ -659,12 +671,16 @@ async function boot() {
     } catch (_) { /* best effort */ }
   }
 
+  // "Open QuickTerm here" opens this window as a scratch window whose first
+  // terminal starts in the given folder, regardless of any remembered workspace.
+  if (openDir) currentWorkspace = null;
+
   if (currentWorkspace) {
     const restored = await restoreWorkspace(currentWorkspace);
     if (!restored) await startScratch();
   } else {
     const pane = layout.init();
-    const administratorSession = initialSessions.find((session) =>
+    const administratorSession = !openDir && initialSessions.find((session) =>
       (session.name || "").startsWith("Administrator - "));
     if (administratorSession) {
       pane.attach(administratorSession);
@@ -672,7 +688,7 @@ async function boot() {
       layout.focusPane(pane);
       api.postFocus(administratorSession.id).catch(() => {});
     } else {
-      await spawnDefaultInto(pane);
+      await spawnDefaultInto(pane, openDir);
     }
   }
   await sweepOrphanSessions();
