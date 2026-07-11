@@ -380,6 +380,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (navigator.clipboard.writeText, execCommand fallback), with a visible
   `[copied]` / `[copy failed]` confirmation; copy is read-only and never counts
   as user input. No selection → the combo passes through to the shell.
+- OSC 52: apps inside the terminal (Claude Code, tmux, vim, …) copy to the
+  system clipboard by emitting `ESC]52;c;<base64>`; the pane honors it via the
+  same write path (async + execCommand fallback). Read requests (`…;?`) are
+  declined. Without this the copy is silently dropped though the app reports it.
+- Rendering: WebGL renderer (DOM fallback) + Unicode 11 width tables
+  (`addon-unicode11`, activeVersion "11") so emoji/wide glyphs measure correctly
+  and modern TUIs don't drift the cursor; falls back to xterm's built-in v6.
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
 - File viewer: `viewer.html?path=...` — separate minimal page, fetches

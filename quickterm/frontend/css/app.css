@@ -70,9 +70,12 @@ button .icon { pointer-events: none; }
   flex: none;
   min-height: 70px;
   display: grid;
-  /* col4 (nav) is `max-content` so the labelled buttons keep their real width and
-     can never be overlapped by the greedier launch control; col1 (1fr) eats slack. */
-  grid-template-columns: minmax(130px, 1fr) minmax(170px, 240px) minmax(300px, 520px) max-content;
+  /* Three zones: brand (left), the workspace+terminal selectors (a fixed-ratio
+     band centered by the equal 1fr side tracks), nav (right). The clamped middle
+     band keeps the selectors a stable width so the centered group never jitters
+     as workspace/profile names change. Explicit grid-column on each child keeps
+     placement correct when the brand is hidden at narrow widths. */
+  grid-template-columns: 1fr clamp(460px, 42vw, 700px) 1fr;
   align-items: center;
   gap: 16px;
   padding: 10px 18px;
@@ -80,7 +83,12 @@ button .icon { pointer-events: none; }
   background: var(--bg);
 }
 
-.launcher-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.launcher-brand { grid-column: 1; display: flex; align-items: center; gap: 11px; min-width: 0; }
+.launcher-controls { grid-column: 2; display: flex; align-items: center; gap: 16px; min-width: 0; }
+/* Split the band ~3:5 (workspace : new-terminal); basis 0 so the ratio holds at
+   any band width, min-width 0 lets long labels ellipsis instead of overflowing. */
+.launcher-controls > .app-dropdown { flex: 3 1 0; min-width: 0; }
+.launcher-controls > .launch-control { flex: 5 1 0; min-width: 0; }
 .brand-mark { width: 33px; height: 33px; display: flex; align-items: flex-end; gap: 3px; padding: 7px; border: 1px solid #4b4638; border-radius: 9px; background: var(--accent-soft); }
 .brand-mark i { display: block; flex: 1; border-radius: 2px 2px 1px 1px; background: var(--accent); }
 .brand-mark i:nth-child(1) { height: 45%; opacity: .55; }
@@ -156,7 +164,7 @@ body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid
 .dropdown-nested .dropdown-item { min-height: 43px; }
 .dropdown-nested .dropdown-item-mark { width: 25px; height: 25px; }
 
-.launcher-nav { justify-self: end; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.launcher-nav { grid-column: 3; justify-self: end; display: flex; align-items: center; gap: 4px; min-width: 0; }
 .nav-button { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; text-transform: capitalize; transition: color .16s ease, background .16s ease; }
 .nav-button.icon-only { padding: 9px; }
 .nav-button .icon { color: var(--text-soft); transition: color .16s ease; }
@@ -473,7 +481,8 @@ body.zoomed #sb-zoom { display: inline; }
 }
 
 @media (max-width: 1040px) {
-  .launcher { grid-template-columns: auto minmax(150px, 210px) minmax(240px, 1fr) max-content; gap: 10px; }
+  .launcher { grid-template-columns: 1fr clamp(380px, 46vw, 560px) 1fr; gap: 10px; }
+  .launcher-controls { gap: 10px; }
   .admin-badge > span { display: none; }
   .admin-badge { padding: 4px 7px; }
   .brand-copy { display: none; }
@@ -485,8 +494,11 @@ body.zoomed #sb-zoom { display: inline; }
 }
 
 @media (max-width: 680px) {
-  .launcher { grid-template-columns: minmax(120px, .7fr) minmax(240px, 1.3fr) auto; padding-inline: 10px; }
+  /* No room to center on a narrow window: controls fill, nav pins right. */
+  .launcher { grid-template-columns: 1fr auto; padding-inline: 10px; }
   .launcher-brand { display: none; }
+  .launcher-controls { grid-column: 1; }
+  .launcher-nav { grid-column: 2; }
   .panel-overlay { padding: 10px; }
   .panel { width: 100%; height: 96vh; border-radius: 12px; }
   .panel-head { padding-inline: 18px; }

@@ -312,7 +312,9 @@ export function initLauncher(el, options) {
     badge.append(icon("shield", 13), element("span", "", "Administrator"));
     brand.append(badge);
   }
-  el.append(brand, buildWorkspaceDropdown(options), buildTerminalControl(options));
+  const controls = element("div", "launcher-controls");
+  controls.append(buildWorkspaceDropdown(options), buildTerminalControl(options));
+  el.append(brand, controls);
 
   const nav = element("nav", "launcher-nav");
   nav.setAttribute("aria-label", "Application");

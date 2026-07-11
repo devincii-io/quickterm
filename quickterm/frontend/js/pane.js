@@ -208,17 +208,27 @@ export class Pane {
   // to copy.
   copySelection(selection = this.term.getSelection()) {
     if (!selection) return false;
-    const ok = () => this.flashNotice("[copied]");
+    this._writeClipboard(selection, () => this.flashNotice("[copied]"), () => this.flashNotice("[copy failed]"));
+    return true;
+  }
+
+  // Write text to the system clipboard via the async API, falling back to the
+  // legacy execCommand path when it is unavailable or denied (WebView2 denies
+  // navigator.clipboard.writeText silently). onOk/onFail are optional feedback
+  // callbacks. Shared by the Ctrl+Shift+C / right-click selection copy and by
+  // the OSC 52 handler (apps inside the terminal — Claude Code, tmux, vim —
+  // that copy programmatically). Read-only; never counts as user input.
+  _writeClipboard(text, onOk, onFail) {
+    const ok = () => { if (onOk) onOk(); };
     const fallback = () => {
-      if (this._execCopy(selection)) ok();
-      else this.flashNotice("[copy failed]");
+      if (this._execCopy(text)) ok();
+      else if (onFail) onFail();
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(selection).then(ok, fallback);
+      navigator.clipboard.writeText(text).then(ok, fallback);
     } else {
       fallback();
     }
-    return true;
   }
 
   // Deprecated execCommand path: best effort when the async clipboard API is
@@ -341,6 +351,16 @@ export class Pane {
       // ConPTY reflow/sequence handling and fixes Windows-specific key quirks.
       ...(/Windows/i.test(navigator.userAgent) ? { windowsPty: { backend: "conpty" } } : {}),
     });
+    // Unicode 11 width tables. Without this xterm uses its built-in v6 widths,
+    // which miscount many emoji and wide glyphs and drift the cursor / corrupt
+    // redraws in modern TUIs (Claude Code, etc.). Optional — falls back to v6
+    // if the addon global failed to load.
+    try {
+      if (window.Unicode11Addon) {
+        this.term.loadAddon(new Unicode11Addon.Unicode11Addon());
+        this.term.unicode.activeVersion = "11";
+      }
+    } catch (e) { /* v6 fallback, non-fatal */ }
     // Ctrl+Shift+C/V copy & paste, scoped to the terminal so the plain
     // Ctrl+C/V (SIGINT / literal paste event) keep their terminal meaning.
     this.term.attachCustomKeyEventHandler((e) => {
@@ -369,12 +389,47 @@ export class Pane {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);
+    // OSC 52: apps running inside the terminal (Claude Code, tmux, vim, etc.)
+    // copy to the system clipboard by emitting ESC]52;c;<base64>. xterm.js has
+    // no built-in OSC 52 handler, so without this the copy is silently dropped
+    // even though the app reports success ("copied N chars to clipboard").
+    // Reuses the fallback-capable write so it works under WebView2. Read
+    // requests (…;?) are declined — WebView2 blocks clipboard reads anyway, and
+    // echoing clipboard contents back to the PTY on demand is a footgun.
+    try {
+      this.term.parser.registerOscHandler(52, (data) => {
+        // data is "<targets>;<base64>"; require the separator (a valid OSC 52
+        // write always has both fields) so a malformed sequence never copies
+        // garbage decoded from the targets field.
+        const sep = data.indexOf(";");
+        if (sep === -1) return true;
+        const payload = data.slice(sep + 1);
+        if (!payload || payload === "?") return true;
+        let text;
+        try {
+          const bin = atob(payload);
+          const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+          text = new TextDecoder().decode(bytes);
+        } catch (e) { return true; } // malformed base64 -> ignore, don't leak
+        this._writeClipboard(text);
+        return true;
+      });
+    } catch (e) { /* no parser API: copy-from-app unsupported, non-fatal */ }
     // Right-click copies the current selection (the Windows Terminal
     // convention) with a visible confirmation. Paste stays on Ctrl+Shift+V —
     // WebView2 silently denies programmatic clipboard reads, so there is no
     // reliable right-click paste to offer here.
     this.termHost.addEventListener("contextmenu", (e) => {
       if (this.copySelection()) e.preventDefault();
+    });
+    // Copy-on-select (the Linux/PuTTY convention): releasing a left-drag
+    // selection copies it automatically. Silent — the explicit Ctrl+Shift+C /
+    // right-click paths keep the visible confirmation, so auto-copy stays quiet
+    // and never flashes on an ordinary drag. Read-only; never counts as input.
+    this.termHost.addEventListener("mouseup", (e) => {
+      if (e.button !== 0) return;
+      const sel = this.term.getSelection();
+      if (sel) this._writeClipboard(sel);
     });
     try {
       const gl = new WebglAddon.WebglAddon();
