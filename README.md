@@ -15,8 +15,11 @@ supports in-place upgrades, and includes an uninstaller. It does not require
 administrator access. A portable `.zip` is also available. Windows may show a
 SmartScreen warning until release binaries are code-signed.
 
-QuickTerm opens as its own native desktop window. The launcher detects installed
-PowerShell, Command Prompt, WSL distributions, Git Bash, and Nushell installations.
+QuickTerm opens as its own native desktop window. When a new version is
+published, the app shows an unobtrusive **Update** pill (Settings → About has
+the details and a one-click, checksum-verified install). The launcher detects
+installed PowerShell, Command Prompt, WSL distributions, Git Bash, and Nushell
+installations.
 Use the **Admin** button beside **Open** to start the selected terminal in a separate
 UAC-approved window; both the window and session are labeled `Administrator`.
 

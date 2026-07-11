@@ -426,6 +426,7 @@ export class Panels {
       ["snippets", "Snippets", "Palette commands"],
       ["voice", "Voice", "Local dictation"],
       ["advanced", "Advanced", "Raw configuration"],
+      ["about", "About", "Version, updates and links"],
     ];
     const render = () => {
       for (const button of nav.querySelectorAll("button")) button.classList.toggle("active", button.dataset.tab === this.settingsTab);
@@ -434,6 +435,7 @@ export class Panels {
       else if (this.settingsTab === "terminals") this._settingsTerminals(content, render);
       else if (this.settingsTab === "snippets") this._settingsSnippets(content, render);
       else if (this.settingsTab === "voice") this._settingsVoice(content);
+      else if (this.settingsTab === "about") this._settingsAbout(content);
       else this._settingsAdvanced(content);
     };
     for (const [id, title, note] of tabs) {
@@ -858,6 +860,98 @@ export class Panels {
       card.append(cardHead, this._field("Command", command, "Runs in the focused terminal; a trailing Enter is added for you."));
       host.append(card);
     }
+  }
+
+  _settingsAbout(host) {
+    const cfg = this.settingsDraft;
+    const version = this.app.version || "";
+
+    const hero = make("section", "about-hero");
+    const identity = make("div", "about-identity");
+    identity.append(
+      make("h3", "about-name", "QuickTerm"),
+      make("span", "about-version", version ? `Version ${version}` : ""),
+    );
+    hero.append(
+      identity,
+      make("p", "about-tagline",
+        "A calm, local terminal workspace — split panes, named workspaces, "
+        + "persistent sessions and quick-launch profiles. Everything stays on this computer."),
+      make("p", "about-credit", "Made by Devin Isaac Worbis · Released under the MIT license"),
+    );
+    host.append(hero);
+
+    const links = make("section", "about-links");
+    for (const [label, url] of [
+      ["Repository", "https://github.com/devincii-io/quickterm"],
+      ["Report an issue", "https://github.com/devincii-io/quickterm/issues"],
+      ["Releases & changelog", "https://github.com/devincii-io/quickterm/releases"],
+      ["MIT license", "https://github.com/devincii-io/quickterm/blob/main/LICENSE"],
+    ]) {
+      const link = make("a", "about-link");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.append(make("span", "", label), icon("arrow-up-right", 13));
+      links.append(link);
+    }
+    host.append(links);
+
+    const card = make("section", "about-update");
+    card.append(make("h4", "", "Updates"));
+    const status = make("p", "about-update-status", "New versions are fetched from GitHub releases.");
+    const row = make("div", "about-update-row");
+    const check = this._button("Check for updates", "secondary-button compact");
+    const install = this._button("", "primary-button compact");
+    install.hidden = true;
+    row.append(check, install);
+    card.append(status, row);
+
+    check.addEventListener("click", async () => {
+      check.disabled = true;
+      status.textContent = "Checking…";
+      install.hidden = true;
+      try {
+        const result = await api.checkUpdate(true);
+        if (result.update_available) {
+          status.textContent = `QuickTerm v${result.latest} is available (you have v${result.current}).`;
+          if (result.installable) {
+            install.textContent = `Install v${result.latest}`;
+            install.hidden = false;
+          }
+        } else {
+          status.textContent = `You are up to date (v${result.current}).`;
+        }
+      } catch (error) {
+        status.textContent = "Could not reach GitHub. Check your connection and try again.";
+      } finally {
+        check.disabled = false;
+      }
+    });
+    install.addEventListener("click", async () => {
+      install.disabled = true;
+      const wanted = install.textContent;
+      install.textContent = "Downloading…";
+      try {
+        await api.installUpdate();
+        status.textContent = "Installer started - QuickTerm will close and update itself.";
+        install.textContent = wanted;
+        install.hidden = true;
+      } catch (error) {
+        status.textContent = "The download failed. You can update manually from the releases page.";
+        install.textContent = wanted;
+        install.disabled = false;
+      }
+    });
+
+    const toggle = make("label", "toggle-row standalone");
+    const checkbox = make("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = cfg.update_check !== false;
+    checkbox.addEventListener("change", () => { cfg.update_check = checkbox.checked; });
+    toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Tell me when a new version is available"));
+    card.append(toggle);
+    host.append(card);
   }
 
   _settingsVoice(host) {

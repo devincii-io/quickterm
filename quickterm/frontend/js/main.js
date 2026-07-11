@@ -446,6 +446,36 @@ async function boot() {
     layout.setTheme(getTheme(themeId, custom || {}).xterm);
   };
   app.appliedTheme = () => ({ theme: cfg.theme, custom_theme: cfg.custom_theme || {} });
+  app.version = cfg.version || "";
+
+  // Update notification: a quiet accent pill in the nav when a newer release
+  // exists. Clicking it opens Settings > About, where install lives.
+  function showUpdatePill(latest) {
+    const nav = document.querySelector(".launcher-nav");
+    if (!nav || nav.querySelector(".update-pill")) return;
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "nav-button update-pill";
+    pill.title = `QuickTerm v${latest} is available - open About to install`;
+    pill.textContent = `Update v${latest}`;
+    pill.addEventListener("click", () => {
+      panels.settingsTab = "about"; // land directly on About, where install lives
+      panels.show("settings");
+    });
+    nav.prepend(pill);
+  }
+
+  function watchUpdates() {
+    if (cfg.elevated || cfg.update_check === false) return;
+    const probe = () => {
+      api.checkUpdate().then((result) => {
+        if (result && result.update_available) showUpdatePill(result.latest);
+      }).catch(() => {});
+    };
+    setTimeout(probe, 4000); // stay out of the boot path
+    setInterval(probe, 6 * 3600 * 1000);
+  }
+  watchUpdates();
 
   initKeys({
     togglePalette: () => { panels.close(); palette.toggle(); },

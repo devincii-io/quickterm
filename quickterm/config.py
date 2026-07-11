@@ -64,6 +64,8 @@ class AppConfig:
     logo: str | None = None
     # reap detached, silent sessions after this many seconds (0 disables)
     idle_timeout_s: int = 300
+    # probe GitHub releases and offer one-click updates in the UI
+    update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
     default_profile: str = ""  # empty = first profile, else first system shell
     profiles: list[Profile] = field(default_factory=_default_profiles)

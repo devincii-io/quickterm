@@ -232,6 +232,8 @@ def create_app(
 
     @app.get("/api/config")
     def get_config() -> dict:
+        from quickterm import __version__
+
         return {
             "font_family": cfg.font_family,
             "font_size": cfg.font_size,
@@ -243,6 +245,8 @@ def create_app(
             "snippets": [_asdict(s) for s in cfg.snippets],
             "voice_available": _voice_available(),
             "elevated": elevated,
+            "version": __version__,
+            "update_check": cfg.update_check,
         }
 
     @app.get("/api/config/full")
@@ -281,6 +285,25 @@ def create_app(
             raise HTTPException(500, str(exc)) from exc
         return {"launched": True}
 
+    @app.get("/api/update")
+    async def update_check(force: bool = False) -> dict:
+        update = importlib.import_module("quickterm.update")  # stubbable in tests
+        try:
+            # network probe: keep it off the event loop
+            return await asyncio.to_thread(update.check, force)
+        except Exception as exc:
+            raise HTTPException(502, f"update check failed: {exc}") from exc
+
+    @app.post("/api/update/install")
+    async def update_install() -> dict:
+        update = importlib.import_module("quickterm.update")  # stubbable in tests
+        try:
+            return await asyncio.to_thread(update.download_and_run)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, f"update install failed: {exc}") from exc
+
     @app.post("/api/window/new")
     def open_window() -> dict:
         # Token-gated (under /api), so only the app's own window can summon more.
@@ -300,7 +323,7 @@ def create_app(
         # apply live-updatable fields in place; port/hotkeys need a restart
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "default_profile", "profiles", "snippets", "voice",
+            "default_profile", "profiles", "snippets", "voice", "update_check",
         ):
             setattr(cfg, name, getattr(new_cfg, name))
         return Response(status_code=204)

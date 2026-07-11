@@ -47,6 +47,8 @@ export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
 export const openNewWindow = () => req("POST", "/api/window/new");
+export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);
+export const installUpdate = () => req("POST", "/api/update/install");
 
 // Branding assets (logos). Uploads send the raw file with its own content-type.
 export const assetUrl = (id) => (id ? `/api/assets/${encodeURIComponent(id)}` : null);

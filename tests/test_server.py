@@ -59,6 +59,7 @@ class FakeConfig:
     custom_theme: dict = field(default_factory=dict)
     logo: str | None = None
     idle_timeout_s: int = 300
+    update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
     default_profile: str = "powershell"
     profiles: list = field(default_factory=list)
@@ -466,6 +467,53 @@ def test_file_missing_404(client, tmp_path):
 
 def test_file_directory_400(client, tmp_path):
     r = client.get("/api/file", params={"path": str(tmp_path)})
+    assert r.status_code == 400
+
+
+# --- update endpoints ---------------------------------------------------------
+
+
+def _stub_update_module(monkeypatch, **attrs):
+    mod = types.ModuleType("quickterm.update")
+    for name, value in attrs.items():
+        setattr(mod, name, value)
+    monkeypatch.setitem(sys.modules, "quickterm.update", mod)
+
+
+def test_update_check_endpoint(client, monkeypatch):
+    payload = {"current": "0.2.0", "latest": "0.3.0", "update_available": True,
+               "url": "https://github.com/devincii-io/quickterm/releases", "notes": "",
+               "installable": True}
+    _stub_update_module(monkeypatch, check=lambda force=False: payload)
+    r = client.get("/api/update")
+    assert r.status_code == 200
+    assert r.json() == payload
+
+
+def test_update_check_maps_failure_to_502(client, monkeypatch):
+    def boom(force=False):
+        raise OSError("offline")
+
+    _stub_update_module(monkeypatch, check=boom)
+    r = client.get("/api/update")
+    assert r.status_code == 502
+
+
+def test_update_install_endpoint(client, monkeypatch):
+    _stub_update_module(
+        monkeypatch, download_and_run=lambda: {"launched": True, "version": "0.3.0"}
+    )
+    r = client.post("/api/update/install")
+    assert r.status_code == 200
+    assert r.json()["launched"] is True
+
+
+def test_update_install_value_error_is_400(client, monkeypatch):
+    def nope():
+        raise ValueError("not on this platform")
+
+    _stub_update_module(monkeypatch, download_and_run=nope)
+    r = client.post("/api/update/install")
     assert r.status_code == 400
 
 

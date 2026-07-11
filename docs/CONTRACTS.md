@@ -48,6 +48,7 @@ class AppConfig:
     custom_theme: dict[str, str] = {}
     logo: str | None = None
     idle_timeout_s: int = 300
+    update_check: bool = True               # UI probes GitHub releases when on
     summon_hotkey: str = "ctrl+alt+grave"   # quake-style summon/hide
     default_profile: str = ""
     profiles: list[Profile] = ...
@@ -188,6 +189,8 @@ REST (JSON, under `/api`):
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
 | GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
+| GET | /api/update | → `{current, latest, update_available, url, notes, installable}` — probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
+| POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
 
