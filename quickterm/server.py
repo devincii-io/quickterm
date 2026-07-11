@@ -107,10 +107,13 @@ def create_app(
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
         count = getattr(manager, "attachment_count", None)
+        busy = getattr(manager, "busy_ids", None)  # getattr: test fakes lack it
+        busy_set = busy() if busy else set()
         out = []
         for info in manager.list():
             d = _asdict(info)
             d["attachments"] = count(info.id) if count else 0
+            d["busy"] = info.id in busy_set
             out.append(d)
         return out
 
@@ -304,12 +307,22 @@ def create_app(
         except Exception as exc:
             raise HTTPException(502, f"update install failed: {exc}") from exc
 
-    @app.post("/api/window/new")
-    def open_window() -> dict:
-        # Token-gated (under /api), so only the app's own window can summon more.
-        from quickterm.app import open_new_window
-
-        return {"opened": open_new_window()}
+    @app.post("/api/open")
+    async def open_target(request: Request) -> dict:
+        # Ctrl+click on a link/path in a terminal. Token-gated (under /api);
+        # opener.py refuses non-http(s) URLs and reveals executables instead
+        # of running them.
+        opener = importlib.import_module("quickterm.opener")  # stubbable in tests
+        body = await request.json()
+        target = body.get("target") if isinstance(body, dict) else None
+        if not isinstance(target, str):
+            raise HTTPException(400, "body must be {'target': <string>}")
+        try:
+            return await asyncio.to_thread(opener.open_target, target)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileNotFoundError:
+            raise HTTPException(404, "no such path") from None
 
     @app.put("/api/config")
     async def put_config(request: Request) -> Response:

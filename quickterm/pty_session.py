@@ -47,6 +47,52 @@ _DEBUG_IO = bool(os.environ.get("QUICKTERM_DEBUG_IO"))
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
+_TH32CS_SNAPPROCESS = 0x00000002
+_k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+_k32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),  # ULONG_PTR
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def pids_with_children() -> set[int]:
+    """PIDs that have at least one direct child right now (one snapshot).
+
+    Lets the UI treat a shell as "busy" when something is running inside it
+    (ssh, a build, an editor). Limitation: processes inside a WSL VM are
+    invisible here, so an idle-looking WSL shell may still be doing work.
+    """
+    snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == _INVALID_HANDLE:
+        return set()
+    parents: set[int] = set()
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        entry_ref = ctypes.byref(entry)
+        if _k32.Process32FirstW(ctypes.c_void_p(snap), entry_ref):
+            while True:
+                if entry.th32ParentProcessID:
+                    parents.add(int(entry.th32ParentProcessID))
+                if not _k32.Process32NextW(ctypes.c_void_p(snap), entry_ref):
+                    break
+    finally:
+        _k32.CloseHandle(ctypes.c_void_p(snap))
+    return parents
+
 
 class PtySession:
     def __init__(

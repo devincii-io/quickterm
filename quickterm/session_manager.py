@@ -10,9 +10,9 @@ from collections import deque
 from dataclasses import dataclass
 
 if os.name == "nt":
-    from .pty_session import PtySession
+    from .pty_session import PtySession, pids_with_children
 else:
-    from .pty_posix import PtySession
+    from .pty_posix import PtySession, pids_with_children
 
 QUEUE_MAXSIZE = 256
 _KILL_REMOVE_GRACE_S = 1.0
@@ -150,6 +150,22 @@ class SessionManager:
             s.info.touched = True
             s.last_activity = time.monotonic()
             s.pty.write(data)
+
+    def busy_ids(self) -> set[str]:
+        """Sessions whose shell has a child process right now (ssh, a build,
+        an editor, ...). One process snapshot for all sessions; used by the UI
+        to guard close actions that would lose running work. WSL in-VM
+        processes are invisible to the snapshot — a known blind spot.
+        """
+        try:
+            parents = pids_with_children()
+        except Exception:
+            return set()
+        return {
+            sid
+            for sid, s in self._sessions.items()
+            if s.info.alive and s.pty is not None and s.pty.pid in parents
+        }
 
     def has_attachments(self, sid: str) -> bool:
         s = self._sessions.get(sid)

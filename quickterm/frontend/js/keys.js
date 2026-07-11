@@ -1,53 +1,54 @@
-// Global keybindings, capture phase. QuickTerm keeps its whole UI on a single
-// modifier — Alt — so every shortcut is just two keys:
-//   Alt+P        command palette
-//   Alt+H        split side by side
-//   Alt+V        split top and bottom
-//   Alt+Z        zoom pane
-//   Alt+W        close pane
-//   Alt+Arrows   move focus between panes
-//   Alt++/-/0    grow / shrink / reset terminal text size
-// These particular Alt combos are not bound by PowerShell/PSReadLine or bash
-// readline, and they are caught here (capture phase) before the terminal, so
-// only the combos above are claimed. Everything else — Ctrl+C, Ctrl+P, the
-// Alt+B/F/D word motions, ... — reaches the shell untouched. Copy and paste
-// stay on Ctrl+Shift+C/V (handled in pane.js) because Ctrl+C is the terminal's
-// interrupt and must never be reused for the UI.
+// Global keybindings, capture phase. QuickTerm claims only Alt combos that
+// nothing running inside the terminal wants:
+//   Alt+K              command palette
+//   Alt+Z              zoom pane
+//   Alt+W              close pane
+//   Alt+Arrows         move focus between panes
+//   Alt+Shift+H        split side by side
+//   Alt+Shift+V        split top and bottom
+//   Alt+Shift++/-/0    grow / shrink / reset terminal text size
+// Everything on plain Alt that shells and TUIs actually bind passes through:
+// Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
+// switch), Alt+H (PSReadLine parameter help), Alt+0..9/Alt+- (readline digit
+// arguments), Alt+B/F/D/. word motions — none of these are claimed here.
+// Copy and paste stay on Ctrl+Shift+C/V (handled in pane.js) because Ctrl+C
+// is the terminal's interrupt and must never be reused for the UI.
 
 export function initKeys(actions) {
   window.addEventListener("keydown", (e) => {
     if (!e.altKey || e.ctrlKey || e.metaKey) return; // Alt-only layer
+
     const key = e.key.toLowerCase();
-
-    // Alt+P toggles the palette even while it is already open.
-    if (!e.shiftKey && key === "p") {
-      e.preventDefault();
-      e.stopPropagation();
-      actions.togglePalette();
-      return;
-    }
-    if (actions.paletteOpen()) return; // palette/panel input owns the keyboard
-
-    const arrows = {
-      arrowleft: () => actions.focusDir("left"),
-      arrowright: () => actions.focusDir("right"),
-      arrowup: () => actions.focusDir("up"),
-      arrowdown: () => actions.focusDir("down"),
-    };
-    const commands = {
-      h: actions.splitH,
-      v: actions.splitV,
-      z: actions.zoom,
-      w: actions.closePane,
-      "+": actions.fontBigger, "=": actions.fontBigger,
-      "-": actions.fontSmaller, _: actions.fontSmaller,
-      "0": actions.fontReset, ")": actions.fontReset,
-    };
-    const handler = (!e.shiftKey && arrows[key]) || commands[key];
-    if (handler) {
+    const done = (handler) => {
       e.preventDefault();
       e.stopPropagation();
       handler();
+    };
+
+    // Alt+K toggles the palette even while it is already open.
+    if (!e.shiftKey && key === "k") return done(actions.togglePalette);
+    if (actions.paletteOpen()) return; // palette/panel input owns the keyboard
+
+    if (!e.shiftKey) {
+      const plain = {
+        arrowleft: () => actions.focusDir("left"),
+        arrowright: () => actions.focusDir("right"),
+        arrowup: () => actions.focusDir("up"),
+        arrowdown: () => actions.focusDir("down"),
+        z: actions.zoom,
+        w: actions.closePane,
+      };
+      if (plain[key]) done(plain[key]);
+      return;
     }
+
+    // Alt+Shift layer: splits and font size. Letters match by e.key; the
+    // font keys match by physical key (e.code) so Shift'ed punctuation works
+    // on any keyboard layout (German Shift+'+' is '*', etc.).
+    if (key === "h") return done(actions.splitH);
+    if (key === "v") return done(actions.splitV);
+    if (e.code === "Digit0" || e.code === "Numpad0") return done(actions.fontReset);
+    if (e.code === "Minus" || e.code === "NumpadSubtract") return done(actions.fontSmaller);
+    if (e.code === "Equal" || e.code === "BracketRight" || e.code === "NumpadAdd") return done(actions.fontBigger);
   }, true);
 }

@@ -9,6 +9,46 @@ import { getTheme, DEFAULT_THEME } from "./themes.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
+
+// File-path links (Ctrl+click): quoted paths may contain spaces; bare ones
+// stop at whitespace/quotes. Windows drive + UNC, POSIX absolute, ~ paths.
+// URLs are handled separately by the web-links addon.
+const FILE_PATH_RE = /"([A-Za-z]:[\\/][^"]+|\\\\[^"]+|~[\\/][^"]+)"|((?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))[^\s"'`<>|]+)/g;
+
+// Only linkify from a sane left boundary so "and/or" or the tail of a URL
+// never lights up. ':' and '=' are allowed before Windows/~ paths ("saved
+// to: C:\x") but not before bare "/..." (that is how URLs would re-match).
+function pathBoundaryOk(ch, path) {
+  if (ch === "" || ch === " " || ch === "\t" || ch === '"' || ch === "'" || ch === "(" || ch === "[") return true;
+  return (ch === ":" || ch === "=" || ch === ",") && !path.startsWith("/");
+}
+
+function makeFilePathProvider(term, activate) {
+  return {
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      const links = [];
+      FILE_PATH_RE.lastIndex = 0;
+      let match;
+      while ((match = FILE_PATH_RE.exec(text))) {
+        const quoted = match[1] !== undefined;
+        let path = quoted ? match[1] : match[2];
+        if (!quoted) path = path.replace(/[.,;:!?)\]}]+$/, ""); // trailing prose punctuation
+        const startIdx = match.index + (quoted ? 1 : 0);
+        const boundary = match.index === 0 ? "" : text[match.index - 1];
+        if (!pathBoundaryOk(boundary, path) || path.length < 3) continue;
+        links.push({
+          range: { start: { x: startIdx + 1, y }, end: { x: startIdx + path.length, y } },
+          text: path,
+          activate,
+        });
+      }
+      callback(links.length ? links : undefined);
+    },
+  };
+}
 const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
@@ -27,6 +67,8 @@ export class Pane {
     this.title = opts.title || null; // user-given name, wins over session name
     this.userWrote = false;    // real keystrokes/paste in this pane
     this.spawnedFresh = false; // session was created by this pane (vs reattached)
+    this.closeArmed = false;   // busy-close guard: next close press proceeds
+    this._closeArmTimer = null;
 
     this.session = null;
     this.state = "empty"; // empty | attached | exited
@@ -53,7 +95,7 @@ export class Pane {
     el.innerHTML =
       '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span></div>' +
       '<div class="term-host"></div>' +
-      '<div class="pane-empty">no session &middot; alt+p</div>' +
+      '<div class="pane-empty">no session &middot; alt+k</div>' +
       '<div class="pane-dim"></div>' +
       '<div class="pane-exitbar" hidden></div>';
     this.el = el;
@@ -150,11 +192,40 @@ export class Pane {
     this.exitBar.hidden = false;
   }
 
+  // Short-lived notice (e.g. "no room to split") that cleans up after itself.
+  flashNotice(text) {
+    this.showNotice(text);
+    clearTimeout(this._noticeTimer);
+    this._noticeTimer = setTimeout(() => {
+      if (this.state !== "exited" && !this.closeArmed) this.exitBar.hidden = true;
+    }, 2000);
+  }
+
   sendText(text) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited) {
-      this.userWrote = true;
+      this._markWrote();
       this.ws.send(ENC.encode(text));
     }
+  }
+
+  // First real input flips userWrote and notifies once: the workspace layer
+  // uses that moment to adopt a scratch layout as the "scratch" workspace.
+  _markWrote() {
+    if (this.userWrote) return;
+    this.userWrote = true;
+    this.onStateChange(this);
+  }
+
+  // Two-step close: something is running inside this shell, so the first
+  // close press only warns; a second press within the window proceeds.
+  armClose() {
+    this.closeArmed = true;
+    this.showNotice("[running — close again to detach]");
+    clearTimeout(this._closeArmTimer);
+    this._closeArmTimer = setTimeout(() => {
+      this.closeArmed = false;
+      if (this.state !== "exited") this.exitBar.hidden = true;
+    }, 3000);
   }
 
   fitSoon() {
@@ -199,7 +270,10 @@ export class Pane {
     this._disposed = true;
     this.detach();
     clearTimeout(this._fitTimer);
+    clearTimeout(this._closeArmTimer);
+    clearTimeout(this._noticeTimer);
     this._ro.disconnect();
+    if (this._linkProvider) { try { this._linkProvider.dispose(); } catch (e) {} this._linkProvider = null; }
     if (this._webgl) { try { this._webgl.dispose(); } catch (e) {} this._webgl = null; }
     if (this.term) { try { this.term.dispose(); } catch (e) {} this.term = null; }
     this.el.remove();
@@ -234,22 +308,18 @@ export class Pane {
         return false;
       }
       if (key === "v") {
-        if (navigator.clipboard && navigator.clipboard.readText) {
-          navigator.clipboard.readText().then((text) => {
-            if (text && this._phase === "live" && !this._exited) {
-              this.userWrote = true;
-              this.term.paste(text);
-            }
-          }).catch(() => {});
-        }
-        e.preventDefault();
-        return false;
+        // Do NOT intercept: Ctrl+Shift+V is Chromium's native "paste as plain
+        // text", which fires a paste event on xterm's textarea — xterm handles
+        // it. navigator.clipboard.readText() is permission-gated in WebView2
+        // (silently denied), so the native path is the only one that works.
+        if (this._phase === "live" && !this._exited) this._markWrote();
+        return true;
       }
       return true;
     });
     // Real keystrokes only: onData also fires for xterm's automatic replies
     // to terminal queries (DA/DSR), which must not count as user activity.
-    this.term.onKey(() => { this.userWrote = true; });
+    this.term.onKey(() => this._markWrote());
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);
@@ -265,6 +335,20 @@ export class Pane {
       this._webgl = null; // DOM renderer fallback (much slower on heavy output)
       console.warn("QuickTerm: WebGL renderer unavailable, using DOM renderer", e);
     }
+    // Ctrl+click links: URLs via the web-links addon, file paths via the
+    // custom provider above. Both open through the token-gated backend
+    // (/api/open), which refuses non-http(s) URLs and reveals executables
+    // in the file manager instead of running them.
+    const activateLink = (event, text) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      api.openTarget(text.trim()).catch(() => this.flashNotice("[could not open]"));
+    };
+    try {
+      this.term.loadAddon(new WebLinksAddon.WebLinksAddon(activateLink));
+    } catch (e) { /* links are a nicety, never fatal */ }
+    try {
+      this._linkProvider = this.term.registerLinkProvider(makeFilePathProvider(this.term, activateLink));
+    } catch (e) { this._linkProvider = null; }
     // Only forward while live: replayed scrollback contains terminal queries
     // (DA/DSR) that xterm auto-answers during the async replay parse — those
     // answers must never reach the PTY as typed input.

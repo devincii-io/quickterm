@@ -1,8 +1,8 @@
 # QuickTerm
 
 A calm, local terminal workspace: split panes, named workspaces, persistent
-sessions, quick-launch profiles, WSL integration, and optional local voice
-input. Everything stays on your computer. No Electron, accounts, or telemetry.
+sessions, quick-launch profiles, and WSL integration. Everything stays on
+your computer. No Electron, accounts, or telemetry.
 
 ## Install
 
@@ -36,10 +36,12 @@ uv run quickterm
 ```
 
 The backend starts on `127.0.0.1:8620` and opens a chromeless browser app
-window. The workspace selector controls persistence: **Scratch** is disposable
-and its sessions are closed when you leave, while a named workspace autosaves
-its exact split arrangement and live session IDs for reattachment with full
-scrollback.
+window. The workspace selector controls persistence: a named workspace
+autosaves its exact split arrangement and live session IDs for reattachment
+with full scrollback. **Scratch** is the disposable mode: the moment you type
+into a scratch layout it starts autosaving as the special `scratch` workspace
+(replacing the previous one), survives closing the window during a run, and is
+deleted for good when the app quits.
 
 Closing the window is smart about your work: if any terminal you have actually
 typed into is still running (an SSH session, a dev server, ...), QuickTerm hides
@@ -49,32 +51,30 @@ If only untouched shells are open, closing the window simply quits and frees
 the memory. Terminal I/O is streamed with coalesced reads/writes end to end,
 so heavy output (builds, logs) renders fast without making typing laggy.
 
-### Voice input (optional)
-
-```
-uv sync --extra voice
-```
-
-Adds local Whisper transcription (German/English auto-detect). Press the voice
-hotkey (default `Ctrl+Alt+V`) once to start recording, again to stop —
-the transcript is typed into the focused pane. The model downloads on first
-use; size is configurable (`voice.model_size` in the config).
+URLs and file paths printed in a terminal are clickable: hold **Ctrl** and
+click to open them with your default browser or file handler (executables are
+revealed in Explorer, never launched). Closing a pane whose shell is running
+something (an SSH session, a build, Claude Code, ...) asks for a second press
+before detaching, so one stray keystroke can't lose running work.
 
 ## Keys
 
-The whole UI lives on a single modifier — Alt — so every shortcut is two keys.
-Combos the shell needs (`Ctrl+C`, `Ctrl+P`, `Alt+B`/`F` word motions, ...)
-pass through untouched.
+QuickTerm only claims Alt combos that nothing inside the terminal wants.
+Everything shells and TUIs actually bind passes through untouched: `Ctrl+C`,
+`Ctrl+P`, `Alt+V` (Claude Code image paste), `Alt+P` (Claude Code model
+switch), `Alt+H` (PSReadLine help), `Alt+0..9`/`Alt+-` (readline digit
+arguments), the `Alt+B`/`F` word motions, ...
 
 | Key | Action |
 |---|---|
-| `Alt+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
-| `Alt+H` / `Alt+V` | Split pane side by side / top and bottom |
+| `Alt+K` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
+| `Alt+Shift+H` / `Alt+Shift+V` | Split pane side by side / top and bottom |
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
-| `Alt+W` | Close pane (detaches — session keeps running) |
-| `Alt+Plus` / `Alt+Minus` / `Alt+0` | Grow / shrink / reset terminal text size |
+| `Alt+W` | Close pane (detaches — session keeps running; asks twice if something is running) |
+| `Alt+Shift+Plus` / `Alt+Shift+Minus` / `Alt+Shift+0` | Grow / shrink / reset terminal text size |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
+| `Ctrl+Click` | Open a URL or file path printed in the terminal |
 | `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable — also restores from tray) |
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
@@ -98,8 +98,9 @@ The same fields are available in the config file:
 ```
 
 Snippets, custom themes, global and per-workspace logos, the idle-session
-timeout, summon hotkey, port, scrollback size, font, and voice settings live in
-the same file. Named workspaces are saved under the QuickTerm config directory
+timeout, summon hotkey, port, scrollback size, and font live in the same file.
+(A local voice-input mode exists behind `uv sync --extra voice` but is parked
+until it gets a proper capture overlay.) Named workspaces are saved under the QuickTerm config directory
 and can be switched from the app bar or dashboard. Logs rotate under `logs/` in
 that directory.
 

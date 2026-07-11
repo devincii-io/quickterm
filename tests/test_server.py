@@ -517,6 +517,44 @@ def test_update_install_value_error_is_400(client, monkeypatch):
     assert r.status_code == 400
 
 
+# --- open endpoint (terminal Ctrl+click links) --------------------------------
+
+
+def _stub_opener_module(monkeypatch, open_target):
+    mod = types.ModuleType("quickterm.opener")
+    mod.open_target = open_target
+    monkeypatch.setitem(sys.modules, "quickterm.opener", mod)
+
+
+def test_open_endpoint(client, monkeypatch):
+    opened = []
+
+    def fake_open(target):
+        opened.append(target)
+        return {"action": "url"}
+
+    _stub_opener_module(monkeypatch, fake_open)
+    r = client.post("/api/open", json={"target": "https://example.com"})
+    assert r.status_code == 200
+    assert r.json() == {"action": "url"}
+    assert opened == ["https://example.com"]
+
+
+def test_open_endpoint_maps_errors(client, monkeypatch):
+    def refuse(target):
+        raise ValueError("only http/https URLs can be opened")
+
+    _stub_opener_module(monkeypatch, refuse)
+    assert client.post("/api/open", json={"target": "ftp://x"}).status_code == 400
+    assert client.post("/api/open", json={"nope": 1}).status_code == 400
+
+    def missing(target):
+        raise FileNotFoundError(target)
+
+    _stub_opener_module(monkeypatch, missing)
+    assert client.post("/api/open", json={"target": "C:/gone"}).status_code == 404
+
+
 # --- WebSocket attach protocol ----------------------------------------------
 
 
@@ -629,21 +667,3 @@ def test_config_reports_elevated(manager, cfg):
         assert c.get("/api/config").json()["elevated"] is False
 
 
-def test_new_window_endpoint(client, monkeypatch):
-    import quickterm.app as app_mod
-
-    calls = []
-    monkeypatch.setattr(app_mod, "open_new_window", lambda: (calls.append(1), True)[1])
-    r = client.post("/api/window/new")
-    assert r.status_code == 200 and r.json()["opened"] is True
-    assert calls == [1]
-
-
-def test_open_new_window_argv(monkeypatch):
-    import quickterm.app as app_mod
-
-    captured = {}
-    monkeypatch.setattr(app_mod.subprocess, "Popen", lambda argv, **kw: captured.update(argv=argv))
-    monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
-    assert app_mod.open_new_window() is True
-    assert captured["argv"][1:] == ["-m", "quickterm.app"]

@@ -22,6 +22,36 @@ from typing import Callable
 _READ_CHUNK = 65536
 
 
+def pids_with_children() -> set[int]:
+    """PIDs that have at least one direct child right now (one /proc scan).
+
+    Mirrors pty_session.pids_with_children so the UI can treat a shell as
+    "busy" when something is running inside it. Returns empty on systems
+    without /proc.
+    """
+    parents: set[int] = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return parents
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                stat = f.read()
+        except OSError:
+            continue  # process vanished mid-scan
+        # pid (comm) state ppid ... — comm may contain spaces, split after ')'
+        tail = stat[stat.rfind(b")") + 2 :].split()
+        if len(tail) >= 2:
+            try:
+                parents.add(int(tail[1]))
+            except ValueError:
+                pass
+    return parents
+
+
 class PtySession:
     def __init__(
         self,

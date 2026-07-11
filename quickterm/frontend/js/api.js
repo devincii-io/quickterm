@@ -34,6 +34,9 @@ export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
 export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
+// busy = the shell has a child process (ssh, build, editor) running right now
+export const sessionBusy = (id) =>
+  getSessions().then((list) => Boolean((list.find((s) => s.id === id) || {}).busy)).catch(() => false);
 // dot-prefixed workspaces (".scratch") are internal and never listed
 export const listWorkspaces = () =>
   req("GET", "/api/workspaces").then((names) => (names || []).filter((name) => !name.startsWith(".")));
@@ -46,8 +49,8 @@ export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
-export const openNewWindow = () => req("POST", "/api/window/new");
 export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);
+export const openTarget = (target) => req("POST", "/api/open", { target });
 export const installUpdate = () => req("POST", "/api/update/install");
 
 // Branding assets (logos). Uploads send the raw file with its own content-type.

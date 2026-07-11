@@ -131,6 +131,9 @@ async def _serve(
     )
     if state is not None:
         state.update(server=server, loop=loop, manager=manager)
+    # The "scratch" workspace is ephemeral: it only mirrors the current scratch
+    # layout during a run. Discard at startup too, so a crash can't leak it.
+    _discard_scratch_workspace()
     hotkeys = _start_hotkeys(loop, manager, cfg)
     boot = asyncio.ensure_future(
         _after_ready(
@@ -154,6 +157,7 @@ async def _serve(
             except Exception:
                 pass
         manager.shutdown()
+        _discard_scratch_workspace()
 
 
 def _sessions_worth_keeping(manager: Any) -> bool:
@@ -322,21 +326,6 @@ def _window_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/#t={auth.get_or_create_token()}"
 
 
-def open_new_window() -> bool:
-    """Open another QuickTerm window onto the already-running backend.
-
-    A fresh process detects the live backend (_already_running) and summons a new
-    native view on the same port, so both windows share sessions and workspaces.
-    """
-    argv = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "quickterm.app"]
-    try:
-        subprocess.Popen(argv, close_fds=True)
-        return True
-    except OSError:
-        log.exception("could not open a new QuickTerm window")
-        return False
-
-
 async def _after_ready(
     server: uvicorn.Server,
     manager: "SessionManager",
@@ -369,6 +358,16 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
                 log.info("reaped %d idle session(s): %s", len(reaped), ", ".join(reaped))
         except Exception:
             log.exception("reaper pass failed")
+
+
+def _discard_scratch_workspace() -> None:
+    """Drop the ephemeral "scratch" workspace file (never survives a run)."""
+    try:
+        import quickterm.workspace as workspace
+
+        workspace.delete_workspace("scratch")
+    except Exception:
+        log.debug("could not discard scratch workspace", exc_info=True)
 
 
 def _workspace_session_ids() -> set[str]:
@@ -444,43 +443,10 @@ def _profile_callback(manager: "SessionManager", prof: "Profile") -> Callable[[]
 
 
 def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> None:
-    # optional extra: any import/init failure silently disables voice
-    try:
-        import quickterm.voice as voice
-
-        if not (cfg.voice.enabled and voice.voice_available()):
-            return
-        from quickterm.voice.capture import Recorder
-        from quickterm.voice.transcribe import Transcriber
-    except Exception:
-        return
-    recorder = Recorder()
-    transcriber = Transcriber(cfg.voice.model_size)
-    recording = threading.Event()
-
-    def finish() -> None:
-        try:
-            audio = recorder.stop()
-            text = transcriber.transcribe(audio)
-            sid = manager.focused_session_id
-            if sid and text:
-                manager.write(sid, text.encode())
-        except Exception:
-            pass
-
-    def toggle() -> None:
-        try:
-            if not recording.is_set():
-                recorder.start()
-                recording.set()
-            else:
-                recording.clear()
-                # transcription is slow; keep it off the event loop
-                threading.Thread(target=finish, daemon=True).start()
-        except Exception:
-            recording.clear()
-
-    hotkeys.register(cfg.voice.hotkey, toggle)
+    # Voice is parked: without a capture overlay the hotkey gives no feedback
+    # at all, which reads as "broken". The capture/transcribe modules stay in
+    # quickterm/voice/ — re-wire here (see git history) once the UI exists.
+    del hotkeys, manager, cfg
 
 
 def _find_browser() -> str | None:

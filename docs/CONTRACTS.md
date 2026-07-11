@@ -98,6 +98,7 @@ class PtySession:
 class SessionInfo:
     id: str; name: str; profile: str | None
     alive: bool; exit_code: int | None; cols: int; rows: int
+    touched: bool   # True once the user typed/pasted into it
 
 class Session:
     info: SessionInfo
@@ -116,6 +117,7 @@ class SessionManager:
     def resize(self, sid: str, cols: int, rows: int) -> None
     def kill(self, sid: str) -> None          # tree kill + remove after grace
     def attach(self, sid: str) -> "Attachment"
+    def busy_ids(self) -> set[str]            # sessions whose shell has a child process
     def shutdown(self) -> None                # kill all
 
 class Attachment:
@@ -169,7 +171,7 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo]` |
+| GET | /api/sessions | → `[SessionInfo + {attachments: int, busy: bool}]` — `busy` = the shell has a child process right now (WSL in-VM work is invisible to it) |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides) |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
@@ -191,6 +193,7 @@ REST (JSON, under `/api`):
 | GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}` — probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
+| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}` — terminal Ctrl+click. http(s) URLs open in the browser; existing local paths open with the OS handler; executable-ish files are revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
 
@@ -245,7 +248,12 @@ Summon/hide: toggle the app browser window via user32
 (EnumWindows/FindWindow matching window title "QuickTerm", ShowWindow +
 SetForegroundWindow). Best-effort; degrade silently.
 
-## quickterm/voice/
+## quickterm/voice/ (parked)
+
+Voice is currently NOT wired up: `_wire_voice` in app.py is a stub and the
+Settings tab is hidden, because the hotkey had no capture overlay/feedback and
+read as broken. The modules below remain and keep this contract for when a
+real overlay exists.
 
 `capture.py`: `Recorder` — start()/stop() -> numpy float32 mono 16 kHz via
 sounddevice. `transcribe.py`: `Transcriber(model_size)` — lazy
@@ -260,23 +268,37 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
   pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
-  `@xterm/addon-webgl@0.18.0` (js+css committed).
+  `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
 - `document.title = "QuickTerm"` (hotkey summon matches on this).
 - Layout tree in JS mirrors the workspace JSON schema exactly.
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use
   `term.write(data, cb)` callbacks for backpressure.
 - Focus: 2px amber rail + dim inactive; POST /api/focus on change.
 - Launcher: compact profile dropdown with an explicit open action and dashboard/settings/help navigation.
-- Dashboard: saved workspace cards with layout previews, quick profile launch, and live-session attach/kill controls.
-- App bar workspace dropdown: Scratch is disposable; named workspaces autosave layout and session IDs and restore the exact live sessions. The last active named workspace is remembered locally.
+- Dashboard: saved workspace cards with layout previews and quick profile launch
+  (no separate live-session list — sessions always belong to a workspace).
+- App bar workspace dropdown: named workspaces autosave layout and session IDs
+  and restore the exact live sessions; the last active one is remembered
+  locally. Scratch lifecycle: an unsaved scratch layout adopts the reserved
+  workspace name `scratch` on the FIRST user keystroke (replacing the previous
+  scratch file and its background-only sessions), autosaves from then on, and
+  survives window close within a run; the backend deletes `workspaces/scratch.json`
+  at process start and shutdown so it never survives a run. The name `scratch`
+  (any case) and dot-prefixed names are rejected in user save paths; workspace
+  names must survive `_safe_name` unchanged.
 - App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several.
 - Settings: tabbed General/Terminals/Voice/Advanced editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
-- Command palette Alt+P: fuzzy over profiles / actions (split h/v, zoom, kill,
+- Command palette Alt+K: fuzzy over profiles / actions (split h/v, zoom, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
-- Keybindings (in addition to palette): Alt+H/Alt+V split, Alt+Z zoom,
-  Alt+W close pane, Alt+arrows focus move.
+- Keybindings (in addition to palette): Alt+Shift+H/V split, Alt+Z zoom,
+  Alt+W close pane (two-step when the session is busy), Alt+arrows focus move,
+  Alt+Shift+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
+  (Claude Code image paste & model switch, PSReadLine/readline bindings).
+- Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link
+  provider) via POST /api/open. Paste is native-only: Ctrl+Shift+V must never
+  be preventDefault'ed (WebView2 denies navigator.clipboard.readText silently).
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
 - File viewer: `viewer.html?path=...` — separate minimal page, fetches

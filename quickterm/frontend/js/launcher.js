@@ -78,19 +78,22 @@ function selectedMark() {
 
 function buildWorkspaceDropdown(options) {
   const { root, trigger, menu, setOpen } = dropdownShell("workspace-dropdown");
+  // "scratch" is the adopted disposable workspace: it autosaves during the
+  // run but the file dies with the app, so it is never presented as saved.
+  const isScratch = !options.currentWorkspace || options.currentWorkspace === "scratch";
   const renderTrigger = () => {
     trigger.textContent = "";
     const copy = element("span", "dropdown-trigger-copy");
     copy.append(
       element("small", "", "Workspace"),
-      element("strong", "", options.currentWorkspace || "Scratch"),
+      element("strong", "", isScratch ? "Scratch" : options.currentWorkspace),
     );
-    trigger.append(element("span", `workspace-state ${options.currentWorkspace ? "saved" : "scratch"}`), copy, chevron());
+    trigger.append(element("span", `workspace-state ${isScratch ? "scratch" : "saved"}`), copy, chevron());
   };
   renderTrigger();
 
   menu.append(sectionLabel("Workspace mode"));
-  const scratch = menuItem("Scratch", "Disposable · closes with the app", { icon: "circle-dashed" });
+  const scratch = menuItem("New scratch", "Disposable · closes with the app", { icon: "circle-dashed" });
   if (!options.currentWorkspace) {
     scratch.classList.add("selected");
     scratch.append(selectedMark());
@@ -104,7 +107,14 @@ function buildWorkspaceDropdown(options) {
     menu.append(element("div", "dropdown-empty", "No workspaces saved yet"));
   }
   for (const name of options.workspaces) {
-    const item = menuItem(name, name === options.currentWorkspace ? "Currently open" : "Sessions and layout saved", { icon: "diamond" });
+    // The adopted "scratch" workspace stays listed (that is how you return
+    // to it) but is labelled for what it is: gone when the app quits.
+    const disposable = name === "scratch";
+    const item = menuItem(
+      name,
+      name === options.currentWorkspace ? "Currently open" : disposable ? "Disposable · this run only" : "Sessions and layout saved",
+      { icon: disposable ? "circle-dashed" : "diamond" },
+    );
     if (name === options.currentWorkspace) {
       item.classList.add("selected");
       item.append(selectedMark());
@@ -154,9 +164,22 @@ function buildTerminalControl(options) {
   const { root, trigger, menu, setOpen } = dropdownShell("terminal-dropdown");
   root.classList.add("launch-dropdown");
   const systems = systemChoices(options.inventory);
-  let selected = options.profiles.length
-    ? { kind: "profile", profile: options.profiles[0], label: options.profiles[0].name, detail: shellLabel(options.profiles[0]) }
-    : systems.length ? { kind: "system", ...systems[0] } : null;
+  // The current selection is the window's default terminal: splits and new
+  // panes open it. Survive launcher rebuilds by restoring the prior choice.
+  const prior = options.selectedTerminal;
+  let selected = null;
+  if (prior && prior.kind === "profile") {
+    const match = options.profiles.find((profile) => profile.name === prior.profile.name);
+    if (match) selected = { kind: "profile", profile: match, label: match.name, detail: shellLabel(match) };
+  } else if (prior && prior.kind === "system" && systems.some((system) => system.id === prior.id)) {
+    selected = { ...prior };
+  }
+  if (!selected) {
+    selected = options.profiles.length
+      ? { kind: "profile", profile: options.profiles[0], label: options.profiles[0].name, detail: shellLabel(options.profiles[0]) }
+      : systems.length ? { kind: "system", ...systems[0] } : null;
+  }
+  if (options.onSelectTerminal && selected) options.onSelectTerminal(selected);
 
   const renderTrigger = () => {
     trigger.textContent = "";
@@ -171,6 +194,7 @@ function buildTerminalControl(options) {
 
   const select = (choice) => {
     selected = choice;
+    if (options.onSelectTerminal) options.onSelectTerminal(choice);
     renderTrigger();
     setOpen(false);
   };
@@ -292,15 +316,6 @@ export function initLauncher(el, options) {
 
   const nav = element("nav", "launcher-nav");
   nav.setAttribute("aria-label", "Application");
-  if (options.onNewWindow) {
-    const win = element("button", "nav-button icon-only");
-    win.type = "button";
-    win.title = "Open another window sharing these sessions and workspaces";
-    win.setAttribute("aria-label", "Open a new window");
-    win.append(icon("new-window", 16));
-    win.addEventListener("click", options.onNewWindow);
-    nav.append(win);
-  }
   const navIcons = { dashboard: "dashboard", settings: "settings", help: "help" };
   for (const [label, onClick] of options.chrome || []) {
     const button = element("button", "nav-button");

@@ -45,9 +45,13 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Backend I/O is bytes in / bytes out; no decoding on the hot path. Input
   decode for winpty is strict-UTF-8 with surrogateescape fallback — never
   `errors="replace"` (mangles 8-bit input).
-- UI keyboard layer is **Alt-only** (Alt+P palette, Alt+H/V split, Alt+Z zoom,
-  Alt+W close, Alt+arrows focus, Alt+±/0 font). Never claim Ctrl+key combos a
-  shell uses; copy/paste stays Ctrl+Shift+C/V inside the terminal.
+- UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
+  Alt+Z zoom, Alt+W close, Alt+arrows focus on plain Alt; Alt+Shift+H/V split and
+  Alt+Shift+±/0 font on the Alt+Shift namespace. Plain Alt+V/P/H/0-9/- MUST pass
+  through to the shell (Claude Code image paste & model switch, PSReadLine/readline
+  bindings) — never re-claim them. Copy/paste stays Ctrl+Shift+C/V; the paste
+  handler must NOT preventDefault (WebView2 denies `clipboard.readText` silently —
+  let the native paste event reach xterm's textarea).
 - Server handlers import stubbable modules via
   `importlib.import_module("quickterm.X")` — a plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.

@@ -94,8 +94,9 @@ async function boot() {
     onFocusChange: (pane) => {
       if (pane && pane.session && pane.state === "attached") api.postFocus(pane.session.id).catch(() => {});
     },
-    onPaneState: () => {
+    onPaneState: (pane) => {
       refreshStatusSoon();
+      maybeAdoptScratch(pane);
       scheduleWorkspaceSave();
     },
     onLayoutChange: () => scheduleWorkspaceSave(),
@@ -170,7 +171,21 @@ async function boot() {
     }
   }
 
+  // Whatever the launcher's "New terminal" dropdown currently shows is what
+  // splits and fresh panes open.
+  let selectedTerminal = null;
+
   function spawnDefaultInto(pane) {
+    if (selectedTerminal) {
+      if (selectedTerminal.kind === "profile") {
+        return spawnInto(pane, selectedTerminal.profile.name, selectedTerminal.profile.cwd || null);
+      }
+      return spawnSpecInto(pane, {
+        cmd: selectedTerminal.cmd,
+        args: selectedTerminal.args || [],
+        name: selectedTerminal.label,
+      });
+    }
     const profile = defaultProfile();
     if (profile) return spawnInto(pane, profile.name, profile.cwd || null);
     const system = defaultSystemSpec();
@@ -238,10 +253,51 @@ async function boot() {
     workspaceSaveTimer = setTimeout(() => persistCurrentWorkspace(), 300);
   }
 
-  async function cleanupScratchSessions() {
-    const ids = [...scratchSessionIds];
+  // Tear down the current scratch layout before leaving it: scratch is
+  // disposable, so its sessions are killed and its file dropped. Handles both
+  // pre-adoption scratch (tracked in scratchSessionIds) and the adopted
+  // "scratch" workspace (whose sessions are the live layout's).
+  async function discardScratch() {
+    const ids = new Set(scratchSessionIds);
     scratchSessionIds.clear();
-    if (ids.length) await api.cleanupSessions(ids).catch(() => {});
+    if (currentWorkspace === SCRATCH_WS) {
+      for (const sid of app.attachedSessionIds()) ids.add(sid);
+      await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
+    }
+    if (ids.size) await api.cleanupSessions([...ids]).catch(() => {});
+  }
+
+  // Ephemeral scratch: the first real keystroke in an unsaved scratch layout
+  // adopts it as the workspace literally named "scratch" — replacing the
+  // previous one (whose background sessions die with it). From then on it
+  // autosaves like any workspace. The backend deletes the "scratch" file at
+  // app start and exit, so it never survives a run; within a run it survives
+  // window close (tray) and can be reopened from the workspace menu.
+  const SCRATCH_WS = "scratch";
+  let adoptingScratch = false;
+  async function maybeAdoptScratch(pane) {
+    if (currentWorkspace || transitioning || adoptingScratch) return;
+    if (!pane || !pane.userWrote) return;
+    adoptingScratch = true;
+    try {
+      // Single-window guard: two windows share one backend and one scratch.json.
+      // If another window already adopted "scratch", stay in pure scratch here
+      // rather than fighting over the file (its sessions stay disposable).
+      const names = await api.listWorkspaces().catch(() => null);
+      if (names && names.includes(SCRATCH_WS)) return;
+      currentWorkspace = SCRATCH_WS;
+      scratchSessionIds.clear(); // these sessions are workspace-managed now
+      rememberWorkspace(SCRATCH_WS);
+      await persistCurrentWorkspace();
+      if (!workspaceNames.includes(SCRATCH_WS)) {
+        workspaceNames.push(SCRATCH_WS);
+        workspaceNames.sort((a, b) => a.localeCompare(b));
+      }
+      buildLauncher();
+      refreshStatusSoon();
+    } finally {
+      adoptingScratch = false;
+    }
   }
 
   async function restoreWorkspace(name) {
@@ -281,10 +337,10 @@ async function boot() {
     if ((name || null) === currentWorkspace) return;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
-    if (currentWorkspace) {
+    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) {
       await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo).catch(() => {});
     } else {
-      await cleanupScratchSessions();
+      await discardScratch(); // leaving scratch (fresh or adopted): throw it away
     }
 
     if (name) {
@@ -314,13 +370,25 @@ async function boot() {
     // itself and nothing was ever typed into it, kill it too so untouched
     // shells don't pile up as background clutter. Reattached sessions and
     // sessions other windows are using are never auto-killed.
-    closePane: () => {
+    closePane: async () => {
       const pane = layout.focused;
-      const session = pane && pane.session;
-      const freshUnused = pane ? pane.spawnedFresh && !pane.userWrote : false;
-      layout.closePane();
+      if (!pane) return;
+      const session = pane.session;
+      const freshUnused = pane.spawnedFresh && !pane.userWrote;
+      let busy = false;
+      if (session && pane.state === "attached") {
+        // Busy guard: a shell with something running inside (ssh, a build,
+        // claude, ...) is too easy to lose to one keypress. First press only
+        // warns; a second within 3s proceeds — and never auto-kills.
+        busy = await api.sessionBusy(session.id);
+        if (busy && !pane.closeArmed) {
+          if (layout.focused === pane) pane.armClose();
+          return;
+        }
+      }
+      layout.closePane(pane);
       refreshStatusSoon();
-      if (!session || !freshUnused) return;
+      if (!session || !freshUnused || busy) return;
       setTimeout(() => { // let our own detach land server-side first
         api.getSessions().then((list) => {
           const live = list.find((item) => item.id === session.id);
@@ -340,9 +408,23 @@ async function boot() {
       }
     },
     sendSnippet: (snippet) => { if (layout.focused) layout.focused.sendText(snippet.text); },
+    validateWorkspaceName: (name) => {
+      const cleanName = (name || "").trim();
+      if (!cleanName) return "Give the workspace a name.";
+      if (cleanName.startsWith(".")) return "Names starting with a dot are reserved.";
+      // "scratch" is reserved: the backend deletes that file at app start and
+      // exit, so a user workspace under that name would silently vanish.
+      if (cleanName.toLowerCase() === "scratch") return "“scratch” is reserved for the disposable workspace.";
+      // The backend stores names through a safe-name filter; a name that does
+      // not survive it unchanged would collide or fail to restore on reboot.
+      if (cleanName.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\.+$/, "") !== cleanName) {
+        return "Use letters, digits, spaces, dots, dashes or underscores.";
+      }
+      return null;
+    },
     saveWorkspace: async (name) => {
       const cleanName = name.trim();
-      if (!cleanName || cleanName.startsWith(".")) return;
+      if (app.validateWorkspaceName(cleanName)) return;
       const wasScratch = !currentWorkspace;
       currentWorkspace = cleanName;
       if (wasScratch) scratchSessionIds.clear();
@@ -496,6 +578,8 @@ async function boot() {
       inventory: terminalInventory,
       workspaces: workspaceNames,
       currentWorkspace,
+      selectedTerminal,
+      onSelectTerminal: (choice) => { selectedTerminal = choice; },
       logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
       onRunProfile: runProfile,
       onRunSystem: runSystemTerminal,
@@ -504,7 +588,6 @@ async function boot() {
       onWorkspace: switchWorkspace,
       onManage: () => panels.toggle("dashboard"),
       elevated: Boolean(cfg.elevated),
-      onNewWindow: () => api.openNewWindow().catch(() => {}),
       chrome: [
         ["dashboard", () => panels.toggle("dashboard")],
         ["settings", () => panels.toggle("settings")],
@@ -514,7 +597,9 @@ async function boot() {
   }
 
   function refreshStatus() {
-    $("sb-workspace").textContent = currentWorkspace ? `ws ${currentWorkspace}` : "scratch · disposable";
+    $("sb-workspace").textContent = currentWorkspace && currentWorkspace !== "scratch"
+      ? `ws ${currentWorkspace}`
+      : "scratch · disposable";
     api.getSessions().then((list) => {
       const count = list.filter((session) => session.alive).length;
       $("sb-sessions").textContent = `${count} session${count === 1 ? "" : "s"}`;
@@ -551,10 +636,28 @@ async function boot() {
   }
   window.addEventListener("pagehide", persistOnExit);
 
-  $("voice-indicator").textContent = cfg.voice_available ? "voice" : "";
+  $("voice-indicator").textContent = ""; // voice is parked until it has a real overlay
   tickClock();
   setInterval(tickClock, 15000);
   setInterval(refreshStatus, 10000);
+
+  // One boot-time sweep for every path (a fix: it used to run only when
+  // booting into scratch): kill leftovers that no saved workspace references,
+  // that no window is attached to, and that this window did not just adopt.
+  async function sweepOrphanSessions() {
+    try {
+      const names = await api.listWorkspaces();
+      const workspaceData = await Promise.all(names.map((name) => api.getWorkspace(name).catch(() => null)));
+      const preserved = new Set();
+      for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
+      for (const sid of app.attachedSessionIds()) preserved.add(sid);
+      const sessions = await api.getSessions();
+      const orphans = sessions
+        .filter((session) => session.alive && !preserved.has(session.id) && !(session.attachments > 0))
+        .map((session) => session.id);
+      if (orphans.length) await api.cleanupSessions(orphans);
+    } catch (_) { /* best effort */ }
+  }
 
   if (currentWorkspace) {
     const restored = await restoreWorkspace(currentWorkspace);
@@ -569,16 +672,10 @@ async function boot() {
       layout.focusPane(pane);
       api.postFocus(administratorSession.id).catch(() => {});
     } else {
-      const workspaceData = await Promise.all(
-        workspaceNames.map((name) => api.getWorkspace(name).catch(() => null)),
-      );
-      const preserved = new Set();
-      for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
-      const orphans = initialSessions.filter((session) => !preserved.has(session.id)).map((session) => session.id);
-      if (orphans.length) await api.cleanupSessions(orphans).catch(() => {});
       await spawnDefaultInto(pane);
     }
   }
+  await sweepOrphanSessions();
   transitioning = false;
   buildLauncher();
   refreshStatus();

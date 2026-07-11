@@ -266,10 +266,23 @@ export class Panels {
     const saveForm = make("div", "save-workspace-form");
     const saveInput = this._textInput("", "Name this workspace");
     const saveButton = this._button("Save current", "primary-button");
+    const saveNote = make("p", "save-workspace-note");
+    let confirmOverwrite = null; // name armed for a second "really overwrite" click
+    const existing = new Set(workspaces.map((workspace) => workspace.name));
     const save = async () => {
       const name = saveInput.value.trim();
-      if (!name) {
+      const problem = this.app.validateWorkspaceName ? this.app.validateWorkspaceName(name) : (name ? null : "Give the workspace a name.");
+      if (problem) {
+        saveNote.textContent = problem;
         saveInput.focus();
+        return;
+      }
+      // Overwriting a different existing workspace loses its layout — ask once.
+      const current = this.app.currentWorkspace && this.app.currentWorkspace();
+      if (existing.has(name) && name !== current && confirmOverwrite !== name) {
+        confirmOverwrite = name;
+        saveButton.textContent = "Overwrite?";
+        saveNote.textContent = `“${name}” already exists — save again to replace it.`;
         return;
       }
       saveButton.disabled = true;
@@ -280,8 +293,13 @@ export class Panels {
     saveInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") save();
     });
+    saveInput.addEventListener("input", () => {
+      confirmOverwrite = null;
+      saveButton.textContent = "Save current";
+      saveNote.textContent = "";
+    });
     saveForm.append(saveInput, saveButton);
-    wsHeading.append(saveForm);
+    wsHeading.append(saveForm, saveNote);
     workspaceSection.append(wsHeading);
 
     const cards = make("div", "workspace-grid");
@@ -319,7 +337,7 @@ export class Panels {
       const preview = this._layoutPreview(layout);
       const footer = make("div", "workspace-card-footer");
       const name = make("div");
-      name.append(make("h3", "", workspace.name), make("p", "", "Saved workspace"));
+      name.append(make("h3", "", workspace.name), make("p", "", workspace.name === "scratch" ? "Disposable · gone when the app quits" : "Saved workspace"));
       const load = this._button("Open workspace", "card-open-button");
       load.addEventListener("click", () => {
         this.close();
@@ -355,41 +373,9 @@ export class Panels {
     }
     profiles.append(profileList);
 
-    const live = make("section", "dashboard-list-card");
-    live.append(this._sectionHeading("Live now", "Sessions stay running when detached"));
-    const liveList = make("div", "live-session-list");
-    if (!alive.length) liveList.append(make("p", "quiet-empty", "No detached sessions. A fresh start."));
-    const attached = new Set(this.app.attachedSessionIds());
-    for (const session of alive.slice(0, 6)) {
-      const row = make("div", "live-session-row");
-      const status = make("span", "live-dot");
-      const copy = make("span", "live-session-copy");
-      copy.append(make("strong", "", session.name || session.id), make("small", "", `${session.profile || "Terminal"} · ${session.cols}×${session.rows}`));
-      row.append(status, copy);
-      if (attached.has(session.id)) row.append(make("span", "attached-label", "Attached"));
-      else {
-        const attach = this._button("Attach", "text-button");
-        attach.addEventListener("click", () => {
-          this.close();
-          this.app.attachSession(session);
-        });
-        row.append(attach);
-      }
-      const kill = this._button("", "icon-button danger-text");
-      kill.append(icon("power", 13));
-      kill.title = "End session";
-      kill.addEventListener("click", async () => {
-        kill.disabled = true;
-        const gone = this._leave(row);
-        await api.killSession(session.id).catch(() => {});
-        await gone;
-        if (this.open === "dashboard") this._dashboard(true);
-      });
-      row.append(kill);
-      liveList.append(row);
-    }
-    live.append(liveList);
-    lower.append(profiles, live);
+    // Sessions always live inside a workspace now, so a separate "Live now"
+    // list would only duplicate the workspace cards above.
+    lower.append(profiles);
     this.bodyEl.append(lower);
     this.bodyEl.scrollTop = scrollTop;
   }
@@ -424,7 +410,8 @@ export class Panels {
       ["general", "General", "Appearance and behavior"],
       ["terminals", "Terminals", "Profiles, WSL and commands"],
       ["snippets", "Snippets", "Palette commands"],
-      ["voice", "Voice", "Local dictation"],
+      // Voice is parked until it has a real capture overlay; the backend
+      // hotkey wiring is disabled in app.py for the same reason.
       ["advanced", "Advanced", "Raw configuration"],
       ["about", "About", "Version, updates and links"],
     ];
@@ -434,7 +421,6 @@ export class Panels {
       if (this.settingsTab === "general") this._settingsGeneral(content);
       else if (this.settingsTab === "terminals") this._settingsTerminals(content, render);
       else if (this.settingsTab === "snippets") this._settingsSnippets(content, render);
-      else if (this.settingsTab === "voice") this._settingsVoice(content);
       else if (this.settingsTab === "about") this._settingsAbout(content);
       else this._settingsAdvanced(content);
     };
@@ -526,7 +512,7 @@ export class Panels {
     const fields = make("div", "settings-grid two-column");
     fields.append(
       this._field("Terminal font", font, "Use any monospace font installed on this computer."),
-      this._field("Terminal text size", fontSize, "Also adjust anytime with Alt+plus / minus."),
+      this._field("Terminal text size", fontSize, "Also adjust anytime with Alt+Shift+plus / minus."),
       this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."),
     );
     group.append(fields);
@@ -820,7 +806,7 @@ export class Panels {
   _settingsSnippets(host, rerender) {
     const cfg = this.settingsDraft;
     cfg.snippets ||= [];
-    const heading = this._sectionHeading("Snippets", "Reusable commands, one keystroke away in the command palette (Alt+P).");
+    const heading = this._sectionHeading("Snippets", "Reusable commands, one keystroke away in the command palette (Alt+K).");
     const add = this._button("", "primary-button compact");
     add.append(icon("plus", 13), make("span", "", "Add snippet"));
     add.addEventListener("click", () => {
@@ -998,12 +984,13 @@ export class Panels {
     this.bodyEl.append(intro);
     const grid = make("div", "help-grid");
     const shortcuts = [
-      ["Alt P", "Open command palette"], ["Alt H", "Split side by side"],
-      ["Alt V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
+      ["Alt K", "Open command palette"], ["Alt Shift H", "Split side by side"],
+      ["Alt Shift V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
       ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
-      ["Alt +", "Bigger terminal text"], ["Alt -", "Smaller terminal text"],
-      ["Alt 0", "Reset terminal text size"],
+      ["Alt Shift +", "Bigger terminal text"], ["Alt Shift -", "Smaller terminal text"],
+      ["Alt Shift 0", "Reset terminal text size"],
       ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
+      ["Ctrl click", "Open a link or file path printed in the terminal"],
     ];
     const keyCard = make("section", "help-card");
     keyCard.append(make("h3", "", "Keyboard shortcuts"));
@@ -1015,10 +1002,10 @@ export class Panels {
     const conceptCard = make("section", "help-card");
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
-      ["Your keys stay yours", "QuickTerm only claims a handful of Alt combos. Ctrl+C, Ctrl+P, the Alt+B/F word motions and every other key reach the shell untouched."],
+      ["Your keys stay yours", "QuickTerm only claims cold Alt combos. Ctrl+C, Ctrl+P, Alt+V (Claude Code image paste), Alt+P (model switch), the Alt+B/F word motions and every other key reach the shell untouched."],
       ["Profiles", "Reusable terminal types, folders and start commands."],
       ["Workspaces", "Named arrangements that restore your split layout."],
-      ["Live sessions", "Background terminals you can detach and return to."],
+      ["Sessions live in workspaces", "Every terminal belongs to a workspace (scratch included). Detach a pane and its session keeps running — reopen the workspace or find it in the palette."],
       ["Snippets", "Small reusable commands available in the palette."],
     ]) {
       const item = make("div", "concept-row");

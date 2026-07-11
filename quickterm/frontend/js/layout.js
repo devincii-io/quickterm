@@ -79,6 +79,14 @@ export class LayoutManager {
   splitPane(pane, dir) {
     if (!pane) return null;
     if (this.zoomed) this.toggleZoom();
+    // Refuse splits that would leave either half below a usable size — a
+    // sliver pane can't render a prompt and is only good for mis-clicks.
+    const rect = pane.el.getBoundingClientRect();
+    const room = dir === "v" ? rect.height : rect.width;
+    if (room > 0 && (room - 6) / 2 < MIN_PANE_PX) {
+      if (pane.flashNotice) pane.flashNotice("[no room to split — enlarge this pane first]");
+      return null;
+    }
     const hit = this._findLeaf(pane);
     if (!hit) return null;
     const fresh = this.newPane();

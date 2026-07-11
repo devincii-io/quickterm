@@ -11,3 +11,7 @@ build/
 *-local-command-*.txt
 .coverage
 htmlcov/
+# Release artifacts are built by CI / the local release flow, never committed
+QuickTerm-v*.zip
+QuickTerm-v*-Setup.exe
+SHA256SUMS.txt
