@@ -38,6 +38,14 @@ and its sessions are closed when you leave, while a named workspace autosaves
 its exact split arrangement and live session IDs for reattachment with full
 scrollback.
 
+Closing the window is smart about your work: if any terminal you have actually
+typed into is still running (an SSH session, a dev server, ...), QuickTerm hides
+to the system tray and keeps everything alive — click the tray icon (or press
+the summon hotkey) to bring it back, right-click → **Quit** to exit for real.
+If only untouched shells are open, closing the window simply quits and frees
+the memory. Terminal I/O is streamed with coalesced reads/writes end to end,
+so heavy output (builds, logs) renders fast without making typing laggy.
+
 ### Voice input (optional)
 
 ```
@@ -51,15 +59,20 @@ use; size is configurable (`voice.model_size` in the config).
 
 ## Keys
 
+The whole UI lives on a single modifier — Alt — so every shortcut is two keys.
+Combos the shell needs (`Ctrl+C`, `Ctrl+P`, `Alt+B`/`F` word motions, ...)
+pass through untouched.
+
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
-| `Alt+Shift+H` / `Alt+Shift+V` | Split pane horizontally / vertically |
+| `Alt+P` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
+| `Alt+H` / `Alt+V` | Split pane side by side / top and bottom |
 | `Alt+Arrows` | Move focus between panes |
-| `Alt+Shift+Z` | Zoom focused pane |
-| `Alt+Shift+W` | Close pane (detaches — session keeps running) |
+| `Alt+Z` | Zoom focused pane |
+| `Alt+W` | Close pane (detaches — session keeps running) |
+| `Alt+Plus` / `Alt+Minus` / `Alt+0` | Grow / shrink / reset terminal text size |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
-| `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable) |
+| `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable — also restores from tray) |
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
 set via `keybinding` in the profile config.
