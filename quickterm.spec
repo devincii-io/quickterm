@@ -7,6 +7,15 @@ from PyInstaller.utils.hooks import collect_submodules
 
 
 hiddenimports = collect_submodules("uvicorn") + collect_submodules("webview")
+# Server handlers reach these via importlib.import_module(...) so tests can stub
+# them; PyInstaller's static graph can't see a runtime string, so list them here
+# or they go missing from the frozen build (a missing one 500s the endpoint).
+hiddenimports += [
+    "quickterm.opener",
+    "quickterm.update",
+    "quickterm.workspace",
+    "quickterm.config",
+]
 
 # pywinpty spawns two helper executables at runtime to host the pseudoconsole
 # (OpenConsole.exe for the ConPTY backend, winpty-agent.exe for the legacy one).

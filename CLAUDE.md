@@ -68,9 +68,18 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   "winpty") and keep `upx=False` (UPX corrupts them + the WebView2 loader).
   Symptom when broken: every terminal spawns then dies instantly with exit
   0xC000013A / 3221225786.
+- Any module reached ONLY via `importlib.import_module("quickterm.X")` (server
+  stubbable modules: `opener`, `update`, plus `workspace`/`config` which happen
+  to also be static-imported) is invisible to PyInstaller's static graph and
+  MUST be listed in `hiddenimports` in `quickterm.spec`, or the frozen build
+  500s that endpoint with `ModuleNotFoundError`. When you add a new
+  importlib-loaded route module, add it to the spec.
 - Verify any packaged build by launching `dist/QuickTerm.exe --port 8641`,
   then: `/api/health` answers and `/api/sessions` (header `X-QuickTerm-Token`
-  from `%APPDATA%/quickterm/runtime.token`) shows `alive: true`.
+  from `%APPDATA%/quickterm/runtime.token`) shows `alive: true`. Smoke-test the
+  importlib routes too: `POST /api/open {"target":"ftp://x"}` -> 400 (not 500)
+  proves `opener` is bundled; `GET /api/update` answers (not 500) proves
+  `update` is. Use a FREE port — never the user's live 8642/8620.
 - Frontend is served with `Cache-Control: no-cache` — required, WebView2
   otherwise serves stale JS/CSS after updates.
 
