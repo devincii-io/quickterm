@@ -237,17 +237,25 @@ function buildTerminalControl(options) {
     if (selected.kind === "profile") options.onRunProfile(selected.profile);
     else options.onRunSystem(selected);
   });
-  const adminButton = element("button", "admin-button");
-  adminButton.type = "button";
-  adminButton.title = "Open in a new administrator window (shows a Windows UAC prompt)";
-  adminButton.setAttribute("aria-label", "Open as administrator");
-  adminButton.append(icon("shield", 15), element("span", "", "Admin"));
-  adminButton.addEventListener("click", () => {
-    if (!selected) return;
-    if (selected.kind === "profile") options.onElevateProfile(selected.profile);
-    else options.onElevateSystem(selected);
-  });
-  control.append(root, openButton, adminButton);
+  control.append(root, openButton);
+  // In an elevated window every new terminal is already an administrator (it
+  // inherits the elevated server), so the "open a new admin window" button is
+  // pointless there — the red frame and badge already say you are admin.
+  if (options.elevated) {
+    control.classList.add("no-admin");
+  } else {
+    const adminButton = element("button", "admin-button");
+    adminButton.type = "button";
+    adminButton.title = "Open in a new administrator window (shows a Windows UAC prompt)";
+    adminButton.setAttribute("aria-label", "Open as administrator");
+    adminButton.append(icon("shield", 15), element("span", "", "Admin"));
+    adminButton.addEventListener("click", () => {
+      if (!selected) return;
+      if (selected.kind === "profile") options.onElevateProfile(selected.profile);
+      else options.onElevateSystem(selected);
+    });
+    control.append(adminButton);
+  }
   return control;
 }
 
@@ -285,10 +293,11 @@ export function initLauncher(el, options) {
   const nav = element("nav", "launcher-nav");
   nav.setAttribute("aria-label", "Application");
   if (options.onNewWindow) {
-    const win = element("button", "nav-button");
+    const win = element("button", "nav-button icon-only");
     win.type = "button";
     win.title = "Open another window sharing these sessions and workspaces";
-    win.append(icon("new-window", 15), element("span", "", "new window"));
+    win.setAttribute("aria-label", "Open a new window");
+    win.append(icon("new-window", 16));
     win.addEventListener("click", options.onNewWindow);
     nav.append(win);
   }

@@ -42,6 +42,17 @@ function countPanes(layout) {
   return (layout.children || []).reduce((sum, child) => sum + countPanes(child), 0);
 }
 
+// Snippets store the exact keystrokes sent to the shell, including the trailing
+// carriage return that runs the command. The editor hides that CR and re-adds
+// it on change, so a one-line snippet "just runs" when picked from the palette.
+function displaySnippet(text) {
+  return String(text || "").replace(/\r\n?/g, "\n").replace(/\n$/, "");
+}
+function runnableSnippet(text) {
+  const body = String(text || "").replace(/\r\n?/g, "\n");
+  return body ? `${body}\r` : "";
+}
+
 export class Panels {
   constructor(app) {
     this.app = app;
@@ -78,9 +89,14 @@ export class Panels {
   }
 
   close() {
+    // If the user previewed a theme in Settings without saving, put the
+    // committed theme back so closing = cancel.
+    const revert = this._themePreviewDirty ? this.app.appliedTheme() : null;
+    this._themePreviewDirty = false;
     this.open = null;
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
+    if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
     this.app.refocusTerm();
   }
 
@@ -385,6 +401,7 @@ export class Panels {
   }
 
   async _settings() {
+    this._themePreviewDirty = false;
     this.bodyEl.append(make("div", "panel-loading", "Loading your preferences…"));
     const [cfg, inventory] = await Promise.all([
       api.getFullConfig().catch(() => null),
@@ -406,6 +423,7 @@ export class Panels {
     const tabs = [
       ["general", "General", "Appearance and behavior"],
       ["terminals", "Terminals", "Profiles, WSL and commands"],
+      ["snippets", "Snippets", "Palette commands"],
       ["voice", "Voice", "Local dictation"],
       ["advanced", "Advanced", "Raw configuration"],
     ];
@@ -414,6 +432,7 @@ export class Panels {
       content.textContent = "";
       if (this.settingsTab === "general") this._settingsGeneral(content);
       else if (this.settingsTab === "terminals") this._settingsTerminals(content, render);
+      else if (this.settingsTab === "snippets") this._settingsSnippets(content, render);
       else if (this.settingsTab === "voice") this._settingsVoice(content);
       else this._settingsAdvanced(content);
     };
@@ -466,6 +485,7 @@ export class Panels {
       try {
         await api.putConfig(this.settingsDraft);
         await this.app.onConfigSaved();
+        this._themePreviewDirty = false; // committed — nothing to revert on close
         message.textContent = "Saved. New terminals will use these settings.";
       } catch (error) {
         message.textContent = `Could not save (${error.status || "connection error"}).`;
@@ -504,7 +524,7 @@ export class Panels {
     const fields = make("div", "settings-grid two-column");
     fields.append(
       this._field("Terminal font", font, "Use any monospace font installed on this computer."),
-      this._field("Terminal text size", fontSize, "Also adjust anytime with Ctrl+Shift+plus / minus."),
+      this._field("Terminal text size", fontSize, "Also adjust anytime with Alt+plus / minus."),
       this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."),
     );
     group.append(fields);
@@ -565,7 +585,7 @@ export class Panels {
 
   _themePicker(cfg) {
     const wrap = make("div", "theme-picker");
-    wrap.append(make("h4", "theme-picker-title", "App theme"), make("p", "field-hint", "Colors the application chrome and every open terminal when you save."));
+    wrap.append(make("h4", "theme-picker-title", "App theme"), make("p", "field-hint", "Recolors the whole app and every open terminal the instant you pick one. Press Save to keep it."));
     const grid = make("div", "theme-grid");
     const current = () => cfg.theme || DEFAULT_THEME;
     const entries = [
@@ -601,6 +621,8 @@ export class Panels {
         cfg.theme = id;
         for (const other of grid.children) other.classList.toggle("active", other === card);
         editor.hidden = id !== CUSTOM_THEME;
+        this._themePreviewDirty = true;
+        this.app.previewTheme(id, cfg.custom_theme);
       });
       grid.append(card);
       cards.set(id, card);
@@ -615,6 +637,10 @@ export class Panels {
       input.addEventListener("input", () => {
         cfg.custom_theme[key] = input.value.toUpperCase();
         renderStrip(cards.get(CUSTOM_THEME), getTheme(CUSTOM_THEME, cfg.custom_theme));
+        if (cfg.theme === CUSTOM_THEME) {
+          this._themePreviewDirty = true;
+          this.app.previewTheme(CUSTOM_THEME, cfg.custom_theme);
+        }
       });
       editor.append(label);
     }
@@ -789,6 +815,51 @@ export class Panels {
     }
   }
 
+  _settingsSnippets(host, rerender) {
+    const cfg = this.settingsDraft;
+    cfg.snippets ||= [];
+    const heading = this._sectionHeading("Snippets", "Reusable commands, one keystroke away in the command palette (Alt+P).");
+    const add = this._button("", "primary-button compact");
+    add.append(icon("plus", 13), make("span", "", "Add snippet"));
+    add.addEventListener("click", () => {
+      let n = 1;
+      const names = new Set(cfg.snippets.map((snippet) => snippet.name));
+      while (names.has(`Snippet ${n}`)) n += 1;
+      cfg.snippets.push({ name: `Snippet ${n}`, text: "" });
+      rerender();
+      host.lastElementChild?.scrollIntoView({ block: "nearest" });
+    });
+    heading.append(add);
+    host.append(heading);
+    if (!cfg.snippets.length) {
+      const empty = make("div", "profiles-empty");
+      empty.append(make("p", "", "No snippets yet. Add one to keep a command you type often ready to run from the palette."));
+      host.append(empty);
+    }
+    for (const [index, snippet] of cfg.snippets.entries()) {
+      const card = make("article", "snippet-card");
+      const cardHead = make("div", "snippet-card-head");
+      const name = this._textInput(snippet.name, "Snippet name");
+      name.addEventListener("input", () => { snippet.name = name.value; });
+      const remove = this._button("", "text-button danger-text");
+      remove.append(icon("trash", 13), make("span", "", "Remove"));
+      remove.addEventListener("click", () => {
+        cfg.snippets.splice(index, 1);
+        rerender();
+      });
+      cardHead.append(name, remove);
+      const command = make("textarea", "ui-input snippet-text");
+      command.rows = 2;
+      command.spellcheck = false;
+      command.placeholder = "git status";
+      command.value = displaySnippet(snippet.text);
+      command.addEventListener("keydown", (event) => event.stopPropagation());
+      command.addEventListener("input", () => { snippet.text = runnableSnippet(command.value); });
+      card.append(cardHead, this._field("Command", command, "Runs in the focused terminal; a trailing Enter is added for you."));
+      host.append(card);
+    }
+  }
+
   _settingsVoice(host) {
     const cfg = this.settingsDraft;
     cfg.voice ||= { enabled: true, model_size: "small", hotkey: "ctrl+alt+v", language: null };
@@ -833,12 +904,12 @@ export class Panels {
     this.bodyEl.append(intro);
     const grid = make("div", "help-grid");
     const shortcuts = [
-      ["Ctrl Shift P", "Open command palette"], ["Alt Shift H", "Split side by side"],
-      ["Alt Shift V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
-      ["Alt Shift Z", "Focus one pane"], ["Alt Shift W", "Detach current pane"],
+      ["Alt P", "Open command palette"], ["Alt H", "Split side by side"],
+      ["Alt V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
+      ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
+      ["Alt +", "Bigger terminal text"], ["Alt -", "Smaller terminal text"],
+      ["Alt 0", "Reset terminal text size"],
       ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
-      ["Ctrl Shift +", "Bigger terminal text"], ["Ctrl Shift -", "Smaller terminal text"],
-      ["Ctrl Shift 0", "Reset terminal text size"],
     ];
     const keyCard = make("section", "help-card");
     keyCard.append(make("h3", "", "Keyboard shortcuts"));
@@ -850,7 +921,7 @@ export class Panels {
     const conceptCard = make("section", "help-card");
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
-      ["Your keys stay yours", "QuickTerm only claims Ctrl+Shift and Alt+Shift combos. Ctrl+P, Alt+letters and every other key reach the shell untouched."],
+      ["Your keys stay yours", "QuickTerm only claims a handful of Alt combos. Ctrl+C, Ctrl+P, the Alt+B/F word motions and every other key reach the shell untouched."],
       ["Profiles", "Reusable terminal types, folders and start commands."],
       ["Workspaces", "Named arrangements that restore your split layout."],
       ["Live sessions", "Background terminals you can detach and return to."],

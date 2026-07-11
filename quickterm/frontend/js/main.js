@@ -437,6 +437,16 @@ async function boot() {
   app.setFontSize = setFontSize;
   app.fontSize = () => fontSize;
 
+  // Live theme preview: apply the chrome and every terminal's colors instantly
+  // (Settings calls this the moment you click a theme) without persisting.
+  // Reverting is just re-applying the committed config theme, which is what
+  // appliedTheme() reports.
+  app.previewTheme = (themeId, custom) => {
+    applyChromeTheme(themeId, custom || {});
+    layout.setTheme(getTheme(themeId, custom || {}).xterm);
+  };
+  app.appliedTheme = () => ({ theme: cfg.theme, custom_theme: cfg.custom_theme || {} });
+
   initKeys({
     togglePalette: () => { panels.close(); palette.toggle(); },
     paletteOpen: () => palette.open || panels.open !== null,

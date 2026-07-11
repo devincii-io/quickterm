@@ -70,9 +70,11 @@ button .icon { pointer-events: none; }
   flex: none;
   min-height: 70px;
   display: grid;
-  grid-template-columns: minmax(150px, .7fr) minmax(180px, 250px) minmax(340px, 510px) minmax(250px, .8fr);
+  /* col4 (nav) is `max-content` so the labelled buttons keep their real width and
+     can never be overlapped by the greedier launch control; col1 (1fr) eats slack. */
+  grid-template-columns: minmax(130px, 1fr) minmax(170px, 240px) minmax(300px, 520px) max-content;
   align-items: center;
-  gap: 22px;
+  gap: 16px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
@@ -103,8 +105,11 @@ body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid
 .launch-button { width: 86px; display: flex; align-items: center; justify-content: center; gap: 9px; border: 0; border-left: 1px solid #57472e; background: var(--accent); color: #211b12; font-weight: 700; cursor: pointer; transition: background .16s ease; }
 .launch-button:hover { background: var(--accent-hover); }
 .launch-button:active { background: var(--accent-press); }
-.admin-button { width: 82px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-left: 1px solid var(--line-strong); border-radius: 0 10px 10px 0; background: var(--surface-raised); color: var(--text); font-size: 12px; font-weight: 650; cursor: pointer; }
+.admin-button { width: 82px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-left: 1px solid var(--line-strong); border-radius: 0 10px 10px 0; background: var(--surface-raised); color: var(--text); font-size: 12px; font-weight: 650; cursor: pointer; white-space: nowrap; }
 .admin-button:hover { color: var(--accent); background: var(--surface-soft); }
+/* Elevated windows drop the Admin button, so the Open button becomes the
+   right edge of the control and takes the rounded corner. */
+.launch-control.no-admin .launch-button { border-radius: 0 10px 10px 0; }
 
 .app-dropdown { position: relative; min-width: 0; }
 .dropdown-trigger { width: 100%; height: 48px; display: flex; align-items: center; gap: 10px; padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 11px; outline: 0; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
@@ -151,8 +156,9 @@ body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid
 .dropdown-nested .dropdown-item { min-height: 43px; }
 .dropdown-nested .dropdown-item-mark { width: 25px; height: 25px; }
 
-.launcher-nav { justify-self: end; display: flex; align-items: center; gap: 4px; }
-.nav-button { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; text-transform: capitalize; transition: color .16s ease, background .16s ease; }
+.launcher-nav { justify-self: end; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.nav-button { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; text-transform: capitalize; transition: color .16s ease, background .16s ease; }
+.nav-button.icon-only { padding: 9px; }
 .nav-button .icon { color: var(--text-soft); transition: color .16s ease; }
 .nav-button:hover { color: var(--text); background: var(--surface-raised); }
 .nav-button:hover .icon { color: var(--accent); }
@@ -202,7 +208,7 @@ body.zoomed #sb-zoom { display: inline; }
 /* Shared controls */
 
 .primary-button, .secondary-button, .card-open-button, .text-button, .icon-button { appearance: none; border: 0; cursor: pointer; transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease; }
-.primary-button, .secondary-button { min-height: 38px; padding: 0 15px; border-radius: 8px; font-weight: 650; }
+.primary-button, .secondary-button { min-height: 38px; padding: 0 15px; border-radius: 8px; font-weight: 650; white-space: nowrap; }
 .primary-button { background: var(--accent); color: #241d13; }
 .primary-button:hover { background: var(--accent-hover); }
 .primary-button.compact { min-height: 34px; padding: 0 12px; font-size: 12px; }
@@ -384,6 +390,11 @@ body.zoomed #sb-zoom { display: inline; }
 .toggle-row input:checked + .toggle-control::after { transform: translateX(14px); background: var(--accent); }
 .toggle-copy { user-select: none; }
 
+.snippet-card { margin-top: 13px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
+.snippet-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
+.snippet-card-head .ui-input { flex: 1; }
+.snippet-text { height: auto; min-height: 46px; padding: 9px 11px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+
 .voice-callout { display: flex; align-items: center; gap: 18px; margin: 17px 0; padding: 19px; border: 1px solid #3f493f; border-radius: 11px; background: linear-gradient(100deg, #232b27, #242820); }
 .voice-callout h3 { margin: 0; font-size: 14px; }
 .voice-callout p { margin: 5px 0 0; color: var(--muted); line-height: 1.45; }
@@ -415,18 +426,30 @@ body.zoomed #sb-zoom { display: inline; }
 @keyframes voice-pulse { 0%, 100% { opacity: .5; transform: rotate(90deg) scaleX(.75); } 50% { opacity: 1; transform: rotate(90deg) scaleX(1); } }
 @keyframes dropdown-in { from { opacity: 0; transform: translateY(-5px) scale(.99); } to { opacity: 1; transform: none; } }
 
-@media (max-width: 880px) {
-  .launcher { grid-template-columns: auto minmax(160px, 220px) minmax(280px, 1fr) auto; gap: 10px; }
+/* The full launcher (brand text + labelled nav + Admin button) needs ~1000px.
+   Below that, collapse to the compact chrome — icon-only nav, no brand text,
+   no shell descriptor — so nothing can overlap at any width. */
+/* Give the shell name the full launch control before the layout is roomy
+   enough to also show its descriptor ("Built into Windows"). */
+@media (max-width: 1180px) {
+  .launch-value em { display: none; }
+}
+
+@media (max-width: 1040px) {
+  .launcher { grid-template-columns: auto minmax(150px, 210px) minmax(240px, 1fr) max-content; gap: 10px; }
+  .admin-badge > span { display: none; }
+  .admin-badge { padding: 4px 7px; }
   .brand-copy { display: none; }
   .nav-button > span:last-child { display: none; }
+  .launch-button { width: 72px; }
+  .admin-button { width: auto; padding: 0 12px; }
   .dashboard-stats { display: none; }
   .settings-main { grid-template-columns: 180px 1fr; }
 }
 
 @media (max-width: 680px) {
-  .launcher { grid-template-columns: minmax(120px, .7fr) minmax(250px, 1.3fr) auto; padding-inline: 10px; }
+  .launcher { grid-template-columns: minmax(120px, .7fr) minmax(240px, 1.3fr) auto; padding-inline: 10px; }
   .launcher-brand { display: none; }
-  .launcher-nav .nav-button:nth-child(3) { display: none; }
   .panel-overlay { padding: 10px; }
   .panel { width: 100%; height: 96vh; border-radius: 12px; }
   .panel-head { padding-inline: 18px; }
