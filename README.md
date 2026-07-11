@@ -55,7 +55,7 @@ so heavy output (builds, logs) renders fast without making typing laggy.
 
 URLs and file paths printed in a terminal are clickable: hold **Ctrl** and
 click to open them with your default browser or file handler (executables are
-revealed in Explorer, never launched). Closing a pane whose shell is running
+revealed in Explorer, never launched). Detaching a pane whose shell is running
 something (an SSH session, a build, Claude Code, ...) asks for a second press
 before detaching, so one stray keystroke can't lose running work.
 
@@ -73,7 +73,7 @@ arguments), the `Alt+B`/`F` word motions, ...
 | `Alt+Shift+H` / `Alt+Shift+V` | Split pane side by side / top and bottom |
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
-| `Alt+W` | Close pane (detaches — session keeps running; asks twice if something is running) |
+| `Alt+W` | Detach pane (session stays in this workspace; asks twice if something is running) |
 | `Alt+Shift+Plus` / `Alt+Shift+Minus` / `Alt+Shift+0` | Grow / shrink / reset terminal text size |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
 | `Ctrl+Click` | Open a URL or file path printed in the terminal |
@@ -81,6 +81,12 @@ arguments), the `Alt+B`/`F` word motions, ...
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
 set via `keybinding` in the profile config.
+
+Detached sessions appear under **Dashboard → Detached sessions** with **Attach**
+and **Kill** controls. `Alt+K` only offers sessions from the current workspace;
+moving one from another workspace requires the explicit **Attach from another
+workspace…** menu. Scratch follows the same ownership rule during the current
+run, but Scratch and all of its sessions are discarded when QuickTerm quits.
 
 ## Configuration
 

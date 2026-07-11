@@ -191,6 +191,7 @@ def fake_workspace(monkeypatch):
         name: str
         layout: dict
         logo: str | None = None
+        session_ids: list[str] = field(default_factory=list)
 
     store: dict[str, Workspace] = {}
     mod.Workspace = Workspace
@@ -388,7 +389,7 @@ def test_workspace_crud(client, fake_workspace):
     assert r.status_code == 204
     assert client.get("/api/workspaces").json() == ["dev"]
     ws = client.get("/api/workspaces/dev").json()
-    assert ws == {"name": "dev", "layout": layout, "logo": None}
+    assert ws == {"name": "dev", "layout": layout, "logo": None, "session_ids": []}
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert client.get("/api/workspaces").json() == []
@@ -429,6 +430,18 @@ def test_deleting_workspace_spares_attached_sessions(client, manager, fake_works
     assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert manager.killed == [detached.id]  # the attached terminal survives
+
+
+def test_workspace_keeps_and_deletes_detached_session_ids(client, manager, fake_workspace):
+    detached = manager.add_session(name="detached")
+    layout = {"type": "pane", "profile": "powershell"}
+    assert client.put(
+        "/api/workspaces/dev",
+        json={"layout": layout, "session_ids": [detached.id]},
+    ).status_code == 204
+    assert client.get("/api/workspaces/dev").json()["session_ids"] == [detached.id]
+    assert client.delete("/api/workspaces/dev").status_code == 204
+    assert manager.killed == [detached.id]
 
 
 # --- REST: file viewer ------------------------------------------------------
@@ -665,5 +678,4 @@ def test_config_reports_elevated(manager, cfg):
         assert c.get("/api/config").json()["elevated"] is True
     with TestClient(create_app(manager, cfg), base_url=base) as c:
         assert c.get("/api/config").json()["elevated"] is False
-
 

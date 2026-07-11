@@ -86,6 +86,7 @@ async function boot() {
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
   const scratchSessionIds = new Set();
+  let workspaceSessionIds = new Set();
   let statusTimer = null;
   let workspaceSaveTimer = null;
   let transitioning = true;
@@ -93,6 +94,23 @@ async function boot() {
   let workspaceLogo = null;
   let fontSize = clampFont(cfg.font_size);
   let fontSaveTimer = null;
+
+  function ownSession(id) {
+    if (!id) return;
+    if (currentWorkspace) workspaceSessionIds.add(id);
+    else scratchSessionIds.add(id);
+  }
+
+  function forgetSession(id) {
+    workspaceSessionIds.delete(id);
+    scratchSessionIds.delete(id);
+  }
+
+  function ownedSessionIds() {
+    const ids = new Set(currentWorkspace ? workspaceSessionIds : scratchSessionIds);
+    sessionIdsInLayout(layout.serialize(), ids);
+    return ids;
+  }
 
   applyChromeTheme(cfg.theme, cfg.custom_theme);
   if (cfg.elevated) document.body.classList.add("elevated");
@@ -150,7 +168,7 @@ async function boot() {
       if (cwd) pane.cwd = cwd;
       pane.attach(info);
       pane.spawnedFresh = true;
-      if (!currentWorkspace) scratchSessionIds.add(info.id);
+      ownSession(info.id);
       if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
       refreshStatusSoon();
@@ -170,7 +188,7 @@ async function boot() {
       pane.launchSpec = launchSpec;
       pane.attach(info);
       pane.spawnedFresh = true;
-      if (!currentWorkspace) scratchSessionIds.add(info.id);
+      ownSession(info.id);
       if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
       refreshStatusSoon();
@@ -244,6 +262,7 @@ async function boot() {
     if (!pane) return;
     layout.focusPane(pane);
     pane.attach(info);
+    ownSession(info.id);
     api.postFocus(info.id).catch(() => {});
     scheduleWorkspaceSave();
     refreshStatusSoon();
@@ -256,6 +275,7 @@ async function boot() {
       currentWorkspace,
       layout.serialize(),
       workspaceLogo,
+      [...ownedSessionIds()],
     ).catch(() => {});
   }
 
@@ -273,7 +293,8 @@ async function boot() {
     const ids = new Set(scratchSessionIds);
     scratchSessionIds.clear();
     if (currentWorkspace === SCRATCH_WS) {
-      for (const sid of app.attachedSessionIds()) ids.add(sid);
+      for (const sid of workspaceSessionIds) ids.add(sid);
+      workspaceSessionIds.clear();
       await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
     }
     if (ids.size) await api.cleanupSessions([...ids]).catch(() => {});
@@ -286,11 +307,12 @@ async function boot() {
   // app start and exit, so it never survives a run; within a run it survives
   // window close (tray) and can be reopened from the workspace menu.
   const SCRATCH_WS = "scratch";
-  let adoptingScratch = false;
+  let scratchAdoption = null;
   async function maybeAdoptScratch(pane) {
-    if (currentWorkspace || transitioning || adoptingScratch) return;
+    if (currentWorkspace || transitioning) return;
     if (!pane || !pane.userWrote) return;
-    adoptingScratch = true;
+    if (scratchAdoption) return scratchAdoption;
+    scratchAdoption = (async () => {
     try {
       // Single-window guard: two windows share one backend and one scratch.json.
       // If another window already adopted "scratch", stay in pure scratch here
@@ -298,6 +320,8 @@ async function boot() {
       const names = await api.listWorkspaces().catch(() => null);
       if (names && names.includes(SCRATCH_WS)) return;
       currentWorkspace = SCRATCH_WS;
+      workspaceSessionIds = new Set(scratchSessionIds);
+      for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
       scratchSessionIds.clear(); // these sessions are workspace-managed now
       rememberWorkspace(SCRATCH_WS);
       await persistCurrentWorkspace();
@@ -308,8 +332,26 @@ async function boot() {
       buildLauncher();
       refreshStatusSoon();
     } finally {
-      adoptingScratch = false;
+      scratchAdoption = null;
     }
+    })();
+    return scratchAdoption;
+  }
+
+  async function ensureScratchWorkspace() {
+    if (currentWorkspace) return true;
+    const names = await api.listWorkspaces().catch(() => []);
+    if (names.includes(SCRATCH_WS)) return false;
+    currentWorkspace = SCRATCH_WS;
+    workspaceSessionIds = new Set(scratchSessionIds);
+    for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
+    scratchSessionIds.clear();
+    rememberWorkspace(SCRATCH_WS);
+    if (!workspaceNames.includes(SCRATCH_WS)) workspaceNames.push(SCRATCH_WS);
+    workspaceNames.sort((a, b) => a.localeCompare(b));
+    await persistCurrentWorkspace();
+    buildLauncher();
+    return true;
   }
 
   async function restoreWorkspace(name) {
@@ -317,6 +359,8 @@ async function boot() {
     if (!saved || !saved.layout) return false;
     const savedLayout = saved.layout;
     workspaceLogo = saved.logo || null;
+    workspaceSessionIds = new Set(saved.session_ids || []);
+    sessionIdsInLayout(savedLayout, workspaceSessionIds); // old workspace files
     const liveSessions = await api.getSessions().catch(() => []);
     const byId = new Map(liveSessions.filter((session) => session.alive).map((session) => [session.id, session]));
     const panes = layout.restore(savedLayout);
@@ -339,6 +383,7 @@ async function boot() {
   async function startScratch() {
     currentWorkspace = null;
     workspaceLogo = null;
+    workspaceSessionIds = new Set();
     rememberWorkspace(null);
     const pane = layout.restore(null)[0];
     await spawnDefaultInto(pane);
@@ -347,12 +392,20 @@ async function boot() {
 
   async function switchWorkspace(name) {
     if ((name || null) === currentWorkspace) return;
+    const leavingWorkspace = currentWorkspace;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
-    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) {
-      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo).catch(() => {});
-    } else {
-      await discardScratch(); // leaving scratch (fresh or adopted): throw it away
+    if (currentWorkspace) {
+      await workspace.save(
+        currentWorkspace,
+        layout.serialize(),
+        workspaceLogo,
+        [...ownedSessionIds()],
+      ).catch(() => {});
+    } else if (name) {
+      // A never-adopted scratch has no workspace file; leaving it is the one
+      // time we clean up its disposable sessions immediately.
+      await discardScratch();
     }
 
     if (name) {
@@ -361,6 +414,11 @@ async function boot() {
       const restored = await restoreWorkspace(name);
       if (!restored) await startScratch();
     } else {
+      // "New scratch" is explicit replacement. Ordinary workspace switching
+      // preserves the adopted Scratch workspace for the rest of this run.
+      if (leavingWorkspace === SCRATCH_WS) await discardScratch();
+      else if (workspaceNames.includes(SCRATCH_WS)) await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
+      workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
       await startScratch();
     }
     transitioning = false;
@@ -369,9 +427,43 @@ async function boot() {
     scheduleWorkspaceSave();
   }
 
+  async function removeWorkspaceOwnership(name, sessionId) {
+    if (name === currentWorkspace) {
+      workspaceSessionIds.delete(sessionId);
+      await persistCurrentWorkspace();
+      return;
+    }
+    const saved = await workspace.details(name).catch(() => null);
+    if (!saved) return;
+    const ids = new Set(saved.session_ids || []);
+    sessionIdsInLayout(saved.layout, ids);
+    ids.delete(sessionId);
+    await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+  }
+
+  async function moveSessionHere(info, fromWorkspace) {
+    if (!info || !info.id) return;
+    if (!currentWorkspace && !(await ensureScratchWorkspace())) return;
+    if (fromWorkspace && fromWorkspace !== currentWorkspace) {
+      await removeWorkspaceOwnership(fromWorkspace, info.id);
+    }
+    workspaceSessionIds.add(info.id);
+    await persistCurrentWorkspace();
+    attachSession(info);
+  }
+
+  async function killWorkspaceSession(info, workspaceName) {
+    if (!info || !info.id) return;
+    await api.killSession(info.id).catch(() => {});
+    forgetSession(info.id);
+    if (workspaceName) await removeWorkspaceOwnership(workspaceName, info.id);
+    refreshStatusSoon();
+  }
+
   const app = {
     profiles,
     snippets,
+    idleTimeoutSeconds: cfg.idle_timeout_s || 300,
     runProfile,
     runSystemTerminal,
     attachSession,
@@ -387,6 +479,7 @@ async function boot() {
       if (!pane) return;
       const session = pane.session;
       const freshUnused = pane.spawnedFresh && !pane.userWrote;
+      if (session && !freshUnused && !currentWorkspace) await maybeAdoptScratch(pane);
       let busy = false;
       if (session && pane.state === "attached") {
         // Busy guard: a shell with something running inside (ssh, a build,
@@ -398,6 +491,7 @@ async function boot() {
           return;
         }
       }
+      if (freshUnused && session) forgetSession(session.id);
       layout.closePane(pane);
       refreshStatusSoon();
       if (!session || !freshUnused || busy) return;
@@ -415,10 +509,14 @@ async function boot() {
     killFocusedSession: () => {
       const pane = layout.focused;
       if (pane && pane.session) {
+        forgetSession(pane.session.id);
         api.killSession(pane.session.id).catch(() => {});
+        scheduleWorkspaceSave();
         refreshStatusSoon();
       }
     },
+    moveSessionHere,
+    killWorkspaceSession,
     sendSnippet: (snippet) => { if (layout.focused) layout.focused.sendText(snippet.text); },
     validateWorkspaceName: (name) => {
       const cleanName = (name || "").trim();
@@ -439,9 +537,13 @@ async function boot() {
       if (app.validateWorkspaceName(cleanName)) return;
       const wasScratch = !currentWorkspace;
       currentWorkspace = cleanName;
-      if (wasScratch) scratchSessionIds.clear();
+      if (wasScratch) {
+        workspaceSessionIds = new Set(scratchSessionIds);
+        scratchSessionIds.clear();
+      }
+      for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
       rememberWorkspace(cleanName);
-      await workspace.save(cleanName, layout.serialize(), workspaceLogo);
+      await workspace.save(cleanName, layout.serialize(), workspaceLogo, [...ownedSessionIds()]);
       if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
       workspaceNames.sort((a, b) => a.localeCompare(b));
       buildLauncher();
@@ -458,7 +560,8 @@ async function boot() {
         currentWorkspace = null;
         workspaceLogo = null;
         rememberWorkspace(null);
-        for (const sid of app.attachedSessionIds()) scratchSessionIds.add(sid);
+        for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
+        workspaceSessionIds = new Set();
       }
       await api.deleteWorkspace(name).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== name);
@@ -475,13 +578,14 @@ async function boot() {
     setWorkspaceLogo: async (assetId) => {
       if (!currentWorkspace) return false;
       workspaceLogo = assetId || null;
-      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo);
+      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()]);
       buildLauncher();
       return true;
     },
     attachedSessionIds: () => layout.panes()
       .filter((pane) => pane.session && pane.state === "attached")
       .map((pane) => pane.session.id),
+    ownedSessionIds: () => [...ownedSessionIds()],
     refocusTerm: () => { if (layout.focused) layout.focused.setFocused(true); },
     onConfigSaved: async () => {
       const [fresh, freshInventory] = await Promise.all([
@@ -495,6 +599,7 @@ async function boot() {
       terminalInventory = freshInventory;
       app.profiles = profiles;
       app.snippets = snippets;
+      app.idleTimeoutSeconds = fresh.idle_timeout_s || 300;
       applyChromeTheme(fresh.theme, fresh.custom_theme);
       layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
       setFontSize(fresh.font_size, false);
@@ -505,6 +610,7 @@ async function boot() {
   const palette = new Palette(app);
   panels = new Panels(app);
   app.openPanel = (name) => panels.show(name);
+  $("sb-shortcuts").addEventListener("click", () => panels.show("help"));
 
   // Terminal text size: applied live to every pane, persisted to config so it
   // survives restarts and shows up in Settings. Saving is debounced so holding
@@ -613,8 +719,11 @@ async function boot() {
       ? `ws ${currentWorkspace}`
       : "scratch · disposable";
     api.getSessions().then((list) => {
-      const count = list.filter((session) => session.alive).length;
-      $("sb-sessions").textContent = `${count} session${count === 1 ? "" : "s"}`;
+      const owned = new Set(app.ownedSessionIds());
+      const attached = new Set(app.attachedSessionIds());
+      const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
+      const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
+      $("sb-sessions").textContent = `${attached.size} open · ${detached} detached`;
     }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 
@@ -634,7 +743,11 @@ async function boot() {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...api.authHeaders() },
-        body: JSON.stringify({ layout: layout.serialize(), logo: workspaceLogo }),
+        body: JSON.stringify({
+          layout: layout.serialize(),
+          logo: workspaceLogo,
+          session_ids: [...ownedSessionIds()],
+        }),
         keepalive: true,
       }).catch(() => {});
     } else if (scratchSessionIds.size) {
@@ -661,7 +774,10 @@ async function boot() {
       const names = await api.listWorkspaces();
       const workspaceData = await Promise.all(names.map((name) => api.getWorkspace(name).catch(() => null)));
       const preserved = new Set();
-      for (const saved of workspaceData) sessionIdsInLayout(saved && saved.layout, preserved);
+      for (const saved of workspaceData) {
+        sessionIdsInLayout(saved && saved.layout, preserved);
+        for (const sid of (saved && saved.session_ids) || []) preserved.add(sid);
+      }
       for (const sid of app.attachedSessionIds()) preserved.add(sid);
       const sessions = await api.getSessions();
       const orphans = sessions

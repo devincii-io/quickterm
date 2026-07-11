@@ -2,7 +2,7 @@
 // nothing running inside the terminal wants:
 //   Alt+K              command palette
 //   Alt+Z              zoom pane
-//   Alt+W              close pane
+//   Alt+W              detach pane
 //   Alt+Arrows         move focus between panes
 //   Alt+Shift+H        split side by side
 //   Alt+Shift+V        split top and bottom

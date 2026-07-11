@@ -207,8 +207,19 @@ def create_app(
         if not isinstance(body, dict) or "layout" not in body:
             raise HTTPException(400, "body must be {'layout': ...}")
         logo = body.get("logo")
+        raw_session_ids = body.get("session_ids")
+        session_ids = (
+            [sid for sid in raw_session_ids if isinstance(sid, str) and sid]
+            if isinstance(raw_session_ids, list)
+            else sorted(_layout_session_ids(body["layout"]))
+        )
         workspace.save_workspace(
-            workspace.Workspace(name=name, layout=body["layout"], logo=logo)
+            workspace.Workspace(
+                name=name,
+                layout=body["layout"],
+                logo=logo,
+                session_ids=session_ids,
+            )
         )
         return Response(status_code=204)
 
@@ -221,7 +232,9 @@ def create_app(
             # Reap the workspace's background sessions, but never one a client
             # is attached to right now — deleting a workspace must not kill
             # terminals that are open in someone's current layout.
-            for sid in _layout_session_ids(saved.layout):
+            owned = set(getattr(saved, "session_ids", []) or [])
+            owned.update(_layout_session_ids(saved.layout))
+            for sid in owned:
                 if manager.get(sid) is not None and not manager.has_attachments(sid):
                     manager.kill(sid)
         workspace.delete_workspace(name)
@@ -250,6 +263,7 @@ def create_app(
             "elevated": elevated,
             "version": __version__,
             "update_check": cfg.update_check,
+            "idle_timeout_s": cfg.idle_timeout_s,
         }
 
     @app.get("/api/config/full")

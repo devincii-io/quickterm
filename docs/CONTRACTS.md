@@ -152,6 +152,7 @@ class Workspace:
     name: str
     layout: dict   # tree above
     logo: str | None = None
+    session_ids: list[str] = field(default_factory=list)  # includes detached
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
@@ -180,7 +181,7 @@ REST (JSON, under `/api`):
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` |
-| PUT | /api/workspaces/{name} | `{layout, logo?}` → 204 |
+| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?}` → 204 |
 | DELETE | /api/workspaces/{name} | kill sessions referenced by the workspace, delete it → 204 |
 | POST | /api/focus | `{session_id}` → 204 (sets manager.focused_session_id) |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
@@ -297,7 +298,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
 - Keybindings (in addition to palette): Alt+Shift+H/V split, Alt+Z zoom,
-  Alt+W close pane (two-step when the session is busy), Alt+arrows focus move,
+  Alt+W detach pane (two-step when the session is busy), Alt+arrows focus move,
   Alt+Shift+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).
 - Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link

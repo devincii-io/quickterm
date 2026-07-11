@@ -3,8 +3,8 @@
 
 import * as api from "./api.js";
 
-export async function save(name, layoutTree, logo) {
-  await api.putWorkspace(name, layoutTree, logo);
+export async function save(name, layoutTree, logo, sessionIds = []) {
+  await api.putWorkspace(name, layoutTree, logo, sessionIds);
 }
 
 export async function load(name) {

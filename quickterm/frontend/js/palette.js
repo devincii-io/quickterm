@@ -1,8 +1,18 @@
-// Ctrl+P command palette: one input, subsequence fuzzy match over
+// Alt+K command palette: one input, subsequence fuzzy match over
 // profiles, actions, snippets, workspaces, and recent sessions.
 // Two-step prompts (workspace name, file path) reuse the same input.
 
 import * as api from "./api.js";
+
+function layoutSessionIds(node, out = new Set()) {
+  if (!node) return out;
+  if (node.type === "split") {
+    for (const child of node.children || []) layoutSessionIds(child, out);
+  } else if (node.session_id) {
+    out.add(node.session_id);
+  }
+  return out;
+}
 
 function fuzzyScore(query, text) {
   if (!query) return 1;
@@ -32,6 +42,8 @@ export class Palette {
     this.filtered = [];
     this.sel = 0;
     this.prompt = null; // {submit(text)}
+    this.foreignMode = false;
+    this.foreignSessions = [];
 
     const overlay = document.createElement("div");
     overlay.className = "palette-overlay";
@@ -63,6 +75,7 @@ export class Palette {
   async openPalette() {
     this.open = true;
     this.prompt = null;
+    this.foreignMode = false;
     this.overlay.hidden = false;
     this.input.value = "";
     this.input.placeholder = "command / profile / snippet / session";
@@ -74,7 +87,7 @@ export class Palette {
       api.getSessions().catch(() => []),
       api.listWorkspaces().catch(() => []),
     ]);
-    if (!this.open || this.prompt) return;
+    if (!this.open || this.prompt || this.foreignMode) return;
     this.items = this._staticItems();
     for (const name of workspaces) {
       this.items.push({
@@ -83,15 +96,37 @@ export class Palette {
         run: () => this.app.loadWorkspace(name),
       });
     }
+    const workspaceData = await Promise.all(workspaces.map(async (name) => ({
+      name,
+      saved: await api.getWorkspace(name).catch(() => null),
+    })));
+    if (!this.open || this.prompt || this.foreignMode) return;
+    const owners = new Map();
+    const layoutBound = new Set();
+    for (const { name, saved } of workspaceData) {
+      if (!saved) continue;
+      const ids = new Set(saved.session_ids || []);
+      layoutSessionIds(saved.layout, ids);
+      for (const sid of ids) if (!owners.has(sid)) owners.set(sid, name);
+      layoutSessionIds(saved.layout, layoutBound);
+    }
     const attached = new Set(this.app.attachedSessionIds());
+    const current = this.app.currentWorkspace() || "scratch";
+    const currentOwned = new Set(this.app.ownedSessionIds ? this.app.ownedSessionIds() : []);
+    this.foreignSessions = [];
     for (const s of sessions) {
-      if (!s.alive || attached.has(s.id)) continue;
-      this.items.push({
-        kind: "session",
-        label: `attach: ${s.name || s.id}`,
-        hint: s.profile ? `${s.profile} · ${s.id}` : s.id,
-        run: () => this.app.attachSession(s),
-      });
+      if (!s.alive || attached.has(s.id) || s.attachments > 0 || layoutBound.has(s.id)) continue;
+      const owner = owners.get(s.id) || (currentOwned.has(s.id) ? current : null);
+      if (owner === current) {
+        this.items.push({
+          kind: "session",
+          label: `attach here: ${s.name || s.id}`,
+          hint: s.profile ? `${s.profile} · ${s.id}` : s.id,
+          run: () => this.app.attachSession(s),
+        });
+      } else {
+        this.foreignSessions.push({ info: s, workspace: owner || "Unassigned" });
+      }
     }
     this._refilter();
   }
@@ -100,6 +135,7 @@ export class Palette {
     if (!this.open) return;
     this.open = false;
     this.prompt = null;
+    this.foreignMode = false;
     this.overlay.hidden = true;
     this.app.refocusTerm();
   }
@@ -115,8 +151,12 @@ export class Palette {
       { kind: "action", label: "split horizontal", run: () => a.splitH() },
       { kind: "action", label: "split vertical", run: () => a.splitV() },
       { kind: "action", label: "zoom pane", run: () => a.zoom() },
-      { kind: "action", label: "close pane", run: () => a.closePane() },
+      { kind: "action", label: "detach pane", run: () => a.closePane() },
       { kind: "action", label: "kill session", run: () => a.killFocusedSession() },
+      {
+        kind: "action", label: "attach from another workspace…", keepOpen: true,
+        run: () => this._foreignSessionMode(),
+      },
       {
         kind: "action", label: "save workspace…", keepOpen: true,
         run: () => this._promptMode("workspace name", (v) => a.saveWorkspace(v)),
@@ -165,10 +205,32 @@ export class Palette {
     this.input.focus();
   }
 
+  _foreignSessionMode() {
+    this.foreignMode = true;
+    this.prompt = null;
+    this.input.value = "";
+    this.input.placeholder = "Other workspaces — choosing one moves the session here";
+    this.items = [
+      { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
+      ...this.foreignSessions.map(({ info, workspace }) => ({
+        kind: "session",
+        label: `move here & attach: ${info.name || info.id}`,
+        hint: `${workspace} · ${info.id}`,
+        run: () => this.app.moveSessionHere(info, workspace === "Unassigned" ? null : workspace),
+      })),
+    ];
+    this._refilter();
+    this.input.focus();
+  }
+
   _key(e) {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
+      if (this.foreignMode) {
+        this.openPalette();
+        return;
+      }
       this.close();
       return;
     }

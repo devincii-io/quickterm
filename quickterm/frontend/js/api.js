@@ -41,8 +41,12 @@ export const sessionBusy = (id) =>
 export const listWorkspaces = () =>
   req("GET", "/api/workspaces").then((names) => (names || []).filter((name) => !name.startsWith(".")));
 export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURIComponent(name)}`);
-export const putWorkspace = (name, layout, logo) =>
-  req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { layout, logo: logo ?? null });
+export const putWorkspace = (name, layout, logo, sessionIds = []) =>
+  req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
+    layout,
+    logo: logo ?? null,
+    session_ids: [...new Set(sessionIds || [])],
+  });
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
 export const postFocus = (sessionId) => req("POST", "/api/focus", { session_id: sessionId });
 export const getFullConfig = () => req("GET", "/api/config/full");

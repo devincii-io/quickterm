@@ -204,6 +204,8 @@ body.dragging .pane { pointer-events: none; }
 #sb-zoom { display: none; color: var(--accent); }
 body.zoomed #sb-zoom { display: inline; }
 #voice-indicator { min-width: 8px; }
+#sb-shortcuts { border: 0; border-radius: 4px; padding: 3px 6px; background: transparent; color: var(--muted); font: inherit; letter-spacing: inherit; text-transform: uppercase; cursor: pointer; }
+#sb-shortcuts:hover { background: var(--surface-soft); color: var(--accent); }
 
 /* Shared controls */
 
@@ -304,6 +306,24 @@ body.zoomed #sb-zoom { display: inline; }
 .workspace-empty-card p { max-width: 430px; margin: 0; }
 .empty-orbit { width: 33px; height: 20px; border: 1px solid var(--accent); border-radius: 50%; transform: rotate(-18deg); opacity: .65; }
 .empty-orbit::after { content: ""; display: block; width: 5px; height: 5px; margin: -2px 0 0 21px; border-radius: 50%; background: var(--accent); }
+
+.detached-section .section-heading { align-items: flex-start; }
+.detached-groups { display: flex; flex-direction: column; gap: 10px; }
+.detached-group, .other-workspace-sessions { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.detached-group.current { border-color: var(--accent-border); }
+.detached-group h3 { margin: 0; padding: 10px 13px; border-bottom: 1px solid var(--line); color: var(--text-soft); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.detached-session-row { min-height: 58px; display: flex; align-items: center; gap: 14px; padding: 9px 12px; border-bottom: 1px solid rgba(48, 55, 53, .7); }
+.detached-session-row:last-child { border-bottom: 0; }
+.detached-session-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.detached-session-copy strong, .detached-session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detached-session-copy strong { font-size: 12px; }
+.detached-session-copy small { color: var(--muted); font-family: var(--mono); font-size: 9px; }
+.detached-session-actions { flex: none; display: flex; align-items: center; gap: 5px; }
+.secondary-button.compact { min-height: 32px; padding: 0 10px; font-size: 10px; }
+.other-workspace-sessions > summary { padding: 12px 14px; color: var(--text-soft); font-size: 11px; cursor: pointer; }
+.other-workspace-sessions[open] > summary { border-bottom: 1px solid var(--line); color: var(--accent); }
+.other-workspace-sessions .detached-group { margin: 10px; background: var(--surface); }
+.detached-empty { margin: 0; padding: 17px; border: 1px dashed var(--line-strong); border-radius: 10px; color: var(--muted); text-align: center; }
 
 .dashboard-lower { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 25px; }
 .dashboard-list-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }

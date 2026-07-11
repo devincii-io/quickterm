@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+from quickterm.app import _workspace_session_ids
 from quickterm.workspace import (
     Workspace,
     delete_workspace,
@@ -26,12 +29,28 @@ def fake_appdata(tmp_path, monkeypatch):
 
 
 def test_save_load_roundtrip():
-    save_workspace(Workspace(name="main", layout=LAYOUT, logo="brand.svg"))
+    save_workspace(Workspace(name="main", layout=LAYOUT, logo="brand.svg", session_ids=["deadbeef"]))
     ws = load_workspace("main")
     assert ws is not None
     assert ws.name == "main"
     assert ws.layout == LAYOUT
     assert ws.logo == "brand.svg"
+    assert ws.session_ids == ["deadbeef"]
+
+
+def test_old_workspace_infers_session_ownership_from_layout(fake_appdata):
+    path = fake_appdata / "quickterm" / "workspaces"
+    path.mkdir(parents=True)
+    legacy = {"name": "legacy", "layout": {"type": "pane", "session_id": "abc12345"}}
+    (path / "legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+    ws = load_workspace("legacy")
+    assert ws is not None
+    assert ws.session_ids == ["abc12345"]
+
+
+def test_workspace_owned_detached_sessions_are_protected_from_reaping():
+    save_workspace(Workspace(name="dev", layout={"type": "pane"}, session_ids=["detached1"]))
+    assert "detached1" in _workspace_session_ids()
 
 
 def test_list_and_delete():

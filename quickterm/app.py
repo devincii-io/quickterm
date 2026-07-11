@@ -396,6 +396,7 @@ def _workspace_session_ids() -> set[str]:
         ws = workspace.load_workspace(name)
         if ws is not None:
             _collect_session_ids(ws.layout, ids)
+            ids.update(getattr(ws, "session_ids", []) or [])
     return ids
 
 

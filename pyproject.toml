@@ -1,6 +1,6 @@
 [project]
 name = "quickterm"
-version = "1.0.0"
+version = "1.1.0"
 description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"

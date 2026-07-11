@@ -42,6 +42,16 @@ function countPanes(layout) {
   return (layout.children || []).reduce((sum, child) => sum + countPanes(child), 0);
 }
 
+function layoutSessionIds(node, out = new Set()) {
+  if (!node) return out;
+  if (node.type === "split") {
+    for (const child of node.children || []) layoutSessionIds(child, out);
+  } else if (node.session_id) {
+    out.add(node.session_id);
+  }
+  return out;
+}
+
 // Snippets store the exact keystrokes sent to the shell, including the trailing
 // carriage return that runs the command. The editor hides that CR and re-adds
 // it on change, so a one-line snippet "just runs" when picked from the palette.
@@ -351,6 +361,97 @@ export class Panels {
     workspaceSection.append(cards);
     this.bodyEl.append(workspaceSection);
 
+    const sessionSection = make("section", "dashboard-section detached-section");
+    const timeoutMinutes = Math.max(1, Math.round((this.app.idleTimeoutSeconds || 300) / 60));
+    sessionSection.append(this._sectionHeading(
+      "Detached sessions",
+      `Sessions stay with their workspace. Only unassigned sessions expire after ${timeoutMinutes} quiet minutes.`,
+    ));
+    const sessionGroups = make("div", "detached-groups");
+    const currentName = (this.app.currentWorkspace && this.app.currentWorkspace()) || "scratch";
+    const attachedHere = new Set(this.app.attachedSessionIds ? this.app.attachedSessionIds() : []);
+    const liveById = new Map(sessions.filter((session) => session.alive).map((session) => [session.id, session]));
+    const claimed = new Set();
+    const groups = [];
+    for (const workspace of workspaces) {
+      if (!workspace.data) continue;
+      const layoutIds = layoutSessionIds(workspace.data.layout);
+      const owned = new Set(workspace.data.session_ids || []);
+      for (const sid of layoutIds) owned.add(sid);
+      if (workspace.name === currentName && this.app.ownedSessionIds) {
+        for (const sid of this.app.ownedSessionIds()) owned.add(sid);
+      }
+      for (const sid of owned) claimed.add(sid);
+      const detached = [...owned]
+        .filter((sid) => !layoutIds.has(sid) && !attachedHere.has(sid))
+        .map((sid) => liveById.get(sid))
+        .filter((session) => session && !(session.attachments > 0));
+      if (detached.length) groups.push({ name: workspace.name, sessions: detached });
+    }
+    if (!workspaces.some((workspace) => workspace.name === currentName) && this.app.ownedSessionIds) {
+      const owned = new Set(this.app.ownedSessionIds());
+      for (const sid of owned) claimed.add(sid);
+      const detached = [...owned]
+        .filter((sid) => !attachedHere.has(sid))
+        .map((sid) => liveById.get(sid))
+        .filter((session) => session && !(session.attachments > 0));
+      if (detached.length) groups.push({ name: currentName, sessions: detached });
+    }
+    const unassigned = sessions.filter((session) =>
+      session.alive && !(session.attachments > 0) && !claimed.has(session.id));
+    if (unassigned.length) groups.push({ name: "Unassigned", sessions: unassigned });
+
+    const sessionRow = (session, workspaceName, isCurrent) => {
+      const row = make("div", "detached-session-row");
+      const copy = make("div", "detached-session-copy");
+      copy.append(
+        make("strong", "", session.name || session.id),
+        make("small", "", `${session.profile || "terminal"} · ${session.id}`),
+      );
+      const actions = make("div", "detached-session-actions");
+      const attach = this._button(isCurrent ? "Attach" : "Move here & attach", "secondary-button compact");
+      attach.addEventListener("click", async () => {
+        this.close();
+        if (isCurrent) this.app.attachSession(session);
+        else await this.app.moveSessionHere(session, workspaceName === "Unassigned" ? null : workspaceName);
+      });
+      const kill = this._button("Kill", "text-button danger-text");
+      kill.addEventListener("click", async () => {
+        kill.disabled = true;
+        await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
+        if (this.open === "dashboard") this._dashboard(true);
+      });
+      actions.append(attach, kill);
+      row.append(copy, actions);
+      return row;
+    };
+
+    const currentGroup = groups.find((group) => group.name === currentName);
+    if (currentGroup) {
+      const group = make("section", "detached-group current");
+      group.append(make("h3", "", currentName === "scratch" ? "Scratch" : currentName));
+      for (const session of currentGroup.sessions) group.append(sessionRow(session, currentName, true));
+      sessionGroups.append(group);
+    }
+    const otherGroups = groups.filter((group) => group !== currentGroup);
+    if (otherGroups.length) {
+      const other = make("details", "other-workspace-sessions");
+      const count = otherGroups.reduce((sum, group) => sum + group.sessions.length, 0);
+      other.append(make("summary", "", `Other workspaces · ${count} — explicit move required`));
+      for (const item of otherGroups) {
+        const group = make("section", "detached-group");
+        group.append(make("h3", "", item.name));
+        for (const session of item.sessions) group.append(sessionRow(session, item.name, false));
+        other.append(group);
+      }
+      sessionGroups.append(other);
+    }
+    if (!groups.length) {
+      sessionGroups.append(make("p", "detached-empty", "Nothing is detached. Alt+W puts a used terminal here without stopping it."));
+    }
+    sessionSection.append(sessionGroups);
+    this.bodyEl.append(sessionSection);
+
     const lower = make("div", "dashboard-lower");
     const profiles = make("section", "dashboard-list-card");
     profiles.append(this._sectionHeading("Quick launch", "Your terminal profiles"));
@@ -373,8 +474,6 @@ export class Panels {
     }
     profiles.append(profileList);
 
-    // Sessions always live inside a workspace now, so a separate "Live now"
-    // list would only duplicate the workspace cards above.
     lower.append(profiles);
     this.bodyEl.append(lower);
     this.bodyEl.scrollTop = scrollTop;
@@ -980,7 +1079,7 @@ export class Panels {
 
   _help() {
     const intro = make("div", "help-intro");
-    intro.append(make("h2", "", "QuickTerm stays out of your way."), make("p", "", "Terminals continue running in the background. Close a pane to detach it, then reattach from the dashboard whenever you need it."));
+    intro.append(make("h2", "", "Your terminals stay organized."), make("p", "", "Alt+W detaches a used terminal without stopping it. It remains inside the current workspace — including Scratch — and appears on the dashboard with Attach and Kill controls."));
     this.bodyEl.append(intro);
     const grid = make("div", "help-grid");
     const shortcuts = [
@@ -1005,7 +1104,8 @@ export class Panels {
       ["Your keys stay yours", "QuickTerm only claims cold Alt combos. Ctrl+C, Ctrl+P, Alt+V (Claude Code image paste), Alt+P (model switch), the Alt+B/F word motions and every other key reach the shell untouched."],
       ["Profiles", "Reusable terminal types, folders and start commands."],
       ["Workspaces", "Named arrangements that restore your split layout."],
-      ["Sessions live in workspaces", "Every terminal belongs to a workspace (scratch included). Detach a pane and its session keeps running — reopen the workspace or find it in the palette."],
+      ["Sessions live in workspaces", "Detached sessions stay with their workspace and do not expire. The palette only shows the current workspace; moving a session from another workspace requires the explicit menu."],
+      ["Scratch is temporary", "Scratch keeps its detached sessions for this run, but the whole Scratch workspace is deleted when QuickTerm quits."],
       ["Snippets", "Small reusable commands available in the palette."],
     ]) {
       const item = make("div", "concept-row");
