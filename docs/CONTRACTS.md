@@ -376,6 +376,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link
   provider) via POST /api/open. Paste is native-only: Ctrl+Shift+V must never
   be preventDefault'ed (WebView2 denies navigator.clipboard.readText silently).
+- Copy: Ctrl+Shift+C or right-click copies the current selection
+  (navigator.clipboard.writeText, execCommand fallback), with a visible
+  `[copied]` / `[copy failed]` confirmation; copy is read-only and never counts
+  as user input. No selection → the combo passes through to the shell.
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
 - File viewer: `viewer.html?path=...` — separate minimal page, fetches

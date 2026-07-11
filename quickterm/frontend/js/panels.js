@@ -1124,6 +1124,7 @@ export class Panels {
       ["Alt Shift +", "Bigger terminal text"], ["Alt Shift -", "Smaller terminal text"],
       ["Alt Shift 0", "Reset terminal text size"],
       ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
+      ["Right click", "Copy the current selection"],
       ["Ctrl click", "Open a link or file path printed in the terminal"],
     ];
     const keyCard = make("section", "help-card");

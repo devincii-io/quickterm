@@ -201,6 +201,48 @@ export class Pane {
     }, 2000);
   }
 
+  // Copy text (default: the terminal's current selection) to the clipboard,
+  // with a visible confirmation and a legacy fallback for WebView2, where the
+  // async clipboard API is sometimes denied and otherwise fails silently.
+  // Read-only — never counts as user input. Returns whether there was anything
+  // to copy.
+  copySelection(selection = this.term.getSelection()) {
+    if (!selection) return false;
+    const ok = () => this.flashNotice("[copied]");
+    const fallback = () => {
+      if (this._execCopy(selection)) ok();
+      else this.flashNotice("[copy failed]");
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(selection).then(ok, fallback);
+    } else {
+      fallback();
+    }
+    return true;
+  }
+
+  // Deprecated execCommand path: best effort when the async clipboard API is
+  // unavailable or denied. Uses an off-screen textarea and restores terminal
+  // focus afterward.
+  _execCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(ta);
+      try { this.term.focus(); } catch (e) {}
+      return copied;
+    } catch (e) {
+      return false;
+    }
+  }
+
   sendText(text) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited) {
       this._markWrote();
@@ -307,7 +349,7 @@ export class Pane {
       if (key === "c") {
         const selection = this.term.getSelection();
         if (!selection) return true;
-        if (navigator.clipboard) navigator.clipboard.writeText(selection).catch(() => {});
+        this.copySelection(selection);
         e.preventDefault();
         return false;
       }
@@ -327,6 +369,13 @@ export class Pane {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);
+    // Right-click copies the current selection (the Windows Terminal
+    // convention) with a visible confirmation. Paste stays on Ctrl+Shift+V —
+    // WebView2 silently denies programmatic clipboard reads, so there is no
+    // reliable right-click paste to offer here.
+    this.termHost.addEventListener("contextmenu", (e) => {
+      if (this.copySelection()) e.preventDefault();
+    });
     try {
       const gl = new WebglAddon.WebglAddon();
       gl.onContextLoss(() => {
