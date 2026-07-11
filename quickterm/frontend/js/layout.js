@@ -22,6 +22,7 @@ export class LayoutManager {
   newPane(profile, cwd, sessionId, launchSpec, title) {
     return new Pane({
       fontFamily: this.opts.fontFamily,
+      fontSize: this.opts.fontSize,
       theme: this.opts.theme,
       profile: profile || null,
       cwd: cwd || null,
@@ -66,6 +67,11 @@ export class LayoutManager {
   setTheme(theme) {
     this.opts.theme = theme;
     for (const p of this.panes()) p.setTheme(theme);
+  }
+
+  setFontSize(px) {
+    this.opts.fontSize = px;
+    for (const p of this.panes()) p.setFontSize(px);
   }
 
   // ---- structural ops ----

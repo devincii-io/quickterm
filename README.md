@@ -8,10 +8,17 @@ input. Everything stays on your computer. No Electron, accounts, or telemetry.
 
 ### Windows application
 
-Download `QuickTerm-*-windows-x64.zip` from the
-[latest release](https://github.com/devincii-io/quickterm/releases/latest),
-extract it, and run `QuickTerm.exe`. Windows may show a SmartScreen warning
-until release binaries are code-signed.
+Download `QuickTerm-v*-Setup.exe` from the
+[latest release](https://github.com/devincii-io/quickterm/releases/latest) and
+run it. The per-user installer adds Start Menu and optional desktop shortcuts,
+supports in-place upgrades, and includes an uninstaller. It does not require
+administrator access. A portable `.zip` is also available. Windows may show a
+SmartScreen warning until release binaries are code-signed.
+
+QuickTerm opens as its own native desktop window. The launcher detects installed
+PowerShell, Command Prompt, WSL distributions, Git Bash, and Nushell installations.
+Use the **Admin** button beside **Open** to start the selected terminal in a separate
+UAC-approved window; both the window and session are labeled `Administrator`.
 
 ### From source
 
@@ -95,7 +102,8 @@ protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
 xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
 
 Pull requests run the test matrix on Windows and Linux. Tags matching `v*`
-build the standalone Windows executable and publish a GitHub release with
-generated notes and SHA-256 checksums.
+build the standalone Windows executable and per-user installer, then publish a
+GitHub release with a portable archive, Python distributions, generated notes,
+and SHA-256 checksums.
 
 MIT licensed.

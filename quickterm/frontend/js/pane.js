@@ -16,6 +16,7 @@ const FIT_DEBOUNCE_MS = 50;
 export class Pane {
   constructor(opts = {}) {
     this.fontFamily = opts.fontFamily || "JetBrains Mono";
+    this.fontSize = opts.fontSize || 14;
     this.theme = opts.theme || getTheme(DEFAULT_THEME).xterm;
     this.onFocusRequest = opts.onFocusRequest || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
@@ -84,6 +85,14 @@ export class Pane {
     this.theme = theme;
     this.el.style.background = theme.background;
     if (this.term) this.term.options.theme = theme;
+  }
+
+  setFontSize(px) {
+    this.fontSize = px;
+    if (this.term) {
+      this.term.options.fontSize = px;
+      this.fitSoon();
+    }
   }
 
   displayName() {
@@ -201,7 +210,7 @@ export class Pane {
   _createTerm() {
     this.term = new Terminal({
       fontFamily: `"${this.fontFamily}", "JetBrains Mono", "Cascadia Mono", Consolas, monospace`,
-      fontSize: 13,
+      fontSize: this.fontSize,
       cursorBlink: false,
       cursorStyle: "block",
       scrollback: 5000,
@@ -277,7 +286,8 @@ export class Pane {
     this._queue.length = 0;
     this._pending = 0;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`);
+    const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
+    const ws = new WebSocket(url, api.wsSubprotocols());
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => { this._backoff = BACKOFF_MIN; };

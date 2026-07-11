@@ -136,6 +136,8 @@ const SYSTEM_META = {
   bash: { detail: "GNU Bash", mark: "$", args: ["-l"] },
   zsh: { detail: "Z shell", mark: "%", args: ["-l"] },
   fish: { detail: "Friendly shell", mark: "><>", args: ["-l"] },
+  "git-bash": { detail: "Git for Windows shell", mark: "$", args: ["-l"] },
+  nushell: { detail: "Modern structured shell", mark: "nu", args: [] },
 };
 
 function systemChoices(inventory) {
@@ -235,7 +237,17 @@ function buildTerminalControl(options) {
     if (selected.kind === "profile") options.onRunProfile(selected.profile);
     else options.onRunSystem(selected);
   });
-  control.append(root, openButton);
+  const adminButton = element("button", "admin-button");
+  adminButton.type = "button";
+  adminButton.title = "Open in a new administrator window (shows a Windows UAC prompt)";
+  adminButton.setAttribute("aria-label", "Open as administrator");
+  adminButton.append(icon("shield", 15), element("span", "", "Admin"));
+  adminButton.addEventListener("click", () => {
+    if (!selected) return;
+    if (selected.kind === "profile") options.onElevateProfile(selected.profile);
+    else options.onElevateSystem(selected);
+  });
+  control.append(root, openButton, adminButton);
   return control;
 }
 
@@ -263,10 +275,23 @@ export function initLauncher(el, options) {
     element("small", "", options.currentWorkspace || "workspaces"),
   );
   brand.append(brandCopy);
+  if (options.elevated) {
+    const badge = element("span", "admin-badge");
+    badge.append(icon("shield", 13), element("span", "", "Administrator"));
+    brand.append(badge);
+  }
   el.append(brand, buildWorkspaceDropdown(options), buildTerminalControl(options));
 
   const nav = element("nav", "launcher-nav");
   nav.setAttribute("aria-label", "Application");
+  if (options.onNewWindow) {
+    const win = element("button", "nav-button");
+    win.type = "button";
+    win.title = "Open another window sharing these sessions and workspaces";
+    win.append(icon("new-window", 15), element("span", "", "new window"));
+    win.addEventListener("click", options.onNewWindow);
+    nav.append(win);
+  }
   const navIcons = { dashboard: "dashboard", settings: "settings", help: "help" };
   for (const [label, onClick] of options.chrome || []) {
     const button = element("button", "nav-button");
@@ -291,7 +316,10 @@ export function initLauncher(el, options) {
 }
 
 function defaultBrandMark() {
-  const mark = element("span", "brand-mark");
-  mark.append(element("i"), element("i"), element("i"));
-  return mark;
+  const frame = element("span", "brand-logo-frame");
+  const image = element("img", "brand-logo");
+  image.src = "/assets/icon-64.png";
+  image.alt = "";
+  frame.append(image);
+  return frame;
 }

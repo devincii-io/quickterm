@@ -1,9 +1,18 @@
 // Thin fetch wrappers over the REST surface in docs/CONTRACTS.md.
 
+// Loopback auth token, handed to the window through its launch URL fragment
+// (see quickterm/auth.py). Every /api call carries it; WS connections pass it
+// as a subprotocol because browsers cannot set headers on a WebSocket.
+let authToken = "";
+export function setToken(value) { authToken = value || ""; }
+export function token() { return authToken; }
+export function authHeaders() { return authToken ? { "X-QuickTerm-Token": authToken } : {}; }
+export function wsSubprotocols() { return authToken ? [`qtauth.${authToken}`] : []; }
+
 async function req(method, path, body) {
-  const opts = { method };
+  const opts = { method, headers: { ...authHeaders() } };
   if (body !== undefined) {
-    opts.headers = { "Content-Type": "application/json" };
+    opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
@@ -36,6 +45,8 @@ export const postFocus = (sessionId) => req("POST", "/api/focus", { session_id: 
 export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");
+export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
+export const openNewWindow = () => req("POST", "/api/window/new");
 
 // Branding assets (logos). Uploads send the raw file with its own content-type.
 export const assetUrl = (id) => (id ? `/api/assets/${encodeURIComponent(id)}` : null);
@@ -43,7 +54,7 @@ export const deleteAsset = (id) => req("DELETE", `/api/assets/${encodeURICompone
 export async function uploadAsset(file) {
   const res = await fetch("/api/assets", {
     method: "POST",
-    headers: { "Content-Type": file.type || "application/octet-stream" },
+    headers: { "Content-Type": file.type || "application/octet-stream", ...authHeaders() },
     body: file,
   });
   if (!res.ok) {

@@ -487,6 +487,14 @@ export class Panels {
     group.append(make("h3", "settings-group-title", "Appearance"));
     const font = this._textInput(cfg.font_family, "JetBrains Mono");
     font.addEventListener("input", () => { cfg.font_family = font.value; });
+    const fontSize = this._select(
+      Array.from({ length: 13 }, (_, index) => {
+        const px = index + 10;
+        return { value: String(px), label: `${px} px` };
+      }),
+      String(cfg.font_size || 14),
+    );
+    fontSize.addEventListener("change", () => { cfg.font_size = Number(fontSize.value); });
     const profileOptions = [
       { value: "", label: "System default shell" },
       ...(cfg.profiles || []).map((profile) => ({ value: profile.name, label: profile.name })),
@@ -494,7 +502,11 @@ export class Panels {
     const defaultProfile = this._select(profileOptions, cfg.default_profile || "");
     defaultProfile.addEventListener("change", () => { cfg.default_profile = defaultProfile.value; });
     const fields = make("div", "settings-grid two-column");
-    fields.append(this._field("Terminal font", font, "Use any monospace font installed on this computer."), this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."));
+    fields.append(
+      this._field("Terminal font", font, "Use any monospace font installed on this computer."),
+      this._field("Terminal text size", fontSize, "Also adjust anytime with Ctrl+Shift+plus / minus."),
+      this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."),
+    );
     group.append(fields);
     group.append(this._themePicker(cfg));
 
@@ -825,6 +837,8 @@ export class Panels {
       ["Alt Shift V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
       ["Alt Shift Z", "Focus one pane"], ["Alt Shift W", "Detach current pane"],
       ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
+      ["Ctrl Shift +", "Bigger terminal text"], ["Ctrl Shift -", "Smaller terminal text"],
+      ["Ctrl Shift 0", "Reset terminal text size"],
     ];
     const keyCard = make("section", "help-card");
     keyCard.append(make("h3", "", "Keyboard shortcuts"));

@@ -128,8 +128,9 @@ export class Palette {
       {
         kind: "action", label: "open file viewer…", keepOpen: true,
         run: () => this._promptMode("file path", (v) => {
+          const t = api.token();
           window.open(
-            `/viewer?path=${encodeURIComponent(v)}`,
+            `/viewer?path=${encodeURIComponent(v)}${t ? `#t=${encodeURIComponent(t)}` : ""}`,
             "_blank",
             "popup,width=900,height=700",
           );

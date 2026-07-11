@@ -7,6 +7,7 @@
 //   Alt+Shift+Z   zoom pane
 //   Alt+Shift+W   close pane
 //   Alt+Arrows    move focus between panes
+//   Ctrl+Shift++/-/0  grow / shrink / reset terminal text size
 // Everything else (Ctrl+P, Alt+letter readline metas, Ctrl+C, ...) reaches
 // the terminal untouched. Ctrl+Shift+C/V copy/paste is handled inside the
 // terminal itself (pane.js) so it only applies when a terminal is focused.
@@ -22,6 +23,22 @@ export function initKeys(actions) {
       return;
     }
     if (actions.paletteOpen()) return; // palette/panel input owns the keyboard
+
+    // Ctrl+Shift +/-/0 resizes the terminal text (browser zoom stays on Ctrl+/-).
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+      const font = {
+        "+": actions.fontBigger, "=": actions.fontBigger,
+        "-": actions.fontSmaller, _: actions.fontSmaller,
+        "0": actions.fontReset, ")": actions.fontReset,
+      };
+      const handler = font[e.key];
+      if (handler) {
+        e.preventDefault();
+        e.stopPropagation();
+        handler();
+        return;
+      }
+    }
 
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const key = e.key.toLowerCase();

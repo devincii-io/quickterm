@@ -1,13 +1,15 @@
-"""Entry point: version check, config, SessionManager + uvicorn bootstrap, browser launch."""
+"""Entry point: config, backend bootstrap, and native desktop window."""
 
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import logging
 import os
 import shutil
 import subprocess
+import socket
 import sys
 import threading
 import urllib.request
@@ -30,20 +32,42 @@ log = logging.getLogger("quickterm")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="QuickTerm")
+    parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, help="override the local backend port")
+    args = parser.parse_args()
     if sys.platform == "win32":
         _check_windows_build()
     from quickterm.config import load_config
 
     cfg = load_config()
+    if args.port is not None:
+        if not 0 <= args.port <= 65535:
+            parser.error("--port must be between 0 and 65535")
+        cfg.port = _free_port() if args.port == 0 else args.port
+    initial_launch = None
+    elevated = bool(args.elevated_spec)
+    if args.elevated_spec:
+        from quickterm.elevation import decode_spec
+
+        initial_launch = decode_spec(args.elevated_spec)
+        cfg.port = _free_port()
     _setup_logging()
     log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
     # One backend per port: a second launch just summons the existing window.
-    if _already_running(cfg.port):
+    if not elevated and _already_running(cfg.port):
         log.info("QuickTerm already running on port %s; opening window", cfg.port)
-        _launch_window(cfg.port)
+        if sys.platform == "win32":
+            _open_native_window(cfg.port)
+        else:
+            _launch_window(cfg.port)
+        return
+    if sys.platform == "win32":
+        if not _run_desktop(cfg, initial_launch=initial_launch, elevated=elevated):
+            sys.exit("QuickTerm could not create its native desktop window.")
         return
     try:
-        asyncio.run(_serve(cfg))
+        asyncio.run(_serve(cfg, initial_launch=initial_launch))
     except KeyboardInterrupt:
         pass
 
@@ -80,17 +104,44 @@ def _check_windows_build() -> None:
         )
 
 
-async def _serve(cfg: "AppConfig") -> None:
+async def _serve(
+    cfg: "AppConfig",
+    *,
+    ready_event: threading.Event | None = None,
+    launch_window: bool = True,
+    state: dict[str, Any] | None = None,
+    initial_launch: dict[str, Any] | None = None,
+    elevated: bool = False,
+) -> None:
     from quickterm.session_manager import SessionManager
+
+    from quickterm import auth
 
     loop = asyncio.get_running_loop()
     manager = SessionManager(loop, cfg.scrollback_bytes)
-    app = create_app(manager, cfg)
+    app = create_app(manager, cfg, auth.get_or_create_token(), elevated=elevated)
     server = uvicorn.Server(
-        uvicorn.Config(app, host=cfg.host, port=cfg.port, log_level="warning")
+        uvicorn.Config(
+            app,
+            host=cfg.host,
+            port=cfg.port,
+            log_config=None,
+            access_log=False,
+        )
     )
+    if state is not None:
+        state.update(server=server, loop=loop)
     hotkeys = _start_hotkeys(loop, manager, cfg)
-    boot = asyncio.ensure_future(_after_ready(server, manager, cfg))
+    boot = asyncio.ensure_future(
+        _after_ready(
+            server,
+            manager,
+            cfg,
+            ready_event=ready_event,
+            launch_window=launch_window,
+            initial_launch=initial_launch,
+        )
+    )
     reaper = asyncio.ensure_future(_reap_loop(manager, cfg))
     try:
         await server.serve()
@@ -105,11 +156,143 @@ async def _serve(cfg: "AppConfig") -> None:
         manager.shutdown()
 
 
-async def _after_ready(server: uvicorn.Server, manager: "SessionManager", cfg: "AppConfig") -> None:
+def _run_desktop(
+    cfg: "AppConfig",
+    *,
+    initial_launch: dict[str, Any] | None = None,
+    elevated: bool = False,
+) -> bool:
+    """Run the backend beside a native Windows WebView on the main thread."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import webview
+    except ImportError:
+        log.exception("native WebView is unavailable")
+        return False
+
+    ready = threading.Event()
+    state: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            asyncio.run(
+                _serve(
+                    cfg,
+                    ready_event=ready,
+                    launch_window=False,
+                    state=state,
+                    initial_launch=initial_launch,
+                    elevated=elevated,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+            ready.set()
+
+    backend = threading.Thread(target=serve, name="quickterm-server", daemon=True)
+    backend.start()
+    ready.wait(timeout=15)
+    if errors or not ready.is_set():
+        if errors:
+            log.error("backend failed before the desktop window opened", exc_info=errors[0])
+        return False
+
+    title = "QuickTerm - Administrator" if elevated else "QuickTerm"
+    webview.create_window(
+        title,
+        _window_url(cfg.port),
+        width=1280,
+        height=800,
+        min_size=(760, 480),
+        background_color="#171918",
+        text_select=True,
+    )
+    try:
+        from quickterm.config import config_dir
+
+        webview.start(
+            gui="edgechromium",
+            private_mode=False,
+            storage_path=str(config_dir() / "webview"),
+        )
+    finally:
+        server = state.get("server")
+        loop = state.get("loop")
+        if server is not None and loop is not None:
+            loop.call_soon_threadsafe(setattr, server, "should_exit", True)
+        backend.join(timeout=10)
+    return True
+
+
+def _open_native_window(port: int) -> bool:
+    """Open another native view onto an already-running QuickTerm backend."""
+    try:
+        import webview
+    except ImportError:
+        return False
+    webview.create_window(
+        "QuickTerm",
+        _window_url(port),
+        width=1280,
+        height=800,
+        min_size=(760, 480),
+        background_color="#171918",
+        text_select=True,
+    )
+    webview.start(gui="edgechromium", private_mode=False)
+    return True
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _window_url(port: int) -> str:
+    # The auth token rides in the URL fragment: the browser reads it client-side
+    # and it is never sent to the server or written to any log.
+    from quickterm import auth
+
+    return f"http://127.0.0.1:{port}/#t={auth.get_or_create_token()}"
+
+
+def open_new_window() -> bool:
+    """Open another QuickTerm window onto the already-running backend.
+
+    A fresh process detects the live backend (_already_running) and summons a new
+    native view on the same port, so both windows share sessions and workspaces.
+    """
+    argv = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "quickterm.app"]
+    try:
+        subprocess.Popen(argv, close_fds=True)
+        return True
+    except OSError:
+        log.exception("could not open a new QuickTerm window")
+        return False
+
+
+async def _after_ready(
+    server: uvicorn.Server,
+    manager: "SessionManager",
+    cfg: "AppConfig",
+    *,
+    ready_event: threading.Event | None = None,
+    launch_window: bool = True,
+    initial_launch: dict[str, Any] | None = None,
+) -> None:
     while not server.started:
         await asyncio.sleep(0.05)
-    _spawn_autostart(manager, cfg)
-    _launch_window(cfg.port)
+    if initial_launch:
+        manager.spawn(**initial_launch)
+    else:
+        _spawn_autostart(manager, cfg)
+    if ready_event is not None:
+        ready_event.set()
+    if launch_window:
+        _launch_window(cfg.port)
 
 
 async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
@@ -259,7 +442,7 @@ def _find_browser() -> str | None:
 
 
 def _launch_window(port: int) -> None:
-    url = f"http://127.0.0.1:{port}"
+    url = _window_url(port)
     browser = _find_browser()
     try:
         if browser:
