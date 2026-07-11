@@ -18,6 +18,17 @@ def test_config_dir_created(fake_appdata):
     assert d.is_dir()
 
 
+def test_default_cwd_prefers_existing_desktop(monkeypatch, tmp_path):
+    (tmp_path / "Desktop").mkdir()
+    monkeypatch.setattr(cfgmod.Path, "home", staticmethod(lambda: tmp_path))
+    assert cfgmod.default_cwd() == str(tmp_path / "Desktop")
+
+
+def test_default_cwd_falls_back_to_home_without_desktop(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfgmod.Path, "home", staticmethod(lambda: tmp_path))
+    assert cfgmod.default_cwd() == str(tmp_path)
+
+
 def test_load_config_writes_default_file(fake_appdata):
     cfg = load_config()
     path = fake_appdata / "quickterm" / "config.json"
@@ -55,6 +66,29 @@ def test_save_load_roundtrip(fake_appdata):
     assert ubuntu.terminal_type == "wsl"
     assert ubuntu.wsl_distro == "Ubuntu"
     assert ubuntu.start_command == "source .venv/bin/activate"
+
+
+def test_save_rejects_missing_local_profile_folder(fake_appdata):
+    missing = fake_appdata / "does-not-exist"
+    cfg = AppConfig(profiles=[
+        Profile(
+            name="Standard",
+            cmd="powershell.exe",
+            cwd=str(missing),
+            terminal_type="windows-powershell",
+        )
+    ])
+    with pytest.raises(ValueError, match="starting folder does not exist"):
+        save_config(cfg)
+    assert not (fake_appdata / "quickterm" / "config.json").exists()
+
+
+def test_save_allows_wsl_folder_without_local_match(fake_appdata):
+    cfg = AppConfig(profiles=[
+        Profile(name="Ubuntu", cmd="wsl.exe", cwd="~/missing", terminal_type="wsl")
+    ])
+    save_config(cfg)
+    assert (fake_appdata / "quickterm" / "config.json").exists()
 
 
 def test_unknown_keys_ignored(fake_appdata):

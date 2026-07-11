@@ -19,6 +19,10 @@ async function req(method, path, body) {
   if (!res.ok) {
     const err = new Error(`${method} ${path} -> ${res.status}`);
     err.status = res.status;
+    try {
+      const payload = await res.json();
+      if (payload && payload.detail) err.detail = String(payload.detail);
+    } catch (_) { /* response was not JSON */ }
     throw err;
   }
   if (res.status === 204) return null;

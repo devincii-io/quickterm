@@ -56,9 +56,20 @@ class AppConfig:
     voice: VoiceConfig = ...
 
 def config_dir() -> Path
+def default_cwd() -> str
 def load_config() -> AppConfig
 def save_config(cfg: AppConfig) -> None
 ```
+
+Saving validates that every non-WSL profile's configured starting folder is an
+existing local directory. WSL profiles accept Linux paths and are not checked
+against the Windows filesystem.
+
+`default_cwd()` is the starting folder for any spawn that specifies no `cwd`
+(profiles without one, detected system shells, splits). It prefers the user's
+Desktop, then home, then the process cwd — never the install directory, which
+is where a frozen exe's `os.getcwd()` would otherwise land. `SessionManager.spawn`
+applies it, so every PTY backend receives a concrete folder.
 
 ## quickterm/pty_session.py
 

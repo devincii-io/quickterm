@@ -9,6 +9,8 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 
+from .config import default_cwd
+
 if os.name == "nt":
     from .pty_session import PtySession, pids_with_children
 else:
@@ -127,7 +129,7 @@ class SessionManager:
         session.pty = PtySession(
             cmd,
             list(args or []),
-            cwd,
+            cwd or default_cwd(),
             dict(env or {}),
             cols,
             rows,

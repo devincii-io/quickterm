@@ -173,8 +173,8 @@ async function boot() {
       scheduleWorkspaceSave();
       refreshStatusSoon();
       return info;
-    } catch (_) {
-      pane.showNotice(`[spawn failed: ${profileName}]`);
+    } catch (error) {
+      pane.showNotice(`[${error.detail || `spawn failed: ${profileName}`}]`);
       return null;
     }
   }
@@ -193,8 +193,8 @@ async function boot() {
       scheduleWorkspaceSave();
       refreshStatusSoon();
       return info;
-    } catch (_) {
-      pane.showNotice(`[spawn failed: ${launchSpec.name}]`);
+    } catch (error) {
+      pane.showNotice(`[${error.detail || `spawn failed: ${launchSpec.name}`}]`);
       return null;
     }
   }

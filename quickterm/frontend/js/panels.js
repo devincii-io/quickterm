@@ -575,7 +575,8 @@ export class Panels {
         this._themePreviewDirty = false; // committed — nothing to revert on close
         message.textContent = "Saved. New terminals will use these settings.";
       } catch (error) {
-        message.textContent = `Could not save (${error.status || "connection error"}).`;
+        message.textContent = error.detail || `Could not save (${error.status || "connection error"}).`;
+        message.title = message.textContent;
         message.classList.add("error");
       } finally {
         save.disabled = false;
@@ -880,7 +881,7 @@ export class Panels {
       }
       const cwd = this._textInput(profile.cwd, inferTerminalType(profile) === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
       cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-      fields.append(this._field("Starting folder", cwd, inferTerminalType(profile) === "wsl" ? "Use a Linux path for WSL." : "Leave empty to use the current folder."));
+      fields.append(this._field("Starting folder", cwd, inferTerminalType(profile) === "wsl" ? "Use a Linux path for WSL." : "Leave empty to start in your Desktop folder."));
       if (inferTerminalType(profile) !== "custom") {
         const start = this._textInput(profile.start_command, "Optional, e.g. uv run dev");
         start.addEventListener("input", () => { profile.start_command = start.value || null; });

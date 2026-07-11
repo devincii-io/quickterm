@@ -73,6 +73,26 @@ class AppConfig:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
 
 
+def default_cwd() -> str:
+    """Starting folder for terminals that don't specify one.
+
+    A frozen exe's process cwd is the install directory — a poor place to drop
+    the user. Prefer the Desktop, then the home directory, then fall back to the
+    process cwd. Never let a stat error leak out of a spawn path.
+    """
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):
+        return os.getcwd()
+    for candidate in (home / "Desktop", home):
+        try:
+            if candidate.is_dir():
+                return str(candidate)
+        except OSError:
+            continue
+    return os.getcwd()
+
+
 def config_dir() -> Path:
     base = os.environ.get("APPDATA")
     if not base:
@@ -106,6 +126,19 @@ def config_from_dict(raw: dict) -> AppConfig:
     return AppConfig(**kwargs)
 
 
+def validate_config(cfg: AppConfig) -> None:
+    for profile in cfg.profiles:
+        cwd = (profile.cwd or "").strip()
+        if not cwd or profile.terminal_type == "wsl":
+            continue
+        resolved = Path(os.path.expandvars(os.path.expanduser(cwd)))
+        if not resolved.is_dir():
+            name = profile.name.strip() or "Untitled terminal"
+            raise ValueError(
+                f'Terminal profile "{name}": starting folder does not exist: {cwd}'
+            )
+
+
 def load_config() -> AppConfig:
     path = config_dir() / "config.json"
     if not path.exists():
@@ -116,6 +149,7 @@ def load_config() -> AppConfig:
 
 
 def save_config(cfg: AppConfig) -> None:
+    validate_config(cfg)
     path = config_dir() / "config.json"
     path.write_text(
         json.dumps(dataclasses.asdict(cfg), indent=2), encoding="utf-8"

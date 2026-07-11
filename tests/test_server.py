@@ -165,11 +165,13 @@ def manager() -> FakeSessionManager:
 
 
 @pytest.fixture
-def cfg() -> FakeConfig:
+def cfg(tmp_path) -> FakeConfig:
+    profile_cwd = tmp_path / "dev"
+    profile_cwd.mkdir()
     return FakeConfig(
         profiles=[
             FakeProfile(name="powershell", cmd="powershell.exe", args=["-NoLogo"]),
-            FakeProfile(name="claude", cmd="claude", cwd="C:/dev", env={"X": "1"}),
+            FakeProfile(name="claude", cmd="claude", cwd=str(profile_cwd), env={"X": "1"}),
         ],
         snippets=[FakeSnippet(name="greet", text="echo hi\n")],
     )
@@ -240,11 +242,11 @@ def test_spawn_with_explicit_cmd(client, manager):
     assert manager.last_spawn["args"] == ["/c", "echo hi"]
 
 
-def test_spawn_resolves_profile(client, manager):
+def test_spawn_resolves_profile(client, manager, cfg):
     r = client.post("/api/sessions", json={"profile": "claude"})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "claude"
-    assert manager.last_spawn["cwd"] == "C:/dev"
+    assert manager.last_spawn["cwd"] == cfg.profiles[1].cwd
     assert manager.last_spawn["env"] == {"X": "1"}
     assert r.json()["profile"] == "claude"
 
@@ -255,19 +257,21 @@ def test_spawn_cmd_overrides_profile(client, manager):
     assert manager.last_spawn["cmd"] == "other.exe"
 
 
-def test_spawn_profile_start_command(client, manager, cfg):
+def test_spawn_profile_start_command(client, manager, cfg, tmp_path):
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
     cfg.profiles.append(FakeProfile(
         name="project",
         cmd="pwsh.exe",
         terminal_type="powershell-core",
         start_command="uv run dev",
-        cwd="C:/dev/project",
+        cwd=str(project_cwd),
     ))
     r = client.post("/api/sessions", json={"profile": "project"})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "pwsh.exe"
     assert manager.last_spawn["args"] == ["-NoLogo", "-NoExit", "-Command", "uv run dev"]
-    assert manager.last_spawn["cwd"] == "C:/dev/project"
+    assert manager.last_spawn["cwd"] == str(project_cwd)
 
 
 def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg):
@@ -295,6 +299,17 @@ def test_spawn_unknown_profile_404(client):
 
 def test_spawn_requires_cmd_or_profile(client):
     assert client.post("/api/sessions", json={}).status_code == 400
+
+
+def test_spawn_rejects_missing_local_folder(client, manager, tmp_path):
+    missing = tmp_path / "does-not-exist"
+    response = client.post(
+        "/api/sessions",
+        json={"cmd": "cmd.exe", "cwd": str(missing), "name": "Standard"},
+    )
+    assert response.status_code == 400
+    assert "starting folder does not exist" in response.json()["detail"]
+    assert manager.list() == []
 
 
 def test_kill_session(client, manager):
@@ -356,7 +371,12 @@ def fake_config_mod(monkeypatch):
         return cfg
 
     mod.config_from_dict = config_from_dict
-    mod.save_config = saved.append
+    def save_config(cfg):
+        if cfg.default_profile == "save-explode":
+            raise ValueError("bad profile folder")
+        saved.append(cfg)
+
+    mod.save_config = save_config
     monkeypatch.setitem(sys.modules, "quickterm.config", mod)
     return saved
 
@@ -376,6 +396,13 @@ def test_full_config_roundtrip(client, cfg, fake_config_mod):
 def test_put_config_invalid_400(client, fake_config_mod):
     r = client.put("/api/config", json={"font_family": "explode"})
     assert r.status_code == 400
+    assert not fake_config_mod
+
+
+def test_put_config_maps_save_validation_to_400(client, fake_config_mod):
+    response = client.put("/api/config", json={"default_profile": "save-explode"})
+    assert response.status_code == 400
+    assert "bad profile folder" in response.json()["detail"]
     assert not fake_config_mod
 
 
@@ -678,4 +705,3 @@ def test_config_reports_elevated(manager, cfg):
         assert c.get("/api/config").json()["elevated"] is True
     with TestClient(create_app(manager, cfg), base_url=base) as c:
         assert c.get("/api/config").json()["elevated"] is False
-

@@ -136,6 +136,15 @@ def create_app(
             env = env if env is not None else dict(prof.env)
         if not cmd:
             raise HTTPException(400, "either 'profile' or 'cmd' is required")
+        if cwd:
+            resolved_cwd = Path(os.path.expandvars(os.path.expanduser(str(cwd))))
+            if not resolved_cwd.is_dir():
+                label = profile_name or body.get("name") or cmd
+                raise HTTPException(
+                    400,
+                    f'Terminal profile "{label}": starting folder does not exist: {cwd}',
+                )
+            cwd = str(resolved_cwd)
         info = manager.spawn(
             name=body.get("name"),
             profile=profile_name,
@@ -344,9 +353,9 @@ def create_app(
 
         try:
             new_cfg = config_mod.config_from_dict(await request.json())
+            config_mod.save_config(new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
-        config_mod.save_config(new_cfg)
         # apply live-updatable fields in place; port/hotkeys need a restart
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",

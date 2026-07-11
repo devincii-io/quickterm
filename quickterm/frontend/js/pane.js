@@ -253,6 +253,10 @@ export class Pane {
     this._renderTab();
     if (!this.term) this._createTerm();
     this._connect();
+    // A split focuses the new pane before its terminal exists, so setFocused()
+    // could not focus the xterm textarea (it was still null). Re-apply now that
+    // the terminal is live, or the freshly-split pane swallows no keystrokes.
+    if (this.el.classList.contains("focused")) this.term.focus();
     this.onStateChange(this);
   }
 
