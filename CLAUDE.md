@@ -83,18 +83,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Frontend is served with `Cache-Control: no-cache` — required, WebView2
   otherwise serves stale JS/CSS after updates.
 
-## Release workflow
+## Local release workflow
 
 Version lives in THREE places that must agree: `quickterm/__init__.py`,
 `pyproject.toml`, and (derived) `uv.lock` — bump the first two, then
-`uv lock`. The tag must be exactly `v<__version__>`; the Release workflow
-(`.github/workflows/release.yml`) checks this, then builds EXE + Inno Setup
-installer + portable zip + sdist/wheel + SHA256SUMS and publishes the release
-with generated notes.
-
-**If GitHub Actions is unavailable** (the account hit a billing lock in
-2026-07 — check `gh run list` after pushing a tag), replicate the workflow
-locally; artifact names must match exactly, README/installer links depend on
+`uv lock`. The tag must be exactly `v<__version__>`. Build releases locally;
+artifact names must match exactly because README and installer links depend on
 them:
 
 ```

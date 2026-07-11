@@ -126,9 +126,8 @@ Architecture: one backend process owns all PTYs (`pty_session.py` /
 protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
 xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
 
-Pull requests run the test matrix on Windows and Linux. Tags matching `v*`
-build the standalone Windows executable and per-user installer, then publish a
-GitHub release with a portable archive, Python distributions, generated notes,
-and SHA-256 checksums.
+Run the verification commands above before merging changes. Release artifacts
+are built locally: the standalone Windows executable, per-user installer,
+portable archive, Python distributions, generated notes, and SHA-256 checksums.
 
 MIT licensed.
