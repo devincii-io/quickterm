@@ -3,7 +3,7 @@
 #endif
 
 #define AppName "QuickTerm"
-#define AppPublisher "Devin Isaac"
+#define AppPublisher "Devin Isaac Worbis"
 #define AppUrl "https://github.com/devincii-io/quickterm"
 #define AppExeName "QuickTerm.exe"
 

@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"
-authors = [{ name = "Devin Isaac" }]
+authors = [{ name = "Devin Isaac Worbis" }]
 keywords = ["terminal", "workspace", "conpty", "wsl", "pty"]
 classifiers = [
     "Development Status :: 3 - Alpha",
