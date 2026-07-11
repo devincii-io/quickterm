@@ -192,31 +192,39 @@ class HotkeyManager:
 
 
 def toggle_window(title_substring: str = "QuickTerm") -> None:
-    """Quake-style summon/hide: minimize if foreground, else restore + focus. Best-effort."""
+    """Quake-style summon/hide: minimize if foreground, else restore + focus.
+
+    Also finds a window hidden to the tray (not just minimized), so the summon
+    hotkey can bring QuickTerm back after its close-to-tray. Best-effort.
+    """
     try:
         user32 = ctypes.windll.user32
         user32.GetForegroundWindow.restype = wintypes.HWND
-        found: list[int] = []
+        visible: list[int] = []
+        hidden: list[int] = []
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def _enum(hwnd, _lparam):
-            if user32.IsWindowVisible(hwnd):
-                n = user32.GetWindowTextLengthW(hwnd)
-                if n:
-                    buf = ctypes.create_unicode_buffer(n + 1)
-                    user32.GetWindowTextW(hwnd, buf, n + 1)
-                    if title_substring in buf.value:
-                        found.append(hwnd)
-                        return False  # stop enumeration
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if title_substring in buf.value:
+                    (visible if user32.IsWindowVisible(hwnd) else hidden).append(hwnd)
+                    if visible:
+                        return False  # a visible match wins; stop enumeration
             return True
 
         user32.EnumWindows(_enum, 0)
-        if not found:
-            return
-        hwnd = found[0]
-        if user32.GetForegroundWindow() == hwnd:
-            user32.ShowWindow(hwnd, _SW_MINIMIZE)
-        else:
+        if visible:
+            hwnd = visible[0]
+            if user32.GetForegroundWindow() == hwnd:
+                user32.ShowWindow(hwnd, _SW_MINIMIZE)
+            else:
+                user32.ShowWindow(hwnd, _SW_RESTORE)
+                user32.SetForegroundWindow(hwnd)
+        elif hidden:
+            hwnd = hidden[0]  # tray-hidden: summon it back
             user32.ShowWindow(hwnd, _SW_RESTORE)
             user32.SetForegroundWindow(hwnd)
     except Exception:

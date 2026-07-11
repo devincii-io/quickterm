@@ -130,7 +130,7 @@ async def _serve(
         )
     )
     if state is not None:
-        state.update(server=server, loop=loop)
+        state.update(server=server, loop=loop, manager=manager)
     hotkeys = _start_hotkeys(loop, manager, cfg)
     boot = asyncio.ensure_future(
         _after_ready(
@@ -154,6 +154,18 @@ async def _serve(
             except Exception:
                 pass
         manager.shutdown()
+
+
+def _sessions_worth_keeping(manager: Any) -> bool:
+    """Closing the window only hides to tray when quitting would lose real
+    work: a live session the user actually typed into. Untouched shells (a
+    fresh scratch pane, idle autostarts) are not worth staying resident for —
+    quit outright and free the RAM.
+    """
+    try:
+        return any(i.alive and getattr(i, "touched", False) for i in manager.list())
+    except Exception:
+        return False
 
 
 def _run_desktop(
@@ -200,7 +212,7 @@ def _run_desktop(
         return False
 
     title = "QuickTerm - Administrator" if elevated else "QuickTerm"
-    webview.create_window(
+    window = webview.create_window(
         title,
         _window_url(cfg.port),
         width=1280,
@@ -209,6 +221,39 @@ def _run_desktop(
         background_color="#171918",
         text_select=True,
     )
+
+    # Hide-to-tray: closing the primary window keeps terminals alive in the
+    # background when they hold real work; otherwise it quits. Elevated windows
+    # always quit on close — a resident admin backend would be a foot-gun.
+    quitting = threading.Event()
+    tray = None
+    if not elevated:
+        try:
+            from quickterm.tray import TrayIcon
+
+            tray = TrayIcon(
+                on_open=lambda: _show_window(window),
+                on_quit=lambda: _quit_window(window, quitting),
+            )
+            tray.start()
+        except Exception:
+            log.exception("tray unavailable; window close will quit")
+            tray = None
+
+    def on_closing() -> bool:
+        if quitting.is_set() or tray is None:
+            return True
+        if not _sessions_worth_keeping(state.get("manager")):
+            return True  # nothing running worth the RAM: real quit
+        window.hide()
+        tray.balloon_once(
+            "QuickTerm is still running",
+            "Your terminals keep running in the background. "
+            "Click the tray icon to reopen, right-click it to quit.",
+        )
+        return False  # cancel the close; we merely hid
+
+    window.events.closing += on_closing
     try:
         from quickterm.config import config_dir
 
@@ -218,12 +263,30 @@ def _run_desktop(
             storage_path=str(config_dir() / "webview"),
         )
     finally:
+        if tray is not None:
+            tray.dispose()
         server = state.get("server")
         loop = state.get("loop")
         if server is not None and loop is not None:
             loop.call_soon_threadsafe(setattr, server, "should_exit", True)
         backend.join(timeout=10)
     return True
+
+
+def _show_window(window: Any) -> None:
+    try:
+        window.show()
+        window.restore()
+    except Exception:
+        log.debug("tray show failed", exc_info=True)
+
+
+def _quit_window(window: Any, quitting: threading.Event) -> None:
+    quitting.set()  # checked by on_closing: this close is a real quit
+    try:
+        window.destroy()
+    except Exception:
+        log.debug("tray quit failed", exc_info=True)
 
 
 def _open_native_window(port: int) -> bool:
