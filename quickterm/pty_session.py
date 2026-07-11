@@ -3,6 +3,11 @@
 Bytes path: low-level winpty.PTY only exposes str reads (decoded from ConPTY's
 UTF-8 stream), so we re-encode to UTF-8 — a lossless round-trip here.
 
+Throughput: the reader coalesces every chunk immediately available into a single
+callback (one thread-hop / ring edit / WS frame per burst instead of per read),
+and writes go through a dedicated writer thread so a full stdin pipe (a big
+paste, a slow consumer) can never block the asyncio loop.
+
 Exit detection: winpty's blocking read reports EOF ~8s late and isalive() lags
 ~3s, so a watcher thread waits on the real process handle, then unblocks the
 reader via cancel_io() once trailing output has drained.
@@ -12,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import logging
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -29,6 +36,14 @@ _INFINITE = 0xFFFFFFFF
 _DRAIN_IDLE_S = 0.15
 _DRAIN_MAX_S = 1.0
 _EXIT_WAIT_S = 10.0
+# Upper bound on how much immediately-available output one read callback carries.
+# Bounded so a huge burst still yields to the loop (keeps input responsive).
+_READ_COALESCE_CHARS = 128 * 1024
+
+log = logging.getLogger("quickterm.pty")
+# Opt-in raw-I/O tracing to pin down "wrong key" reports: logs the exact bytes
+# entering the PTY and the size of each output burst. Off unless the env var set.
+_DEBUG_IO = bool(os.environ.get("QUICKTERM_DEBUG_IO"))
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -70,18 +85,67 @@ class PtySession:
             _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, self._pid
         )
 
+        # Writes are handed to a dedicated thread so a blocking winpty.write
+        # (stdin pipe full) never stalls the event loop. None is the stop token.
+        self._write_q: queue.Queue[bytes | None] = queue.Queue()
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{self._pid}", daemon=True
         )
         self._watcher = threading.Thread(
             target=self._watch_exit, name=f"pty-watch-{self._pid}", daemon=True
         )
+        self._writer = threading.Thread(
+            target=self._write_loop, name=f"pty-writer-{self._pid}", daemon=True
+        )
         self._reader.start()
         self._watcher.start()
+        self._writer.start()
 
     def write(self, data: bytes) -> None:
-        # winpty write() takes str; input is UTF-8 keyboard bytes
-        self._pty.write(data.decode("utf-8", errors="replace"))
+        # Enqueue only — the writer thread does the (possibly blocking) PTY write.
+        self._write_q.put(data)
+
+    def _write_loop(self) -> None:
+        while True:
+            item = self._write_q.get()
+            if item is None:
+                return
+            parts = [item]
+            # Coalesce keystrokes/paste chunks that piled up into one PTY write.
+            try:
+                while True:
+                    nxt = self._write_q.get_nowait()
+                    if nxt is None:
+                        self._do_write(b"".join(parts))
+                        return
+                    parts.append(nxt)
+            except queue.Empty:
+                pass
+            self._do_write(b"".join(parts))
+
+    def _do_write(self, data: bytes) -> None:
+        if _DEBUG_IO:
+            log.info("pty %s <- in %r", self._pid, data)
+        # winpty.write takes str. Valid UTF-8 (all normal keyboard input) is
+        # lossless via strict decode; rare 8-bit input (onBinary) survives as
+        # surrogates instead of being mangled to U+FFFD by errors="replace".
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="surrogateescape")
+        try:
+            self._pty.write(text)
+        except Exception:
+            try:
+                self._pty.write(data.decode("utf-8", errors="replace"))
+            except Exception:
+                pass  # dead pty / unencodable: drop this write
+
+    def _stop_writer(self) -> None:
+        try:
+            self._write_q.put_nowait(None)
+        except Exception:
+            pass
 
     def resize(self, cols: int, rows: int) -> None:
         try:
@@ -108,6 +172,7 @@ class PtySession:
                 capture_output=True,
                 creationflags=_CREATE_NO_WINDOW,
             )
+        self._stop_writer()
         # watcher notices death, drains, then cancel_io() closes out the reader
 
     def _watch_exit(self) -> None:
@@ -147,7 +212,23 @@ class PtySession:
                 break
             if chunk:
                 self._last_read = time.monotonic()
-                self._post(self._on_output, chunk.encode("utf-8"))
+                # Drain everything already buffered into one callback so a burst
+                # is one thread-hop / ring edit / WS frame, not one per read.
+                parts = [chunk]
+                total = len(chunk)
+                while total < _READ_COALESCE_CHARS:
+                    try:
+                        more = pty.read(blocking=False)  # "" when nothing ready
+                    except Exception:
+                        break
+                    if not more:
+                        break
+                    parts.append(more)
+                    total += len(more)
+                data = "".join(parts).encode("utf-8")
+                if _DEBUG_IO:
+                    log.info("pty %s -> out %d bytes", self._pid, len(data))
+                self._post(self._on_output, data)
             try:
                 if pty.iseof():
                     break
@@ -162,6 +243,7 @@ class PtySession:
                 code = None
         self._exit_code = code if code is not None else 1
         self._exited.set()
+        self._stop_writer()  # release the writer thread on natural exit
         self._post(self._on_exit, self._exit_code)
 
     def _post(self, cb: Callable, arg) -> None:

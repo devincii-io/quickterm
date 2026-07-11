@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 
 if os.name == "nt":
@@ -45,19 +46,33 @@ class Session:
         self.info = info
         self.pty: PtySession | None = None
         self._cap = cap
-        self._ring = bytearray()
+        # Scrollback ring as a deque of chunks + running byte count: appending
+        # and trimming cost O(chunk), not O(cap) — the old bytearray slice
+        # memmoved up to `cap` bytes on every write under sustained output.
+        self._chunks: deque[bytes] = deque()
+        self._ring_bytes = 0
         self._ring_cols = info.cols
         self._ring_rows = info.rows
         self._attachments: set[Attachment] = set()
         self.last_activity = time.monotonic()  # updated on output and input
 
     def scrollback(self) -> tuple[bytes, int, int]:
-        return bytes(self._ring), self._ring_cols, self._ring_rows
+        # Joined only here, at attach time (rare) — not on the hot output path.
+        return b"".join(self._chunks), self._ring_cols, self._ring_rows
 
     def _record(self, data: bytes) -> None:
-        self._ring += data
-        if len(self._ring) > self._cap:
-            del self._ring[: len(self._ring) - self._cap]
+        if data:
+            self._chunks.append(data)
+            self._ring_bytes += len(data)
+            while self._ring_bytes > self._cap:
+                oldest = self._chunks[0]
+                overflow = self._ring_bytes - self._cap
+                if len(oldest) <= overflow:
+                    self._chunks.popleft()
+                    self._ring_bytes -= len(oldest)
+                else:
+                    self._chunks[0] = oldest[overflow:]  # trim front of oldest
+                    self._ring_bytes -= overflow
         self._ring_cols, self._ring_rows = self.info.cols, self.info.rows
 
     def _fanout(self, item: bytes | None) -> None:

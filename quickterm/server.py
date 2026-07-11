@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 
 FILE_READ_CAP = 512 * 1024
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+# Max bytes merged into one live output frame. Bounds per-send loop time so the
+# input pump interleaves; big enough to collapse bursts into few frames.
+_SEND_COALESCE_BYTES = 128 * 1024
 
 
 def _asdict(obj: Any) -> Any:
@@ -571,11 +574,33 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
     while True:
         chunk = await attachment.queue.get()
         if chunk is None:
-            code = session.info.exit_code
-            await ws.send_text(json.dumps({"type": "exit", "code": code}))
-            await ws.close()
+            await _send_exit(ws, session)
             return
-        await ws.send_bytes(chunk)
+        # Coalesce whatever else is already queued into a single frame (capped so
+        # one send can't monopolize the loop and starve input). Raw bytes stay a
+        # plain byte stream to the client, so this is wire-compatible.
+        parts = [chunk]
+        total = len(chunk)
+        exited = False
+        while total < _SEND_COALESCE_BYTES:
+            try:
+                item = attachment.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is None:
+                exited = True
+                break
+            parts.append(item)
+            total += len(item)
+        await ws.send_bytes(parts[0] if len(parts) == 1 else b"".join(parts))
+        if exited:
+            await _send_exit(ws, session)
+            return
+
+
+async def _send_exit(ws: WebSocket, session: Any) -> None:
+    await ws.send_text(json.dumps({"type": "exit", "code": session.info.exit_code}))
+    await ws.close()
 
 
 async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> None:

@@ -483,9 +483,12 @@ def test_ws_attach_protocol(client, manager):
         assert ws.receive_bytes() == b"old-output"
         # 3. replay_done
         assert json.loads(ws.receive_text()) == {"type": "replay_done"}
-        # 4. live binary frames
-        assert ws.receive_bytes() == b"live-1"
-        assert ws.receive_bytes() == b"live-2"
+        # 4. live binary output — raw bytes, which the pump may coalesce into a
+        # single frame (wire-compatible: the client treats it as a byte stream).
+        live = ws.receive_bytes()
+        while live != b"live-1live-2":
+            live += ws.receive_bytes()
+        assert live == b"live-1live-2"
         # client input: raw bytes -> manager.write, resize JSON -> manager.resize
         ws.send_bytes(b"dir\r")
         ws.send_text(json.dumps({"type": "resize", "cols": 132, "rows": 43}))
