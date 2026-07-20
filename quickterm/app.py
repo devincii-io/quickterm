@@ -33,15 +33,6 @@ log = logging.getLogger("quickterm")
 
 
 def main() -> None:
-    # Dual-mode: `QuickTerm.exe mcp ...` re-serves this same binary as the
-    # quickterm-mcp bridge over stdio, so the frozen build ships the MCP server
-    # without a second executable. Intercept before any GUI/window setup.
-    raw = sys.argv[1:]
-    if raw and raw[0] == "mcp":
-        from quickterm.mcp_server import main as mcp_main
-
-        mcp_main(raw[1:])
-        return
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
@@ -146,6 +137,9 @@ async def _serve(
             port=cfg.port,
             log_config=None,
             access_log=False,
+            ws_max_size=256 * 1024,
+            ws_max_queue=16,
+            ws_per_message_deflate=False,
         )
     )
     if state is not None:
@@ -182,12 +176,15 @@ async def _serve(
 
 def _sessions_worth_keeping(manager: Any) -> bool:
     """Closing the window only hides to tray when quitting would lose real
-    work: a live session the user actually typed into. Untouched shells (a
-    fresh scratch pane, idle autostarts) are not worth staying resident for —
-    quit outright and free the RAM.
+    work: a live session the user typed into or one with a child process.
+    Untouched empty shells are not worth staying resident for.
     """
     try:
-        return any(i.alive and getattr(i, "touched", False) for i in manager.list())
+        busy = manager.busy_ids() if hasattr(manager, "busy_ids") else set()
+        return any(
+            i.alive and (getattr(i, "touched", False) or getattr(i, "id", None) in busy)
+            for i in manager.list()
+        )
     except Exception:
         return False
 
@@ -429,8 +426,6 @@ def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
 
 def _spawn_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
     try:
-        from quickterm.server import _wants_discovery_env
-
         manager.spawn(
             name=prof.name,
             profile=prof.name,
@@ -438,7 +433,6 @@ def _spawn_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig")
             args=list(prof.args),
             cwd=prof.cwd,
             env=dict(prof.env),
-            inject_env=_wants_discovery_env(cfg, prof),
         )
     except Exception:
         pass  # a broken profile must not take down startup

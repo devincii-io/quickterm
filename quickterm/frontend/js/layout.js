@@ -252,6 +252,12 @@ export class LayoutManager {
     const a = this._renderNode(node.children[0]);
     const sp = document.createElement("div");
     sp.className = "splitter";
+    sp.tabIndex = 0;
+    sp.setAttribute("role", "separator");
+    sp.setAttribute("aria-label", "Resize terminal panes");
+    sp.setAttribute("aria-orientation", node.dir === "v" ? "horizontal" : "vertical");
+    sp.setAttribute("aria-valuemin", "10");
+    sp.setAttribute("aria-valuemax", "90");
     this._wireSplitter(sp, node, el);
     const b = this._renderNode(node.children[1]);
     el.appendChild(a);
@@ -265,9 +271,23 @@ export class LayoutManager {
     const r = Math.min(0.95, Math.max(0.05, typeof node.ratio === "number" ? node.ratio : 0.5));
     splitEl.children[0].style.flex = `${r} 1 0px`;
     splitEl.children[2].style.flex = `${1 - r} 1 0px`;
+    splitEl.children[1].setAttribute("aria-valuenow", String(Math.round(r * 100)));
   }
 
   _wireSplitter(sp, node, splitEl) {
+    sp.addEventListener("keydown", (event) => {
+      const horizontal = node.dir !== "v";
+      const decrease = horizontal ? event.key === "ArrowLeft" : event.key === "ArrowUp";
+      const increase = horizontal ? event.key === "ArrowRight" : event.key === "ArrowDown";
+      if (!decrease && !increase && event.key !== "Home") return;
+      event.preventDefault();
+      node.ratio = event.key === "Home"
+        ? 0.5
+        : Math.min(0.9, Math.max(0.1, node.ratio + (increase ? 0.05 : -0.05)));
+      this._applyRatio(node, splitEl);
+      this.fitAll();
+      this._changed();
+    });
     sp.addEventListener("mousedown", (e) => {
       e.preventDefault();
       const horiz = node.dir !== "v";

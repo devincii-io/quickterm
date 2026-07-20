@@ -7,11 +7,8 @@ import dataclasses
 import importlib
 import json
 import os
-import re
 import shutil
 import subprocess
-import time
-from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,65 +26,10 @@ FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 # Max bytes merged into one live output frame. Bounds per-send loop time so the
 # input pump interleaves; big enough to collapse bursts into few frames.
 _SEND_COALESCE_BYTES = 128 * 1024
-# Default byte ceiling for a text scrollback read (last-N-lines still applies).
-_SCROLLBACK_TEXT_CAP = 64 * 1024
-# ANSI escape sequences to drop when returning terminal output as plain text:
-# CSI (colors/cursor), OSC (title/hyperlink, BEL- or ST-terminated), and the
-# two-character escapes. Deliberately conservative — it never touches content.
-_ANSI_RE = re.compile(
-    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|\x1b[@-Z\\-_]"
-)
-
-
 def _asdict(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
     return dict(vars(obj))
-
-
-def _wants_discovery_env(cfg: "AppConfig", profile: Any) -> bool:
-    """Whether a spawn should receive the QuickTerm discovery env (incl. token).
-
-    Only when the bridge is enabled AND either the global inject_all escape
-    hatch is on or this specific profile opted in via mcp_access. A spawn with
-    no profile (explicit cmd / system shell) gets it only under inject_all.
-    """
-    mcp_cfg = getattr(cfg, "mcp", None)
-    if not getattr(mcp_cfg, "enabled", True):
-        return False
-    if getattr(mcp_cfg, "inject_all", False):
-        return True
-    return bool(getattr(profile, "mcp_access", False))
-
-
-def _terminal_text(data: bytes, lines: int, strip_ansi: bool, max_bytes: int) -> tuple[str, bool]:
-    """Render raw scrollback bytes as readable text for a non-terminal reader.
-
-    Decodes utf-8 (replacement on error), optionally strips ANSI control
-    sequences, keeps the last `lines` lines, and caps the result at `max_bytes`
-    (tail kept). Returns (text, truncated).
-    """
-    text = data.decode("utf-8", errors="replace")
-    if strip_ansi:
-        text = _ANSI_RE.sub("", text)
-        # Normalize newlines and drop lone carriage returns (progress redraws)
-        # and any residual control bytes, keeping tab and newline.
-        text = text.replace("\r\n", "\n").replace("\r", "")
-        text = "".join(ch for ch in text if ch >= " " or ch in "\n\t")
-    truncated = False
-    if lines and lines > 0:
-        parts = text.split("\n")
-        if len(parts) > lines:
-            parts = parts[-lines:]
-            truncated = True
-        text = "\n".join(parts)
-    encoded = text.encode("utf-8")
-    if max_bytes and len(encoded) > max_bytes:
-        text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
-        truncated = True
-    return text, truncated
 
 
 def _allowed_origins(cfg: "AppConfig") -> tuple[set[str], set[str]]:
@@ -104,29 +46,6 @@ def create_app(
 
     app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
     allowed_hosts, allowed_origins = _allowed_origins(cfg)
-
-    # Discovery env for a co-located MCP client: injected into every spawned
-    # terminal so quickterm-mcp finds the backend with zero configuration. Same
-    # trust boundary as auth.py's token file (both readable only by this user);
-    # turning mcp.enabled off keeps the token out of child environments.
-    if getattr(getattr(cfg, "mcp", None), "enabled", True):
-        env_ctx = {"QUICKTERM_PORT": str(cfg.port)}
-        if token:
-            env_ctx["QUICKTERM_TOKEN"] = token
-        try:
-            manager.env_context = env_ctx
-        except Exception:
-            pass
-
-    # Small in-memory audit trail of AI-driven writes, surfaced at
-    # GET /api/mcp/activity so the UI can show what an MCP client has typed.
-    mcp_activity: deque = deque(maxlen=100)
-
-    def _record_mcp_input(sid: str, name: str, nbytes: int) -> None:
-        mcp_activity.appendleft(
-            {"ts": time.time(), "action": "input", "session_id": sid,
-             "name": name, "bytes": nbytes}
-        )
 
     def _token_required(request: Request) -> bool:
         # Sensitive surface = everything under /api that isn't a public probe or a
@@ -236,7 +155,6 @@ def create_app(
             cols=body.get("cols", 120),
             rows=body.get("rows", 30),
             workspace=workspace if isinstance(workspace, str) and workspace else None,
-            inject_env=_wants_discovery_env(cfg, prof),
         )
         return _asdict(info)
 
@@ -267,87 +185,6 @@ def create_app(
             if isinstance(sid, str) and manager.get(sid) is not None:
                 manager.kill(sid)
         return Response(status_code=204)
-
-    @app.get("/api/sessions/{sid}/scrollback")
-    def read_scrollback(
-        sid: str, lines: int = 200, strip_ansi: bool = True, max_bytes: int = _SCROLLBACK_TEXT_CAP
-    ) -> dict:
-        # Read a session's ring buffer as plain text without opening a WS — the
-        # MCP `read_terminal` tool and any dashboard preview use this.
-        session = manager.get(sid)
-        if session is None:
-            raise HTTPException(404, "no such session")
-        data, _cols, _rows = session.scrollback()
-        text, truncated = _terminal_text(data, lines, strip_ansi, max_bytes)
-        return {
-            "id": sid,
-            "text": text,
-            "lines": text.count("\n") + 1 if text else 0,
-            "truncated": truncated,
-            "alive": session.info.alive,
-            "exit_code": session.info.exit_code,
-        }
-
-    @app.post("/api/sessions/{sid}/input")
-    async def send_session_input(sid: str, request: Request) -> dict:
-        # Type into a terminal from a non-attached (MCP) client. Token-gated
-        # like all /api, further gated by mcp.allow_input, capped, and audited.
-        mcp_cfg = getattr(cfg, "mcp", None)
-        if not getattr(mcp_cfg, "allow_input", True):
-            raise HTTPException(403, "terminal input via API is disabled (mcp.allow_input=false)")
-        session = manager.get(sid)
-        if session is None:
-            raise HTTPException(404, "no such session")
-        if not session.info.alive:
-            raise HTTPException(409, "session has exited")
-        body = await request.json()
-        text = body.get("text") if isinstance(body, dict) else None
-        if not isinstance(text, str):
-            raise HTTPException(400, "body must be {'text': <string>}")
-        data = text.encode("utf-8", "surrogateescape")
-        cap = int(getattr(mcp_cfg, "max_input_bytes", 4096) or 4096)
-        if len(data) > cap:
-            raise HTTPException(413, f"input exceeds the {cap}-byte limit")
-        manager.write(sid, data)
-        try:
-            session.info.mcp_touched = True
-        except Exception:
-            pass
-        _record_mcp_input(sid, session.info.name, len(data))
-        return {"written": len(data)}
-
-    @app.get("/api/mcp/activity")
-    def mcp_activity_log() -> list[dict]:
-        return list(mcp_activity)
-
-    @app.get("/api/mcp/setup")
-    def mcp_setup() -> dict:
-        # Copy-paste setup for an MCP client (Claude Code). Discovery is
-        # automatic inside a pane, so the client config needs no arguments. The
-        # command matches this install: `quickterm-mcp` for a pip/uv install, or
-        # `QuickTerm.exe mcp` for the frozen build (dual-mode single binary).
-        mcp_server = importlib.import_module("quickterm.mcp_server")
-        mcp_cfg = getattr(cfg, "mcp", None)
-        command, cmd_args = mcp_server.mcp_invocation()
-        server_entry: dict = {"command": command}
-        if cmd_args:
-            server_entry["args"] = cmd_args
-        quoted = f'"{command}"' if " " in command else command
-        invocation = quoted + ("" if not cmd_args else " " + " ".join(cmd_args))
-        return {
-            "command": command,
-            "args": cmd_args,
-            "add_command": f"claude mcp add quickterm -- {invocation}",
-            "mcp_json": {"mcpServers": {"quickterm": server_entry}},
-            "enabled": bool(getattr(mcp_cfg, "enabled", True)),
-            "allow_input": bool(getattr(mcp_cfg, "allow_input", True)),
-            "note": (
-                "Turn on 'Allow AI tools (MCP)' for the profile you run your agent "
-                "in, then register the command above. Inside a QuickTerm pane the "
-                "bridge auto-discovers port, token, and workspace and scopes to that "
-                "pane's workspace. Outside a pane, pass --port and --workspace."
-            ),
-        }
 
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:
@@ -412,17 +249,6 @@ def create_app(
                     manager.kill(sid)
         workspace.delete_workspace(name)
         return Response(status_code=204)
-
-    @app.post("/api/focus")
-    async def set_focus(request: Request) -> Response:
-        body = await request.json()
-        manager.focused_session_id = body.get("session_id")
-        return Response(status_code=204)
-
-    @app.get("/api/focus")
-    def get_focus() -> dict:
-        # "What is the user looking at" — the MCP get_focused_session tool.
-        return {"session_id": manager.focused_session_id}
 
     @app.get("/api/config")
     def get_config() -> dict:
@@ -525,13 +351,10 @@ def create_app(
             config_mod.save_config(new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
-        # apply live-updatable fields in place; port/hotkeys need a restart.
-        # `mcp` is applied live so allow_input/max_input_bytes take effect at
-        # once (env injection, keyed off mcp.enabled at boot, still needs a
-        # restart — like port).
+        # Apply live-updatable fields in place; port and global hotkeys need a restart.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "default_profile", "profiles", "snippets", "voice", "update_check", "mcp",
+            "default_profile", "profiles", "snippets", "voice", "update_check",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
@@ -598,14 +421,17 @@ def create_app(
         if session is None:
             await ws.close(code=4404)
             return
-        data, cols, rows = session.scrollback()
-        await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
-        await ws.send_bytes(data)
-        await ws.send_text(json.dumps({"type": "replay_done"}))
+        # Subscribe before taking the replay snapshot. Both calls are
+        # synchronous on the event-loop thread, so output cannot slip between
+        # the snapshot and the live queue (the old order permanently lost it).
         attachment = manager.attach(sid)
+        data, cols, rows = session.scrollback()
         try:
+            await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
+            await ws.send_bytes(data)
+            await ws.send_text(json.dumps({"type": "replay_done"}))
             await _live_phase(ws, attachment, manager, session, sid)
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
             attachment.detach()
@@ -793,12 +619,16 @@ async def _live_phase(
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         for task in done:
+            if task.cancelled():
+                continue
             exc = task.exception()
             if exc is not None and not isinstance(exc, WebSocketDisconnect):
                 raise exc
     finally:
         for task in (out, inp):
-            task.cancel()
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(out, inp, return_exceptions=True)
 
 
 async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) -> None:
@@ -807,6 +637,10 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
         chunk = await attachment.queue.get()
         if chunk is None:
             await _send_exit(ws, session)
+            return
+        if chunk is attachment.overflow_sentinel:
+            await ws.send_text(json.dumps({"type": "overflow"}))
+            await ws.close(code=1013, reason="viewer fell behind; reconnect to replay")
             return
         # Coalesce whatever else is already queued into a single frame (capped so
         # one send can't monopolize the loop and starve input). Raw bytes stay a
@@ -822,6 +656,10 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
             if item is None:
                 exited = True
                 break
+            if item is attachment.overflow_sentinel:
+                await ws.send_text(json.dumps({"type": "overflow"}))
+                await ws.close(code=1013, reason="viewer fell behind; reconnect to replay")
+                return
             parts.append(item)
             total += len(item)
         await ws.send_bytes(parts[0] if len(parts) == 1 else b"".join(parts))
@@ -841,11 +679,20 @@ async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> Non
         if msg["type"] == "websocket.disconnect":
             return
         if msg.get("bytes") is not None:
-            manager.write(sid, msg["bytes"])
+            data = msg["bytes"]
+            if len(data) > 256 * 1024:
+                await ws.close(code=1009, reason="input frame too large")
+                return
+            manager.write(sid, data)
         elif msg.get("text"):
-            ctrl = json.loads(msg["text"])
+            try:
+                ctrl = json.loads(msg["text"])
+            except (TypeError, json.JSONDecodeError):
+                continue
             if ctrl.get("type") == "resize":
-                manager.resize(sid, int(ctrl["cols"]), int(ctrl["rows"]))
+                cols = max(2, min(1000, int(ctrl["cols"])))
+                rows = max(1, min(1000, int(ctrl["rows"])))
+                manager.resize(sid, cols, rows)
 
 
 def _mount_frontend(app: FastAPI) -> None:

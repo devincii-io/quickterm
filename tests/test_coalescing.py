@@ -73,6 +73,7 @@ class _FakeWS:
 class _FakeAtt:
     def __init__(self, queue):
         self.queue = queue
+        self.overflow_sentinel = object()
 
 
 class _FakeSession:

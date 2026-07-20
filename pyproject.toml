@@ -1,6 +1,6 @@
 [project]
 name = "quickterm"
-version = "1.4.0"
+version = "2.0.0"
 description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"
@@ -33,7 +33,6 @@ voice = [
 
 [project.scripts]
 quickterm = "quickterm.app:main"
-quickterm-mcp = "quickterm.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/devincii-io/quickterm"

@@ -4,7 +4,7 @@ import os
 import pytest
 
 import quickterm.session_manager as session_manager
-from quickterm.session_manager import QUEUE_MAXSIZE, SessionManager
+from quickterm.session_manager import SessionManager
 
 
 class _RecordingPty:
@@ -27,39 +27,15 @@ class _RecordingPty:
         pass
 
 
-async def test_spawn_injects_discovery_env_when_opted_in(monkeypatch):
+async def test_spawn_preserves_profile_env_and_workspace_metadata(monkeypatch):
     monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
     mgr = SessionManager(asyncio.get_running_loop())
-    mgr.env_context = {"QUICKTERM_PORT": "8620", "QUICKTERM_TOKEN": "abc"}
-    info = mgr.spawn(cmd="x.exe", workspace="proj", inject_env=True)
-    env = _RecordingPty.last.env
-    assert env["QUICKTERM_PORT"] == "8620"
-    assert env["QUICKTERM_TOKEN"] == "abc"
-    assert env["QUICKTERM_SESSION_ID"] == info.id
-    assert env["QUICKTERM_WORKSPACE"] == "proj"
-    assert info.workspace == "proj"
-
-
-async def test_spawn_env_omits_workspace_when_none(monkeypatch):
-    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
-    mgr = SessionManager(asyncio.get_running_loop())
-    info = mgr.spawn(cmd="x.exe", inject_env=True)
-    env = _RecordingPty.last.env
-    assert env["QUICKTERM_SESSION_ID"] == info.id
-    assert "QUICKTERM_WORKSPACE" not in env
-    assert info.workspace is None
-
-
-async def test_spawn_without_opt_in_gets_no_token_but_tags_workspace(monkeypatch):
-    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
-    mgr = SessionManager(asyncio.get_running_loop())
-    mgr.env_context = {"QUICKTERM_PORT": "8620", "QUICKTERM_TOKEN": "abc"}
     info = mgr.spawn(cmd="x.exe", workspace="proj", env={"USER_SET": "1"})
     env = _RecordingPty.last.env
     assert "QUICKTERM_TOKEN" not in env
     assert "QUICKTERM_SESSION_ID" not in env
-    assert env["USER_SET"] == "1"  # the profile's own env is untouched
-    assert info.workspace == "proj"  # scoping metadata still recorded
+    assert env["USER_SET"] == "1"
+    assert info.workspace == "proj"
 
 
 def _short(script: str) -> tuple[str, list[str]]:
@@ -136,7 +112,7 @@ async def test_scrollback_ring_truncates():
         mgr.shutdown()
 
 
-async def test_slow_subscriber_drops_oldest_only(manager):
+async def test_slow_subscriber_requests_clean_resync(manager):
     cmd, args = _short("echo hi")
     info = manager.spawn(cmd=cmd, args=args)
     att = manager.attach(info.id)
@@ -145,11 +121,9 @@ async def test_slow_subscriber_drops_oldest_only(manager):
     while not att.queue.full():
         att.queue.put_nowait(b"x")
     sess._fanout(b"NEW")
-    assert att.queue.qsize() == QUEUE_MAXSIZE
-    items = []
-    while not att.queue.empty():
-        items.append(att.queue.get_nowait())
-    assert items[-1] == b"NEW"  # newest kept, oldest dropped
+    assert att.overflowed is True
+    assert att.queue.qsize() == 1
+    assert att.queue.get_nowait() is att.overflow_sentinel
 
 
 async def test_idle_reaper_spares_attached_and_workspace_sessions(manager):
@@ -164,11 +138,19 @@ async def test_idle_reaper_spares_attached_and_workspace_sessions(manager):
     assert manager.reap_idle(300, {second.id}) == [first.id]
 
 
+async def test_idle_reaper_spares_touched_sessions(manager):
+    cmd, args = _interactive()
+    info = manager.spawn(cmd=cmd, args=args, name="work")
+    sess = manager.get(info.id)
+    sess.info.touched = True
+    sess.last_activity -= 600
+    assert manager.reap_idle(300, set()) == []
+
+
 async def test_kill_and_list_and_focus(manager):
     cmd, args = _interactive()
     info = manager.spawn(cmd=cmd, args=args, name="longlived")
     assert any(s.id == info.id for s in manager.list())
-    manager.focused_session_id = info.id
     att = manager.attach(info.id)
     await asyncio.sleep(0.3)
     manager.kill(info.id)

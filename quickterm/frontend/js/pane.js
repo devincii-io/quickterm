@@ -9,6 +9,7 @@ import { getTheme, DEFAULT_THEME } from "./themes.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
+const CLIENT_QUEUE_LIMIT = 2 << 20; // reconnect before sustained output grows JS heap
 
 // File-path links (Ctrl+click): quoted paths may contain spaces; bare ones
 // stop at whitespace/quotes. Windows drive + UNC, POSIX absolute, ~ paths.
@@ -67,6 +68,7 @@ export class Pane {
     this.title = opts.title || null; // user-given name, wins over session name
     this.userWrote = false;    // real keystrokes/paste in this pane
     this.spawnedFresh = false; // session was created by this pane (vs reattached)
+    this.spawnPending = false;
     this.closeArmed = false;   // busy-close guard: next close press proceeds
     this._closeArmTimer = null;
 
@@ -81,6 +83,7 @@ export class Pane {
     this._replayDone = false;
     this._replayWrites = 0;
     this._queue = [];
+    this._queuedBytes = 0;
     this._pending = 0;
 
     this._backoff = BACKOFF_MIN;
@@ -115,7 +118,24 @@ export class Pane {
   }
 
   get canReplace() {
-    return this.state === "empty" || this.state === "exited";
+    return !this.spawnPending && (this.state === "empty" || this.state === "exited");
+  }
+
+  beginSpawn() {
+    if (this.spawnPending) return false;
+    this.spawnPending = true;
+    this.state = "spawning";
+    this.emptyEl.hidden = false;
+    this.emptyEl.textContent = "starting terminal…";
+    this._renderTab();
+    return true;
+  }
+
+  endSpawn() {
+    this.spawnPending = false;
+    if (this.state === "spawning") this.state = "empty";
+    this.emptyEl.textContent = "no session · alt+k";
+    this._renderTab();
   }
 
   setFocused(focused) {
@@ -149,9 +169,7 @@ export class Pane {
   _renderTab() {
     const name = this.displayName();
     this.tabNameEl.textContent = name;
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
-    this.tabDotEl.style.background = `hsl(${((hash % 360) + 360) % 360} 42% 62%)`;
+    this.el.dataset.state = this.state;
   }
 
   _startRename() {
@@ -190,6 +208,8 @@ export class Pane {
   showNotice(text) {
     this.exitBar.textContent = text;
     this.exitBar.hidden = false;
+    const live = document.getElementById("live-status");
+    if (live) live.textContent = text.replace(/^\[|\]$/g, "");
   }
 
   // Short-lived notice (e.g. "no room to split") that cleans up after itself.
@@ -291,6 +311,7 @@ export class Pane {
 
   attach(info) {
     if (this._disposed) return;
+    this.endSpawn();
     clearTimeout(this._reconnectTimer);
     this._teardownWs();
     this.session = info;
@@ -344,7 +365,7 @@ export class Pane {
       cursorBlink: false,
       cursorStyle: "block",
       scrollback: 5000,
-      minimumContrastRatio: 1,
+      minimumContrastRatio: 4.5,
       allowProposedApi: true,
       theme: this.theme,
       // On Windows the backend PTY is ConPTY; telling xterm lets it apply the
@@ -422,15 +443,6 @@ export class Pane {
     this.termHost.addEventListener("contextmenu", (e) => {
       if (this.copySelection()) e.preventDefault();
     });
-    // Copy-on-select (the Linux/PuTTY convention): releasing a left-drag
-    // selection copies it automatically. Silent — the explicit Ctrl+Shift+C /
-    // right-click paths keep the visible confirmation, so auto-copy stays quiet
-    // and never flashes on an ordinary drag. Read-only; never counts as input.
-    this.termHost.addEventListener("mouseup", (e) => {
-      if (e.button !== 0) return;
-      const sel = this.term.getSelection();
-      if (sel) this._writeClipboard(sel);
-    });
     try {
       const gl = new WebglAddon.WebglAddon();
       gl.onContextLoss(() => {
@@ -480,7 +492,10 @@ export class Pane {
     this._replayDone = false;
     this._replayWrites = 0;
     this._queue.length = 0;
+    this._queuedBytes = 0;
     this._pending = 0;
+    this.term.options.disableStdin = true;
+    this.showNotice("[restoring terminal…]");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
     const ws = new WebSocket(url, api.wsSubprotocols());
@@ -511,6 +526,10 @@ export class Pane {
         if (this._replayWrites === 0) this._goLive();
         else this._phase = "prelive"; // wait for replay writes to flush
         break;
+      case "overflow":
+        this.flashNotice("[output busy · resynchronizing]");
+        if (this.ws) this.ws.close();
+        break;
       case "exit":
         this._onExit(typeof msg.code === "number" ? msg.code : null);
         break;
@@ -527,7 +546,13 @@ export class Pane {
         if (this._replayDone && this._replayWrites === 0) this._goLive();
       });
     } else {
+      if (this._queuedBytes + data.byteLength > CLIENT_QUEUE_LIMIT) {
+        this.flashNotice("[output busy · resynchronizing]");
+        if (this.ws) this.ws.close();
+        return;
+      }
       this._queue.push(data);
+      this._queuedBytes += data.byteLength;
       if (this._phase === "live") this._pump();
     }
   }
@@ -535,6 +560,8 @@ export class Pane {
   _goLive() {
     if (this._disposed || this._exited) return;
     this._phase = "live";
+    this.term.options.disableStdin = false;
+    this.exitBar.hidden = true;
     try { this.fit.fit(); } catch (e) {}
     this._sendResize();
     this._pump();
@@ -547,6 +574,7 @@ export class Pane {
   _pump() {
     while (this._queue.length && this._pending < PENDING_LIMIT) {
       const data = this._drainQueue();
+      this._queuedBytes -= data.byteLength;
       this._pending += data.byteLength;
       this.term.write(data, () => {
         this._pending -= data.byteLength;
@@ -581,6 +609,8 @@ export class Pane {
     this._exited = true;
     this._phase = "idle";
     this.state = "exited";
+    if (this.term) this.term.options.disableStdin = true;
+    this._renderTab();
     this.showNotice(code === null ? "[exited]" : `[exited · code ${code}]`);
     this.onStateChange(this);
   }

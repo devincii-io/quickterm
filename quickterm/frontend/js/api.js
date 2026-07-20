@@ -52,7 +52,6 @@ export const putWorkspace = (name, layout, logo, sessionIds = []) =>
     session_ids: [...new Set(sessionIds || [])],
   });
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
-export const postFocus = (sessionId) => req("POST", "/api/focus", { session_id: sessionId });
 export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");

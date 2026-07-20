@@ -1,6 +1,5 @@
-// Curated color themes. Each entry carries an xterm.js ITheme (the terminal
-// palette) plus a hand-tuned `chrome` palette that colors the whole app so a
-// theme looks intentional everywhere, not just inside the terminal.
+// Curated terminal themes. Each entry carries an xterm.js ITheme plus legacy
+// chrome metadata used only to select light or dark neutral application chrome.
 // The selected theme id is persisted in the backend config ("theme").
 
 function theme(label, note, chrome, base, accent) {
@@ -226,14 +225,13 @@ export function getTheme(id, custom = {}) {
 
 export function applyChromeTheme(id, custom = {}) {
   const selected = getTheme(id, custom);
-  const colors = selected.chrome || {
-    background: selected.xterm.background,
-    surface: mix(selected.xterm.background, "#FFFFFF", 0.055),
-    text: selected.xterm.foreground,
-    muted: mix(selected.xterm.foreground, selected.xterm.background, 0.48),
-    accent: selected.accent || selected.xterm.cursor,
-    danger: selected.xterm.red,
-  };
+  // Terminal palettes belong to the terminal. Keep application chrome neutral
+  // so switching to Dracula, Tokyo Night, or a custom shell palette does not
+  // turn every button and panel into a different product.
+  const light = Boolean(selected.chrome && selected.chrome.light);
+  const colors = light
+    ? { background: "#F6F8FA", surface: "#FFFFFF", text: "#1F2328", muted: "#656D76", accent: "#0969DA", danger: "#CF222E" }
+    : { background: "#0D1117", surface: "#161B22", text: "#E6EDF3", muted: "#8B949E", accent: "#58A6FF", danger: "#F85149" };
   const root = document.documentElement.style;
   const surface = normalizeHex(colors.surface, colors.background);
   const background = normalizeHex(colors.background, CUSTOM_THEME_DEFAULTS.background);
@@ -242,7 +240,6 @@ export function applyChromeTheme(id, custom = {}) {
   const accent = normalizeHex(colors.accent, CUSTOM_THEME_DEFAULTS.accent);
   const danger = normalizeHex(colors.danger, CUSTOM_THEME_DEFAULTS.danger);
   // Light themes tint surfaces toward black; dark themes toward white.
-  const light = Boolean(colors.light);
   const lift = light ? "#000000" : "#FFFFFF";
   const values = {
     "--bg": background,

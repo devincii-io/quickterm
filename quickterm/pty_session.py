@@ -38,7 +38,7 @@ _DRAIN_MAX_S = 1.0
 _EXIT_WAIT_S = 10.0
 # Upper bound on how much immediately-available output one read callback carries.
 # Bounded so a huge burst still yields to the loop (keeps input responsive).
-_READ_COALESCE_CHARS = 128 * 1024
+_READ_COALESCE_BYTES = 128 * 1024
 
 log = logging.getLogger("quickterm.pty")
 # Opt-in raw-I/O tracing to pin down "wrong key" reports: logs the exact bytes
@@ -260,18 +260,20 @@ class PtySession:
                 self._last_read = time.monotonic()
                 # Drain everything already buffered into one callback so a burst
                 # is one thread-hop / ring edit / WS frame, not one per read.
-                parts = [chunk]
-                total = len(chunk)
-                while total < _READ_COALESCE_CHARS:
+                first = chunk.encode("utf-8")
+                parts = [first]
+                total = len(first)
+                while total < _READ_COALESCE_BYTES:
                     try:
                         more = pty.read(blocking=False)  # "" when nothing ready
                     except Exception:
                         break
                     if not more:
                         break
-                    parts.append(more)
-                    total += len(more)
-                data = "".join(parts).encode("utf-8")
+                    encoded = more.encode("utf-8")
+                    parts.append(encoded)
+                    total += len(encoded)
+                data = b"".join(parts)
                 if _DEBUG_IO:
                     log.info("pty %s -> out %d bytes", self._pid, len(data))
                 self._post(self._on_output, data)

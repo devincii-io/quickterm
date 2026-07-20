@@ -16,7 +16,10 @@ if os.name == "nt":
 else:
     from .pty_posix import PtySession, pids_with_children
 
-QUEUE_MAXSIZE = 256
+# Keep slow-viewer memory bounded. If a viewer falls behind this window it is
+# explicitly told to reconnect and replay the current scrollback; arbitrary VT
+# bytes are never silently discarded because that corrupts terminal state.
+QUEUE_MAXSIZE = 8
 _KILL_REMOVE_GRACE_S = 1.0
 
 
@@ -30,15 +33,16 @@ class SessionInfo:
     cols: int
     rows: int
     touched: bool = False  # True once the user has written any input
-    workspace: str | None = None  # workspace this session was spawned into (MCP scope hint)
-    mcp_touched: bool = False  # True once an MCP client has written into it
+    workspace: str | None = None  # workspace this session belongs to
 
 
 class Attachment:
-    """Per-subscriber bounded queue of bytes chunks; None = session exited."""
+    """Per-subscriber bounded queue; None = exit, overflow_sentinel = resync."""
 
     def __init__(self, session: "Session") -> None:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
+        self.overflow_sentinel = object()
+        self.overflowed = False
         self._session = session
 
     def detach(self) -> None:
@@ -81,19 +85,18 @@ class Session:
 
     def _fanout(self, item: bytes | None) -> None:
         for att in tuple(self._attachments):
+            if att.overflowed:
+                continue
             q = att.queue
             try:
                 q.put_nowait(item)
             except asyncio.QueueFull:
-                # drop oldest for this slow subscriber only; others unaffected
+                att.overflowed = True
                 try:
-                    q.get_nowait()
+                    while True:
+                        q.get_nowait()
                 except asyncio.QueueEmpty:
-                    pass
-                try:
-                    q.put_nowait(item)
-                except asyncio.QueueFull:
-                    pass
+                    q.put_nowait(att.overflow_sentinel)
 
 
 class SessionManager:
@@ -103,11 +106,6 @@ class SessionManager:
         self._loop = loop
         self._cap = scrollback_bytes
         self._sessions: dict[str, Session] = {}
-        self.focused_session_id: str | None = None
-        # Static discovery env injected into every spawned terminal (port, token)
-        # so an MCP client launched inside a pane finds the backend. The server
-        # sets this at app build; each spawn adds the per-session id/workspace.
-        self.env_context: dict[str, str] = {}
 
     def spawn(
         self,
@@ -121,7 +119,6 @@ class SessionManager:
         cols: int = 120,
         rows: int = 30,
         workspace: str | None = None,
-        inject_env: bool = False,
     ) -> SessionInfo:
         sid = uuid.uuid4().hex[:8]
         info = SessionInfo(
@@ -135,17 +132,7 @@ class SessionManager:
             workspace=workspace,
         )
         session = Session(info, self._cap)
-        # The discovery env (incl. the auth token) is injected ONLY when the
-        # caller opts in — so the token is not handed to every shell. The
-        # workspace tag above is set regardless: it is server-side metadata for
-        # scoping, not a secret. Discovery vars win over the profile's env so a
-        # caller cannot spoof the session's own identity.
         child_env = dict(env or {})
-        if inject_env:
-            child_env.update(self.env_context)
-            child_env["QUICKTERM_SESSION_ID"] = sid
-            if workspace:
-                child_env["QUICKTERM_WORKSPACE"] = workspace
         session.pty = PtySession(
             cmd,
             list(args or []),
@@ -201,6 +188,8 @@ class SessionManager:
         s = self._sessions.get(sid)
         if s and s.pty:
             s.info.cols, s.info.rows = cols, rows
+            # Reconnect geometry must stay current even while the PTY is silent.
+            s._ring_cols, s._ring_rows = cols, rows
             s.pty.resize(cols, rows)
 
     def kill(self, sid: str) -> None:
@@ -226,19 +215,23 @@ class SessionManager:
         self._sessions.clear()
 
     def reap_idle(self, timeout_s: int, protected: set[str] | None = None) -> list[str]:
-        """Kill background clutter: sessions nobody is attached to that a saved
-        workspace does not reference. A live session is only reaped once it has
-        been silent (no output, no input) for `timeout_s`; an already-exited one
-        goes immediately. Attached and workspace-persisted sessions are safe.
+        """Clean stopped sessions and untouched background shells.
+
+        A silent session that the user typed into may be an SSH connection,
+        server, or WSL job, so it is never expired automatically. Exited sessions
+        are cleaned even when a stale workspace file still references them.
         """
         protected = protected or set()
         now = time.monotonic()
+        busy = self.busy_ids()
         doomed: list[str] = []
         for sid, s in self._sessions.items():
-            if s._attachments or sid in protected:
+            if s._attachments:
                 continue
             if not s.info.alive:
                 doomed.append(sid)
+            elif sid in protected or s.info.touched or sid in busy:
+                continue
             elif timeout_s > 0 and now - s.last_activity > timeout_s:
                 doomed.append(sid)
         for sid in doomed:

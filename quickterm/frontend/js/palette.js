@@ -44,14 +44,15 @@ export class Palette {
     this.prompt = null; // {submit(text)}
     this.foreignMode = false;
     this.foreignSessions = [];
+    this.requestId = 0;
 
     const overlay = document.createElement("div");
     overlay.className = "palette-overlay";
     overlay.hidden = true;
     overlay.innerHTML =
-      '<div class="palette">' +
-      '<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">' +
-      '<div class="palette-list"></div>' +
+      '<div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">' +
+      '<input type="text" role="combobox" aria-label="Find a command" aria-autocomplete="list" aria-controls="palette-list" aria-expanded="true" spellcheck="false" autocomplete="off" autocapitalize="off">' +
+      '<div id="palette-list" class="palette-list" role="listbox"></div>' +
       "</div>";
     document.body.appendChild(overlay);
     this.overlay = overlay;
@@ -73,6 +74,7 @@ export class Palette {
   }
 
   async openPalette() {
+    const requestId = ++this.requestId;
     this.open = true;
     this.prompt = null;
     this.foreignMode = false;
@@ -87,7 +89,7 @@ export class Palette {
       api.getSessions().catch(() => []),
       api.listWorkspaces().catch(() => []),
     ]);
-    if (!this.open || this.prompt || this.foreignMode) return;
+    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode) return;
     this.items = this._staticItems();
     for (const name of workspaces) {
       this.items.push({
@@ -100,7 +102,7 @@ export class Palette {
       name,
       saved: await api.getWorkspace(name).catch(() => null),
     })));
-    if (!this.open || this.prompt || this.foreignMode) return;
+    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode) return;
     const owners = new Map();
     const layoutBound = new Set();
     for (const { name, saved } of workspaceData) {
@@ -134,6 +136,7 @@ export class Palette {
   close() {
     if (!this.open) return;
     this.open = false;
+    this.requestId++;
     this.prompt = null;
     this.foreignMode = false;
     this.overlay.hidden = true;
@@ -148,11 +151,11 @@ export class Palette {
       { kind: "action", label: "dashboard", run: () => a.openPanel("dashboard") },
       { kind: "action", label: "settings", run: () => a.openPanel("settings") },
       { kind: "action", label: "help", run: () => a.openPanel("help") },
-      { kind: "action", label: "split horizontal", run: () => a.splitH() },
-      { kind: "action", label: "split vertical", run: () => a.splitV() },
-      { kind: "action", label: "zoom pane", run: () => a.zoom() },
-      { kind: "action", label: "detach pane", run: () => a.closePane() },
-      { kind: "action", label: "kill session", run: () => a.killFocusedSession() },
+      { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH() },
+      { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV() },
+      { kind: "action", label: "zoom pane", hint: "Alt+Z", run: () => a.zoom() },
+      { kind: "action", label: "detach pane", hint: "Alt+W", run: () => a.closePane() },
+      { kind: "action", label: "kill session", hint: "Stops the process", run: () => a.killFocusedSession() },
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),
@@ -291,6 +294,9 @@ export class Palette {
     this.filtered.forEach((item, i) => {
       const row = document.createElement("div");
       row.className = "palette-item" + (i === this.sel ? " sel" : "");
+      row.id = `palette-option-${i}`;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(i === this.sel));
       const kind = document.createElement("span");
       kind.className = "kind";
       kind.textContent = item.kind;
@@ -317,5 +323,8 @@ export class Palette {
       this.listEl.appendChild(row);
       if (i === this.sel) row.scrollIntoView({ block: "nearest" });
     });
+    const active = this.filtered.length ? `palette-option-${this.sel}` : "";
+    if (active) this.input.setAttribute("aria-activedescendant", active);
+    else this.input.removeAttribute("aria-activedescendant");
   }
 }

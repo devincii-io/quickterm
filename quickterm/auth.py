@@ -1,6 +1,5 @@
 """Loopback auth token: the shared secret that proves a caller is QuickTerm's
-own window (or a program the user explicitly handed the token to, e.g. a future
-MCP bridge) rather than any other process that can reach 127.0.0.1.
+own window rather than any other process that can reach 127.0.0.1.
 
 The Host/Origin guard in server.py only stops *browser* attacks; it cannot stop
 a native local program from forging a Host header. The token closes that gap:

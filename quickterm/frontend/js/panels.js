@@ -90,9 +90,9 @@ export class Panels {
     const overlay = make("div", "panel-overlay");
     overlay.hidden = true;
     overlay.innerHTML =
-      '<section class="panel" role="dialog" aria-modal="true">' +
+      '<section class="panel" role="dialog" aria-modal="true" aria-labelledby="panel-title">' +
       '<header class="panel-head"><div><span class="panel-eyebrow">QuickTerm</span>' +
-      '<h1 class="panel-title"></h1><p class="panel-subtitle"></p></div>' +
+      '<h1 id="panel-title" class="panel-title"></h1><p class="panel-subtitle"></p></div>' +
       '<button class="panel-close" type="button"><span>Close</span><kbd>Esc</kbd></button></header>' +
       '<div class="panel-body"></div></section>';
     document.body.appendChild(overlay);
@@ -101,6 +101,7 @@ export class Panels {
     this.titleEl = overlay.querySelector(".panel-title");
     this.subtitleEl = overlay.querySelector(".panel-subtitle");
     this.bodyEl = overlay.querySelector(".panel-body");
+    this.closeButton = overlay.querySelector(".panel-close");
 
     overlay.addEventListener("mousedown", (event) => {
       if (event.target === overlay) this.close();
@@ -111,6 +112,20 @@ export class Panels {
         event.preventDefault();
         event.stopPropagation();
         this.close();
+      } else if (this.open && event.key === "Tab") {
+        const focusable = [...this.panelEl.querySelectorAll(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )].filter((node) => !node.hidden && node.offsetParent !== null);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     }, true);
   }
@@ -124,7 +139,8 @@ export class Panels {
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
     if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
-    this.app.refocusTerm();
+    if (this.returnFocus && this.returnFocus.isConnected) this.returnFocus.focus();
+    else this.app.refocusTerm();
   }
 
   toggle(name) {
@@ -134,6 +150,7 @@ export class Panels {
 
   show(name) {
     const refreshing = this.open === name;
+    if (!refreshing) this.returnFocus = document.activeElement;
     this.open = name;
     this.overlay.hidden = false;
     this.panelEl.dataset.view = name;
@@ -154,6 +171,7 @@ export class Panels {
       this.bodyEl.textContent = "";
       this._help();
     }
+    if (!refreshing) requestAnimationFrame(() => this.closeButton.focus());
   }
 
   // Live data on the dashboard (session list, pane counts) keeps itself
@@ -161,7 +179,9 @@ export class Panels {
   _startDashboardRefresh() {
     this._stopDashboardRefresh();
     this._dashTimer = setInterval(() => {
-      if (this.open === "dashboard" && !this._dashLoading) this._dashboard(true);
+      const editing = this.panelEl.contains(document.activeElement)
+        && document.activeElement.matches("input, textarea, select");
+      if (this.open === "dashboard" && !this._dashLoading && !editing) this._dashboard(true);
     }, DASHBOARD_REFRESH_MS);
   }
 
@@ -274,9 +294,9 @@ export class Panels {
     const hero = make("div", "dashboard-hero");
     const heroCopy = make("div", "hero-copy");
     heroCopy.append(
-      make("span", "hero-kicker", "Ready when you are"),
-      make("h2", "hero-title", "A calmer place for every command."),
-      make("p", "hero-text", "Keep different projects in their own layout and return to them in one click."),
+      make("span", "hero-kicker", "Workspace overview"),
+      make("h2", "hero-title", this.app.currentWorkspace() || "Scratch"),
+      make("p", "hero-text", "Open layouts, reattach background terminals, or clean up sessions from one place."),
     );
     const stats = make("div", "dashboard-stats");
     const alive = sessions.filter((session) => session.alive);
@@ -353,6 +373,7 @@ export class Panels {
       menu.append(icon("trash", 13), make("span", "", "Delete"));
       menu.addEventListener("click", async (event) => {
         event.stopPropagation();
+        if (!window.confirm(`Delete workspace "${workspace.name}" and stop its detached sessions?`)) return;
         menu.disabled = true;
         const gone = this._leave(card);
         if (this.app.deleteWorkspace) await this.app.deleteWorkspace(workspace.name);
@@ -379,10 +400,13 @@ export class Panels {
     this.bodyEl.append(workspaceSection);
 
     const sessionSection = make("section", "dashboard-section detached-section");
-    const timeoutMinutes = Math.max(1, Math.round((this.app.idleTimeoutSeconds || 300) / 60));
+    const timeoutSeconds = this.app.idleTimeoutSeconds ?? 300;
+    const timeoutCopy = timeoutSeconds <= 0
+      ? "Untouched background shells are never expired automatically."
+      : `Untouched background shells expire after ${Math.max(1, Math.round(timeoutSeconds / 60))} quiet minutes; used or busy sessions are kept.`;
     sessionSection.append(this._sectionHeading(
       "Detached sessions",
-      `Sessions stay with their workspace. Only unassigned sessions expire after ${timeoutMinutes} quiet minutes.`,
+      timeoutCopy,
     ));
     const sessionGroups = make("div", "detached-groups");
     const currentName = (this.app.currentWorkspace && this.app.currentWorkspace()) || "scratch";
@@ -434,6 +458,7 @@ export class Panels {
       });
       const kill = this._button("Kill", "text-button danger-text");
       kill.addEventListener("click", async () => {
+        if (!window.confirm(`Stop terminal "${session.name || session.id}"?`)) return;
         kill.disabled = true;
         await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
         if (this.open === "dashboard") this._dashboard(true);
@@ -682,7 +707,7 @@ export class Panels {
       this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."),
       this._field("Local server port", port, "Only available on this computer."),
       this._field("Session scrollback", scrollback, "History retained for each live session."),
-      this._field("Reap detached sessions", idleTimeout, "Silent sessions outside named workspaces are ended after this time."),
+      this._field("Clean unused shells", idleTimeout, "Only untouched, detached shells are ended after this time; used and busy terminals are kept."),
     );
     behavior.append(appFields);
     host.append(group, branding, behavior);
@@ -690,13 +715,21 @@ export class Panels {
 
   _themePicker(cfg) {
     const wrap = make("div", "theme-picker");
-    wrap.append(make("h4", "theme-picker-title", "App theme"), make("p", "field-hint", "Recolors the whole app and every open terminal the instant you pick one. Press Save to keep it."));
-    const grid = make("div", "theme-grid");
+    wrap.append(make("h4", "theme-picker-title", "Terminal theme"), make("p", "field-hint", "Changes terminal colors while the workbench stays neutral. Press Save to keep it."));
+    const featuredGrid = make("div", "theme-grid theme-grid-featured");
+    const catalog = make("details", "theme-catalog");
+    const catalogGrid = make("div", "theme-grid theme-grid-catalog");
     const current = () => cfg.theme || DEFAULT_THEME;
     const entries = [
       ...Object.entries(TERMINAL_THEMES),
       [CUSTOM_THEME, getTheme(CUSTOM_THEME, cfg.custom_theme)],
     ];
+    const selectedThemeId = entries.some(([id]) => id === current()) ? current() : DEFAULT_THEME;
+    const featuredIds = ["graphite", "github-dark", "one-dark", "rose-pine-dawn"];
+    if (!featuredIds.includes(selectedThemeId)) featuredIds[featuredIds.length - 1] = selectedThemeId;
+    const featured = new Set(featuredIds);
+    const catalogCount = entries.filter(([id]) => !featured.has(id)).length;
+    catalog.append(make("summary", "theme-catalog-trigger", `Theme catalog · ${catalogCount} more`), catalogGrid);
     const cards = new Map();
     const editor = make("div", "custom-theme-editor");
     const renderStrip = (card, def) => {
@@ -712,7 +745,7 @@ export class Panels {
       const card = make("button", "theme-card");
       card.type = "button";
       card.dataset.theme = id;
-      card.classList.toggle("active", current() === id);
+      card.classList.toggle("active", selectedThemeId === id);
       const strip = make("span", "theme-strip");
       const prompt = make("i", "theme-strip-prompt", "~ $");
       strip.append(prompt);
@@ -724,12 +757,12 @@ export class Panels {
       renderStrip(card, def);
       card.addEventListener("click", () => {
         cfg.theme = id;
-        for (const other of grid.children) other.classList.toggle("active", other === card);
+        for (const other of cards.values()) other.classList.toggle("active", other === card);
         editor.hidden = id !== CUSTOM_THEME;
         this._themePreviewDirty = true;
         this.app.previewTheme(id, cfg.custom_theme);
       });
-      grid.append(card);
+      (featured.has(id) ? featuredGrid : catalogGrid).append(card);
       cards.set(id, card);
     }
     cfg.custom_theme = customColors(cfg.custom_theme || {});
@@ -749,8 +782,8 @@ export class Panels {
       });
       editor.append(label);
     }
-    editor.hidden = current() !== CUSTOM_THEME;
-    wrap.append(grid, editor);
+    editor.hidden = selectedThemeId !== CUSTOM_THEME;
+    wrap.append(featuredGrid, catalog, editor);
     return wrap;
   }
 
@@ -832,7 +865,7 @@ export class Panels {
       const available = (this.terminalInventory.types || []).find((type) => type.executable && type.available !== false);
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, mcp_access: false });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -926,13 +959,6 @@ export class Panels {
       toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Open automatically with a restored workspace"));
       card.append(toggle);
 
-      const mcpToggle = make("label", "toggle-row");
-      const mcpCheckbox = make("input");
-      mcpCheckbox.type = "checkbox";
-      mcpCheckbox.checked = Boolean(profile.mcp_access);
-      mcpCheckbox.addEventListener("change", () => { profile.mcp_access = mcpCheckbox.checked; });
-      mcpToggle.append(mcpCheckbox, make("span", "toggle-control"), make("span", "toggle-copy", "Allow AI tools (MCP) — inject the QuickTerm token so an agent here can see and drive this workspace"));
-      card.append(mcpToggle);
       host.append(card);
     }
   }
@@ -1118,8 +1144,8 @@ export class Panels {
     this.bodyEl.append(intro);
     const grid = make("div", "help-grid");
     const shortcuts = [
-      ["Alt K", "Open command palette"], ["Alt Shift H", "Split side by side"],
-      ["Alt Shift V", "Split top and bottom"], ["Alt arrows", "Move between panes"],
+      ["Alt K", "Open command palette"], ["Alt Shift →", "Split to the right"],
+      ["Alt Shift ↓", "Split below"], ["Alt arrows", "Move between panes"],
       ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
       ["Alt Shift +", "Bigger terminal text"], ["Alt Shift -", "Smaller terminal text"],
       ["Alt Shift 0", "Reset terminal text size"],

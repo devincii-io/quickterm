@@ -119,9 +119,7 @@ async function boot() {
     fontFamily: cfg.font_family || "JetBrains Mono",
     fontSize,
     theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
-    onFocusChange: (pane) => {
-      if (pane && pane.session && pane.state === "attached") api.postFocus(pane.session.id).catch(() => {});
-    },
+    onFocusChange: () => refreshStatusSoon(),
     onPaneState: (pane) => {
       refreshStatusSoon();
       maybeAdoptScratch(pane);
@@ -160,14 +158,14 @@ async function boot() {
     };
   }
 
-  // The workspace a new session is born into, tagged so a co-located MCP client
-  // (quickterm-mcp) can scope to it. Only real named workspaces are tagged —
-  // an unsaved/scratch layout stays untagged so a later rename isn't stale.
+  // Tag new sessions with their named workspace. Scratch remains untagged
+  // because it is disposable and may be promoted under a different name.
   function spawnWorkspaceTag() {
     return currentWorkspace && currentWorkspace !== SCRATCH_WS ? currentWorkspace : undefined;
   }
 
   async function spawnInto(pane, profileName, cwd) {
+    if (!pane.beginSpawn()) return null;
     try {
       const info = await api.createSession({
         profile: profileName, cwd: cwd || undefined, workspace: spawnWorkspaceTag(),
@@ -178,17 +176,18 @@ async function boot() {
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
-      if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
       refreshStatusSoon();
       return info;
     } catch (error) {
+      pane.endSpawn();
       pane.showNotice(`[${error.detail || `spawn failed: ${profileName}`}]`);
       return null;
     }
   }
 
   async function spawnSpecInto(pane, spec) {
+    if (!pane.beginSpawn()) return null;
     const launchSpec = serializableSpec(spec);
     try {
       // workspace tags the request only (not the persisted launchSpec).
@@ -199,11 +198,11 @@ async function boot() {
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
-      if (layout.focused === pane) api.postFocus(info.id).catch(() => {});
       scheduleWorkspaceSave();
       refreshStatusSoon();
       return info;
     } catch (error) {
+      pane.endSpawn();
       pane.showNotice(`[${error.detail || `spawn failed: ${launchSpec.name}`}]`);
       return null;
     }
@@ -273,7 +272,6 @@ async function boot() {
     layout.focusPane(pane);
     pane.attach(info);
     ownSession(info.id);
-    api.postFocus(info.id).catch(() => {});
     scheduleWorkspaceSave();
     refreshStatusSoon();
   }
@@ -369,10 +367,14 @@ async function boot() {
     if (!saved || !saved.layout) return false;
     const savedLayout = saved.layout;
     workspaceLogo = saved.logo || null;
-    workspaceSessionIds = new Set(saved.session_ids || []);
-    sessionIdsInLayout(savedLayout, workspaceSessionIds); // old workspace files
     const liveSessions = await api.getSessions().catch(() => []);
     const byId = new Map(liveSessions.filter((session) => session.alive).map((session) => [session.id, session]));
+    workspaceSessionIds = new Set(
+      (saved.session_ids || []).filter((sessionId) => byId.has(sessionId)),
+    );
+    for (const sessionId of sessionIdsInLayout(savedLayout)) {
+      if (byId.has(sessionId)) workspaceSessionIds.add(sessionId);
+    }
     const panes = layout.restore(savedLayout);
     for (const pane of panes) {
       const live = pane.savedSessionId && byId.get(pane.savedSessionId);
@@ -473,7 +475,7 @@ async function boot() {
   const app = {
     profiles,
     snippets,
-    idleTimeoutSeconds: cfg.idle_timeout_s || 300,
+    idleTimeoutSeconds: cfg.idle_timeout_s ?? 300,
     runProfile,
     runSystemTerminal,
     attachSession,
@@ -519,6 +521,7 @@ async function boot() {
     killFocusedSession: () => {
       const pane = layout.focused;
       if (pane && pane.session) {
+        if (!window.confirm(`Stop terminal "${pane.displayName()}"?`)) return;
         forgetSession(pane.session.id);
         api.killSession(pane.session.id).catch(() => {});
         scheduleWorkspaceSave();
@@ -623,7 +626,7 @@ async function boot() {
       terminalInventory = freshInventory;
       app.profiles = profiles;
       app.snippets = snippets;
-      app.idleTimeoutSeconds = fresh.idle_timeout_s || 300;
+      app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
       applyChromeTheme(fresh.theme, fresh.custom_theme);
       layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
       setFontSize(fresh.font_size, false);
@@ -634,7 +637,10 @@ async function boot() {
   const palette = new Palette(app);
   panels = new Panels(app);
   app.openPanel = (name) => panels.show(name);
-  $("sb-shortcuts").addEventListener("click", () => panels.show("help"));
+  $("sb-shortcuts").addEventListener("click", () => {
+    panels.close();
+    palette.toggle();
+  });
 
   // Terminal text size: applied live to every pane, persisted to config so it
   // survives restarts and shows up in Settings. Saving is debounced so holding
@@ -721,6 +727,7 @@ async function boot() {
       workspaces: workspaceNames,
       currentWorkspace,
       selectedTerminal,
+      defaultProfile: cfg.default_profile,
       onSelectTerminal: (choice) => { selectedTerminal = choice; },
       logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
       onRunProfile: runProfile,
@@ -746,8 +753,9 @@ async function boot() {
       const owned = new Set(app.ownedSessionIds());
       const attached = new Set(app.attachedSessionIds());
       const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
+      const visible = liveOwned.filter((session) => attached.has(session.id)).length;
       const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
-      $("sb-sessions").textContent = `${attached.size} open · ${detached} detached`;
+      $("sb-sessions").textContent = `${visible} live · ${detached} detached`;
     }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 
@@ -826,7 +834,6 @@ async function boot() {
       pane.attach(administratorSession);
       scratchSessionIds.add(administratorSession.id);
       layout.focusPane(pane);
-      api.postFocus(administratorSession.id).catch(() => {});
     } else {
       await spawnDefaultInto(pane, openDir);
     }

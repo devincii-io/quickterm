@@ -6,6 +6,8 @@
 //   Alt+Arrows         move focus between panes
 //   Alt+Shift+H        split side by side
 //   Alt+Shift+V        split top and bottom
+//   Alt+Shift+Right    split to the right
+//   Alt+Shift+Down     split below
 //   Alt+Shift++/-/0    grow / shrink / reset terminal text size
 // Everything on plain Alt that shells and TUIs actually bind passes through:
 // Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
@@ -47,6 +49,8 @@ export function initKeys(actions) {
     // on any keyboard layout (German Shift+'+' is '*', etc.).
     if (key === "h") return done(actions.splitH);
     if (key === "v") return done(actions.splitV);
+    if (key === "arrowright") return done(actions.splitH);
+    if (key === "arrowdown") return done(actions.splitV);
     if (e.code === "Digit0" || e.code === "Numpad0") return done(actions.fontReset);
     if (e.code === "Minus" || e.code === "NumpadSubtract") return done(actions.fontSmaller);
     if (e.code === "Equal" || e.code === "BracketRight" || e.code === "NumpadAdd") return done(actions.fontBigger);

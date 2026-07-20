@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,10 +22,6 @@ class Profile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
-    # Only terminals from a profile with mcp_access carry the QuickTerm discovery
-    # env (incl. the auth token), so an AI client (quickterm-mcp) works there.
-    # Off by default: the token is not sprayed into every shell you open.
-    mcp_access: bool = False
 
 
 @dataclass
@@ -39,25 +36,6 @@ class VoiceConfig:
     model_size: str = "small"
     hotkey: str = "ctrl+alt+v"
     language: str | None = None
-
-
-@dataclass
-class McpConfig:
-    """Controls the quickterm-mcp bridge (see quickterm/mcp_server.py).
-
-    `enabled` injects discovery env (QUICKTERM_PORT/TOKEN/SESSION_ID/WORKSPACE)
-    into every spawned terminal so an MCP client launched inside a pane finds
-    the backend with no configuration; turning it off keeps the token out of
-    child environments. `allow_input` gates the write path (typing into a
-    terminal from an AI client); reads are always allowed to token holders.
-    """
-
-    enabled: bool = True
-    allow_input: bool = True
-    max_input_bytes: int = 4096
-    # Convenience escape hatch: inject discovery env into EVERY terminal, not
-    # just profiles with mcp_access. Less safe; off by default.
-    inject_all: bool = False
 
 
 def _default_profiles() -> list[Profile]:
@@ -94,7 +72,6 @@ class AppConfig:
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
-    mcp: McpConfig = field(default_factory=McpConfig)
 
 
 def default_cwd() -> str:
@@ -147,12 +124,18 @@ def config_from_dict(raw: dict) -> AppConfig:
         kwargs["snippets"] = [_parse(Snippet, s) for s in kwargs["snippets"]]
     if "voice" in kwargs:
         kwargs["voice"] = _parse(VoiceConfig, kwargs["voice"])
-    if "mcp" in kwargs:
-        kwargs["mcp"] = _parse(McpConfig, kwargs["mcp"])
     return AppConfig(**kwargs)
 
 
 def validate_config(cfg: AppConfig) -> None:
+    if not 1 <= cfg.port <= 65535:
+        raise ValueError("Port must be between 1 and 65535")
+    if not 64 * 1024 <= cfg.scrollback_bytes <= 64 * 1024 * 1024:
+        raise ValueError("Scrollback must be between 64 KiB and 64 MiB")
+    if not 8 <= cfg.font_size <= 32:
+        raise ValueError("Font size must be between 8 and 32")
+    if cfg.idle_timeout_s < 0:
+        raise ValueError("Idle timeout cannot be negative")
     for profile in cfg.profiles:
         cwd = (profile.cwd or "").strip()
         if not cwd or profile.terminal_type == "wsl":
@@ -177,6 +160,21 @@ def load_config() -> AppConfig:
 def save_config(cfg: AppConfig) -> None:
     validate_config(cfg)
     path = config_dir() / "config.json"
-    path.write_text(
-        json.dumps(dataclasses.asdict(cfg), indent=2), encoding="utf-8"
-    )
+    _atomic_write(path, json.dumps(dataclasses.asdict(cfg), indent=2))
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace a JSON file only after the complete new value is durable."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise

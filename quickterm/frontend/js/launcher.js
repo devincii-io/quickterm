@@ -175,9 +175,14 @@ function buildTerminalControl(options) {
     selected = { ...prior };
   }
   if (!selected) {
-    selected = options.profiles.length
-      ? { kind: "profile", profile: options.profiles[0], label: options.profiles[0].name, detail: shellLabel(options.profiles[0]) }
-      : systems.length ? { kind: "system", ...systems[0] } : null;
+    const preferredProfile = options.profiles.find((profile) => profile.name === options.defaultProfile);
+    const preferredSystem = systems.find((system) => system.id === options.defaultProfile);
+    selected = preferredProfile
+      ? { kind: "profile", profile: preferredProfile, label: preferredProfile.name, detail: shellLabel(preferredProfile) }
+      : preferredSystem ? { kind: "system", ...preferredSystem }
+      : options.profiles.length
+        ? { kind: "profile", profile: options.profiles[0], label: options.profiles[0].name, detail: shellLabel(options.profiles[0]) }
+        : systems.length ? { kind: "system", ...systems[0] } : null;
   }
   if (options.onSelectTerminal && selected) options.onSelectTerminal(selected);
 

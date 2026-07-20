@@ -40,6 +40,8 @@ async def main(mb: float) -> None:
         item = await att.queue.get()
         if item is None:
             break
+        if item is att.overflow_sentinel:
+            raise RuntimeError("benchmark consumer fell behind; rerun on an idle machine")
         total += len(item)
         frames += 1
     dt = time.monotonic() - t0
@@ -48,9 +50,7 @@ async def main(mb: float) -> None:
     per_frame = (total / frames) if frames else 0
     print(
         f"{total / 1e6:6.1f} MB seen in {dt:5.2f}s  ->  {rate:6.1f} MB/s  "
-        f"over {frames} frames ({per_frame:,.0f} B/frame)\n"
-        "(bytes may undercount vs produced: the 256-slot attachment queue drops "
-        "oldest under backpressure; wall-clock + frame count are the signal.)"
+        f"over {frames} frames ({per_frame:,.0f} B/frame)"
     )
     mgr.shutdown()
 

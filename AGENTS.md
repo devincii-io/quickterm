@@ -49,7 +49,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   Alt+Z zoom, Alt+W close, Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
   (or H/V) split and
   Alt+Shift+±/0 font on the Alt+Shift namespace. Plain Alt+V/P/H/0-9/- MUST pass
-  through to the shell (Claude Code image paste & model switch, PSReadLine/readline
+  through to the shell (Codex image paste & model switch, PSReadLine/readline
   bindings) — never re-claim them. Copy/paste stays Ctrl+Shift+C/V; the paste
   handler must NOT preventDefault (WebView2 denies `clipboard.readText` silently —
   let the native paste event reach xterm's textarea).

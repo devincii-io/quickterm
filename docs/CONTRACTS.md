@@ -25,8 +25,6 @@ class Profile:
     terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/custom
     wsl_distro: str | None = None
     start_command: str | None = None  # run inside supported shells, then remain interactive
-    mcp_access: bool = False          # inject QuickTerm discovery env (incl. token) into
-                                      # this profile's terminals — opt-in per profile
 
 @dataclass
 class Snippet:
@@ -39,14 +37,6 @@ class VoiceConfig:
     model_size: str = "small"       # faster-whisper model name
     hotkey: str = "ctrl+alt+v"      # toggle push-to-talk (press start / press stop)
     language: str | None = None     # None = auto-detect (DE/EN)
-
-@dataclass
-class McpConfig:                     # the quickterm-mcp bridge (see mcp_server.py)
-    enabled: bool = True            # master switch for the bridge + env injection
-    allow_input: bool = True        # allow POST /api/sessions/{id}/input (AI typing)
-    max_input_bytes: int = 4096     # hard cap per send_input call
-    inject_all: bool = False        # inject discovery env into EVERY terminal, not just
-                                    # profiles with mcp_access (convenience; less safe)
 
 @dataclass
 class AppConfig:
@@ -64,7 +54,6 @@ class AppConfig:
     profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
     voice: VoiceConfig = ...
-    mcp: McpConfig = ...
 
 def config_dir() -> Path
 def default_cwd() -> str
@@ -121,8 +110,7 @@ class SessionInfo:
     id: str; name: str; profile: str | None
     alive: bool; exit_code: int | None; cols: int; rows: int
     touched: bool               # True once the user typed/pasted into it
-    workspace: str | None = None  # workspace this session was spawned into (MCP scope hint)
-    mcp_touched: bool = False     # True once an MCP client wrote into it
+    workspace: str | None = None  # workspace this session belongs to
 
 class Session:
     info: SessionInfo
@@ -132,12 +120,10 @@ class Session:
 
 class SessionManager:
     def __init__(self, loop, scrollback_bytes: int = 512*1024) -> None
-    env_context: dict[str, str]   # static discovery env (QUICKTERM_PORT/TOKEN) the
-                                  # server sets at build; spawn adds per-session id/workspace
     def spawn(self, *, name: str | None = None, profile: str | None = None,
               cmd: str, args: list[str] = ..., cwd: str | None = None,
               env: dict[str, str] = ..., cols: int = 120, rows: int = 30,
-              workspace: str | None = None) -> SessionInfo   # workspace tags info + child env
+              workspace: str | None = None) -> SessionInfo
     def list(self) -> list[SessionInfo]
     def get(self, sid: str) -> Session | None
     def write(self, sid: str, data: bytes) -> None
@@ -148,17 +134,15 @@ class SessionManager:
     def shutdown(self) -> None                # kill all
 
 class Attachment:
-    # per-subscriber bounded asyncio.Queue[bytes | None]; None = session exited
+    # bounded queue; slow viewers receive an explicit resync sentinel
     queue: asyncio.Queue
     def detach(self) -> None
 ```
 
-- Flow control: subscriber queues are bounded (e.g. 256 chunks). If a queue is
-  full, coalesce/drop for that slow subscriber only after buffering — never
-  block other subscribers; scrollback ring always stays current.
+- Flow control: subscriber queues are bounded. A slow viewer is disconnected
+  with an explicit resync signal and replays the current ring; terminal bytes
+  are never silently dropped or delivered in a corrupt partial sequence.
 - Session ids: short hex (`uuid4().hex[:8]`).
-- `focused_session_id: str | None` attribute settable via REST; hotkeys/voice
-  write into it.
 
 ## quickterm/workspace.py
 
@@ -204,18 +188,12 @@ REST (JSON, under `/api`):
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
-| GET | /api/sessions/{id}/scrollback | `?lines=200&strip_ansi=1&max_bytes=65536` → `{id, text, lines, truncated, alive, exit_code}` — ring buffer as plain text (ANSI stripped server-side, last-N-lines, byte-capped). 404 if unknown. |
-| POST | /api/sessions/{id}/input | `{text}` → `{written}` — type into a terminal from a non-attached client. Gated by `mcp.allow_input` (else 403), capped at `mcp.max_input_bytes` (else 413), 404 unknown, 409 exited, 400 bad body. Sets `mcp_touched`, appends to the activity log. |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` |
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?}` → 204 |
 | DELETE | /api/workspaces/{name} | kill sessions referenced by the workspace, delete it → 204 |
-| POST | /api/focus | `{session_id}` → 204 (sets manager.focused_session_id) |
-| GET | /api/focus | → `{session_id}` — what the user is looking at (MCP get_focused_session) |
-| GET | /api/mcp/activity | → `[{ts, action, session_id, name, bytes}]` — recent AI-driven writes (ring of 100) |
-| GET | /api/mcp/setup | → `{command, add_command, mcp_json, enabled, allow_input, note}` — copy-paste MCP client setup |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
 | GET | /api/config/full | → complete `AppConfig` |
 | PUT | /api/config | complete `AppConfig` → 204 |
@@ -239,51 +217,15 @@ WebSocket `/ws/session/{id}` — attach protocol, in order:
    - client → binary frames: raw keyboard input bytes (written to PTY verbatim)
    - client → text JSON `{"type":"resize","cols":C,"rows":R}`
 
+If a viewer falls behind its bounded queue, the server sends
+`{"type":"overflow"}` and closes the socket. The client reconnects and replays
+the current bounded scrollback instead of continuing with missing VT bytes.
+
 Client is responsible for replay-then-resize: set xterm to replay size, write
 scrollback, THEN resize to real size and send resize message.
 
 Server binds 127.0.0.1 by default. Host and Origin allowlists protect the local
 HTTP and WebSocket surface against DNS rebinding and cross-origin browser use.
-
-## quickterm/mcp_server.py
-
-`quickterm-mcp` — a dependency-free MCP server over **stdio** that exposes a
-QuickTerm workspace's terminals to an AI client (Claude Code, …). Separate
-process the client launches; drives the running backend over the loopback REST
-API with the per-install token. The protocol layer is hand-rolled
-newline-delimited JSON-RPC 2.0 (`initialize` / `tools/list` / `tools/call` /
-`ping`, notifications ignored); backend calls use stdlib `urllib`. Nothing is
-written to stdout except protocol messages.
-
-```python
-def main(argv: list[str] | None = None) -> None      # serve, or --setup to print client config
-def setup_message(command: str = "quickterm-mcp") -> str
-class RestBackend: ...       # urllib client, sends X-QuickTerm-Token
-class QuickTerm: ...         # workspace scope resolution + the tools
-class Server:                # JSON-RPC dispatch
-    def handle(self, msg: dict) -> dict | None
-def serve(server, stdin, stdout) -> None
-```
-
-Discovery is automatic inside a pane: QuickTerm injects `QUICKTERM_PORT` /
-`QUICKTERM_TOKEN` / `QUICKTERM_SESSION_ID` / `QUICKTERM_WORKSPACE` into a
-terminal ONLY when its profile has `mcp_access` (or the global `mcp.inject_all`),
-so the token is not sprayed into every shell. The session's `workspace` tag is
-recorded regardless (server-side scoping metadata, not a secret); only real named
-workspaces are tagged, never scratch. Scope resolves in order:
-`--workspace`/`$QUICKTERM_WORKSPACE` →
-live workspace-file membership of the caller's own session → spawn-time tag →
-unscoped (all live sessions, stated as such). Scope is a per-agent guardrail,
-not a hard boundary — the token already grants full local API access.
-
-The `initialize` result carries an `instructions` string (the model's primer on
-scope + tools); the same text is returned by the `about` tool on demand.
-
-Tools: `about`, `whoami`, `list_sessions`, `read_terminal`, `list_workspaces`,
-`get_focused_session` (read); `send_input` (scoped, never to your own session,
-capped, audited), `spawn_session` (profiles only, joins the workspace),
-`kill_session` (only sessions this bridge spawned). CLI: `--host/--port/--token/
---token-file/--workspace/--session`, `--setup`.
 
 ## quickterm/app.py
 
@@ -303,8 +245,8 @@ def main() -> None
 - Clean shutdown: manager.shutdown() on exit.
 - Close-to-tray (win32, non-elevated): closing the primary window hides to the
   system tray (quickterm/tray.py, ctypes Shell_NotifyIcon) iff any live session
-  has `touched=True` — otherwise the app quits. Tray menu: Open / Quit. The
-  summon hotkey also restores a tray-hidden window.
+  has `touched=True` or its shell has a child process — otherwise the app quits.
+  Tray menu: Open / Quit. The summon hotkey also restores a tray-hidden window.
 
 ## quickterm/hotkeys.py
 
@@ -369,7 +311,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Command palette Alt+K: fuzzy over profiles / actions (split h/v, zoom, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
-- Keybindings (in addition to palette): Alt+Shift+H/V split, Alt+Z zoom,
+- Keybindings (in addition to palette): Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom,
   Alt+W detach pane (two-step when the session is busy), Alt+arrows focus move,
   Alt+Shift+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).

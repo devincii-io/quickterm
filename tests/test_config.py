@@ -91,37 +91,20 @@ def test_save_allows_wsl_folder_without_local_match(fake_appdata):
     assert (fake_appdata / "quickterm" / "config.json").exists()
 
 
-def test_mcp_config_defaults_and_roundtrip(fake_appdata):
-    cfg = load_config()
-    # capable-but-safe defaults: bridge on, input allowed, capped, no blanket inject
-    assert cfg.mcp.enabled is True
-    assert cfg.mcp.allow_input is True
-    assert cfg.mcp.max_input_bytes == 4096
-    assert cfg.mcp.inject_all is False
-    cfg.mcp.allow_input = False
-    cfg.mcp.max_input_bytes = 2048
-    save_config(cfg)
-    loaded = load_config()
-    assert loaded.mcp.allow_input is False
-    assert loaded.mcp.max_input_bytes == 2048
-
-
-def test_profile_mcp_access_defaults_off_and_roundtrips(fake_appdata):
-    assert Profile(name="x", cmd="cmd.exe").mcp_access is False
-    cfg = AppConfig(profiles=[Profile(name="claude", cmd="claude", mcp_access=True)])
-    save_config(cfg)
-    assert next(p for p in load_config().profiles if p.name == "claude").mcp_access is True
-
-
-def test_mcp_config_ignores_unknown_keys(fake_appdata):
-    path = fake_appdata / "quickterm"
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "config.json").write_text(
-        json.dumps({"mcp": {"allow_input": False, "bogus": 1}}), encoding="utf-8"
-    )
-    cfg = load_config()
-    assert cfg.mcp.allow_input is False
-    assert cfg.mcp.enabled is True  # default preserved
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("port", 0, "Port"),
+        ("scrollback_bytes", 1024, "Scrollback"),
+        ("font_size", 40, "Font size"),
+        ("idle_timeout_s", -1, "Idle timeout"),
+    ],
+)
+def test_save_rejects_unsafe_bounds(fake_appdata, field, value, message):
+    cfg = AppConfig()
+    setattr(cfg, field, value)
+    with pytest.raises(ValueError, match=message):
+        save_config(cfg)
 
 
 def test_unknown_keys_ignored(fake_appdata):

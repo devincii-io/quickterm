@@ -13,7 +13,7 @@
 <body>
 <div id="app">
   <header id="launcher" class="launcher"></header>
-  <main id="grid" class="grid"></main>
+  <main id="grid" class="grid" aria-label="Terminal workspace"></main>
   <div id="zoom-host" class="zoom-host" hidden></div>
   <footer id="statusbar" class="statusbar">
     <span id="sb-workspace" class="sb-item"></span>
@@ -21,10 +21,11 @@
     <span id="sb-sessions" class="sb-item"></span>
     <span id="sb-zoom">zoom</span>
     <span class="sb-flex"></span>
-    <button id="sb-shortcuts" type="button">Alt+K commands · Help shortcuts</button>
+    <button id="sb-shortcuts" type="button">Commands <kbd>Alt+K</kbd></button>
     <span id="voice-indicator"></span>
     <span id="sb-clock" class="sb-item"></span>
   </footer>
+  <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
 </div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>

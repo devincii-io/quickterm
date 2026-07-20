@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,18 +62,29 @@ def load_workspace(name: str) -> Workspace | None:
 
 
 def save_workspace(ws: Workspace) -> None:
-    _path_for(ws.name).write_text(
-        json.dumps(
-            {
-                "name": ws.name,
-                "layout": ws.layout,
-                "logo": ws.logo,
-                "session_ids": sorted(set(ws.session_ids)),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    path = _path_for(ws.name)
+    text = json.dumps(
+        {
+            "name": ws.name,
+            "layout": ws.layout,
+            "logo": ws.logo,
+            "session_ids": sorted(set(ws.session_ids)),
+        },
+        indent=2,
     )
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _collect_session_ids(node: object, out: set[str]) -> None:
