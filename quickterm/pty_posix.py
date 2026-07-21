@@ -12,6 +12,7 @@ import asyncio
 import fcntl
 import os
 import pty
+import queue
 import shutil
 import signal
 import struct
@@ -96,13 +97,43 @@ class PtySession:
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{pid}", daemon=True
         )
+        self._write_q: queue.Queue[bytes | None] = queue.Queue(maxsize=64)
+        self._writer = threading.Thread(
+            target=self._write_loop, name=f"pty-writer-{pid}", daemon=True
+        )
         self._reader.start()
+        self._writer.start()
 
     def write(self, data: bytes) -> None:
         if not self._dead.is_set():
             try:
-                os.write(self._fd, data)
-            except OSError:
+                self._write_q.put_nowait(data)
+            except queue.Full:
+                raise BufferError("PTY input queue is full") from None
+
+    def _write_loop(self) -> None:
+        while True:
+            data = self._write_q.get()
+            if data is None:
+                return
+            view = memoryview(data)
+            while view and not self._dead.is_set():
+                try:
+                    written = os.write(self._fd, view)
+                except OSError:
+                    return
+                if written <= 0:
+                    return
+                view = view[written:]
+
+    def _stop_writer(self) -> None:
+        try:
+            self._write_q.put_nowait(None)
+        except queue.Full:
+            try:
+                self._write_q.get_nowait()
+                self._write_q.put_nowait(None)
+            except (queue.Empty, queue.Full):
                 pass
 
     def resize(self, cols: int, rows: int) -> None:
@@ -133,6 +164,7 @@ class PtySession:
                 os.kill(self._pid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
+        self._stop_writer()
         # reader sees EOF/EIO and finishes exit handling
 
     def _read_loop(self) -> None:
@@ -155,6 +187,7 @@ class PtySession:
         if self._exit_code is None:
             self._exit_code = 1
         self._dead.set()
+        self._stop_writer()
         try:
             os.close(self._fd)
         except OSError:

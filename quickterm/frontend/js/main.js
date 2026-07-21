@@ -89,6 +89,10 @@ async function boot() {
   let workspaceSessionIds = new Set();
   let statusTimer = null;
   let workspaceSaveTimer = null;
+  let workspaceRetryTimer = null;
+  let workspaceStatusTimer = null;
+  let workspaceSaveInFlight = false;
+  let workspaceSavePending = false;
   let transitioning = true;
   let panels;
   let workspaceLogo = null;
@@ -119,7 +123,7 @@ async function boot() {
     fontFamily: cfg.font_family || "JetBrains Mono",
     fontSize,
     theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
-    onFocusChange: () => refreshStatusSoon(),
+    onFocusChange: () => { refreshStatusSoon(); updateQuickSettings(); },
     onPaneState: (pane) => {
       refreshStatusSoon();
       maybeAdoptScratch(pane);
@@ -139,7 +143,9 @@ async function boot() {
     const types = (terminalInventory && terminalInventory.types) || [];
     const usable = types.find((type) => type.executable && type.available !== false && type.id !== "custom");
     if (!usable) return null;
-    const args = usable.id === "powershell-core" || usable.id === "windows-powershell" ? ["-NoLogo"] : [];
+    const args = usable.id === "powershell-core" || usable.id === "windows-powershell"
+      ? ["-NoLogo"]
+      : usable.id === "wsl" ? ["--cd", "~"] : [];
     return { cmd: usable.executable, args, name: usable.label };
   }
 
@@ -277,20 +283,65 @@ async function boot() {
   }
 
   async function persistCurrentWorkspace() {
-    if (!currentWorkspace || transitioning || !layout.root) return;
+    if (!currentWorkspace || transitioning || !layout.root) return true;
     clearTimeout(workspaceSaveTimer);
-    await workspace.save(
-      currentWorkspace,
-      layout.serialize(),
-      workspaceLogo,
-      [...ownedSessionIds()],
-    ).catch(() => {});
+    clearTimeout(workspaceRetryTimer);
+    workspaceRetryTimer = null;
+    if (workspaceSaveInFlight) {
+      workspaceSavePending = true;
+      return true;
+    }
+    workspaceSaveInFlight = true;
+    workspaceSavePending = false;
+    const targetWorkspace = currentWorkspace;
+    setWorkspaceSaveState("saving");
+    let saved = false;
+    try {
+      await workspace.save(
+        targetWorkspace,
+        layout.serialize(),
+        workspaceLogo,
+        [...ownedSessionIds()],
+      );
+      saved = true;
+      if (currentWorkspace === targetWorkspace) {
+        setWorkspaceSaveState("saved");
+        clearTimeout(workspaceStatusTimer);
+        workspaceStatusTimer = setTimeout(() => setWorkspaceSaveState(""), 1400);
+      }
+    } catch (_) {
+      if (currentWorkspace === targetWorkspace) {
+        workspaceSavePending = true;
+        setWorkspaceSaveState("save failed · retrying", "error");
+        workspaceRetryTimer = setTimeout(() => {
+          workspaceRetryTimer = null;
+          persistCurrentWorkspace();
+        }, 2000);
+      }
+    } finally {
+      workspaceSaveInFlight = false;
+      if (saved && workspaceSavePending && currentWorkspace === targetWorkspace) {
+        setTimeout(() => persistCurrentWorkspace(), 0);
+      }
+    }
+    return saved;
   }
 
   function scheduleWorkspaceSave() {
     if (!currentWorkspace || transitioning) return;
     clearTimeout(workspaceSaveTimer);
+    clearTimeout(workspaceRetryTimer);
+    workspaceRetryTimer = null;
+    workspaceSavePending = true;
     workspaceSaveTimer = setTimeout(() => persistCurrentWorkspace(), 300);
+  }
+
+  function setWorkspaceSaveState(text, state = "") {
+    const status = $("sb-save");
+    if (!status) return;
+    status.textContent = text;
+    if (state) status.dataset.state = state;
+    else delete status.dataset.state;
   }
 
   // Tear down the current scratch layout before leaving it: scratch is
@@ -408,12 +459,18 @@ async function boot() {
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
     if (currentWorkspace) {
-      await workspace.save(
-        currentWorkspace,
-        layout.serialize(),
-        workspaceLogo,
-        [...ownedSessionIds()],
-      ).catch(() => {});
+      try {
+        await workspace.save(
+          currentWorkspace,
+          layout.serialize(),
+          workspaceLogo,
+          [...ownedSessionIds()],
+        );
+      } catch (_) {
+        transitioning = false;
+        setWorkspaceSaveState("save failed · workspace not switched", "error");
+        return;
+      }
     } else if (name) {
       // A never-adopted scratch has no workspace file; leaving it is the one
       // time we clean up its disposable sessions immediately.
@@ -465,11 +522,17 @@ async function boot() {
   }
 
   async function killWorkspaceSession(info, workspaceName) {
-    if (!info || !info.id) return;
-    await api.killSession(info.id).catch(() => {});
+    if (!info || !info.id) return false;
+    try {
+      await api.killSession(info.id);
+    } catch (_) {
+      setWorkspaceSaveState("could not stop terminal", "error");
+      return false;
+    }
     forgetSession(info.id);
     if (workspaceName) await removeWorkspaceOwnership(workspaceName, info.id);
     refreshStatusSoon();
+    return true;
   }
 
   const app = {
@@ -518,12 +581,17 @@ async function boot() {
         }).catch(() => {});
       }, 350);
     },
-    killFocusedSession: () => {
+    killFocusedSession: async () => {
       const pane = layout.focused;
       if (pane && pane.session) {
         if (!window.confirm(`Stop terminal "${pane.displayName()}"?`)) return;
+        try {
+          await api.killSession(pane.session.id);
+        } catch (_) {
+          pane.flashNotice("[could not stop terminal]");
+          return;
+        }
         forgetSession(pane.session.id);
-        api.killSession(pane.session.id).catch(() => {});
         scheduleWorkspaceSave();
         refreshStatusSoon();
       }
@@ -581,6 +649,12 @@ async function boot() {
     // kills sessions nobody is attached to, and deleting the workspace you're
     // in simply turns the live layout into a scratch layout in place.
     deleteWorkspace: async (name) => {
+      try {
+        await api.deleteWorkspace(name);
+      } catch (_) {
+        setWorkspaceSaveState("workspace delete failed", "error");
+        return false;
+      }
       const deletingCurrent = currentWorkspace === name;
       if (deletingCurrent) {
         clearTimeout(workspaceSaveTimer);
@@ -590,11 +664,11 @@ async function boot() {
         for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
         workspaceSessionIds = new Set();
       }
-      await api.deleteWorkspace(name).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== name);
       buildLauncher();
       refreshStatusSoon();
       scheduleWorkspaceSave(); // live layout continues as scratch
+      return true;
     },
     onWorkspacesChanged: async () => {
       workspaceNames = await api.listWorkspaces().catch(() => workspaceNames);
@@ -636,8 +710,9 @@ async function boot() {
 
   const palette = new Palette(app);
   panels = new Panels(app);
-  app.openPanel = (name) => panels.show(name);
+  app.openPanel = (name) => { closeQuickSettings(); panels.show(name); };
   $("sb-shortcuts").addEventListener("click", () => {
+    closeQuickSettings();
     panels.close();
     palette.toggle();
   });
@@ -663,9 +738,122 @@ async function boot() {
     fontSize = next;
     layout.setFontSize(fontSize);
     if (persist) persistFontSize();
+    updateQuickSettings();
   }
   app.setFontSize = setFontSize;
   app.fontSize = () => fontSize;
+
+  // Pane-first is the least surprising developer default: changing text size
+  // in one terminal should not reflow every other running terminal.  "All
+  // panes" remains one click away and persists the default for new panes.
+  let fontScope = "pane";
+  const quickSettings = $("quick-settings");
+  const quickButton = $("sb-quick");
+
+  function scopedFontSize() {
+    return fontScope === "pane" && layout.focused ? layout.focused.fontSize : fontSize;
+  }
+
+  function updateQuickSettings() {
+    const value = clampFont(scopedFontSize());
+    const paneScope = fontScope === "pane" && Boolean(layout.focused);
+    const statusValue = $("sb-font-size");
+    if (statusValue) statusValue.textContent = `${value} px · ${paneScope ? "pane" : "all"}`;
+    const output = $("quick-font-value");
+    if (!output) return;
+    output.textContent = `${value} px`;
+    $("quick-font-smaller").disabled = value <= MIN_FONT;
+    $("quick-font-bigger").disabled = value >= MAX_FONT;
+    $("quick-scope-pane").classList.toggle("active", paneScope);
+    $("quick-scope-pane").setAttribute("aria-pressed", String(paneScope));
+    $("quick-scope-all").classList.toggle("active", !paneScope);
+    $("quick-scope-all").setAttribute("aria-pressed", String(!paneScope));
+    $("quick-scope-hint").textContent = paneScope
+      ? "This pane only; its size resets when the view is recreated."
+      : "All panes and the saved default for new terminals.";
+    $("quick-focus").textContent = layout.zoomed ? "Show all panes" : "Focus this pane";
+    const canWidth = layout.canResizeFocused("h");
+    const canHeight = layout.canResizeFocused("v");
+    $("quick-width-smaller").disabled = !canWidth;
+    $("quick-width-bigger").disabled = !canWidth;
+    $("quick-height-smaller").disabled = !canHeight;
+    $("quick-height-bigger").disabled = !canHeight;
+    $("quick-pane-balance").disabled = !canWidth && !canHeight;
+  }
+
+  function setFontScope(scope) {
+    fontScope = scope === "pane" && layout.focused ? "pane" : "all";
+    // Switching back to All intentionally clears temporary per-pane
+    // overrides so the value shown here matches every terminal immediately.
+    if (fontScope === "all") layout.setFontSize(fontSize);
+    updateQuickSettings();
+  }
+
+  function setScopedFontSize(px) {
+    const next = clampFont(px);
+    if (fontScope === "pane" && layout.focused) {
+      layout.focused.setFontSize(next);
+      layout.focused.flashNotice(`[font ${next}px · this pane]`);
+      updateQuickSettings();
+      return;
+    }
+    setFontSize(next);
+    if (layout.focused) layout.focused.flashNotice(`[font ${next}px · all panes]`);
+  }
+
+  function resetScopedFontSize() {
+    setScopedFontSize(fontScope === "pane" ? fontSize : DEFAULT_FONT);
+  }
+
+  app.fontBigger = () => setScopedFontSize(scopedFontSize() + 1);
+  app.fontSmaller = () => setScopedFontSize(scopedFontSize() - 1);
+  app.fontReset = resetScopedFontSize;
+  app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
+  app.balanceFocused = () => layout.balanceFocusedSplit();
+
+  function closeQuickSettings(restoreButton = false) {
+    quickSettings.hidden = true;
+    quickButton.setAttribute("aria-expanded", "false");
+    if (restoreButton) quickButton.focus();
+  }
+
+  function toggleQuickSettings() {
+    const opening = quickSettings.hidden;
+    if (!opening) { closeQuickSettings(true); return; }
+    palette.close();
+    panels.close();
+    document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns"));
+    quickSettings.hidden = false;
+    quickButton.setAttribute("aria-expanded", "true");
+    updateQuickSettings();
+    $("quick-font-smaller").focus();
+  }
+
+  quickButton.addEventListener("click", toggleQuickSettings);
+  $("quick-close").addEventListener("click", () => closeQuickSettings(true));
+  $("quick-scope-pane").addEventListener("click", () => setFontScope("pane"));
+  $("quick-scope-all").addEventListener("click", () => setFontScope("all"));
+  $("quick-font-smaller").addEventListener("click", () => setScopedFontSize(scopedFontSize() - 1));
+  $("quick-font-bigger").addEventListener("click", () => setScopedFontSize(scopedFontSize() + 1));
+  $("quick-font-reset").addEventListener("click", resetScopedFontSize);
+  $("quick-width-smaller").addEventListener("click", () => layout.adjustFocusedSize("h", -0.05));
+  $("quick-width-bigger").addEventListener("click", () => layout.adjustFocusedSize("h", 0.05));
+  $("quick-height-smaller").addEventListener("click", () => layout.adjustFocusedSize("v", -0.05));
+  $("quick-height-bigger").addEventListener("click", () => layout.adjustFocusedSize("v", 0.05));
+  $("quick-pane-balance").addEventListener("click", () => layout.balanceFocusedSplit());
+  $("quick-focus").addEventListener("click", () => { layout.toggleZoom(); updateQuickSettings(); });
+  $("quick-full-settings").addEventListener("click", () => { closeQuickSettings(true); panels.show("settings"); });
+  document.addEventListener("mousedown", (event) => {
+    if (!quickSettings.hidden && !quickSettings.contains(event.target) && !quickButton.contains(event.target)) closeQuickSettings();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !quickSettings.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuickSettings(true);
+    }
+  }, true);
+  updateQuickSettings();
 
   // Live theme preview: apply the chrome and every terminal's colors instantly
   // (Settings calls this the moment you click a theme) without persisting.
@@ -708,16 +896,19 @@ async function boot() {
   watchUpdates();
 
   initKeys({
-    togglePalette: () => { panels.close(); palette.toggle(); },
+    togglePalette: () => { closeQuickSettings(); panels.close(); palette.toggle(); },
+    // Quick Settings is intentionally non-modal: its view shortcuts keep
+    // working while the drawer is open. Full panels and the command palette
+    // still own the keyboard while they are active.
     paletteOpen: () => palette.open || panels.open !== null,
     splitH: app.splitH,
     splitV: app.splitV,
     zoom: app.zoom,
     closePane: app.closePane,
     focusDir: (direction) => layout.focusDir(direction),
-    fontBigger: () => setFontSize(fontSize + 1),
-    fontSmaller: () => setFontSize(fontSize - 1),
-    fontReset: () => setFontSize(DEFAULT_FONT),
+    fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
+    fontSmaller: () => setScopedFontSize(scopedFontSize() - 1),
+    fontReset: resetScopedFontSize,
   });
 
   function buildLauncher() {
@@ -755,7 +946,9 @@ async function boot() {
       const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
       const visible = liveOwned.filter((session) => attached.has(session.id)).length;
       const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
-      $("sb-sessions").textContent = `${visible} live · ${detached} detached`;
+      $("sb-sessions").textContent = detached
+        ? `${visible} open · ${detached} background`
+        : `${visible} open`;
     }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 
@@ -798,27 +991,6 @@ async function boot() {
   setInterval(tickClock, 15000);
   setInterval(refreshStatus, 10000);
 
-  // One boot-time sweep for every path (a fix: it used to run only when
-  // booting into scratch): kill leftovers that no saved workspace references,
-  // that no window is attached to, and that this window did not just adopt.
-  async function sweepOrphanSessions() {
-    try {
-      const names = await api.listWorkspaces();
-      const workspaceData = await Promise.all(names.map((name) => api.getWorkspace(name).catch(() => null)));
-      const preserved = new Set();
-      for (const saved of workspaceData) {
-        sessionIdsInLayout(saved && saved.layout, preserved);
-        for (const sid of (saved && saved.session_ids) || []) preserved.add(sid);
-      }
-      for (const sid of app.attachedSessionIds()) preserved.add(sid);
-      const sessions = await api.getSessions();
-      const orphans = sessions
-        .filter((session) => session.alive && !preserved.has(session.id) && !(session.attachments > 0))
-        .map((session) => session.id);
-      if (orphans.length) await api.cleanupSessions(orphans);
-    } catch (_) { /* best effort */ }
-  }
-
   // "Open QuickTerm here" opens this window as a scratch window whose first
   // terminal starts in the given folder, regardless of any remembered workspace.
   if (openDir) currentWorkspace = null;
@@ -838,7 +1010,9 @@ async function boot() {
       await spawnDefaultInto(pane, openDir);
     }
   }
-  await sweepOrphanSessions();
+  // Do not sweep unknown sessions here: backend autostart profiles exist
+  // before this window and intentionally have no saved workspace yet. The
+  // backend idle reaper already removes only safe, untouched, non-busy shells.
   transitioning = false;
   buildLauncher();
   refreshStatus();

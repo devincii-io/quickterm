@@ -10,10 +10,15 @@ your computer. No Electron, accounts, or telemetry.
 
 Download `QuickTerm-v*-Setup.exe` from the
 [latest release](https://github.com/devincii-io/quickterm/releases/latest) and
-run it. The per-user installer adds Start Menu and optional desktop shortcuts,
+run it. The per-user installer adds Start Menu and Desktop shortcuts,
 supports in-place upgrades, and includes an uninstaller. It does not require
 administrator access. A portable `.zip` is also available. Windows may show a
 SmartScreen warning until release binaries are code-signed.
+
+The installed build uses a normal application folder instead of a
+self-extracting one-file executable. Multiple QuickTerm windows share that
+runtime on disk, avoiding a separate temporary extraction and its startup cost
+for every process.
 
 QuickTerm opens as its own native desktop window. The installer adds an
 optional **Open QuickTerm here** entry to the folder right-click menu (both on
@@ -71,7 +76,7 @@ arguments), the `Alt+B`/`F` word motions, ...
 | Key | Action |
 |---|---|
 | `Alt+K` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
-| `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` remain aliases) |
+| `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
 | `Alt+W` | Detach pane (session stays in this workspace; asks twice if something is running) |
@@ -79,6 +84,13 @@ arguments), the `Alt+B`/`F` word motions, ...
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
 | `Ctrl+Click` | Open a URL or file path printed in the terminal |
 | `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable — also restores from tray) |
+
+The status bar's **View** drawer exposes reliable `−` / `+` font controls with
+an explicit **This pane / All panes** scope, plus width/height controls for the
+selected pane, split balancing, focus mode, and a shortcut to full Settings.
+Keyboard font shortcuts follow the scope selected there. Pane-only sizes are
+temporary; All panes also updates the saved default. Split dividers are wider,
+keyboard-adjustable, and can be double-clicked to balance them.
 
 Per-profile global hotkeys (e.g. `Ctrl+Alt+1` → spawn the claude profile) are
 set via `keybinding` in the profile config.
@@ -96,7 +108,9 @@ Terminal profiles can be managed from **Settings → Terminals**. Choose
 PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a detected
 distribution), or a custom executable. Profiles can also set a starting folder,
 an optional command to run inside the shell, environment variables, a global
-shortcut and autostart.
+shortcut and autostart. With no folder configured, Windows shells start in the
+Windows user home and WSL starts in the distro's Linux home. A WSL profile can
+use Linux paths such as `~/dev`; its startup command runs from that location.
 
 The same fields are available in the config file:
 
@@ -109,6 +123,9 @@ The same fields are available in the config file:
 
 Snippets, custom themes, global and per-workspace logos, the idle-session
 timeout, summon hotkey, port, scrollback size, and font live in the same file.
+Settings shows four featured color themes and groups the full catalog into
+Dark, Soft, Warm, Light, and Custom sections. Theme previews update the whole
+workbench and every open terminal immediately, then revert on Cancel.
 (A local voice-input mode exists behind `uv sync --extra voice` but is parked
 until it gets a proper capture overlay.) Named workspaces are saved under the QuickTerm config directory
 and can be switched from the app bar or dashboard. Logs rotate under `logs/` in
@@ -129,7 +146,7 @@ protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
 xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
 
 Run the verification commands above before merging changes. Release artifacts
-are built locally: the standalone Windows executable, per-user installer,
+are built locally: the Windows application folder, per-user installer,
 portable archive, Python distributions, generated notes, and SHA-256 checksums.
 
 MIT licensed.

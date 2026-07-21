@@ -142,7 +142,7 @@ class Attachment:
 - Flow control: subscriber queues are bounded. A slow viewer is disconnected
   with an explicit resync signal and replays the current ring; terminal bytes
   are never silently dropped or delivered in a corrupt partial sequence.
-- Session ids: short hex (`uuid4().hex[:8]`).
+- Session ids: full random hex (`uuid4().hex`).
 
 ## quickterm/workspace.py
 
@@ -204,13 +204,15 @@ REST (JSON, under `/api`):
 | GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}` — probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
-| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}` — terminal Ctrl+click. http(s) URLs open in the browser; existing local paths open with the OS handler; executable-ish files are revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
+| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}` — terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
 
 1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (size scrollback was recorded at)
-2. server → ONE binary frame: scrollback bytes (may be empty)
-3. server → text JSON `{"type":"replay_done"}`
+2. server → binary scrollback frames of at most 128 KiB; after xterm finishes
+   parsing each frame, client → text JSON `{"type":"replay_ack"}`
+3. server → text JSON `{"type":"replay_done"}` (an empty replay keeps the
+   legacy empty binary frame but requires no acknowledgement)
 4. live phase:
    - server → binary frames: raw PTY output
    - server → text JSON `{"type":"exit","code":N}` then close, on session death
@@ -292,7 +294,8 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Layout tree in JS mirrors the workspace JSON schema exactly.
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use
   `term.write(data, cb)` callbacks for backpressure.
-- Focus: 2px amber rail + dim inactive; POST /api/focus on change.
+- Focus: 2px theme-accent rail with a compact semantic state dot; inactive
+  terminals remain fully readable.
 - Launcher: compact profile dropdown with an explicit open action and dashboard/settings/help navigation.
 - Dashboard: saved workspace cards with layout previews and quick profile launch
   (no separate live-session list — sessions always belong to a workspace).
@@ -306,8 +309,21 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (any case) and dot-prefixed names are rejected in user save paths; workspace
   names must survive `_safe_name` unchanged.
 - App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several.
-- Settings: tabbed General/Terminals/Voice/Advanced editor. Terminal profiles expose shell type,
+- Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
+- Themes: four featured choices stay visible; the catalog groups all remaining
+  palettes under Dark, Soft, Warm, Light, and Custom. Clicking a theme previews
+  both application chrome and every open xterm immediately; Cancel restores the
+  persisted theme.
+- Quick settings: the status-bar View drawer controls font size for either the
+  focused pane or all panes, resizes the focused pane against its nearest
+  horizontal/vertical split, balances that split, toggles focus mode, and links
+  to full Settings. Alt+Shift+±/0 follows the selected scope; pane-only
+  overrides are temporary, while All panes persists the global default.
+- Starting folders are shell-native: blank Windows profiles use the Windows
+  user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
+  are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
+  startup command runs after that location is selected.
 - Command palette Alt+K: fuzzy over profiles / actions (split h/v, zoom, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
@@ -335,8 +351,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `/api/file`, renders read-only monospace text, same design tokens. Opened
   via palette action ("view file: <path>") with `window.open(..., "_blank",
   "popup,width=900,height=700")`. Hidden by default — no button in main chrome.
-- Design tokens: graphite surfaces with warm amber focus, a softer system UI face
-  around the monospace terminal, restrained rounded corners, and reduced-motion support.
+- Design tokens: compact, flat workbench chrome derives restrained semantic
+  surfaces and focus colors from the selected palette; terminal ANSI colors
+  remain separate. Reduced-motion and forced-colors modes are supported.
 
 ## Testing
 

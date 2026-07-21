@@ -299,12 +299,56 @@ def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg
     assert manager.last_spawn["cwd"] is None
 
 
+def test_spawn_wsl_profile_defaults_to_linux_home(client, manager, cfg):
+    cfg.profiles.append(FakeProfile(
+        name="ubuntu-home",
+        cmd="wsl.exe",
+        terminal_type="wsl",
+        wsl_distro="Ubuntu-24.04",
+    ))
+    response = client.post("/api/sessions", json={"profile": "ubuntu-home"})
+    assert response.status_code == 200
+    assert manager.last_spawn["args"] == ["-d", "Ubuntu-24.04", "--cd", "~"]
+    assert manager.last_spawn["cwd"] is None
+
+
+def test_spawn_wsl_profile_request_folder_becomes_wsl_cd(client, manager, cfg):
+    cfg.profiles.append(FakeProfile(
+        name="ubuntu-project",
+        cmd="wsl.exe",
+        terminal_type="wsl",
+        cwd="~/default",
+    ))
+    response = client.post(
+        "/api/sessions",
+        json={"profile": "ubuntu-project", "cwd": "~/requested", "cols": 80, "rows": 24},
+    )
+    assert response.status_code == 200
+    assert manager.last_spawn["args"] == ["--cd", "~/requested"]
+    assert manager.last_spawn["cwd"] is None
+
+
 def test_spawn_unknown_profile_404(client):
     assert client.post("/api/sessions", json={"profile": "nope"}).status_code == 404
 
 
 def test_spawn_requires_cmd_or_profile(client):
     assert client.post("/api/sessions", json={}).status_code == 400
+
+
+@pytest.mark.parametrize("body", [
+    [],
+    {"cmd": "cmd.exe", "args": "not-a-list"},
+    {"cmd": "cmd.exe", "args": ["ok", 3]},
+    {"cmd": "cmd.exe", "env": {"KEY": 3}},
+    {"cmd": "cmd.exe", "cols": 0},
+    {"cmd": "cmd.exe", "rows": "many"},
+    {"cmd": ["cmd.exe"]},
+])
+def test_spawn_rejects_malformed_payloads(client, manager, body):
+    response = client.post("/api/sessions", json=body)
+    assert response.status_code == 400
+    assert manager.list() == []
 
 
 def test_spawn_rejects_missing_local_folder(client, manager, tmp_path):
@@ -615,6 +659,7 @@ def test_ws_attach_protocol(client, manager):
         assert json.loads(ws.receive_text()) == {"type": "replay_size", "cols": 80, "rows": 24}
         # 2. one binary scrollback frame
         assert ws.receive_bytes() == b"old-output"
+        ws.send_text(json.dumps({"type": "replay_ack"}))
         # 3. replay_done
         assert json.loads(ws.receive_text()) == {"type": "replay_done"}
         # 4. live binary output — raw bytes, which the pump may coalesce into a
@@ -625,6 +670,8 @@ def test_ws_attach_protocol(client, manager):
         assert live == b"live-1live-2"
         # client input: raw bytes -> manager.write, resize JSON -> manager.resize
         ws.send_bytes(b"dir\r")
+        ws.send_text(json.dumps({"type": "resize", "cols": "bad", "rows": 43}))
+        ws.send_text(json.dumps(["not", "an", "object"]))
         ws.send_text(json.dumps({"type": "resize", "cols": 132, "rows": 43}))
         _wait_for(lambda: manager.resizes == [(info.id, 132, 43)])
         assert manager.writes == [(info.id, b"dir\r")]

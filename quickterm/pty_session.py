@@ -133,7 +133,7 @@ class PtySession:
 
         # Writes are handed to a dedicated thread so a blocking winpty.write
         # (stdin pipe full) never stalls the event loop. None is the stop token.
-        self._write_q: queue.Queue[bytes | None] = queue.Queue()
+        self._write_q: queue.Queue[bytes | None] = queue.Queue(maxsize=64)
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{self._pid}", daemon=True
         )
@@ -149,7 +149,10 @@ class PtySession:
 
     def write(self, data: bytes) -> None:
         # Enqueue only — the writer thread does the (possibly blocking) PTY write.
-        self._write_q.put(data)
+        try:
+            self._write_q.put_nowait(data)
+        except queue.Full:
+            raise BufferError("PTY input queue is full") from None
 
     def _write_loop(self) -> None:
         while True:
@@ -157,14 +160,16 @@ class PtySession:
             if item is None:
                 return
             parts = [item]
+            total = len(item)
             # Coalesce keystrokes/paste chunks that piled up into one PTY write.
             try:
-                while True:
+                while total < 256 * 1024:
                     nxt = self._write_q.get_nowait()
                     if nxt is None:
                         self._do_write(b"".join(parts))
                         return
                     parts.append(nxt)
+                    total += len(nxt)
             except queue.Empty:
                 pass
             self._do_write(b"".join(parts))
@@ -182,16 +187,17 @@ class PtySession:
         try:
             self._pty.write(text)
         except Exception:
-            try:
-                self._pty.write(data.decode("utf-8", errors="replace"))
-            except Exception:
-                pass  # dead pty / unencodable: drop this write
+            pass  # dead PTY or an unrepresentable 8-bit write; never mangle input
 
     def _stop_writer(self) -> None:
         try:
             self._write_q.put_nowait(None)
-        except Exception:
-            pass
+        except queue.Full:
+            try:
+                self._write_q.get_nowait()
+                self._write_q.put_nowait(None)
+            except (queue.Empty, queue.Full):
+                pass
 
     def resize(self, cols: int, rows: int) -> None:
         try:

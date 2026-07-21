@@ -69,7 +69,7 @@ async def test_spawn_attach_output_and_sentinel(manager):
     cmd, args = _short("echo hi")
     info = manager.spawn(cmd=cmd, args=args, name="t1")
     assert info.alive and info.cols == 120 and info.rows == 30
-    assert len(info.id) == 8
+    assert len(info.id) == 32
     att = manager.attach(info.id)
     out = await _drain(att)
     assert b"hi" in out

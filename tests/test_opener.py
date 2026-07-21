@@ -53,3 +53,20 @@ def test_executable_is_revealed_not_run(monkeypatch, tmp_path):
         )
     assert opener.open_target(str(exe)) == {"action": "revealed"}
     assert len(popen_calls) == 1  # explorer /select or xdg-open of the parent
+
+
+@pytest.mark.parametrize("suffix", [".cpl", ".msc", ".chm", ".url", ".application"])
+def test_other_executable_capable_files_are_revealed(monkeypatch, tmp_path, suffix):
+    target = tmp_path / f"printed-by-terminal{suffix}"
+    target.write_text("payload", encoding="utf-8")
+    popen_calls = []
+    monkeypatch.setattr(opener.subprocess, "Popen", lambda argv: popen_calls.append(argv))
+    if sys.platform == "win32":
+        monkeypatch.setattr(
+            opener.os,
+            "startfile",
+            lambda p: (_ for _ in ()).throw(AssertionError("must reveal unknown file types")),
+            raising=False,
+        )
+    assert opener.open_target(str(target)) == {"action": "revealed"}
+    assert len(popen_calls) == 1

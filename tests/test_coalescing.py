@@ -51,6 +51,21 @@ def test_ring_records_current_size_even_for_empty_write():
     assert (cols, rows) == (111, 22)
 
 
+def test_scrollback_chunk_snapshot_avoids_full_join():
+    s = _session(100)
+    s._record(b"abc")
+    s._record(b"def")
+    chunks, cols, rows = s.scrollback_chunks()
+    assert chunks == (b"abc", b"def")
+    assert (cols, rows) == (80, 24)
+
+
+def test_replay_frames_are_nonempty_ordered_and_bounded(monkeypatch):
+    monkeypatch.setattr(server, "_SEND_COALESCE_BYTES", 4)
+    frames = list(server._coalesce_replay((b"", b"abc", b"defghi")))
+    assert frames == [b"abcd", b"efgh", b"i"]
+
+
 # ---- output pump send coalescing ----
 
 

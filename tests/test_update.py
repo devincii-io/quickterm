@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import quickterm.update as update
 from quickterm import __version__
 from quickterm.update import _expected_hash, is_newer
@@ -86,3 +88,24 @@ def test_get_refuses_plain_http():
         assert "https" in str(exc)
     else:
         raise AssertionError("plain http must be refused")
+
+
+def test_download_url_is_pinned_to_github_hosts():
+    update._validate_download_url("https://github.com/devincii-io/quickterm/releases/download/v2/a.exe")
+    update._validate_download_url("https://release-assets.githubusercontent.com/object")
+    with pytest.raises(ValueError, match="non-GitHub"):
+        update._validate_download_url("https://example.invalid/QuickTerm-Setup.exe")
+
+
+def test_install_refuses_release_without_checksums(monkeypatch):
+    monkeypatch.setattr(update.os, "name", "nt")
+    payload = _release_payload("v99.0.0")
+
+    def fake_get(url, timeout=15, max_bytes=update._MAX_METADATA_BYTES):
+        if url == update.API_LATEST:
+            return payload
+        return b"installer"
+
+    monkeypatch.setattr(update, "_get", fake_get)
+    with pytest.raises(ValueError, match="refusing unverified install"):
+        update.download_and_run()

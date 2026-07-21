@@ -17,14 +17,55 @@
   <div id="zoom-host" class="zoom-host" hidden></div>
   <footer id="statusbar" class="statusbar">
     <span id="sb-workspace" class="sb-item"></span>
+    <span id="sb-save" class="sb-save" role="status" aria-live="polite"></span>
     <span class="sb-sep">&middot;</span>
     <span id="sb-sessions" class="sb-item"></span>
     <span id="sb-zoom">zoom</span>
     <span class="sb-flex"></span>
+    <button id="sb-quick" type="button" aria-expanded="false" aria-controls="quick-settings">View <span id="sb-font-size">14 px</span></button>
     <button id="sb-shortcuts" type="button">Commands <kbd>Alt+K</kbd></button>
     <span id="voice-indicator"></span>
     <span id="sb-clock" class="sb-item"></span>
   </footer>
+  <aside id="quick-settings" class="quick-settings" role="dialog" aria-labelledby="quick-settings-title" hidden>
+    <header class="quick-settings-head">
+      <div><strong id="quick-settings-title">Quick settings</strong><small>View controls</small></div>
+      <button id="quick-close" type="button" aria-label="Close quick settings">Esc</button>
+    </header>
+    <div class="quick-setting-row">
+      <span>Apply font to</span>
+      <div class="quick-scope" role="group" aria-label="Font size scope">
+        <button id="quick-scope-pane" type="button">This pane</button>
+        <button id="quick-scope-all" type="button">All panes</button>
+      </div>
+    </div>
+    <div class="quick-font-stepper" role="group" aria-label="Terminal font size">
+      <button id="quick-font-smaller" type="button" aria-label="Decrease terminal font size">−</button>
+      <output id="quick-font-value">14 px</output>
+      <button id="quick-font-bigger" type="button" aria-label="Increase terminal font size">+</button>
+      <button id="quick-font-reset" type="button">Reset</button>
+    </div>
+    <p id="quick-scope-hint" class="quick-settings-hint"></p>
+    <section class="quick-pane-size" aria-labelledby="quick-pane-size-title">
+      <div class="quick-setting-row">
+        <span id="quick-pane-size-title">Selected pane size</span>
+        <small>nearest split</small>
+      </div>
+      <div class="quick-pane-size-grid">
+        <span>Width</span>
+        <button id="quick-width-smaller" type="button" aria-label="Make selected pane narrower">−</button>
+        <button id="quick-width-bigger" type="button" aria-label="Make selected pane wider">+</button>
+        <span>Height</span>
+        <button id="quick-height-smaller" type="button" aria-label="Make selected pane shorter">−</button>
+        <button id="quick-height-bigger" type="button" aria-label="Make selected pane taller">+</button>
+      </div>
+      <button id="quick-pane-balance" class="quick-pane-balance" type="button">Balance nearest split</button>
+    </section>
+    <div class="quick-settings-actions">
+      <button id="quick-focus" type="button">Focus this pane</button>
+      <button id="quick-full-settings" type="button">Full settings…</button>
+    </div>
+  </aside>
   <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
 </div>
 <script src="/vendor/xterm.js"></script>

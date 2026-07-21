@@ -192,6 +192,34 @@ export class LayoutManager {
     if (best) this.focusPane(best);
   }
 
+  canResizeFocused(axis) {
+    return Boolean(this._focusedSplit(axis));
+  }
+
+  adjustFocusedSize(axis, amount) {
+    const hit = this._focusedSplit(axis);
+    if (!hit) return false;
+    // Growing child 0 increases the ratio; growing child 1 decreases it.
+    const signed = (hit.childIndex === 0 ? 1 : -1) * amount;
+    hit.node.ratio = Math.min(0.9, Math.max(0.1, hit.node.ratio + signed));
+    this.render();
+    if (this.focused) this.focusPane(this.focused);
+    this._changed();
+    return true;
+  }
+
+  balanceFocusedSplit() {
+    // Prefer width when both axes are available: it is the common two-pane
+    // layout and makes the single balance button deterministic.
+    const hit = this._focusedSplit("h") || this._focusedSplit("v");
+    if (!hit) return false;
+    hit.node.ratio = 0.5;
+    this.render();
+    if (this.focused) this.focusPane(this.focused);
+    this._changed();
+    return true;
+  }
+
   // ---- persistence ----
 
   serialize(node = this.root) {
@@ -258,6 +286,7 @@ export class LayoutManager {
     sp.setAttribute("aria-orientation", node.dir === "v" ? "horizontal" : "vertical");
     sp.setAttribute("aria-valuemin", "10");
     sp.setAttribute("aria-valuemax", "90");
+    sp.title = "Drag to resize · arrow keys resize · double-click balances";
     this._wireSplitter(sp, node, el);
     const b = this._renderNode(node.children[1]);
     el.appendChild(a);
@@ -288,28 +317,40 @@ export class LayoutManager {
       this.fitAll();
       this._changed();
     });
-    sp.addEventListener("mousedown", (e) => {
+    sp.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      node.ratio = 0.5;
+      this._applyRatio(node, splitEl);
+      this.fitAll();
+      this._changed();
+    });
+    sp.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
       e.preventDefault();
       const horiz = node.dir !== "v";
       const rect = splitEl.getBoundingClientRect();
       const total = horiz ? rect.width : rect.height;
       if (total <= 0) return;
       const min = Math.min(MIN_PANE_PX / total, 0.45);
+      try { sp.setPointerCapture(e.pointerId); } catch (_) { /* old WebView */ }
       const move = (ev) => {
         const pos = horiz ? ev.clientX - rect.left : ev.clientY - rect.top;
         node.ratio = Math.min(1 - min, Math.max(min, pos / total));
         this._applyRatio(node, splitEl);
       };
-      const up = () => {
-        window.removeEventListener("mousemove", move);
-        window.removeEventListener("mouseup", up);
+      const up = (ev) => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        try { sp.releasePointerCapture(ev.pointerId); } catch (_) { /* already released */ }
         document.body.classList.remove("dragging");
         this.fitAll();
         this._changed();
       };
       document.body.classList.add("dragging");
-      window.addEventListener("mousemove", move);
-      window.addEventListener("mouseup", up);
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
     });
   }
 
@@ -319,6 +360,31 @@ export class LayoutManager {
     for (const c of node.children) {
       const r = this._findLeaf(pane, c, node);
       if (r) return r;
+    }
+    return null;
+  }
+
+  _focusedSplit(axis) {
+    if (!this.focused) return null;
+    const wanted = axis === "v" || axis === "height" ? "v" : "h";
+    const path = this._pathToPane(this.focused);
+    if (!path) return null;
+    for (let i = path.length - 1; i >= 0; i--) {
+      if (path[i].node.dir === wanted) return path[i];
+    }
+    return null;
+  }
+
+  _pathToPane(pane, node = this.root, path = []) {
+    if (!node) return null;
+    if (node.type === "pane") return node.pane === pane ? path : null;
+    for (let childIndex = 0; childIndex < node.children.length; childIndex++) {
+      const found = this._pathToPane(
+        pane,
+        node.children[childIndex],
+        [...path, { node, childIndex }],
+      );
+      if (found) return found;
     }
     return null;
   }

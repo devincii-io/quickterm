@@ -11,6 +11,14 @@ import {
 
 const DASHBOARD_REFRESH_MS = 5000;
 
+const THEME_CATALOG_GROUPS = [
+  ["Dark", ["graphite", "one-dark", "dracula", "tokyo-night", "github-dark", "solarized-dark", "material-ocean", "night-owl", "cobalt2"]],
+  ["Soft", ["catppuccin-mocha", "catppuccin-macchiato", "nord", "everforest", "rose-pine", "ayu-mirage"]],
+  ["Warm", ["gruvbox-dark", "kanagawa", "monokai", "horizon"]],
+  ["Light", ["rose-pine-dawn", "github-light", "solarized-light"]],
+  ["Custom", [CUSTOM_THEME]],
+];
+
 const TERMINAL_TYPES = [
   { id: "powershell-core", label: "PowerShell 7", executable: "pwsh.exe" },
   { id: "windows-powershell", label: "Windows PowerShell", executable: "powershell.exe" },
@@ -179,9 +187,11 @@ export class Panels {
   _startDashboardRefresh() {
     this._stopDashboardRefresh();
     this._dashTimer = setInterval(() => {
-      const editing = this.panelEl.contains(document.activeElement)
-        && document.activeElement.matches("input, textarea, select");
-      if (this.open === "dashboard" && !this._dashLoading && !editing) this._dashboard(true);
+      // Rebuilding the dashboard steals focus from action buttons just as
+      // surely as from inputs. Pause while focus is anywhere in its body;
+      // header/close-button focus does not block background refreshes.
+      const interacting = this.bodyEl.contains(document.activeElement);
+      if (this.open === "dashboard" && !this._dashLoading && !interacting) this._dashboard(true);
     }, DASHBOARD_REFRESH_MS);
   }
 
@@ -299,8 +309,8 @@ export class Panels {
       make("p", "hero-text", "Open layouts, reattach background terminals, or clean up sessions from one place."),
     );
     const stats = make("div", "dashboard-stats");
-    const alive = sessions.filter((session) => session.alive);
-    for (const [value, label] of [[workspaces.length, "workspaces"], [alive.length, "live sessions"], [this.app.profiles.length, "terminal profiles"]]) {
+    const openSessions = sessions.filter((session) => session.alive && session.attachments > 0);
+    for (const [value, label] of [[workspaces.length, "workspaces"], [openSessions.length, "open terminals"], [this.app.profiles.length, "terminal profiles"]]) {
       const stat = make("div", "dashboard-stat");
       stat.append(make("strong", "", String(value).padStart(2, "0")), make("span", "", label));
       stats.append(stat);
@@ -375,9 +385,15 @@ export class Panels {
         event.stopPropagation();
         if (!window.confirm(`Delete workspace "${workspace.name}" and stop its detached sessions?`)) return;
         menu.disabled = true;
+        const deleted = this.app.deleteWorkspace
+          ? await this.app.deleteWorkspace(workspace.name)
+          : await api.deleteWorkspace(workspace.name).then(() => true).catch(() => false);
+        if (!deleted) {
+          menu.disabled = false;
+          menu.querySelector("span").textContent = "Delete failed · retry";
+          return;
+        }
         const gone = this._leave(card);
-        if (this.app.deleteWorkspace) await this.app.deleteWorkspace(workspace.name);
-        else await api.deleteWorkspace(workspace.name).catch(() => {});
         await gone;
         if (this.open === "dashboard") this._dashboard(true);
       });
@@ -460,7 +476,12 @@ export class Panels {
       kill.addEventListener("click", async () => {
         if (!window.confirm(`Stop terminal "${session.name || session.id}"?`)) return;
         kill.disabled = true;
-        await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
+        const stopped = await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
+        if (!stopped) {
+          kill.disabled = false;
+          kill.textContent = "Kill failed · retry";
+          return;
+        }
         if (this.open === "dashboard") this._dashboard(true);
       });
       actions.append(attach, kill);
@@ -608,6 +629,18 @@ export class Panels {
         message.classList.add("error");
         return;
       }
+      const snippets = this.settingsDraft.snippets || [];
+      if (snippets.some((snippet) => !(snippet.name || "").trim() || !(snippet.text || "").trim())) {
+        message.textContent = "Every snippet needs a name and command.";
+        message.classList.add("error");
+        return;
+      }
+      const snippetNames = snippets.map((snippet) => snippet.name.trim().toLowerCase());
+      if (new Set(snippetNames).size !== snippetNames.length) {
+        message.textContent = "Snippet names must be unique.";
+        message.classList.add("error");
+        return;
+      }
       save.disabled = true;
       message.classList.remove("error");
       message.textContent = "Saving…";
@@ -638,8 +671,8 @@ export class Panels {
     const font = this._textInput(cfg.font_family, "JetBrains Mono");
     font.addEventListener("input", () => { cfg.font_family = font.value; });
     const fontSize = this._select(
-      Array.from({ length: 13 }, (_, index) => {
-        const px = index + 10;
+      Array.from({ length: 22 }, (_, index) => {
+        const px = index + 9;
         return { value: String(px), label: `${px} px` };
       }),
       String(cfg.font_size || 14),
@@ -715,10 +748,10 @@ export class Panels {
 
   _themePicker(cfg) {
     const wrap = make("div", "theme-picker");
-    wrap.append(make("h4", "theme-picker-title", "Terminal theme"), make("p", "field-hint", "Changes terminal colors while the workbench stays neutral. Press Save to keep it."));
+    wrap.append(make("h4", "theme-picker-title", "Color theme"), make("p", "field-hint", "Previews the workbench and every open terminal instantly. Press Save to keep it."));
     const featuredGrid = make("div", "theme-grid theme-grid-featured");
     const catalog = make("details", "theme-catalog");
-    const catalogGrid = make("div", "theme-grid theme-grid-catalog");
+    const catalogBody = make("div", "theme-catalog-body");
     const current = () => cfg.theme || DEFAULT_THEME;
     const entries = [
       ...Object.entries(TERMINAL_THEMES),
@@ -729,7 +762,28 @@ export class Panels {
     if (!featuredIds.includes(selectedThemeId)) featuredIds[featuredIds.length - 1] = selectedThemeId;
     const featured = new Set(featuredIds);
     const catalogCount = entries.filter(([id]) => !featured.has(id)).length;
-    catalog.append(make("summary", "theme-catalog-trigger", `Theme catalog · ${catalogCount} more`), catalogGrid);
+    const catalogTargets = new Map();
+    const availableIds = new Set(entries.map(([id]) => id));
+    for (const [label, ids] of THEME_CATALOG_GROUPS) {
+      const visibleIds = ids.filter((id) => availableIds.has(id) && !featured.has(id));
+      if (!visibleIds.length) continue;
+      const section = make("section", "theme-category");
+      const grid = make("div", "theme-grid theme-grid-catalog");
+      section.append(make("h5", "theme-category-title", label), grid);
+      catalogBody.append(section);
+      for (const id of visibleIds) catalogTargets.set(id, grid);
+    }
+    const ungroupedIds = entries
+      .map(([id]) => id)
+      .filter((id) => !featured.has(id) && !catalogTargets.has(id));
+    if (ungroupedIds.length) {
+      const section = make("section", "theme-category");
+      const grid = make("div", "theme-grid theme-grid-catalog");
+      section.append(make("h5", "theme-category-title", "Other"), grid);
+      catalogBody.append(section);
+      for (const id of ungroupedIds) catalogTargets.set(id, grid);
+    }
+    catalog.append(make("summary", "theme-catalog-trigger", `Theme catalog · ${catalogCount} more`), catalogBody);
     const cards = new Map();
     const editor = make("div", "custom-theme-editor");
     const renderStrip = (card, def) => {
@@ -746,7 +800,9 @@ export class Panels {
       card.type = "button";
       card.dataset.theme = id;
       card.classList.toggle("active", selectedThemeId === id);
+      card.setAttribute("aria-pressed", String(selectedThemeId === id));
       const strip = make("span", "theme-strip");
+      strip.setAttribute("aria-hidden", "true");
       const prompt = make("i", "theme-strip-prompt", "~ $");
       strip.append(prompt);
       for (const key of ["red", "yellow", "green", "cyan", "blue", "magenta"]) {
@@ -757,12 +813,16 @@ export class Panels {
       renderStrip(card, def);
       card.addEventListener("click", () => {
         cfg.theme = id;
-        for (const other of cards.values()) other.classList.toggle("active", other === card);
+        for (const other of cards.values()) {
+          const active = other === card;
+          other.classList.toggle("active", active);
+          other.setAttribute("aria-pressed", String(active));
+        }
         editor.hidden = id !== CUSTOM_THEME;
         this._themePreviewDirty = true;
         this.app.previewTheme(id, cfg.custom_theme);
       });
-      (featured.has(id) ? featuredGrid : catalogGrid).append(card);
+      (featured.has(id) ? featuredGrid : catalogTargets.get(id) || catalogBody).append(card);
       cards.set(id, card);
     }
     cfg.custom_theme = customColors(cfg.custom_theme || {});

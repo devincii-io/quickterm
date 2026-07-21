@@ -68,6 +68,10 @@ class Session:
         # Joined only here, at attach time (rare) — not on the hot output path.
         return b"".join(self._chunks), self._ring_cols, self._ring_rows
 
+    def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
+        """Snapshot replay without joining the entire ring into one allocation."""
+        return tuple(self._chunks), self._ring_cols, self._ring_rows
+
     def _record(self, data: bytes) -> None:
         if data:
             self._chunks.append(data)
@@ -120,7 +124,7 @@ class SessionManager:
         rows: int = 30,
         workspace: str | None = None,
     ) -> SessionInfo:
-        sid = uuid.uuid4().hex[:8]
+        sid = uuid.uuid4().hex
         info = SessionInfo(
             id=sid,
             name=name or profile or cmd,

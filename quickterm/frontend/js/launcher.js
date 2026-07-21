@@ -142,7 +142,7 @@ const SYSTEM_META = {
   "powershell-core": { detail: "Modern PowerShell", mark: "PS", args: ["-NoLogo"] },
   "windows-powershell": { detail: "Built into Windows", mark: "PS", args: ["-NoLogo"] },
   "command-prompt": { detail: "Classic Windows shell", mark: "C:\\", args: [] },
-  wsl: { detail: "Linux on Windows", mark: "LX", args: [] },
+  wsl: { detail: "Linux on Windows", mark: "LX", args: ["--cd", "~"] },
   bash: { detail: "GNU Bash", mark: "$", args: ["-l"] },
   zsh: { detail: "Z shell", mark: "%", args: ["-l"] },
   fish: { detail: "Friendly shell", mark: "><>", args: ["-l"] },

@@ -158,6 +158,66 @@ export const TERMINAL_THEMES = {
     brightYellow: "#657B83", brightBlue: "#6C71C4", brightMagenta: "#D33682",
     brightCyan: "#2AA198", brightWhite: "#FDF6E3",
   }, "#268BD2"),
+  monokai: theme("Monokai", "Bold editor classic",
+    { background: "#1E1F1C", surface: "#272822", text: "#F8F8F2", muted: "#90908A", accent: "#A6E22E", danger: "#F92672" }, {
+    background: "#272822", foreground: "#F8F8F2", cursor: "#F8F8F0",
+    selectionBackground: "#49483E",
+    black: "#272822", red: "#F92672", green: "#A6E22E", yellow: "#F4BF75",
+    blue: "#66D9EF", magenta: "#AE81FF", cyan: "#A1EFE4", white: "#F8F8F2",
+    brightBlack: "#75715E", brightRed: "#F92672", brightGreen: "#A6E22E",
+    brightYellow: "#E6DB74", brightBlue: "#66D9EF", brightMagenta: "#AE81FF",
+    brightCyan: "#A1EFE4", brightWhite: "#F9F8F5",
+  }, "#A6E22E"),
+  "ayu-mirage": theme("Ayu Mirage", "Balanced amber dusk",
+    { background: "#1F2430", surface: "#242936", text: "#CCCAC2", muted: "#707A8C", accent: "#FFCC66", danger: "#F28779" }, {
+    background: "#1F2430", foreground: "#CCCAC2", cursor: "#FFCC66",
+    selectionBackground: "#33415E",
+    black: "#191E2A", red: "#F28779", green: "#D5FF80", yellow: "#FFD173",
+    blue: "#73D0FF", magenta: "#DFBFFF", cyan: "#95E6CB", white: "#C7C7C7",
+    brightBlack: "#686868", brightRed: "#F07178", brightGreen: "#BAE67E",
+    brightYellow: "#FFCC66", brightBlue: "#5CCFE6", brightMagenta: "#C3A6FF",
+    brightCyan: "#95E6CB", brightWhite: "#FFFFFF",
+  }, "#FFCC66"),
+  "material-ocean": theme("Material Ocean", "Deep blue and violet",
+    { background: "#0F111A", surface: "#1A1C25", text: "#B0BEC5", muted: "#717CB4", accent: "#82AAFF", danger: "#FF5370" }, {
+    background: "#0F111A", foreground: "#B0BEC5", cursor: "#FFCC00",
+    selectionBackground: "#2C3043",
+    black: "#000000", red: "#FF5370", green: "#C3E88D", yellow: "#FFCB6B",
+    blue: "#82AAFF", magenta: "#C792EA", cyan: "#89DDFF", white: "#FFFFFF",
+    brightBlack: "#546E7A", brightRed: "#FF5370", brightGreen: "#C3E88D",
+    brightYellow: "#FFCB6B", brightBlue: "#82AAFF", brightMagenta: "#C792EA",
+    brightCyan: "#89DDFF", brightWhite: "#FFFFFF",
+  }, "#82AAFF"),
+  "night-owl": theme("Night Owl", "Focused midnight blue",
+    { background: "#011627", surface: "#0B2942", text: "#D6DEEB", muted: "#637777", accent: "#82AAFF", danger: "#EF5350" }, {
+    background: "#011627", foreground: "#D6DEEB", cursor: "#80A4C2",
+    selectionBackground: "#1D3B53",
+    black: "#011627", red: "#EF5350", green: "#22DA6E", yellow: "#ADDB67",
+    blue: "#82AAFF", magenta: "#C792EA", cyan: "#21C7A8", white: "#FFFFFF",
+    brightBlack: "#575656", brightRed: "#EF5350", brightGreen: "#22DA6E",
+    brightYellow: "#FFEB95", brightBlue: "#82AAFF", brightMagenta: "#C792EA",
+    brightCyan: "#7FDBCA", brightWhite: "#FFFFFF",
+  }, "#82AAFF"),
+  cobalt2: theme("Cobalt2", "Electric blue and gold",
+    { background: "#122738", surface: "#193549", text: "#FFFFFF", muted: "#9EACB9", accent: "#FFC600", danger: "#FF628C" }, {
+    background: "#193549", foreground: "#FFFFFF", cursor: "#FFC600",
+    selectionBackground: "#0050A4",
+    black: "#000000", red: "#FF628C", green: "#3AD900", yellow: "#FFC600",
+    blue: "#0088FF", magenta: "#FB94FF", cyan: "#80FCFF", white: "#FFFFFF",
+    brightBlack: "#555555", brightRed: "#FF628C", brightGreen: "#3AD900",
+    brightYellow: "#FFC600", brightBlue: "#0088FF", brightMagenta: "#FB94FF",
+    brightCyan: "#80FCFF", brightWhite: "#FFFFFF",
+  }, "#FFC600"),
+  horizon: theme("Horizon", "Warm coral twilight",
+    { background: "#1C1E26", surface: "#232530", text: "#D5D8DA", muted: "#6C6F93", accent: "#E95678", danger: "#EC6A88" }, {
+    background: "#1C1E26", foreground: "#D5D8DA", cursor: "#E95678",
+    selectionBackground: "#2E303E",
+    black: "#0A0A0D", red: "#E95678", green: "#29D398", yellow: "#FAB795",
+    blue: "#26BBD9", magenta: "#EE64AC", cyan: "#59E1E3", white: "#E5E5E5",
+    brightBlack: "#6C6F93", brightRed: "#EC6A88", brightGreen: "#3FDAA4",
+    brightYellow: "#FBC3A7", brightBlue: "#3FC4DE", brightMagenta: "#F075B5",
+    brightCyan: "#6BE4E6", brightWhite: "#FFFFFF",
+  }, "#E95678"),
   "rose-pine-dawn": theme("Rosé Pine Dawn", "Soft rose · light",
     { background: "#FAF4ED", surface: "#FFFAF3", text: "#575279", muted: "#797593", accent: "#907AA9", danger: "#B4637A", light: true }, {
     background: "#FAF4ED", foreground: "#575279", cursor: "#575279",
@@ -168,6 +228,26 @@ export const TERMINAL_THEMES = {
     brightYellow: "#EA9D34", brightBlue: "#56949F", brightMagenta: "#907AA9",
     brightCyan: "#D7827E", brightWhite: "#575279",
   }, "#907AA9"),
+  "github-light": theme("GitHub Light", "Clean daylight contrast",
+    { background: "#F6F8FA", surface: "#FFFFFF", text: "#1F2328", muted: "#656D76", accent: "#0969DA", danger: "#CF222E", light: true }, {
+    background: "#FFFFFF", foreground: "#1F2328", cursor: "#0969DA",
+    selectionBackground: "#B6D7FE",
+    black: "#24292F", red: "#CF222E", green: "#116329", yellow: "#4D2D00",
+    blue: "#0969DA", magenta: "#8250DF", cyan: "#1B7C83", white: "#6E7781",
+    brightBlack: "#57606A", brightRed: "#A40E26", brightGreen: "#1A7F37",
+    brightYellow: "#633C01", brightBlue: "#218BFF", brightMagenta: "#A475F9",
+    brightCyan: "#3192AA", brightWhite: "#8C959F",
+  }, "#0969DA"),
+  "solarized-light": theme("Solarized Light", "Warm paper and cyan",
+    { background: "#FDF6E3", surface: "#EEE8D5", text: "#586E75", muted: "#839496", accent: "#268BD2", danger: "#DC322F", light: true }, {
+    background: "#FDF6E3", foreground: "#657B83", cursor: "#657B83",
+    selectionBackground: "#EEE8D5",
+    black: "#073642", red: "#DC322F", green: "#859900", yellow: "#B58900",
+    blue: "#268BD2", magenta: "#D33682", cyan: "#2AA198", white: "#EEE8D5",
+    brightBlack: "#002B36", brightRed: "#CB4B16", brightGreen: "#586E75",
+    brightYellow: "#657B83", brightBlue: "#839496", brightMagenta: "#6C71C4",
+    brightCyan: "#93A1A1", brightWhite: "#FDF6E3",
+  }, "#268BD2"),
 };
 
 function normalizeHex(value, fallback) {
@@ -190,6 +270,28 @@ function mix(a, b, amount) {
 function rgba(hex, alpha) {
   const [r, g, b] = rgb(hex);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function luminance(hex) {
+  const channels = rgb(hex).map((value) => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+function contrast(a, b) {
+  const high = Math.max(luminance(a), luminance(b));
+  const low = Math.min(luminance(a), luminance(b));
+  return (high + 0.05) / (low + 0.05);
+}
+
+function readableColor(candidate, endpoint, backgrounds) {
+  for (let step = 0; step <= 20; step += 1) {
+    const value = mix(candidate, endpoint, step / 20);
+    if (backgrounds.every((background) => contrast(value, background) >= 4.5)) return value;
+  }
+  return endpoint;
 }
 
 export function customColors(value = {}) {
@@ -225,22 +327,32 @@ export function getTheme(id, custom = {}) {
 
 export function applyChromeTheme(id, custom = {}) {
   const selected = getTheme(id, custom);
-  // Terminal palettes belong to the terminal. Keep application chrome neutral
-  // so switching to Dracula, Tokyo Night, or a custom shell palette does not
-  // turn every button and panel into a different product.
-  const light = Boolean(selected.chrome && selected.chrome.light);
-  const colors = light
-    ? { background: "#F6F8FA", surface: "#FFFFFF", text: "#1F2328", muted: "#656D76", accent: "#0969DA", danger: "#CF222E" }
-    : { background: "#0D1117", surface: "#161B22", text: "#E6EDF3", muted: "#8B949E", accent: "#58A6FF", danger: "#F85149" };
+  // Theme the whole workspace live, but derive secondary surfaces from six
+  // restrained semantic colors instead of spraying terminal ANSI colors over UI.
+  const colors = selected.chrome || CUSTOM_THEME_DEFAULTS;
   const root = document.documentElement.style;
   const surface = normalizeHex(colors.surface, colors.background);
   const background = normalizeHex(colors.background, CUSTOM_THEME_DEFAULTS.background);
-  const text = normalizeHex(colors.text, CUSTOM_THEME_DEFAULTS.text);
-  const muted = normalizeHex(colors.muted, CUSTOM_THEME_DEFAULTS.muted);
+  const light = typeof colors.light === "boolean" ? colors.light : luminance(background) > 0.5;
+  const rawText = normalizeHex(colors.text, CUSTOM_THEME_DEFAULTS.text);
   const accent = normalizeHex(colors.accent, CUSTOM_THEME_DEFAULTS.accent);
-  const danger = normalizeHex(colors.danger, CUSTOM_THEME_DEFAULTS.danger);
+  const rawDanger = normalizeHex(colors.danger, CUSTOM_THEME_DEFAULTS.danger);
   // Light themes tint surfaces toward black; dark themes toward white.
   const lift = light ? "#000000" : "#FFFFFF";
+  const field = mix(background, surface, 0.4);
+  const contrastEndpoint = light ? "#000000" : "#FFFFFF";
+  const text = readableColor(rawText, contrastEndpoint, [background, surface, field]);
+  const textSoft = readableColor(mix(text, background, 0.16), text, [background, surface, field]);
+  const muted = readableColor(
+    normalizeHex(colors.muted, CUSTOM_THEME_DEFAULTS.muted),
+    text,
+    [background, surface, field],
+  );
+  const darkAccentText = "#111318";
+  const onAccent = contrast(accent, "#FFFFFF") >= contrast(accent, darkAccentText)
+    ? "#FFFFFF"
+    : darkAccentText;
+  const danger = readableColor(rawDanger, contrastEndpoint, [background, surface, field]);
   const values = {
     "--bg": background,
     "--surface": surface,
@@ -249,9 +361,9 @@ export function applyChromeTheme(id, custom = {}) {
     // semantic surfaces that used to be hardcoded graphite hexes
     "--well": background,
     "--card": mix(background, surface, 0.62),
-    "--field": mix(background, surface, 0.4),
+    "--field": field,
     "--text": text,
-    "--text-soft": mix(text, background, 0.16),
+    "--text-soft": textSoft,
     "--muted": muted,
     "--accent": accent,
     "--accent-soft": mix(background, accent, 0.17),
@@ -259,9 +371,10 @@ export function applyChromeTheme(id, custom = {}) {
     "--accent-press": mix(accent, light ? "#FFFFFF" : "#000000", 0.12),
     "--accent-border": mix(background, accent, 0.5),
     "--accent-ring": rgba(accent, 0.14),
-    "--on-accent": light ? "#FFFFFF" : mix(background, "#000000", 0.35),
+    "--on-accent": onAccent,
     "--sage": mix(muted, "#A7D5B3", 0.36),
     "--danger": danger,
+    "--danger-soft": rgba(danger, 0.1),
     "--line": mix(surface, text, 0.09),
     "--line-strong": mix(surface, text, 0.16),
     "--line-hover": mix(surface, text, 0.3),

@@ -18,10 +18,10 @@ def test_config_dir_created(fake_appdata):
     assert d.is_dir()
 
 
-def test_default_cwd_prefers_existing_desktop(monkeypatch, tmp_path):
+def test_default_cwd_uses_home_even_when_desktop_exists(monkeypatch, tmp_path):
     (tmp_path / "Desktop").mkdir()
     monkeypatch.setattr(cfgmod.Path, "home", staticmethod(lambda: tmp_path))
-    assert cfgmod.default_cwd() == str(tmp_path / "Desktop")
+    assert cfgmod.default_cwd() == str(tmp_path)
 
 
 def test_default_cwd_falls_back_to_home_without_desktop(monkeypatch, tmp_path):
@@ -121,3 +121,45 @@ def test_unknown_keys_ignored(fake_appdata):
     assert cfg.port == 7000
     assert cfg.profiles[0].name == "x"
     assert cfg.voice.model_size == "base"
+
+
+def test_corrupt_config_is_quarantined_and_defaults_restore(fake_appdata):
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text('{"profiles": [', encoding="utf-8")
+
+    loaded = load_config()
+
+    assert loaded.theme == "graphite"
+    assert json.loads((path / "config.json").read_text(encoding="utf-8"))["theme"] == "graphite"
+    backups = list(path.glob("config.invalid-*.json"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == '{"profiles": ['
+
+
+def test_save_rejects_non_loopback_host(fake_appdata):
+    with pytest.raises(ValueError, match="loopback"):
+        save_config(AppConfig(host="0.0.0.0"))
+
+
+def test_load_quarantines_structurally_invalid_config(fake_appdata):
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text(json.dumps({"profiles": "bad"}), encoding="utf-8")
+    assert load_config().profiles == []
+    assert len(list(path.glob("config.invalid-*.json"))) == 1
+
+
+def test_save_rejects_duplicate_snippets(fake_appdata):
+    cfg = AppConfig()
+    cfg.snippets[1].name = cfg.snippets[0].name.upper()
+    with pytest.raises(ValueError, match="Snippet names must be unique"):
+        save_config(cfg)
+
+
+def test_save_rejects_conflicting_global_shortcuts(fake_appdata):
+    cfg = AppConfig(profiles=[
+        Profile(name="Conflict", cmd="cmd.exe", keybinding=cfgmod.AppConfig().summon_hotkey),
+    ])
+    with pytest.raises(ValueError, match="conflicts"):
+        save_config(cfg)

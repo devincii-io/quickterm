@@ -426,12 +426,17 @@ def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
 
 def _spawn_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
     try:
+        # Keep autostart/global-hotkey launches identical to API/UI launches:
+        # terminal types, WSL distro, and start_command must all be resolved.
+        from quickterm.server import _resolve_profile
+
+        cmd, args, cwd = _resolve_profile(prof)
         manager.spawn(
             name=prof.name,
             profile=prof.name,
-            cmd=prof.cmd,
-            args=list(prof.args),
-            cwd=prof.cwd,
+            cmd=cmd,
+            args=args,
+            cwd=cwd,
             env=dict(prof.env),
         )
     except Exception:

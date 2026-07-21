@@ -66,6 +66,16 @@ def test_load_missing_returns_none():
     assert load_workspace("nope") is None
 
 
+def test_corrupt_workspace_does_not_break_other_workspaces(fake_appdata):
+    folder = fake_appdata / "quickterm" / "workspaces"
+    folder.mkdir(parents=True)
+    (folder / "broken.json").write_text('{"layout":', encoding="utf-8")
+    save_workspace(Workspace(name="healthy", layout=LAYOUT, session_ids=["live1"]))
+
+    assert load_workspace("broken") is None
+    assert load_workspace("healthy").session_ids == ["live1"]
+
+
 def test_name_sanitized_to_safe_filename(fake_appdata):
     weird = 'my/ws:with*bad"chars?'
     save_workspace(Workspace(name=weird, layout=LAYOUT))

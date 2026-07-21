@@ -85,6 +85,7 @@ export class Pane {
     this._queue = [];
     this._queuedBytes = 0;
     this._pending = 0;
+    this._generation = 0; // ignores write callbacks/messages from an old connection
 
     this._backoff = BACKOFF_MIN;
     this._reconnectTimer = null;
@@ -496,19 +497,21 @@ export class Pane {
     this._pending = 0;
     this.term.options.disableStdin = true;
     this.showNotice("[restoring terminal…]");
+    const generation = ++this._generation;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
     const ws = new WebSocket(url, api.wsSubprotocols());
     ws.binaryType = "arraybuffer";
     this.ws = ws;
-    ws.onopen = () => { this._backoff = BACKOFF_MIN; };
+    ws.onopen = () => { if (this.ws === ws) this._backoff = BACKOFF_MIN; };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws || generation !== this._generation) return;
       if (typeof ev.data === "string") {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         this._control(msg);
       } else {
-        this._binary(ev.data);
+        this._binary(ev.data, generation);
       }
     };
     ws.onclose = () => { if (this.ws === ws) this._closed(); };
@@ -536,13 +539,17 @@ export class Pane {
     }
   }
 
-  _binary(buf) {
+  _binary(buf, generation = this._generation) {
     const data = new Uint8Array(buf);
     if (data.byteLength === 0) return; // xterm never acks empty writes
     if (this._phase === "replay") {
       this._replayWrites++;
       this.term.write(data, () => {
+        if (generation !== this._generation) return;
         this._replayWrites--;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: "replay_ack" }));
+        }
         if (this._replayDone && this._replayWrites === 0) this._goLive();
       });
     } else {
@@ -574,9 +581,11 @@ export class Pane {
   _pump() {
     while (this._queue.length && this._pending < PENDING_LIMIT) {
       const data = this._drainQueue();
+      const generation = this._generation;
       this._queuedBytes -= data.byteLength;
       this._pending += data.byteLength;
       this.term.write(data, () => {
+        if (generation !== this._generation) return;
         this._pending -= data.byteLength;
         if (this._queue.length && this._phase === "live") this._pump();
       });
@@ -633,10 +642,12 @@ export class Pane {
     const delay = this._backoff;
     this._backoff = Math.min(this._backoff * 2, BACKOFF_MAX);
     clearTimeout(this._reconnectTimer);
+    this.showNotice(`[connection lost · retrying in ${Math.max(1, Math.ceil(delay / 1000))}s]`);
     this._reconnectTimer = setTimeout(() => this._connect(), delay);
   }
 
   _teardownWs() {
+    this._generation++;
     if (this.ws) {
       const w = this.ws;
       this.ws = null;

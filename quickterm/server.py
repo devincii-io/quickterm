@@ -117,7 +117,13 @@ def create_app(
 
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:
-        body = await request.json() if await request.body() else {}
+        raw_body = await request.body()
+        try:
+            body = json.loads(raw_body) if raw_body else {}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "request body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
         profile_name = body.get("profile")
         cmd = body.get("cmd")
         args = body.get("args")
@@ -125,16 +131,33 @@ def create_app(
         env = body.get("env")
         prof = None
         if profile_name is not None:
+            if not isinstance(profile_name, str) or not profile_name.strip():
+                raise HTTPException(400, "profile must be a non-empty string")
             prof = next((p for p in cfg.profiles if p.name == profile_name), None)
             if prof is None:
                 raise HTTPException(404, f"unknown profile: {profile_name}")
-            resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof)
+            resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, cwd)
             cmd = cmd or resolved_cmd
             args = args if args is not None else resolved_args
-            cwd = cwd if cwd is not None else resolved_cwd
+            # _resolve_profile incorporates the request override.  WSL embeds
+            # it in `--cd` and deliberately returns no Windows process cwd.
+            cwd = resolved_cwd
             env = env if env is not None else dict(prof.env)
-        if not cmd:
+        if not isinstance(cmd, str) or not cmd.strip():
             raise HTTPException(400, "either 'profile' or 'cmd' is required")
+        cmd = cmd.strip()
+        if args is not None and (
+            not isinstance(args, list) or len(args) > 1024
+            or any(not isinstance(arg, str) for arg in args)
+        ):
+            raise HTTPException(400, "args must be a list of at most 1024 strings")
+        if env is not None and (
+            not isinstance(env, dict) or len(env) > 256
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in env.items())
+        ):
+            raise HTTPException(400, "env must be an object of at most 256 string pairs")
+        if cwd is not None and not isinstance(cwd, str):
+            raise HTTPException(400, "cwd must be a string")
         if cwd:
             resolved_cwd = Path(os.path.expandvars(os.path.expanduser(str(cwd))))
             if not resolved_cwd.is_dir():
@@ -144,16 +167,23 @@ def create_app(
                     f'Terminal profile "{label}": starting folder does not exist: {cwd}',
                 )
             cwd = str(resolved_cwd)
+        name = body.get("name")
+        if name is not None and not isinstance(name, str):
+            raise HTTPException(400, "name must be a string")
         workspace = body.get("workspace")
+        if workspace is not None and not isinstance(workspace, str):
+            raise HTTPException(400, "workspace must be a string")
+        cols = _bounded_int(body.get("cols", 120), "cols", 2, 1000)
+        rows = _bounded_int(body.get("rows", 30), "rows", 1, 1000)
         info = manager.spawn(
-            name=body.get("name"),
+            name=name.strip()[:80] if name and name.strip() else None,
             profile=profile_name,
             cmd=cmd,
             args=args or [],
             cwd=cwd,
             env=env or {},
-            cols=body.get("cols", 120),
-            rows=body.get("rows", 30),
+            cols=cols,
+            rows=rows,
             workspace=workspace if isinstance(workspace, str) and workspace else None,
         )
         return _asdict(info)
@@ -425,10 +455,32 @@ def create_app(
         # synchronous on the event-loop thread, so output cannot slip between
         # the snapshot and the live queue (the old order permanently lost it).
         attachment = manager.attach(sid)
-        data, cols, rows = session.scrollback()
+        chunks_fn = getattr(session, "scrollback_chunks", None)
+        if chunks_fn is not None:
+            replay_chunks, cols, rows = chunks_fn()
+        else:  # test fakes and third-party managers implementing the old surface
+            data, cols, rows = session.scrollback()
+            replay_chunks = (data,) if data else ()
         try:
             await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
-            await ws.send_bytes(data)
+            sent_replay = False
+            for frame in _coalesce_replay(replay_chunks):
+                sent_replay = True
+                await ws.send_bytes(frame)
+                try:
+                    ack_text = await asyncio.wait_for(ws.receive_text(), timeout=30)
+                    ack = json.loads(ack_text)
+                except (asyncio.TimeoutError, TypeError, json.JSONDecodeError):
+                    await ws.close(code=1002, reason="invalid replay acknowledgement")
+                    return
+                if not isinstance(ack, dict) or ack.get("type") != "replay_ack":
+                    await ws.close(code=1002, reason="invalid replay acknowledgement")
+                    return
+            # Keep the original wire shape for empty terminals.  The empty
+            # frame has nothing for xterm to parse, so it intentionally does
+            # not participate in replay acknowledgement flow control.
+            if not sent_replay:
+                await ws.send_bytes(b"")
             await ws.send_text(json.dumps({"type": "replay_done"}))
             await _live_phase(ws, attachment, manager, session, sid)
         except (WebSocketDisconnect, asyncio.CancelledError):
@@ -440,6 +492,25 @@ def create_app(
     return app
 
 
+def _coalesce_replay(chunks: Any):
+    """Yield non-empty replay frames no larger than the live-frame cap."""
+    pending = bytearray()
+    for raw in chunks:
+        if not raw:
+            continue
+        view = memoryview(raw)
+        offset = 0
+        while offset < len(view):
+            take = min(_SEND_COALESCE_BYTES - len(pending), len(view) - offset)
+            pending.extend(view[offset:offset + take])
+            offset += take
+            if len(pending) == _SEND_COALESCE_BYTES:
+                yield bytes(pending)
+                pending.clear()
+    if pending:
+        yield bytes(pending)
+
+
 def _voice_available() -> bool:
     try:
         import quickterm.voice as voice
@@ -449,10 +520,10 @@ def _voice_available() -> bool:
         return False
 
 
-def _resolve_profile(prof: Any) -> tuple[str, list[str], str | None]:
+def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, list[str], str | None]:
     terminal_type = getattr(prof, "terminal_type", None)
     start = (getattr(prof, "start_command", None) or "").strip()
-    cwd = getattr(prof, "cwd", None)
+    cwd = cwd_override or getattr(prof, "cwd", None)
     existing_args = list(getattr(prof, "args", []) or [])
 
     if terminal_type == "powershell-core":
@@ -472,8 +543,10 @@ def _resolve_profile(prof: Any) -> tuple[str, list[str], str | None]:
         distro = (getattr(prof, "wsl_distro", None) or "").strip()
         if distro:
             args += ["-d", distro]
-        if cwd:
-            args += ["--cd", cwd]
+        # wsl.exe otherwise inherits QuickTerm's Windows process directory and
+        # opens under /mnt/c.  A blank profile belongs in the distro's own
+        # home; explicit Linux and Windows paths are both accepted by --cd.
+        args += ["--cd", cwd or "~"]
         if start:
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
         return "wsl.exe", args, None
@@ -683,16 +756,35 @@ async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> Non
             if len(data) > 256 * 1024:
                 await ws.close(code=1009, reason="input frame too large")
                 return
-            manager.write(sid, data)
+            try:
+                manager.write(sid, data)
+            except BufferError:
+                await ws.close(code=1013, reason="terminal input queue is full")
+                return
         elif msg.get("text"):
             try:
                 ctrl = json.loads(msg["text"])
             except (TypeError, json.JSONDecodeError):
                 continue
-            if ctrl.get("type") == "resize":
-                cols = max(2, min(1000, int(ctrl["cols"])))
-                rows = max(1, min(1000, int(ctrl["rows"])))
+            if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
+                try:
+                    cols = _bounded_int(ctrl.get("cols"), "cols", 2, 1000)
+                    rows = _bounded_int(ctrl.get("rows"), "rows", 1, 1000)
+                except HTTPException:
+                    continue
                 manager.resize(sid, cols, rows)
+
+
+def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(400, f"{name} must be an integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(400, f"{name} must be an integer") from None
+    if number < minimum or number > maximum:
+        raise HTTPException(400, f"{name} must be between {minimum} and {maximum}")
+    return number
 
 
 def _mount_frontend(app: FastAPI) -> None:

@@ -45,7 +45,12 @@ def load_workspace(name: str) -> Workspace | None:
     path = _path_for(name)
     if not path.exists():
         return None
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
     session_ids = raw.get("session_ids")
     if not isinstance(session_ids, list):
         # Backward compatibility: older workspace files expressed ownership

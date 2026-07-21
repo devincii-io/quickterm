@@ -16,11 +16,13 @@ import webbrowser
 from pathlib import Path
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
-# Never launch these on click; reveal them in the file manager instead.
-_REVEAL_EXTS = {
-    ".exe", ".bat", ".cmd", ".com", ".scr", ".ps1", ".psm1", ".vbs", ".vbe",
-    ".js", ".jse", ".wsf", ".wsh", ".msi", ".msp", ".lnk", ".jar", ".hta",
-    ".reg", ".sh",
+# Ctrl+click may be induced by untrusted terminal output. Open only file types
+# that are conventionally passive; reveal every other file in Explorer/Finder
+# so executable-capable extensions (.cpl/.msc/.chm/.url/...) never launch.
+_OPEN_EXTS = {
+    ".txt", ".md", ".log", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini",
+    ".cfg", ".conf", ".csv", ".tsv", ".pdf", ".png", ".jpg", ".jpeg",
+    ".gif", ".webp", ".bmp", ".ico",
 }
 
 
@@ -41,12 +43,12 @@ def open_target(target: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(cleaned)
     if sys.platform == "win32":
-        if path.is_file() and path.suffix.lower() in _REVEAL_EXTS:
+        if path.is_file() and path.suffix.lower() not in _OPEN_EXTS:
             subprocess.Popen(["explorer", f"/select,{path}"])
             return {"action": "revealed"}
         os.startfile(str(path))  # noqa: S606 - deliberate: user's own click
         return {"action": "opened"}
-    if path.is_file() and path.suffix.lower() in _REVEAL_EXTS:
+    if path.is_file() and path.suffix.lower() not in _OPEN_EXTS:
         subprocess.Popen(["xdg-open", str(path.parent)])
         return {"action": "revealed"}
     subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
