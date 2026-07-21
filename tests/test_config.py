@@ -3,7 +3,7 @@ import json
 import pytest
 
 from quickterm import config as cfgmod
-from quickterm.config import AppConfig, Profile, load_config, save_config
+from quickterm.config import AppConfig, Profile, load_config, save_config, validate_environment
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +67,48 @@ def test_save_load_roundtrip(fake_appdata):
     assert ubuntu.terminal_type == "wsl"
     assert ubuntu.wsl_distro == "Ubuntu"
     assert ubuntu.start_command == "source .venv/bin/activate"
+
+
+def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
+    fake_appdata, monkeypatch
+):
+    monkeypatch.setattr(cfgmod.secret_store, "protection_available", lambda: True)
+    monkeypatch.setattr(cfgmod.secret_store, "protect", lambda data: b"sealed:" + data)
+    monkeypatch.setattr(
+        cfgmod.secret_store,
+        "unprotect",
+        lambda data: data.removeprefix(b"sealed:"),
+    )
+    path = fake_appdata / "quickterm"
+    path.mkdir()
+    legacy = {
+        "profiles": [{"name": "secure", "cmd": "cmd.exe", "env": {"API_TOKEN": "secret"}}]
+    }
+    (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = load_config()
+
+    assert loaded.profiles[0].env == {"API_TOKEN": "secret"}
+    stored = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    protected = stored["profiles"][0]["env"]["API_TOKEN"]
+    assert protected["protected"] == "dpapi-v1"
+    assert "secret" not in json.dumps(stored)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"": "value"},
+        {"BAD=NAME": "value"},
+        {"BAD\nNAME": "value"},
+        {"KEY": "bad\0value"},
+        {"Path": "one", "PATH": "two"},
+        {"KEY": "x" * (cfgmod.ENV_MAX_VALUE_CHARS + 1)},
+    ],
+)
+def test_environment_validation_rejects_unsafe_values(env):
+    with pytest.raises(ValueError):
+        validate_environment(env)
 
 
 def test_save_rejects_missing_local_profile_folder(fake_appdata):

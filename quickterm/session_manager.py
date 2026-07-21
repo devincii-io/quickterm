@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 
-from .config import default_cwd
+from .config import default_cwd, validate_environment
 from .process_usage import snapshot_processes, summarize_trees
 
 if os.name == "nt":
@@ -161,7 +161,7 @@ class SessionManager:
         session = Session(info, self._cap)
         if os.path.basename(cmd).casefold() in {"wsl", "wsl.exe"}:
             session.resource_scope = "host-process-tree-partial-wsl"
-        child_env = dict(env or {})
+        child_env = dict(validate_environment(env or {}))
         session.pty = PtySession(
             cmd,
             list(args or []),

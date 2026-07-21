@@ -10,6 +10,12 @@ import subprocess
 import sys
 from typing import Any
 
+from quickterm import secret_store
+from quickterm.config import validate_environment
+
+
+_PROTECTED_PREFIX = "dpapi-v1."
+
 
 def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
     cmd = spec.get("cmd")
@@ -19,10 +25,7 @@ def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
     env = spec.get("env") or {}
     if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
         raise ValueError("args must be a list of strings")
-    if not isinstance(env, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in env.items()
-    ):
-        raise ValueError("env must contain string values")
+    validate_environment(env)
     label = spec.get("name") or spec.get("label") or os.path.basename(cmd)
     if isinstance(label, str) and label.startswith("Administrator - "):
         marked_name = label
@@ -32,21 +35,28 @@ def _clean_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "cmd": cmd,
         "args": args,
         "cwd": spec.get("cwd") if isinstance(spec.get("cwd"), str) else None,
-        "env": env,
+        "env": dict(env),
         "name": marked_name,
     }
 
 
 def encode_spec(spec: dict[str, Any]) -> str:
     raw = json.dumps(_clean_spec(spec), separators=(",", ":")).encode("utf-8")
+    if secret_store.protection_available():
+        protected = secret_store.protect(raw)
+        return _PROTECTED_PREFIX + base64.urlsafe_b64encode(protected).decode("ascii")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
 def decode_spec(token: str) -> dict[str, Any]:
     try:
-        raw = base64.urlsafe_b64decode(token.encode("ascii"))
+        if token.startswith(_PROTECTED_PREFIX):
+            protected = base64.urlsafe_b64decode(token.removeprefix(_PROTECTED_PREFIX).encode("ascii"))
+            raw = secret_store.unprotect(protected)
+        else:
+            raw = base64.urlsafe_b64decode(token.encode("ascii"))
         decoded = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit("Invalid elevated terminal request.") from exc
     if not isinstance(decoded, dict):
         raise SystemExit("Invalid elevated terminal request.")

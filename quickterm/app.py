@@ -94,6 +94,10 @@ def _setup_logging() -> None:
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         root.setLevel(logging.INFO)
         root.addHandler(handler)
+    if os.environ.get("QUICKTERM_DEBUG_IO") == "1":
+        log.warning(
+            "QUICKTERM_DEBUG_IO=1: raw terminal input is being written to the local log"
+        )
 
 
 def _already_running(port: int) -> bool:

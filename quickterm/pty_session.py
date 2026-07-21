@@ -43,7 +43,11 @@ _READ_COALESCE_BYTES = 128 * 1024
 log = logging.getLogger("quickterm.pty")
 # Opt-in raw-I/O tracing to pin down "wrong key" reports: logs the exact bytes
 # entering the PTY and the size of each output burst. Off unless the env var set.
-_DEBUG_IO = bool(os.environ.get("QUICKTERM_DEBUG_IO"))
+def _debug_io_enabled() -> bool:
+    return os.environ.get("QUICKTERM_DEBUG_IO") == "1"
+
+
+_DEBUG_IO = _debug_io_enabled()
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 

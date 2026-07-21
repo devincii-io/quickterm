@@ -358,6 +358,9 @@ def test_spawn_returns_conflict_when_live_terminal_limit_is_reached(client, mana
     {"cmd": "cmd.exe", "args": "not-a-list"},
     {"cmd": "cmd.exe", "args": ["ok", 3]},
     {"cmd": "cmd.exe", "env": {"KEY": 3}},
+    {"cmd": "cmd.exe", "env": {"BAD=NAME": "value"}},
+    {"cmd": "cmd.exe", "env": {"KEY": "bad\0value"}},
+    {"cmd": "cmd.exe", "env": {"Path": "one", "PATH": "two"}},
     {"cmd": "cmd.exe", "cols": 0},
     {"cmd": "cmd.exe", "rows": "many"},
     {"cmd": ["cmd.exe"]},
@@ -433,6 +436,17 @@ def test_config_endpoint(client, cfg):
     assert [p["name"] for p in body["profiles"]] == ["powershell", "claude"]
     assert body["snippets"][0]["name"] == "greet"
     assert body["voice_available"] is False  # voice module absent in tests
+    assert client.get("/api/config").headers["cache-control"] == "no-store"
+
+
+def test_spawn_rejects_oversized_json_before_parsing(client, manager):
+    response = client.post(
+        "/api/sessions",
+        content=b" " * (1024 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert manager.list() == []
 
 
 @pytest.fixture

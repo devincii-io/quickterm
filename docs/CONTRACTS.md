@@ -9,6 +9,11 @@ goals, quirks, and design tokens.
 - Config dir: `%APPDATA%/quickterm/` (`config.config_dir() -> pathlib.Path`, creates it)
 - `config.json` in config dir; workspaces in `workspaces/*.json` under config dir.
 - All persistence is stdlib `json`.
+- Windows serializes each profile environment value as a current-user DPAPI
+  object (`{"protected":"dpapi-v1","data":"..."}`); the in-memory/API shape
+  remains `dict[str, str]`. Plaintext legacy values migrate on load. POSIX
+  config/token storage uses user-only permissions (`0700` directory, `0600`
+  files).
 
 ## quickterm/config.py
 
@@ -60,11 +65,17 @@ def config_dir() -> Path
 def default_cwd() -> str
 def load_config() -> AppConfig
 def save_config(cfg: AppConfig) -> None
+def validate_environment(env: object) -> dict[str, str]
 ```
 
 Saving validates that every non-WSL profile's configured starting folder is an
 existing local directory. WSL profiles accept Linux paths and are not checked
 against the Windows filesystem.
+
+Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
+pairs, empty names, `=`, control characters, NUL values, and names that collide
+case-insensitively. Both PTY backends merge the validated override over the
+QuickTerm process environment.
 
 `default_cwd()` is the starting folder for any spawn that specifies no `cwd`
 (profiles without one, detected system shells, splits). It prefers the user's
@@ -78,8 +89,8 @@ One ConPTY. Reader thread pushes bytes into the owner's callback via
 `loop.call_soon_threadsafe` — never blocks the event loop. The reader coalesces
 all immediately-available output into one callback (bounded). `write()` only
 enqueues; a dedicated writer thread performs the (possibly blocking) PTY write,
-so a full stdin pipe never stalls the loop. Set `QUICKTERM_DEBUG_IO` to log raw
-in/out bytes.
+so a full stdin pipe never stalls the loop. Set `QUICKTERM_DEBUG_IO=1` to log
+raw in/out bytes; `0` and every other value leave tracing disabled.
 
 ```python
 class PtySession:
@@ -210,6 +221,10 @@ REST (JSON, under `/api`):
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}` — probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
 | POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}` — terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
+
+JSON bodies for session creation, elevation, and full-config updates are capped
+at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
+immutable asset responses retain their explicit long-lived cache policy.
 
 WebSocket `/ws/session/{id}` — attach protocol, in order:
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import os
@@ -9,6 +10,15 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import secret_store
+
+
+ENV_MAX_PAIRS = 256
+ENV_MAX_KEY_CHARS = 1024
+ENV_MAX_VALUE_CHARS = 64 * 1024
+ENV_MAX_TOTAL_CHARS = 256 * 1024
+_DPAPI_SCHEME = "dpapi-v1"
 
 
 @dataclass
@@ -107,7 +117,96 @@ def config_dir() -> Path:
         )
     path = Path(base) / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o700)
     return path
+
+
+def validate_environment(env: object) -> dict[str, str]:
+    """Validate a portable, structurally safe environment override mapping."""
+    if not isinstance(env, dict) or len(env) > ENV_MAX_PAIRS:
+        raise ValueError(f"environment must contain at most {ENV_MAX_PAIRS} string pairs")
+    seen: set[str] = set()
+    total = 0
+    for key, value in env.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("environment must contain string pairs")
+        if not key or "=" in key or any(ord(char) < 32 for char in key):
+            raise ValueError(
+                "environment variable names must be non-empty and contain no '=' or control characters"
+            )
+        if "\0" in value:
+            raise ValueError("environment variable values cannot contain NUL characters")
+        if len(key) > ENV_MAX_KEY_CHARS:
+            raise ValueError(
+                f"environment variable names cannot exceed {ENV_MAX_KEY_CHARS} characters"
+            )
+        if len(value) > ENV_MAX_VALUE_CHARS:
+            raise ValueError(
+                f"environment variable values cannot exceed {ENV_MAX_VALUE_CHARS} characters"
+            )
+        folded = key.casefold()
+        if folded in seen:
+            raise ValueError("environment variable names must be unique ignoring case")
+        seen.add(folded)
+        total += len(key) + len(value) + 2
+    if total > ENV_MAX_TOTAL_CHARS:
+        raise ValueError(
+            f"environment overrides cannot exceed {ENV_MAX_TOTAL_CHARS} characters"
+        )
+    return env
+
+
+def _decode_environment(raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise TypeError("environment must be a JSON object")
+    decoded: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):
+            decoded[key] = value
+            continue
+        if not isinstance(value, dict) or value.get("protected") != _DPAPI_SCHEME:
+            raise TypeError("environment values must be strings or supported protected values")
+        payload = value.get("data")
+        if not isinstance(payload, str) or not secret_store.protection_available():
+            raise ValueError("protected environment value is unavailable for this OS user")
+        try:
+            ciphertext = base64.b64decode(payload, validate=True)
+            decoded[key] = secret_store.unprotect(ciphertext).decode("utf-8")
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValueError("could not decrypt a protected environment value") from exc
+    return validate_environment(decoded)
+
+
+def _storage_dict(cfg: AppConfig) -> dict:
+    stored = dataclasses.asdict(cfg)
+    if not secret_store.protection_available():
+        return stored
+    for profile in stored["profiles"]:
+        profile["env"] = {
+            key: {
+                "protected": _DPAPI_SCHEME,
+                "data": base64.b64encode(secret_store.protect(value.encode("utf-8"))).decode(
+                    "ascii"
+                ),
+            }
+            for key, value in profile["env"].items()
+        }
+    return stored
+
+
+def _has_plaintext_environment(raw: dict) -> bool:
+    if not secret_store.protection_available():
+        return False
+    profiles = raw.get("profiles")
+    if not isinstance(profiles, list):
+        return False
+    return any(
+        isinstance(profile, dict)
+        and isinstance(profile.get("env"), dict)
+        and any(isinstance(value, str) for value in profile["env"].values())
+        for profile in profiles
+    )
 
 
 def _known(cls: type, data: dict) -> dict:
@@ -128,7 +227,15 @@ def config_from_dict(raw: dict) -> AppConfig:
     if "profiles" in kwargs:
         if not isinstance(kwargs["profiles"], list):
             raise TypeError("profiles must be a list")
-        kwargs["profiles"] = [_parse(Profile, p) for p in kwargs["profiles"]]
+        profiles = []
+        for profile in kwargs["profiles"]:
+            if not isinstance(profile, dict):
+                raise TypeError("Profile must be a JSON object")
+            parsed = dict(profile)
+            if "env" in parsed:
+                parsed["env"] = _decode_environment(parsed["env"])
+            profiles.append(_parse(Profile, parsed))
+        kwargs["profiles"] = profiles
     if "snippets" in kwargs:
         if not isinstance(kwargs["snippets"], list):
             raise TypeError("snippets must be a list")
@@ -191,11 +298,10 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f'Terminal profile "{name}": executable is required')
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
-        if not isinstance(profile.env, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in profile.env.items()
-        ):
-            raise ValueError(f'Terminal profile "{name}": environment must contain strings')
+        try:
+            validate_environment(profile.env)
+        except ValueError as exc:
+            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
         if profile.cwd is not None and not isinstance(profile.cwd, str):
             raise ValueError(f'Terminal profile "{name}": starting folder must be a string')
         if profile.keybinding:
@@ -236,8 +342,14 @@ def load_config() -> AppConfig:
         save_config(cfg)
         return cfg
     try:
-        cfg = config_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        cfg = config_from_dict(raw)
         validate_config(cfg)
+        if _has_plaintext_environment(raw):
+            try:
+                save_config(cfg)
+            except OSError:
+                pass  # keep a valid legacy config usable if DPAPI is unavailable
         return cfg
     except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
         # Keep the exact broken file recoverable instead of trapping the app in
@@ -252,7 +364,7 @@ def load_config() -> AppConfig:
 def save_config(cfg: AppConfig) -> None:
     validate_config(cfg)
     path = config_dir() / "config.json"
-    _atomic_write(path, json.dumps(dataclasses.asdict(cfg), indent=2))
+    _atomic_write(path, json.dumps(_storage_dict(cfg), indent=2))
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -260,10 +372,14 @@ def _atomic_write(path: Path, text: str) -> None:
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            if os.name != "nt":
+                os.fchmod(handle.fileno(), 0o600)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
+        if os.name != "nt":
+            path.chmod(0o600)
     except BaseException:
         try:
             os.unlink(temp_name)

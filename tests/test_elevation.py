@@ -18,6 +18,9 @@ def test_elevated_spec_roundtrip_marks_terminal_name_once():
         }
     )
     decoded = decode_spec(token)
+    if elevation.secret_store.protection_available():
+        assert token.startswith("dpapi-v1.")
+    assert "QUICKTERM_TEST" not in token
     assert decoded == {
         "cmd": r"C:\Windows\System32\cmd.exe",
         "args": ["/K", "echo ready"],
@@ -33,6 +36,8 @@ def test_elevated_spec_roundtrip_marks_terminal_name_once():
         {},
         {"cmd": "cmd.exe", "args": "not-a-list"},
         {"cmd": "cmd.exe", "env": {"NUMBER": 1}},
+        {"cmd": "cmd.exe", "env": {"BAD=NAME": "value"}},
+        {"cmd": "cmd.exe", "env": {"KEY": "bad\0value"}},
     ],
 )
 def test_elevated_spec_rejects_invalid_commands(spec):

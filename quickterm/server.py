@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from quickterm.session_manager import Attachment, SessionManager
 
 FILE_READ_CAP = 512 * 1024
+JSON_BODY_CAP = 1024 * 1024
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 # Max bytes merged into one live output frame. Bounds per-send loop time so the
 # input pump interleaves; big enough to collapse bursts into few frames.
@@ -70,12 +71,14 @@ def create_app(
             return Response("forbidden: bad origin", status_code=403)
         if token and _token_required(request) and request.headers.get(auth.HEADER) != token:
             return Response("forbidden: bad token", status_code=403)
+        path = request.url.path
         response = await call_next(request)
+        if path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-store")
         # Frontend assets carry ETag/Last-Modified but no Cache-Control, so
         # browsers cache them heuristically and can serve a stale UI after the
         # app updates. Force revalidation for the shell (the immutable, hashed
         # /api/assets responses set their own long-lived caching).
-        path = request.url.path
         if not path.startswith("/api") and not path.startswith("/ws"):
             response.headers.setdefault("Cache-Control", "no-cache")
         return response
@@ -124,11 +127,7 @@ def create_app(
 
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:
-        raw_body = await request.body()
-        try:
-            body = json.loads(raw_body) if raw_body else {}
-        except json.JSONDecodeError as exc:
-            raise HTTPException(400, "request body must be valid JSON") from exc
+        body = await _read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
         profile_name = body.get("profile")
@@ -158,11 +157,12 @@ def create_app(
             or any(not isinstance(arg, str) for arg in args)
         ):
             raise HTTPException(400, "args must be a list of at most 1024 strings")
-        if env is not None and (
-            not isinstance(env, dict) or len(env) > 256
-            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in env.items())
-        ):
-            raise HTTPException(400, "env must be an object of at most 256 string pairs")
+        if env is not None:
+            config_mod = importlib.import_module("quickterm.config")
+            try:
+                env = config_mod.validate_environment(env)
+            except ValueError as exc:
+                raise HTTPException(400, f"invalid env: {exc}") from exc
         if cwd is not None and not isinstance(cwd, str):
             raise HTTPException(400, "cwd must be a string")
         if cwd:
@@ -334,7 +334,9 @@ def create_app(
     async def elevate_terminal(request: Request) -> dict:
         if os.name != "nt":
             raise HTTPException(400, "administrator terminals are only available on Windows")
-        body = await request.json()
+        body = await _read_json(request)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
         profile_name = body.get("profile")
         if profile_name is not None:
             prof = next((p for p in cfg.profiles if p.name == profile_name), None)
@@ -399,7 +401,7 @@ def create_app(
         config_mod = importlib.import_module("quickterm.config")
 
         try:
-            new_cfg = config_mod.config_from_dict(await request.json())
+            new_cfg = config_mod.config_from_dict(await _read_json(request))
             config_mod.save_config(new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
@@ -810,6 +812,31 @@ def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
     if number < minimum or number > maximum:
         raise HTTPException(400, f"{name} must be between {minimum} and {maximum}")
     return number
+
+
+async def _read_json(request: Request, maximum: int = JSON_BODY_CAP) -> Any:
+    """Read a bounded JSON body without first buffering an unbounded request."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > maximum:
+                raise HTTPException(413, f"request body cannot exceed {maximum} bytes")
+        except ValueError:
+            raise HTTPException(400, "invalid Content-Length header") from None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > maximum:
+            raise HTTPException(413, f"request body cannot exceed {maximum} bytes")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
 
 
 def _mount_frontend(app: FastAPI) -> None:

@@ -9,7 +9,9 @@ server, never in logs) and stored in a user-private file for out-of-band callers
 
 from __future__ import annotations
 
+import os
 import secrets
+import time
 
 from quickterm.config import config_dir
 
@@ -33,12 +35,43 @@ def get_or_create_token() -> str:
     try:
         existing = path.read_text(encoding="utf-8").strip()
         if existing:
+            if os.name != "nt":
+                path.chmod(0o600)
             return existing
     except OSError:
         pass
     token = secrets.token_urlsafe(32)
     try:
-        path.write_text(token, encoding="utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another process won first-start creation. Use its token so all windows
+        # agree instead of overwriting it with a different secret.
+        for _ in range(20):
+            try:
+                existing = path.read_text(encoding="utf-8").strip()
+                if existing:
+                    if os.name != "nt":
+                        path.chmod(0o600)
+                    return existing
+            except OSError:
+                pass
+            time.sleep(0.01)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+        except OSError:
+            return token
     except OSError:
-        pass  # in-memory token still works for this run
+        return token  # in-memory token still works for this run
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            path.chmod(0o600)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
     return token

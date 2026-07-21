@@ -2,9 +2,19 @@ import asyncio
 import os
 
 if os.name == "nt":
+    import quickterm.pty_session as pty_module
     from quickterm.pty_session import PtySession
 else:
     from quickterm.pty_posix import PtySession
+
+
+def test_raw_io_debug_requires_exact_opt_in(monkeypatch):
+    if os.name != "nt":
+        return
+    monkeypatch.setenv("QUICKTERM_DEBUG_IO", "0")
+    assert pty_module._debug_io_enabled() is False
+    monkeypatch.setenv("QUICKTERM_DEBUG_IO", "1")
+    assert pty_module._debug_io_enabled() is True
 
 
 def _short(script: str) -> tuple[str, list[str]]:

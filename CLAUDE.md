@@ -58,7 +58,8 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `sys.modules` stubs and writes to the real `%APPDATA%`.
 - Session activity tracking uses `touched` (set on user input via `onKey`, not
   `onData` — xterm auto-replies to DA/DSR must not count).
-- `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging).
+- `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
+  no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
   style); server tests use TestClient + fakes. Keep the suite < 40 s.
 

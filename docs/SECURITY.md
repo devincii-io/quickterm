@@ -10,7 +10,16 @@ claim a certification or guarantee suitability for every regulated setting.
 - The server binds to loopback (`127.0.0.1`) and rejects unexpected `Host` and
   browser `Origin` values.
 - Sensitive HTTP and WebSocket routes require a random per-install token. The
-  token is stored under the signed-in user's `%APPDATA%\quickterm` directory.
+  token is stored under the signed-in user's `%APPDATA%\quickterm` directory;
+  POSIX installs enforce mode `0600` on the token and `0700` on the directory.
+- Windows profile environment values are encrypted at rest with current-user
+  DPAPI. Plaintext values from older configs are migrated automatically. UAC
+  launches carry a DPAPI ciphertext instead of embedding recoverable JSON in
+  the process command line.
+- Environment overrides reject empty/malformed names, NUL characters,
+  case-insensitive duplicates, and excessive sizes. JSON configuration and
+  session-spawn requests are capped before buffering, and configuration API
+  responses use `Cache-Control: no-store`.
 - There are no accounts, analytics, advertising, or usage telemetry. Terminal
   I/O and resource measurements are not sent to Fichtel Systems or another
   service.
@@ -28,12 +37,18 @@ claim a certification or guarantee suitability for every regulated setting.
 - Every shell and program runs with the QuickTerm user's OS permissions.
   QuickTerm does not sandbox commands, inspect scripts, filter terminal output,
   or prevent a user from exfiltrating data through tools they launch.
+- A profile environment value is available to the shell and every descendant
+  process in that terminal. DPAPI protects the value at rest; it cannot protect
+  it from programs that the user intentionally launches with that environment.
 - The local token protects against web pages and accidental API access. It is
   not protection against malware, administrators, or another program already
   running as the same Windows user and able to read that user's files or memory.
 - Administrator terminals require a separate Windows UAC-approved launch.
   QuickTerm cannot make an elevated command safe; Windows policy remains the
   authority.
+- `QUICKTERM_DEBUG_IO=1` intentionally writes raw terminal input to the
+  user-private rotating log and can therefore capture typed or pasted secrets.
+  No other value enables this diagnostic mode.
 - Unsigned releases can trigger SmartScreen, and a new trusted signing identity
   can still warn while reputation builds. A hash
   published beside a release detects corruption relative to that release, but

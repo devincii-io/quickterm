@@ -51,6 +51,18 @@ function parseEnvLines(text) {
   return env;
 }
 
+function environmentError(env) {
+  const seen = new Set();
+  for (const [key, value] of Object.entries(env || {})) {
+    if (!key || key.includes("=") || /[\x00-\x1f]/.test(key)) return `Invalid environment variable name: ${key || "(empty)"}.`;
+    if (typeof value !== "string" || value.includes("\0")) return `Invalid value for environment variable ${key}.`;
+    const folded = key.toLocaleLowerCase();
+    if (seen.has(folded)) return `Environment variable names must be unique ignoring case: ${key}.`;
+    seen.add(folded);
+  }
+  return "";
+}
+
 function inferTerminalType(profile) {
   if (profile.terminal_type) return profile.terminal_type;
   const cmd = (profile.cmd || "").toLowerCase().split(/[\\/]/).pop();
@@ -743,6 +755,14 @@ export class Panels {
         message.classList.add("error");
         return;
       }
+      const badEnvironment = profiles
+        .map((profile) => environmentError(profile.env))
+        .find(Boolean);
+      if (badEnvironment) {
+        message.textContent = badEnvironment;
+        message.classList.add("error");
+        return;
+      }
       const snippets = this.settingsDraft.snippets || [];
       if (snippets.some((snippet) => !(snippet.name || "").trim() || !(snippet.text || "").trim())) {
         message.textContent = "Every snippet needs a name and command.";
@@ -1132,7 +1152,11 @@ export class Panels {
       envArea.rows = 3;
       envArea.addEventListener("keydown", (event) => event.stopPropagation());
       envArea.addEventListener("input", () => { profile.env = parseEnvLines(envArea.value); });
-      card.append(this._field("Environment variables", envArea, "One KEY=value per line, merged over the system environment."));
+      card.append(this._field(
+        "Environment variables",
+        envArea,
+        "One KEY=value per line, inherited by every process in this terminal. Values are encrypted on disk with your Windows account.",
+      ));
 
       const toggle = make("label", "toggle-row");
       const checkbox = make("input");

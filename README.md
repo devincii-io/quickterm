@@ -126,7 +126,15 @@ shortcut and autostart. With no folder configured, Windows shells start in the
 Windows user home and WSL starts in the distro's Linux home. A WSL profile can
 use Linux paths such as `~/dev`; its startup command runs from that location.
 
-The same fields are available in the config file:
+Profile environment values are encrypted at rest with Windows DPAPI and can be
+decrypted only by the same Windows account. Existing plaintext profile values
+are migrated automatically. They are still inherited by every program launched
+inside that terminal, so use a dedicated profile when a credential should have
+a narrow scope. On POSIX, QuickTerm relies on `0700`/`0600` directory and file
+permissions instead of storing an encryption key beside the data.
+
+The same fields are available through Settings → Advanced. A plaintext config
+value written manually remains supported and is protected on the next load:
 
 ```json
 {"name": "project", "cmd": "wsl.exe", "args": [], "cwd": "~/dev/project",
