@@ -41,6 +41,7 @@ def test_load_config_writes_default_file(fake_appdata):
     assert cfg.custom_theme == {}
     assert cfg.logo is None
     assert cfg.idle_timeout_s == 300
+    assert cfg.max_sessions == 0
     assert cfg.scrollback_bytes == 512 * 1024
     assert len(cfg.snippets) >= 1
 
@@ -98,6 +99,7 @@ def test_save_allows_wsl_folder_without_local_match(fake_appdata):
         ("scrollback_bytes", 1024, "Scrollback"),
         ("font_size", 40, "Font size"),
         ("idle_timeout_s", -1, "Idle timeout"),
+        ("max_sessions", 101, "Terminal limit"),
     ],
 )
 def test_save_rejects_unsafe_bounds(fake_appdata, field, value, message):

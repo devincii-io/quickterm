@@ -125,6 +125,7 @@ body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid
 .dropdown-trigger:focus-visible, .app-dropdown.open > .dropdown-trigger { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-ring); }
 .dropdown-trigger-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
 .dropdown-trigger-copy > small { color: var(--muted); font-size: 9px; font-weight: 650; letter-spacing: .11em; text-transform: uppercase; }
+.dropdown-trigger-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dropdown-trigger-copy > strong { margin-top: 3px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .dropdown-chevron { flex: none; color: var(--muted); font-family: var(--mono); font-size: 16px; transform: translateY(-2px); transition: transform .16s ease; }
 .app-dropdown.open > .dropdown-trigger .dropdown-chevron { transform: translateY(2px) rotate(180deg); }
@@ -210,6 +211,11 @@ body.dragging .pane { pointer-events: none; }
 .pane-dim { position: absolute; inset: 0; z-index: 5; background: rgba(20, 24, 23, .18); pointer-events: none; }
 .pane.focused .pane-dim { display: none; }
 .pane-exitbar { position: absolute; z-index: 6; right: 8px; bottom: 7px; padding: 4px 8px; border: 1px solid rgba(212, 124, 115, .25); border-radius: 5px; background: #2c2221; color: var(--danger); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.pane-exitbar.confirming { max-width: min(420px, calc(100% - 16px)); display: flex; align-items: center; gap: 10px; padding: 8px 9px; letter-spacing: 0; text-transform: none; }
+.pane-confirm-copy { min-width: 0; line-height: 1.35; }
+.pane-confirm-actions { flex: none; display: flex; gap: 5px; }
+.pane-confirm-actions button { min-height: 25px; padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--text-soft); font: inherit; cursor: pointer; }
+.pane-confirm-actions .pane-confirm-accept { border-color: rgba(212, 124, 115, .5); color: var(--danger); }
 
 .statusbar { flex: none; min-height: 27px; display: flex; align-items: center; gap: 8px; padding: 3px 13px; border-top: 1px solid var(--line); background: var(--bg); color: var(--muted); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; user-select: none; }
 .sb-flex { flex: 1; }
@@ -317,6 +323,18 @@ body.zoomed #sb-zoom { display: inline; }
 .dashboard-stat strong { display: block; font-family: var(--mono); font-size: 19px; font-weight: 500; }
 .dashboard-stat span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; letter-spacing: .07em; text-transform: uppercase; }
 .dashboard-section { margin-top: 29px; }
+.usage-section .section-heading { align-items: flex-start; }
+.usage-table { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.usage-row { min-height: 62px; display: flex; align-items: center; gap: 20px; padding: 10px 13px; border-bottom: 1px solid var(--line); }
+.usage-row:last-child { border-bottom: 0; }
+.usage-identity { flex: 1; min-width: 150px; display: flex; flex-direction: column; gap: 4px; }
+.usage-identity strong, .usage-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-identity strong { font-size: 12px; }
+.usage-identity small { color: var(--muted); font-size: 9px; }
+.usage-values { flex: none; display: grid; grid-template-columns: repeat(4, minmax(68px, 1fr)); gap: 7px; }
+.usage-value { min-width: 68px; display: flex; flex-direction: column; gap: 3px; padding-left: 9px; border-left: 1px solid var(--line); }
+.usage-value strong { color: var(--text-soft); font-family: var(--mono); font-size: 11px; font-weight: 500; }
+.usage-value small { color: var(--muted); font-size: 8px; letter-spacing: .04em; text-transform: uppercase; }
 .save-workspace-form { width: min(380px, 45%); display: flex; gap: 8px; }
 .save-workspace-form .ui-input { flex: 1; }
 .section-heading:has(.save-workspace-note) { flex-wrap: wrap; }
@@ -398,6 +416,9 @@ body.zoomed #sb-zoom { display: inline; }
 .settings-footer { flex: none; min-height: 65px; display: flex; align-items: center; gap: 9px; padding: 11px 22px; border-top: 1px solid var(--line); background: var(--bg); }
 .settings-message { color: var(--muted); font-size: 11px; }
 .settings-message.error { color: var(--danger); }
+.inline-confirmation { position: fixed; z-index: 120; width: min(390px, calc(100vw - 24px)); display: flex; align-items: center; gap: 12px; padding: 10px 11px; border: 1px solid rgba(212, 124, 115, .45); border-radius: 4px; background: var(--surface-raised); box-shadow: 0 12px 32px rgba(0, 0, 0, .42); }
+.inline-confirmation-copy { flex: 1; min-width: 0; color: var(--text-soft); font-size: 10px; line-height: 1.4; }
+.inline-confirmation-actions { flex: none; display: flex; align-items: center; gap: 5px; }
 .footer-spacer { flex: 1; }
 
 .settings-group { margin-top: 15px; padding: 18px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
@@ -562,6 +583,8 @@ body.zoomed #sb-zoom { display: inline; }
   .logo-picker-actions { grid-column: 1 / -1; }
   .settings-footer { flex-wrap: wrap; }
   .settings-message { display: block; order: -1; flex-basis: 100%; }
+  .usage-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .usage-values { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -672,6 +695,18 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 }
 
 @media (max-width: 520px) {
+  .launcher { grid-template-columns: minmax(0, 1fr) max-content; gap: 5px; padding-inline: 6px; }
+  .launcher-controls { width: 100%; gap: 4px; }
+  .launcher-controls > .app-dropdown { flex: 1 1 92px; }
+  .launcher-controls > .launch-control { flex: 1.7 1 150px; }
+  .launcher-nav { gap: 0; }
+  .nav-button { min-width: 28px; min-height: 30px; padding: 5px 6px; }
+  .dropdown-trigger { gap: 6px; padding-inline: 8px; }
+  .launch-dropdown > .dropdown-trigger { padding-inline: 8px 5px; }
+  .launch-button { width: 54px; gap: 4px; }
+  .admin-button { width: 34px; padding: 0; }
+  .admin-button > span { display: none; }
+  .launch-value strong { min-width: 0; }
   #sb-workspace, #sb-clock, .sb-sep, #sb-shortcuts kbd { display: none; }
   .quick-font-stepper { grid-template-columns: 34px minmax(70px, 1fr) 34px; }
   #quick-font-reset { grid-column: 1 / -1; }

@@ -66,6 +66,8 @@ class AppConfig:
     logo: str | None = None
     # reap detached, silent sessions after this many seconds (0 disables)
     idle_timeout_s: int = 300
+    # maximum simultaneously live terminals (0 disables the limit)
+    max_sessions: int = 0
     # probe GitHub releases and offer one-click updates in the UI
     update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
@@ -146,6 +148,7 @@ def validate_config(cfg: AppConfig) -> None:
         ("Scrollback", cfg.scrollback_bytes),
         ("Font size", cfg.font_size),
         ("Idle timeout", cfg.idle_timeout_s),
+        ("Terminal limit", cfg.max_sessions),
     ):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{label} must be an integer")
@@ -157,6 +160,8 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("Font size must be between 9 and 30")
     if cfg.idle_timeout_s < 0:
         raise ValueError("Idle timeout cannot be negative")
+    if not 0 <= cfg.max_sessions <= 100:
+        raise ValueError("Terminal limit must be between 0 and 100")
     if not isinstance(cfg.theme, str) or not cfg.theme.strip():
         raise ValueError("Theme must be a non-empty string")
     if not isinstance(cfg.custom_theme, dict) or any(

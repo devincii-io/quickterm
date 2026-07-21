@@ -3,6 +3,7 @@
 //   Alt+K              command palette
 //   Alt+Z              zoom pane
 //   Alt+W              detach pane
+//   Alt+Shift+W        kill terminal process tree and close pane
 //   Alt+Arrows         move focus between panes
 //   Alt+Shift+H        split side by side
 //   Alt+Shift+V        split top and bottom
@@ -48,6 +49,7 @@ export function initKeys(actions) {
     // prefer the produced character, with stable numpad and WebView fallbacks.
     if (key === "h") return done(actions.splitH);
     if (key === "v") return done(actions.splitV);
+    if (key === "w") return done(actions.killSession);
     if (key === "arrowright") return done(actions.splitH);
     if (key === "arrowdown") return done(actions.splitV);
 

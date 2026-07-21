@@ -67,6 +67,21 @@ function countPanes(layout) {
   return (layout.children || []).reduce((sum, child) => sum + countPanes(child), 0);
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "Unavailable";
+  if (bytes < 1024 * 1024) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(bytes < 100 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatUptime(seconds) {
+  if (!Number.isFinite(seconds)) return "—";
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+  return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+}
+
 function layoutSessionIds(node, out = new Set()) {
   if (!node) return out;
   if (node.type === "split") {
@@ -144,6 +159,7 @@ export class Panels {
     const revert = this._themePreviewDirty ? this.app.appliedTheme() : null;
     this._themePreviewDirty = false;
     this.open = null;
+    this._clearInlineConfirmation();
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
     if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
@@ -191,7 +207,8 @@ export class Panels {
       // surely as from inputs. Pause while focus is anywhere in its body;
       // header/close-button focus does not block background refreshes.
       const interacting = this.bodyEl.contains(document.activeElement);
-      if (this.open === "dashboard" && !this._dashLoading && !interacting) this._dashboard(true);
+      if (this.open === "dashboard" && !this._dashLoading
+          && !interacting && !this._inlineConfirmation) this._dashboard(true);
     }, DASHBOARD_REFRESH_MS);
   }
 
@@ -221,6 +238,61 @@ export class Panels {
     const button = make("button", className, label);
     button.type = "button";
     return button;
+  }
+
+  _clearInlineConfirmation(restoreButton = true) {
+    if (!this._inlineConfirmation) return;
+    const { box, button } = this._inlineConfirmation;
+    this._inlineConfirmation = null;
+    box.remove();
+    if (restoreButton && button.isConnected) {
+      button.hidden = false;
+      button.focus();
+    }
+  }
+
+  _confirmNear(button, message, confirmLabel, action) {
+    this._clearInlineConfirmation(false);
+    button.hidden = true;
+    const box = make("div", "inline-confirmation");
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "Confirm destructive action");
+    const copy = make("span", "inline-confirmation-copy", message);
+    const actions = make("span", "inline-confirmation-actions");
+    const confirm = this._button(confirmLabel, "secondary-button danger-text compact");
+    const cancel = this._button("Cancel", "text-button compact");
+    actions.append(confirm, cancel);
+    box.append(copy, actions);
+    document.body.append(box);
+    const rect = button.getBoundingClientRect();
+    box.style.top = `${Math.min(window.innerHeight - 90, rect.bottom + 6)}px`;
+    box.style.right = `${Math.max(12, window.innerWidth - rect.right)}px`;
+    this._inlineConfirmation = { box, button };
+
+    const run = async () => {
+      confirm.disabled = true;
+      cancel.disabled = true;
+      try {
+        await action();
+        this._clearInlineConfirmation(false);
+      } catch (error) {
+        copy.textContent = error?.detail || "Action failed. Try again.";
+        confirm.textContent = "Retry";
+        confirm.disabled = false;
+        cancel.disabled = false;
+        confirm.focus();
+      }
+    };
+    confirm.addEventListener("click", run);
+    cancel.addEventListener("click", () => this._clearInlineConfirmation());
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        this._clearInlineConfirmation();
+      }
+    });
+    requestAnimationFrame(() => confirm.focus());
   }
 
   _field(label, control, hint) {
@@ -309,14 +381,65 @@ export class Panels {
       make("p", "hero-text", "Open layouts, reattach background terminals, or clean up sessions from one place."),
     );
     const stats = make("div", "dashboard-stats");
-    const openSessions = sessions.filter((session) => session.alive && session.attachments > 0);
-    for (const [value, label] of [[workspaces.length, "workspaces"], [openSessions.length, "open terminals"], [this.app.profiles.length, "terminal profiles"]]) {
+    const liveSessions = sessions.filter((session) => session.alive);
+    const measuredMemory = liveSessions.reduce((sum, session) =>
+      sum + (session.usage?.available ? session.usage.working_set_bytes || 0 : 0), 0);
+    for (const [value, label] of [[workspaces.length, "workspaces"], [liveSessions.length, "live terminals"], [formatBytes(measuredMemory), "host RAM"]]) {
       const stat = make("div", "dashboard-stat");
       stat.append(make("strong", "", String(value).padStart(2, "0")), make("span", "", label));
       stats.append(stat);
     }
     hero.append(heroCopy, stats);
     this.bodyEl.append(hero);
+
+    const usageSection = make("section", "dashboard-section usage-section");
+    const usageHeading = this._sectionHeading(
+      "Terminal usage",
+      "Live host process-tree working set and sampled CPU. Figures are local estimates, not billing or enforcement data.",
+    );
+    if (liveSessions.length) {
+      const killAll = this._button("Kill all terminals…", "secondary-button danger-text");
+      killAll.addEventListener("click", () => {
+        const count = liveSessions.length;
+        const warning = `Stop ${count} live terminal${count === 1 ? "" : "s"} across all QuickTerm windows? Their panes in this window will close and unsaved shell work will be lost.`;
+        this._confirmNear(killAll, warning, "Kill all", async () => {
+          await this.app.killAllSessions();
+          if (this.open === "dashboard") this._dashboard(true);
+        });
+      });
+      usageHeading.append(killAll);
+    }
+    usageSection.append(usageHeading);
+    const usageTable = make("div", "usage-table");
+    if (!liveSessions.length) {
+      usageTable.append(make("p", "detached-empty", "No live terminals to measure."));
+    }
+    for (const session of liveSessions) {
+      const usage = session.usage || {};
+      const row = make("div", "usage-row");
+      const identity = make("div", "usage-identity");
+      const scope = usage.scope === "host-process-tree-partial-wsl"
+        ? "host side only · WSL workload excluded"
+        : `${session.attachments > 0 ? "open" : "background"} · ${session.profile || "terminal"}`;
+      identity.append(make("strong", "", session.name || session.id), make("small", "", scope));
+      const values = make("div", "usage-values");
+      const cpu = usage.cpu_percent == null ? "Sampling…" : `${usage.cpu_percent.toFixed(1)}%`;
+      const metrics = [
+        [usage.available ? formatBytes(usage.working_set_bytes) : "Unavailable", "RAM"],
+        [usage.available ? cpu : "Unavailable", "CPU"],
+        [String(usage.process_count || 0), "processes"],
+        [formatUptime(usage.uptime_seconds), "uptime"],
+      ];
+      for (const [value, label] of metrics) {
+        const cell = make("span", "usage-value");
+        cell.append(make("strong", "", value), make("small", "", label));
+        values.append(cell);
+      }
+      row.append(identity, values);
+      usageTable.append(row);
+    }
+    usageSection.append(usageTable);
+    this.bodyEl.append(usageSection);
 
     const workspaceSection = make("section", "dashboard-section");
     const wsHeading = this._sectionHeading("Workspaces", "Saved arrangements of terminals, folders and tools.");
@@ -381,21 +504,16 @@ export class Panels {
       }
       const menu = this._button("", "text-button danger-text");
       menu.append(icon("trash", 13), make("span", "", "Delete"));
-      menu.addEventListener("click", async (event) => {
+      menu.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (!window.confirm(`Delete workspace "${workspace.name}" and stop its detached sessions?`)) return;
-        menu.disabled = true;
-        const deleted = this.app.deleteWorkspace
-          ? await this.app.deleteWorkspace(workspace.name)
-          : await api.deleteWorkspace(workspace.name).then(() => true).catch(() => false);
-        if (!deleted) {
-          menu.disabled = false;
-          menu.querySelector("span").textContent = "Delete failed · retry";
-          return;
-        }
-        const gone = this._leave(card);
-        await gone;
-        if (this.open === "dashboard") this._dashboard(true);
+        this._confirmNear(menu, `Delete workspace “${workspace.name}” and stop its detached sessions?`, "Delete", async () => {
+          const deleted = this.app.deleteWorkspace
+            ? await this.app.deleteWorkspace(workspace.name)
+            : await api.deleteWorkspace(workspace.name).then(() => true).catch(() => false);
+          if (!deleted) throw new Error("Workspace could not be deleted.");
+          await this._leave(card);
+          if (this.open === "dashboard") this._dashboard(true);
+        });
       });
       top.append(badge, menu);
       const preview = this._layoutPreview(layout);
@@ -473,16 +591,12 @@ export class Panels {
         else await this.app.moveSessionHere(session, workspaceName === "Unassigned" ? null : workspaceName);
       });
       const kill = this._button("Kill", "text-button danger-text");
-      kill.addEventListener("click", async () => {
-        if (!window.confirm(`Stop terminal "${session.name || session.id}"?`)) return;
-        kill.disabled = true;
-        const stopped = await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
-        if (!stopped) {
-          kill.disabled = false;
-          kill.textContent = "Kill failed · retry";
-          return;
-        }
-        if (this.open === "dashboard") this._dashboard(true);
+      kill.addEventListener("click", () => {
+        this._confirmNear(kill, `Stop terminal “${session.name || session.id}”?`, "Kill", async () => {
+          const stopped = await this.app.killWorkspaceSession(session, workspaceName === "Unassigned" ? null : workspaceName);
+          if (!stopped) throw new Error("Terminal could not be stopped.");
+          if (this.open === "dashboard") this._dashboard(true);
+        });
       });
       actions.append(attach, kill);
       row.append(copy, actions);
@@ -735,12 +849,21 @@ export class Panels {
       { value: "3600", label: "1 hour" },
     ], String(cfg.idle_timeout_s ?? 300));
     idleTimeout.addEventListener("change", () => { cfg.idle_timeout_s = Number(idleTimeout.value); });
+    const maxSessions = this._textInput(cfg.max_sessions ?? 0, "0");
+    maxSessions.type = "number";
+    maxSessions.min = "0";
+    maxSessions.max = "100";
+    maxSessions.step = "1";
+    maxSessions.addEventListener("input", () => {
+      cfg.max_sessions = Math.max(0, Math.min(100, Number(maxSessions.value) || 0));
+    });
     const appFields = make("div", "settings-grid two-column");
     appFields.append(
       this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."),
       this._field("Local server port", port, "Only available on this computer."),
       this._field("Session scrollback", scrollback, "History retained for each live session."),
       this._field("Clean unused shells", idleTimeout, "Only untouched, detached shells are ended after this time; used and busy terminals are kept."),
+      this._field("Live terminal limit", maxSessions, "0 means unlimited. At the limit, new terminals are blocked; existing terminals are never stopped."),
     );
     behavior.append(appFields);
     host.append(group, branding, behavior);
@@ -1207,6 +1330,7 @@ export class Panels {
       ["Alt K", "Open command palette"], ["Alt Shift →", "Split to the right"],
       ["Alt Shift ↓", "Split below"], ["Alt arrows", "Move between panes"],
       ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
+      ["Alt Shift W", "Kill terminal and close pane"],
       ["Alt Shift +", "Bigger terminal text"], ["Alt Shift -", "Smaller terminal text"],
       ["Alt Shift 0", "Reset terminal text size"],
       ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],

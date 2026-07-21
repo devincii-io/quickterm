@@ -4,7 +4,7 @@ import os
 import pytest
 
 import quickterm.session_manager as session_manager
-from quickterm.session_manager import SessionManager
+from quickterm.session_manager import SessionLimitError, SessionManager
 
 
 class _RecordingPty:
@@ -158,3 +158,19 @@ async def test_kill_and_list_and_focus(manager):
     assert manager.get(info.id).info.alive is False
     await asyncio.sleep(1.2)  # grace period: session removed from registry
     assert manager.get(info.id) is None
+
+
+async def test_live_session_limit_blocks_only_new_spawns():
+    mgr = SessionManager(asyncio.get_running_loop(), max_sessions=1)
+    try:
+        cmd, args = _interactive()
+        first = mgr.spawn(cmd=cmd, args=args, name="first")
+        with pytest.raises(SessionLimitError, match="terminal limit reached"):
+            mgr.spawn(cmd=cmd, args=args, name="blocked")
+        assert mgr.get(first.id).info.alive is True
+
+        mgr.set_max_sessions(0)
+        second = mgr.spawn(cmd=cmd, args=args, name="second")
+        assert mgr.get(second.id).info.alive is True
+    finally:
+        mgr.shutdown()

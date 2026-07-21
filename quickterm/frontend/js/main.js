@@ -584,17 +584,28 @@ async function boot() {
     killFocusedSession: async () => {
       const pane = layout.focused;
       if (pane && pane.session) {
-        if (!window.confirm(`Stop terminal "${pane.displayName()}"?`)) return;
-        try {
-          await api.killSession(pane.session.id);
-        } catch (_) {
-          pane.flashNotice("[could not stop terminal]");
-          return;
-        }
-        forgetSession(pane.session.id);
-        scheduleWorkspaceSave();
-        refreshStatusSoon();
+        pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
+          const sessionId = pane.session.id;
+          await api.killSession(sessionId);
+          forgetSession(sessionId);
+          layout.closePane(pane);
+          scheduleWorkspaceSave();
+          refreshStatusSoon();
+        });
       }
+    },
+    killAllSessions: async () => {
+      const result = await api.killAllSessions();
+      for (const pane of [...layout.panes()]) {
+        if (!pane.session) continue;
+        forgetSession(pane.session.id);
+        layout.closePane(pane);
+      }
+      workspaceSessionIds.clear();
+      scratchSessionIds.clear();
+      scheduleWorkspaceSave();
+      refreshStatusSoon();
+      return result?.killed || 0;
     },
     moveSessionHere,
     killWorkspaceSession,
@@ -905,6 +916,7 @@ async function boot() {
     splitV: app.splitV,
     zoom: app.zoom,
     closePane: app.closePane,
+    killSession: app.killFocusedSession,
     focusDir: (direction) => layout.focusDir(direction),
     fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
     fontSmaller: () => setScopedFontSize(scopedFontSize() - 1),
@@ -946,9 +958,15 @@ async function boot() {
       const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
       const visible = liveOwned.filter((session) => attached.has(session.id)).length;
       const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
-      $("sb-sessions").textContent = detached
+      const measuredMemory = list.reduce((sum, session) =>
+        sum + (session.alive && session.usage?.available ? session.usage.working_set_bytes || 0 : 0), 0);
+      const memoryLabel = measuredMemory >= 1024 * 1024 * 1024
+        ? `${(measuredMemory / (1024 * 1024 * 1024)).toFixed(1)} GB RAM`
+        : `${Math.round(measuredMemory / (1024 * 1024))} MB RAM`;
+      const countLabel = detached
         ? `${visible} open · ${detached} background`
         : `${visible} open`;
+      $("sb-sessions").textContent = `${countLabel} · ${memoryLabel}`;
     }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 

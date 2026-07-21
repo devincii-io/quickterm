@@ -13,7 +13,11 @@ Download `QuickTerm-v*-Setup.exe` from the
 run it. The per-user installer adds Start Menu and Desktop shortcuts,
 supports in-place upgrades, and includes an uninstaller. It does not require
 administrator access. A portable `.zip` is also available. Windows may show a
-SmartScreen warning until release binaries are code-signed.
+SmartScreen warning because current release binaries are unsigned. A trusted
+Authenticode signature identifies the publisher and lets reputation carry
+between releases, but a new signing identity can still receive warnings while
+reputation builds; Microsoft Store distribution is the reliable no-warning
+path. See [Signing releases](docs/SECURITY.md#smartscreen-and-release-signing).
 
 The installed build uses a normal application folder instead of a
 self-extracting one-file executable. Multiple QuickTerm windows share that
@@ -80,6 +84,7 @@ arguments), the `Alt+B`/`F` word motions, ...
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
 | `Alt+W` | Detach pane (session stays in this workspace; asks twice if something is running) |
+| `Alt+Shift+W` | Kill the focused terminal process tree and close its pane (asks first) |
 | `Alt+Shift+Plus` / `Alt+Shift+Minus` / `Alt+Shift+0` | Grow / shrink / reset terminal text size |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
 | `Ctrl+Click` | Open a URL or file path printed in the terminal |
@@ -100,6 +105,15 @@ and **Kill** controls. `Alt+K` only offers sessions from the current workspace;
 moving one from another workspace requires the explicit **Attach from another
 workspace…** menu. Scratch follows the same ownership rule during the current
 run, but Scratch and all of its sessions are discarded when QuickTerm quits.
+
+**Dashboard → Terminal usage** shows the host process tree's current working
+set, sampled CPU, process count, and uptime for every live terminal. The status
+bar shows the measured total. WSL is labelled **host side only** because Linux
+processes inside the WSL VM cannot be attributed reliably to one Windows
+terminal. Settings can cap live terminals from 1–100; `0` keeps the default
+unlimited behavior. Reaching the cap blocks new spawns and never kills an
+existing terminal. The dashboard also has a confirmed **Kill all terminals**
+action for intentionally stopping every live session.
 
 ## Configuration
 
@@ -130,6 +144,17 @@ workbench and every open terminal immediately, then revert on Cancel.
 until it gets a proper capture overlay.) Named workspaces are saved under the QuickTerm config directory
 and can be switched from the app bar or dashboard. Logs rotate under `logs/` in
 that directory.
+
+## Security and company use
+
+QuickTerm is designed for local workstation use and can fit a company-managed
+Windows environment when its documented controls match that company's policy.
+It is not a sandbox, an EDR product, or a compliance certification. Terminals
+run arbitrary commands with the signed-in user's permissions, so normal OS
+controls, least privilege, application allowlisting, patching, and endpoint
+monitoring still apply. See [Security and company deployment](docs/SECURITY.md)
+for the implemented boundaries, data handling, tracker accuracy, and an IT
+review checklist.
 
 ## Development
 

@@ -207,6 +207,7 @@ export class Pane {
   }
 
   showNotice(text) {
+    if (this._confirmation) this.cancelConfirmation();
     this.exitBar.textContent = text;
     this.exitBar.hidden = false;
     const live = document.getElementById("live-status");
@@ -220,6 +221,65 @@ export class Pane {
     this._noticeTimer = setTimeout(() => {
       if (this.state !== "exited" && !this.closeArmed) this.exitBar.hidden = true;
     }, 2000);
+  }
+
+  confirmAction(message, action, confirmLabel = "Kill") {
+    this.cancelConfirmation();
+    const text = document.createElement("span");
+    text.className = "pane-confirm-copy";
+    text.textContent = message;
+    const actions = document.createElement("span");
+    actions.className = "pane-confirm-actions";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "pane-confirm-accept";
+    confirm.textContent = confirmLabel;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "pane-confirm-cancel";
+    cancel.textContent = "Cancel";
+    actions.append(confirm, cancel);
+    this.exitBar.textContent = "";
+    this.exitBar.append(text, actions);
+    this.exitBar.classList.add("confirming");
+    this.exitBar.hidden = false;
+
+    const run = async () => {
+      confirm.disabled = true;
+      cancel.disabled = true;
+      try {
+        await action();
+        if (!this._disposed) this.cancelConfirmation();
+      } catch (error) {
+        if (this._disposed) return;
+        text.textContent = error?.detail || "Action failed. Try again.";
+        confirm.textContent = "Retry";
+        confirm.disabled = false;
+        cancel.disabled = false;
+        confirm.focus();
+      }
+    };
+    confirm.addEventListener("click", run);
+    cancel.addEventListener("click", () => this.cancelConfirmation(true));
+    const keyHandler = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        this.cancelConfirmation(true);
+      }
+    };
+    this.exitBar.addEventListener("keydown", keyHandler);
+    this._confirmation = { confirm, cancel, keyHandler };
+    requestAnimationFrame(() => confirm.focus());
+  }
+
+  cancelConfirmation(refocus = false) {
+    if (!this._confirmation) return;
+    this.exitBar.removeEventListener("keydown", this._confirmation.keyHandler);
+    this._confirmation = null;
+    this.exitBar.classList.remove("confirming");
+    if (this.state !== "exited") this.exitBar.hidden = true;
+    if (refocus && this.term) this.term.focus();
   }
 
   // Copy text (default: the terminal's current selection) to the clipboard,
@@ -350,6 +410,7 @@ export class Pane {
     clearTimeout(this._fitTimer);
     clearTimeout(this._closeArmTimer);
     clearTimeout(this._noticeTimer);
+    this.cancelConfirmation();
     this._ro.disconnect();
     if (this._linkProvider) { try { this._linkProvider.dispose(); } catch (e) {} this._linkProvider = null; }
     if (this._webgl) { try { this._webgl.dispose(); } catch (e) {} this._webgl = null; }
@@ -360,6 +421,13 @@ export class Pane {
   // ---- internals ----
 
   _createTerm() {
+    // Override xterm's default OSC hyperlink handler: the vendor default uses
+    // window.confirm(). Every terminal link must stay inside QuickTerm's own
+    // Ctrl+click flow and token-gated local opener.
+    const activateLink = (event, text) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      api.openTarget(text.trim()).catch(() => this.flashNotice("[could not open]"));
+    };
     this.term = new Terminal({
       fontFamily: `"${this.fontFamily}", "JetBrains Mono", "Cascadia Mono", Consolas, monospace`,
       fontSize: this.fontSize,
@@ -368,6 +436,7 @@ export class Pane {
       scrollback: 5000,
       minimumContrastRatio: 4.5,
       allowProposedApi: true,
+      linkHandler: { activate: activateLink },
       theme: this.theme,
       // On Windows the backend PTY is ConPTY; telling xterm lets it apply the
       // ConPTY reflow/sequence handling and fixes Windows-specific key quirks.
@@ -460,10 +529,6 @@ export class Pane {
     // custom provider above. Both open through the token-gated backend
     // (/api/open), which refuses non-http(s) URLs and reveals executables
     // in the file manager instead of running them.
-    const activateLink = (event, text) => {
-      if (!event.ctrlKey && !event.metaKey) return;
-      api.openTarget(text.trim()).catch(() => this.flashNotice("[could not open]"));
-    };
     try {
       this.term.loadAddon(new WebLinksAddon.WebLinksAddon(activateLink));
     } catch (e) { /* links are a nicety, never fatal */ }

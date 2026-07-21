@@ -48,6 +48,7 @@ class AppConfig:
     custom_theme: dict[str, str] = {}
     logo: str | None = None
     idle_timeout_s: int = 300
+    max_sessions: int = 0                    # 0 = unlimited; otherwise 1..100 live
     update_check: bool = True               # UI probes GitHub releases when on
     summon_hotkey: str = "ctrl+alt+grave"   # quake-style summon/hide
     default_profile: str = ""
@@ -119,7 +120,8 @@ class Session:
     def scrollback(self) -> tuple[bytes, int, int]   # (data, cols_at_record, rows_at_record)
 
 class SessionManager:
-    def __init__(self, loop, scrollback_bytes: int = 512*1024) -> None
+    def __init__(self, loop, scrollback_bytes: int = 512*1024,
+                 max_sessions: int = 0) -> None
     def spawn(self, *, name: str | None = None, profile: str | None = None,
               cmd: str, args: list[str] = ..., cwd: str | None = None,
               env: dict[str, str] = ..., cols: int = 120, rows: int = 30,
@@ -131,6 +133,8 @@ class SessionManager:
     def kill(self, sid: str) -> None          # tree kill + remove after grace
     def attach(self, sid: str) -> "Attachment"
     def busy_ids(self) -> set[str]            # sessions whose shell has a child process
+    def session_metrics(self) -> tuple[set[str], dict[str, dict]]
+    def set_max_sessions(self, limit: int) -> None
     def shutdown(self) -> None                # kill all
 
 class Attachment:
@@ -183,10 +187,11 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo + {attachments: int, busy: bool}]` — `busy` = the shell has a child process right now (WSL in-VM work is invisible to it) |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides) |
+| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage}]`; `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. WSL scope is explicitly partial. |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides); 409 when the live-terminal limit is reached |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
+| POST | /api/sessions/kill-all | → kill every live session → `{killed: int}` |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
@@ -328,12 +333,19 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
 - Keybindings (in addition to palette): Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom,
-  Alt+W detach pane (two-step when the session is busy), Alt+arrows focus move,
+  Alt+W detach pane (two-step when the session is busy), Alt+Shift+W confirms
+  a process-tree kill and closes the pane, Alt+arrows focus move,
   Alt+Shift+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).
+- Destructive UI actions use an in-app confirmation placed by the triggering
+  control (or inside the focused pane for keyboard actions). Confirm receives
+  focus so Enter accepts; Escape and the Cancel button cancel. Application code
+  does not use browser `alert`, `confirm`, or `prompt` dialogs.
 - Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link
   provider) via POST /api/open. Paste is native-only: Ctrl+Shift+V must never
   be preventDefault'ed (WebView2 denies navigator.clipboard.readText silently).
+  QuickTerm also overrides xterm's default OSC hyperlink handler, which would
+  otherwise use a browser confirmation dialog.
 - Copy: Ctrl+Shift+C or right-click copies the current selection
   (navigator.clipboard.writeText, execCommand fallback), with a visible
   `[copied]` / `[copy failed]` confirmation; copy is read-only and never counts

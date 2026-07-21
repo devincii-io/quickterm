@@ -163,7 +163,7 @@ export class Palette {
       { kind: "view", label: "pane height: taller", run: () => a.resizeFocused("v", 0.05) },
       { kind: "view", label: "balance nearest pane split", run: () => a.balanceFocused() },
       { kind: "action", label: "detach pane", hint: "Alt+W", run: () => a.closePane() },
-      { kind: "action", label: "kill session", hint: "Stops the process", run: () => a.killFocusedSession() },
+      { kind: "action", label: "kill session and close pane", hint: "Alt+Shift+W", run: () => a.killFocusedSession() },
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),

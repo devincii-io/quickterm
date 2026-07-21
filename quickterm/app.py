@@ -128,7 +128,7 @@ async def _serve(
     from quickterm import auth
 
     loop = asyncio.get_running_loop()
-    manager = SessionManager(loop, cfg.scrollback_bytes)
+    manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
     app = create_app(manager, cfg, auth.get_or_create_token(), elevated=elevated)
     server = uvicorn.Server(
         uvicorn.Config(

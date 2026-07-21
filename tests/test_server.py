@@ -59,6 +59,7 @@ class FakeConfig:
     custom_theme: dict = field(default_factory=dict)
     logo: str | None = None
     idle_timeout_s: int = 300
+    max_sessions: int = 0
     update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
     default_profile: str = "powershell"
@@ -113,6 +114,7 @@ class FakeSessionManager:
         self.focused_session_id: str | None = None
         self.last_attachment: FakeAttachment | None = None
         self.initial_live: list[bytes] = []
+        self.max_sessions = 0
 
     def add_session(self, scrollback: bytes = b"", **overrides) -> FakeSessionInfo:
         info = FakeSessionInfo(
@@ -160,6 +162,9 @@ class FakeSessionManager:
 
     def shutdown(self) -> None:
         self.sessions.clear()
+
+    def set_max_sessions(self, limit: int) -> None:
+        self.max_sessions = limit
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -336,6 +341,18 @@ def test_spawn_requires_cmd_or_profile(client):
     assert client.post("/api/sessions", json={}).status_code == 400
 
 
+def test_spawn_returns_conflict_when_live_terminal_limit_is_reached(client, manager, monkeypatch):
+    from quickterm.session_manager import SessionLimitError
+
+    def blocked(**_kwargs):
+        raise SessionLimitError("terminal limit reached (4); stop a terminal or raise the limit")
+
+    monkeypatch.setattr(manager, "spawn", blocked)
+    response = client.post("/api/sessions", json={"cmd": "cmd.exe"})
+    assert response.status_code == 409
+    assert "terminal limit reached (4)" in response.json()["detail"]
+
+
 @pytest.mark.parametrize("body", [
     [],
     {"cmd": "cmd.exe", "args": "not-a-list"},
@@ -380,6 +397,16 @@ def test_cleanup_sessions(client, manager):
     assert manager.get(kept.id) is not None
 
 
+def test_kill_all_sessions(client, manager):
+    manager.add_session(name="one")
+    manager.add_session(name="two")
+    manager.add_session(name="stopped", alive=False)
+    response = client.post("/api/sessions/kill-all")
+    assert response.status_code == 200
+    assert response.json() == {"killed": 2}
+    assert len(manager.killed) == 2
+
+
 def test_spawn_tags_workspace(client, manager):
     r = client.post("/api/sessions", json={"cmd": "cmd.exe", "workspace": "proj"})
     assert r.status_code == 200
@@ -418,7 +445,7 @@ def fake_config_mod(monkeypatch):
             raise ValueError("bad font")
         cfg = FakeConfig()
         for k, v in raw.items():
-            if k in {"font_family", "default_profile"}:
+            if k in {"font_family", "default_profile", "max_sessions"}:
                 setattr(cfg, k, v)
         return cfg
 
@@ -433,16 +460,19 @@ def fake_config_mod(monkeypatch):
     return saved
 
 
-def test_full_config_roundtrip(client, cfg, fake_config_mod):
+def test_full_config_roundtrip(client, cfg, manager, fake_config_mod):
     body = client.get("/api/config/full").json()
     assert body["font_family"] == cfg.font_family
     assert body["port"] == cfg.port
 
     body["font_family"] = "Cascadia Mono"
+    body["max_sessions"] = 7
     r = client.put("/api/config", json=body)
     assert r.status_code == 204
     assert len(fake_config_mod) == 1          # persisted
     assert cfg.font_family == "Cascadia Mono"  # applied live
+    assert cfg.max_sessions == 7
+    assert manager.max_sessions == 7
 
 
 def test_put_config_invalid_400(client, fake_config_mod):

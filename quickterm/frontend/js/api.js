@@ -38,6 +38,7 @@ export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
 export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
+export const killAllSessions = () => req("POST", "/api/sessions/kill-all", {});
 // busy = the shell has a child process (ssh, build, editor) running right now
 export const sessionBusy = (id) =>
   getSessions().then((list) => Boolean((list.find((s) => s.id === id) || {}).busy)).catch(() => false);

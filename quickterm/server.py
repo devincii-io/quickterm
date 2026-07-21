@@ -105,13 +105,20 @@ def create_app(
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
         count = getattr(manager, "attachment_count", None)
-        busy = getattr(manager, "busy_ids", None)  # getattr: test fakes lack it
-        busy_set = busy() if busy else set()
+        metrics_fn = getattr(manager, "session_metrics", None)
+        if metrics_fn:
+            busy_set, metrics = metrics_fn()
+        else:
+            busy = getattr(manager, "busy_ids", None)  # test fakes may lack it
+            busy_set = busy() if busy else set()
+            metrics = {}
         out = []
         for info in manager.list():
             d = _asdict(info)
             d["attachments"] = count(info.id) if count else 0
             d["busy"] = info.id in busy_set
+            if info.id in metrics:
+                d["usage"] = metrics[info.id]
             out.append(d)
         return out
 
@@ -175,17 +182,24 @@ def create_app(
             raise HTTPException(400, "workspace must be a string")
         cols = _bounded_int(body.get("cols", 120), "cols", 2, 1000)
         rows = _bounded_int(body.get("rows", 30), "rows", 1, 1000)
-        info = manager.spawn(
-            name=name.strip()[:80] if name and name.strip() else None,
-            profile=profile_name,
-            cmd=cmd,
-            args=args or [],
-            cwd=cwd,
-            env=env or {},
-            cols=cols,
-            rows=rows,
-            workspace=workspace if isinstance(workspace, str) and workspace else None,
-        )
+        try:
+            info = manager.spawn(
+                name=name.strip()[:80] if name and name.strip() else None,
+                profile=profile_name,
+                cmd=cmd,
+                args=args or [],
+                cwd=cwd,
+                env=env or {},
+                cols=cols,
+                rows=rows,
+                workspace=workspace if isinstance(workspace, str) and workspace else None,
+            )
+        except Exception as exc:
+            from quickterm.session_manager import SessionLimitError
+
+            if isinstance(exc, SessionLimitError):
+                raise HTTPException(409, str(exc)) from exc
+            raise
         return _asdict(info)
 
     @app.delete("/api/sessions/{sid}")
@@ -215,6 +229,13 @@ def create_app(
             if isinstance(sid, str) and manager.get(sid) is not None:
                 manager.kill(sid)
         return Response(status_code=204)
+
+    @app.post("/api/sessions/kill-all")
+    def kill_all_sessions() -> dict:
+        session_ids = [info.id for info in manager.list() if info.alive]
+        for sid in session_ids:
+            manager.kill(sid)
+        return {"killed": len(session_ids)}
 
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:
@@ -298,6 +319,7 @@ def create_app(
             "version": __version__,
             "update_check": cfg.update_check,
             "idle_timeout_s": cfg.idle_timeout_s,
+            "max_sessions": cfg.max_sessions,
         }
 
     @app.get("/api/config/full")
@@ -384,10 +406,13 @@ def create_app(
         # Apply live-updatable fields in place; port and global hotkeys need a restart.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "default_profile", "profiles", "snippets", "voice", "update_check",
+            "max_sessions", "default_profile", "profiles", "snippets", "voice", "update_check",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
+        set_limit = getattr(manager, "set_max_sessions", None)
+        if set_limit:
+            set_limit(cfg.max_sessions)
         return Response(status_code=204)
 
     @app.get("/api/file")
