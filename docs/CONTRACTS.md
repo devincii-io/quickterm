@@ -27,9 +27,15 @@ class Profile:
     env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
     keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
     autostart: bool = False
-    terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/custom
+    terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/
+                                      # git-bash/nushell/ssh/sftp/custom (POSIX adds bash/zsh/fish)
     wsl_distro: str | None = None
-    start_command: str | None = None  # run inside supported shells, then remain interactive
+    start_command: str | None = None  # run inside supported shells, then remain interactive;
+                                      # for ssh: remote command run instead of a shell
+    ssh_host: str | None = None       # ssh/sftp only; required for those types
+    ssh_port: int | None = None       # None = 22; validated 1..65535
+    ssh_user: str | None = None
+    ssh_key: str | None = None        # path to a PuTTY .ppk; existence not validated
 
 @dataclass
 class Snippet:
@@ -70,7 +76,10 @@ def validate_environment(env: object) -> dict[str, str]
 
 Saving validates that every non-WSL profile's configured starting folder is an
 existing local directory. WSL profiles accept Linux paths and are not checked
-against the Windows filesystem.
+against the Windows filesystem. `ssh`/`sftp` profiles require a non-empty
+`ssh_host`; the Settings UI keeps their `cwd` empty (a remote session has no
+local starting folder). Passphrases and passwords are never stored — plink and
+psftp prompt interactively inside the terminal.
 
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
 pairs, empty names, `=`, control characters, NUL values, and names that collide
@@ -199,7 +208,7 @@ REST (JSON, under `/api`):
 | Method | Path | Body → Response |
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage}]`; `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. WSL scope is explicitly partial. |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides); 409 when the live-terminal limit is reached |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides); 409 when the live-terminal limit is reached. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | POST | /api/sessions/kill-all | → kill every live session → `{killed: int}` |
@@ -213,7 +222,7 @@ REST (JSON, under `/api`):
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
 | GET | /api/config/full | → complete `AppConfig` |
 | PUT | /api/config | complete `AppConfig` → 204 |
-| GET | /api/system/terminals | → detected terminal types and WSL distributions |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
@@ -328,9 +337,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   at process start and shutdown so it never survives a run. The name `scratch`
   (any case) and dot-prefixed names are rejected in user save paths; workspace
   names must survive `_safe_name` unchanged.
-- App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several.
+- App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several. `ssh`/`sftp` never appear as System entries (profile-only — they need a host).
 - Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
+  `ssh`/`sftp` profiles swap the starting-folder field for Host/Port/Username/Private key (`.ppk`);
+  `ssh` relabels start command as a remote command; `sftp` hides it.
 - Themes: four featured choices stay visible; the catalog groups all remaining
   palettes under Dark, Soft, Warm, Light, and Custom. Clicking a theme previews
   both application chrome and every open xterm immediately; Cancel restores the

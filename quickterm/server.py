@@ -17,6 +17,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
 
+from quickterm import putty_tools
+
 if TYPE_CHECKING:
     from quickterm.config import AppConfig
     from quickterm.session_manager import Attachment, SessionManager
@@ -182,6 +184,13 @@ def create_app(
             raise HTTPException(400, "workspace must be a string")
         cols = _bounded_int(body.get("cols", 120), "cols", 2, 1000)
         rows = _bounded_int(body.get("rows", 30), "rows", 1, 1000)
+        tools = putty_tools.tools_dir()
+        if tools is not None:
+            # Appended (not prepended) so a user-installed plink/pscp still wins.
+            env = dict(env or {})
+            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+            base_path = env.get(path_key) or os.environ.get("PATH", "")
+            env[path_key] = f"{base_path}{os.pathsep}{tools}" if base_path else str(tools)
         try:
             info = manager.spawn(
                 name=name.strip()[:80] if name and name.strip() else None,
@@ -582,6 +591,26 @@ def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, l
         if start:
             return shell, ["-lc", f"{start}; exec {shell} -l"], cwd
         return shell, ["-l"], cwd
+    if terminal_type in ("ssh", "sftp"):
+        tool = putty_tools.plink_path() if terminal_type == "ssh" else putty_tools.psftp_path()
+        if tool is None:
+            raise HTTPException(
+                400, "PuTTY tools are not installed (run scripts/fetch_putty.py)"
+            )
+        host = (getattr(prof, "ssh_host", None) or "").strip()
+        user = (getattr(prof, "ssh_user", None) or "").strip()
+        port = getattr(prof, "ssh_port", None)
+        key = (getattr(prof, "ssh_key", None) or "").strip()
+        args = ["-ssh"] if terminal_type == "ssh" else []
+        if port:
+            args += ["-P", str(port)]
+        if key:
+            args += ["-i", key]
+        args.append(f"{user}@{host}" if user else host)
+        # plink runs a trailing command on the remote host instead of a shell.
+        if terminal_type == "ssh" and start:
+            args.append(start)
+        return str(tool), args, cwd
     return prof.cmd, existing_args, cwd
 
 
@@ -639,6 +668,8 @@ def _terminal_inventory() -> dict:
             ),
         ),
         ("nushell", "Nushell", _first_executable("nu.exe")),
+        ("ssh", "SSH (PuTTY plink)", _optional_str(putty_tools.plink_path())),
+        ("sftp", "SFTP (PuTTY psftp)", _optional_str(putty_tools.psftp_path())),
     ]
     distributions: list[str] = []
     wsl = next((exe for type_id, _label, exe in shells if type_id == "wsl"), None)
@@ -674,6 +705,10 @@ def _terminal_inventory() -> dict:
         ] + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
         "wsl_distributions": distributions,
     }
+
+
+def _optional_str(path: Path | None) -> str | None:
+    return str(path) if path is not None else None
 
 
 def _first_executable(command: str | None, *candidates: Path) -> str | None:

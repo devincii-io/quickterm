@@ -1,11 +1,16 @@
 import { icon } from "./icons.js";
 
 function shellLabel(profile) {
+  const target = profile.ssh_host
+    ? (profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host)
+    : "";
   const labels = {
     "powershell-core": "PowerShell 7",
     "windows-powershell": "Windows PowerShell",
     "command-prompt": "Command Prompt",
     wsl: profile.wsl_distro ? `WSL · ${profile.wsl_distro}` : "WSL",
+    ssh: target ? `SSH · ${target}` : "SSH (PuTTY plink)",
+    sftp: target ? `SFTP · ${target}` : "SFTP (PuTTY psftp)",
     custom: "Custom command",
   };
   return labels[profile.terminal_type] || profile.cmd || "Terminal";
@@ -151,8 +156,11 @@ const SYSTEM_META = {
 };
 
 function systemChoices(inventory) {
+  // ssh/sftp need a host and are therefore profile-only: launched hostless,
+  // plink/psftp would just print usage and exit.
   return (inventory.types || [])
-    .filter((type) => type.executable && type.available !== false && type.id !== "custom")
+    .filter((type) => type.executable && type.available !== false
+      && type.id !== "custom" && type.id !== "ssh" && type.id !== "sftp")
     .map((type) => {
       const meta = SYSTEM_META[type.id] || { detail: type.executable, mark: ">", args: [] };
       return { id: type.id, label: type.label, detail: meta.detail, cmd: type.executable, args: meta.args, mark: meta.mark };

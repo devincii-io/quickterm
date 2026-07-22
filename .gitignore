@@ -1,6 +1,8 @@
 .venv/
 .venv-win/
 .release-tools/
+# Pinned third-party binaries fetched by scripts/fetch_putty.py, never committed
+vendor/
 __pycache__/
 *.pyc
 .pytest_cache/

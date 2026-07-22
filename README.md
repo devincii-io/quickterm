@@ -120,11 +120,19 @@ action for intentionally stopping every live session.
 `%APPDATA%\quickterm\config.json` — created with defaults on first run.
 Terminal profiles can be managed from **Settings → Terminals**. Choose
 PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a detected
-distribution), or a custom executable. Profiles can also set a starting folder,
+distribution), SSH or SFTP (powered by bundled PuTTY plink/psftp), or a custom
+executable. Profiles can also set a starting folder,
 an optional command to run inside the shell, environment variables, a global
 shortcut and autostart. With no folder configured, Windows shells start in the
 Windows user home and WSL starts in the distro's Linux home. A WSL profile can
 use Linux paths such as `~/dev`; its startup command runs from that location.
+
+SSH and SFTP profiles take a host, optional port, username and PuTTY `.ppk`
+private key; passphrases are never stored — you are prompted in the terminal.
+The bundled PuTTY tools are pinned and hash-verified at build time, and their
+folder is appended to every terminal's `PATH`, so `pscp`, `plink` and `psftp`
+work as commands in any QuickTerm shell (for example
+`pscp file.txt user@host:/tmp/`). See `THIRD-PARTY-NOTICES.md` for licenses.
 
 Profile environment values are encrypted at rest with Windows DPAPI and can be
 decrypted only by the same Windows account. Existing plaintext profile values

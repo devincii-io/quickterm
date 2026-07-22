@@ -84,6 +84,14 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `update` is. Use a FREE port — never the user's live 8642/8620.
 - Frontend is served with `Cache-Control: no-cache` — required, WebView2
   otherwise serves stale JS/CSS after updates.
+- Bundled PuTTY tools (`plink/pscp/psftp` — ssh/sftp terminal types + on-PATH
+  in every session): `python scripts/fetch_putty.py` populates the gitignored
+  `vendor/putty/` and is a build prerequisite — `quickterm.spec` re-verifies
+  the pinned SHA-256s and hard-fails without it (dest "putty", covered by the
+  existing `upx=False`). Bumping PuTTY = update version + hashes in
+  `scripts/fetch_putty.py` from the official `sha256sums` (plain `w64/` lines,
+  not "installer version"), re-run the script, rebuild. Also ship
+  `THIRD-PARTY-NOTICES.md` (referenced by `packaging/quickterm.iss`).
 
 ## Local release workflow
 

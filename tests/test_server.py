@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import json
+import os
 import sys
 import time
 import types
@@ -32,6 +33,10 @@ class FakeProfile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = None
+    ssh_user: str | None = None
+    ssh_key: str | None = None
 
 
 @dataclass
@@ -188,6 +193,33 @@ def cfg(tmp_path) -> FakeConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_putty_tools(monkeypatch):
+    # Hermetic default: tests must not depend on whether vendor/putty exists on
+    # the machine. Tests that need the tools use the putty_dir fixture.
+    from quickterm import putty_tools
+
+    monkeypatch.setattr(putty_tools, "tools_dir", lambda: None)
+    monkeypatch.setattr(putty_tools, "plink_path", lambda: None)
+    monkeypatch.setattr(putty_tools, "psftp_path", lambda: None)
+    monkeypatch.setattr(putty_tools, "pscp_path", lambda: None)
+
+
+@pytest.fixture
+def putty_dir(no_putty_tools, monkeypatch, tmp_path):
+    from quickterm import putty_tools
+
+    base = tmp_path / "putty"
+    base.mkdir()
+    for name in ("plink.exe", "pscp.exe", "psftp.exe"):
+        (base / name).write_bytes(b"")
+    monkeypatch.setattr(putty_tools, "tools_dir", lambda: base)
+    monkeypatch.setattr(putty_tools, "plink_path", lambda: base / "plink.exe")
+    monkeypatch.setattr(putty_tools, "psftp_path", lambda: base / "psftp.exe")
+    monkeypatch.setattr(putty_tools, "pscp_path", lambda: base / "pscp.exe")
+    return base
+
+
 @pytest.fixture
 def client(manager, cfg) -> TestClient:
     # base_url must match the server's Host allowlist (see _local_guard)
@@ -331,6 +363,73 @@ def test_spawn_wsl_profile_request_folder_becomes_wsl_cd(client, manager, cfg):
     assert response.status_code == 200
     assert manager.last_spawn["args"] == ["--cd", "~/requested"]
     assert manager.last_spawn["cwd"] is None
+
+
+def test_spawn_ssh_profile_builds_plink_argv(client, manager, cfg, putty_dir):
+    cfg.profiles.append(FakeProfile(
+        name="server",
+        cmd="",
+        terminal_type="ssh",
+        ssh_host="host.example.com",
+        ssh_port=2222,
+        ssh_user="deploy",
+        ssh_key="C:\\keys\\id.ppk",
+        start_command="uptime",
+    ))
+    r = client.post("/api/sessions", json={"profile": "server"})
+    assert r.status_code == 200
+    assert manager.last_spawn["cmd"] == str(putty_dir / "plink.exe")
+    assert manager.last_spawn["args"] == [
+        "-ssh", "-P", "2222", "-i", "C:\\keys\\id.ppk", "deploy@host.example.com", "uptime",
+    ]
+
+
+def test_spawn_sftp_profile_builds_psftp_argv(client, manager, cfg, putty_dir):
+    cfg.profiles.append(FakeProfile(
+        name="files", cmd="", terminal_type="sftp", ssh_host="box", ssh_user="u",
+    ))
+    r = client.post("/api/sessions", json={"profile": "files"})
+    assert r.status_code == 200
+    assert manager.last_spawn["cmd"] == str(putty_dir / "psftp.exe")
+    assert manager.last_spawn["args"] == ["u@box"]
+
+
+def test_spawn_ssh_profile_without_tools_is_400(client, cfg):
+    cfg.profiles.append(FakeProfile(name="server", cmd="", terminal_type="ssh", ssh_host="h"))
+    r = client.post("/api/sessions", json={"profile": "server"})
+    assert r.status_code == 400
+    assert "PuTTY" in r.json()["detail"]
+
+
+def test_spawn_appends_putty_dir_to_path(client, manager, putty_dir, monkeypatch):
+    monkeypatch.setenv("PATH", "C:\\base")
+    r = client.post("/api/sessions", json={"cmd": "cmd.exe"})
+    assert r.status_code == 200
+    path = manager.last_spawn["env"]["PATH"]
+    assert path == f"C:\\base{os.pathsep}{putty_dir}"
+
+
+def test_spawn_appends_putty_dir_after_profile_path(client, manager, cfg, putty_dir):
+    cfg.profiles[0].env = {"PATH": "C:\\profile"}
+    r = client.post("/api/sessions", json={"profile": "powershell"})
+    assert r.status_code == 200
+    assert manager.last_spawn["env"]["PATH"] == f"C:\\profile{os.pathsep}{putty_dir}"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="bundled PuTTY inventory is Windows-only")
+def test_terminal_inventory_lists_putty_types(client, putty_dir):
+    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
+    assert entries["ssh"]["available"] is True
+    assert entries["ssh"]["executable"] == str(putty_dir / "plink.exe")
+    assert entries["sftp"]["available"] is True
+    assert entries["sftp"]["executable"] == str(putty_dir / "psftp.exe")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="bundled PuTTY inventory is Windows-only")
+def test_terminal_inventory_marks_putty_missing(client):
+    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
+    assert entries["ssh"]["available"] is False
+    assert entries["ssh"]["executable"] is None
 
 
 def test_spawn_unknown_profile_404(client):

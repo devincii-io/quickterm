@@ -33,6 +33,10 @@ class Profile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = None
+    ssh_user: str | None = None
+    ssh_key: str | None = None
 
 
 @dataclass
@@ -298,6 +302,18 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f'Terminal profile "{name}": executable is required')
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
+        if profile.terminal_type in ("ssh", "sftp"):
+            if not isinstance(profile.ssh_host, str) or not profile.ssh_host.strip():
+                raise ValueError(f'Terminal profile "{name}": host is required')
+            if profile.ssh_port is not None and (
+                isinstance(profile.ssh_port, bool)
+                or not isinstance(profile.ssh_port, int)
+                or not 1 <= profile.ssh_port <= 65535
+            ):
+                raise ValueError(f'Terminal profile "{name}": port must be between 1 and 65535')
+            for field_label, value in (("username", profile.ssh_user), ("private key", profile.ssh_key)):
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f'Terminal profile "{name}": {field_label} must be a string')
         try:
             validate_environment(profile.env)
         except ValueError as exc:
