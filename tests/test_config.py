@@ -134,6 +134,44 @@ def test_save_allows_wsl_folder_without_local_match(fake_appdata):
     assert (fake_appdata / "quickterm" / "config.json").exists()
 
 
+def test_ssh_profile_roundtrip(fake_appdata):
+    cfg = AppConfig()
+    cfg.profiles.append(Profile(
+        name="server",
+        cmd="",
+        terminal_type="ssh",
+        ssh_host="host.example.com",
+        ssh_port=2222,
+        ssh_user="deploy",
+        ssh_key="C:\\keys\\id.ppk",
+    ))
+    save_config(cfg)
+    loaded = load_config()
+    server = next(p for p in loaded.profiles if p.name == "server")
+    assert server.terminal_type == "ssh"
+    assert server.ssh_host == "host.example.com"
+    assert server.ssh_port == 2222
+    assert server.ssh_user == "deploy"
+    assert server.ssh_key == "C:\\keys\\id.ppk"
+
+
+def test_save_rejects_ssh_profile_without_host(fake_appdata):
+    cfg = AppConfig(profiles=[
+        Profile(name="server", cmd="", terminal_type="ssh")
+    ])
+    with pytest.raises(ValueError, match="host is required"):
+        save_config(cfg)
+
+
+@pytest.mark.parametrize("port", [0, 65536, True, "22"])
+def test_save_rejects_ssh_profile_with_bad_port(fake_appdata, port):
+    cfg = AppConfig(profiles=[
+        Profile(name="server", cmd="", terminal_type="sftp", ssh_host="h", ssh_port=port)
+    ])
+    with pytest.raises(ValueError, match="port must be between"):
+        save_config(cfg)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

@@ -24,6 +24,8 @@ const TERMINAL_TYPES = [
   { id: "windows-powershell", label: "Windows PowerShell", executable: "powershell.exe" },
   { id: "command-prompt", label: "Command Prompt", executable: "cmd.exe" },
   { id: "wsl", label: "Windows Subsystem for Linux", executable: "wsl.exe" },
+  { id: "ssh", label: "SSH (PuTTY plink)", executable: "" },
+  { id: "sftp", label: "SFTP (PuTTY psftp)", executable: "" },
   { id: "custom", label: "Custom command", executable: "" },
 ];
 
@@ -70,6 +72,8 @@ function inferTerminalType(profile) {
   if (cmd === "powershell" || cmd === "powershell.exe") return "windows-powershell";
   if (cmd === "cmd" || cmd === "cmd.exe") return "command-prompt";
   if (cmd === "wsl" || cmd === "wsl.exe") return "wsl";
+  if (cmd === "plink" || cmd === "plink.exe") return "ssh";
+  if (cmd === "psftp" || cmd === "psftp.exe") return "sftp";
   return "custom";
 }
 
@@ -671,7 +675,12 @@ export class Panels {
   _terminalLabel(profile) {
     const type = inferTerminalType(profile);
     if (type === "wsl" && profile.wsl_distro) return `WSL · ${profile.wsl_distro}`;
-    return (TERMINAL_TYPES.find((item) => item.id === type) || TERMINAL_TYPES[4]).label;
+    if ((type === "ssh" || type === "sftp") && profile.ssh_host) {
+      const target = profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host;
+      return `${type.toUpperCase()} · ${target}`;
+    }
+    const fallback = TERMINAL_TYPES.find((item) => item.id === "custom");
+    return (TERMINAL_TYPES.find((item) => item.id === type) || fallback).label;
   }
 
   async _settings() {
@@ -1068,7 +1077,7 @@ export class Panels {
       const available = (this.terminalInventory.types || []).find((type) => type.executable && type.available !== false);
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -1111,7 +1120,10 @@ export class Panels {
       const type = this._select(inventoryTypes, inferTerminalType(profile));
       type.addEventListener("change", () => {
         profile.terminal_type = type.value;
-        const known = TERMINAL_TYPES.find((item) => item.id === type.value);
+        // Prefer the live inventory (real resolved paths, includes git-bash,
+        // nushell, ssh/sftp); the static list is only the pre-load fallback.
+        const known = (this.terminalInventory.types || []).find((item) => item.id === type.value)
+          || TERMINAL_TYPES.find((item) => item.id === type.value);
         if (known && known.executable) profile.cmd = known.executable;
         if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
         else profile.args = [];
@@ -1132,13 +1144,45 @@ export class Panels {
         args.addEventListener("input", () => { profile.args = args.value.trim() ? args.value.trim().split(/\s+/) : []; });
         fields.append(this._field("Executable", command), this._field("Arguments", args, "Arguments containing spaces can be edited precisely in Advanced."));
       }
-      const cwd = this._textInput(profile.cwd, inferTerminalType(profile) === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
-      cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-      fields.append(this._field("Starting folder", cwd, inferTerminalType(profile) === "wsl" ? "Use a Linux path for WSL." : "Leave empty to start in your Desktop folder."));
-      if (inferTerminalType(profile) !== "custom") {
-        const start = this._textInput(profile.start_command, "Optional, e.g. uv run dev");
+      const kind = inferTerminalType(profile);
+      const remote = kind === "ssh" || kind === "sftp";
+      if (remote) {
+        const hostInput = this._textInput(profile.ssh_host, "server.example.com");
+        hostInput.addEventListener("input", () => {
+          profile.ssh_host = hostInput.value || null;
+          identity.querySelector("p").textContent = this._terminalLabel(profile);
+        });
+        const portInput = this._textInput(profile.ssh_port ? String(profile.ssh_port) : "", "22");
+        portInput.addEventListener("input", () => {
+          const parsed = Number.parseInt(portInput.value, 10);
+          profile.ssh_port = Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
+        });
+        const userInput = this._textInput(profile.ssh_user, "Optional, e.g. deploy");
+        userInput.addEventListener("input", () => {
+          profile.ssh_user = userInput.value || null;
+          identity.querySelector("p").textContent = this._terminalLabel(profile);
+        });
+        const keyInput = this._textInput(profile.ssh_key, "Optional, C:\\Users\\you\\key.ppk");
+        keyInput.addEventListener("input", () => { profile.ssh_key = keyInput.value || null; });
+        fields.append(
+          this._field("Host", hostInput),
+          this._field("Port", portInput, "Leave empty for 22."),
+          this._field("Username", userInput),
+          this._field("Private key", keyInput, "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal."),
+        );
+      } else {
+        const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
+        cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
+        fields.append(this._field("Starting folder", cwd, kind === "wsl" ? "Use a Linux path for WSL." : "Leave empty to start in your Desktop folder."));
+      }
+      if (kind !== "custom" && kind !== "sftp") {
+        const start = this._textInput(profile.start_command, kind === "ssh" ? "Optional, runs on the remote host" : "Optional, e.g. uv run dev");
         start.addEventListener("input", () => { profile.start_command = start.value || null; });
-        fields.append(this._field("Start command", start, "Runs inside the shell and keeps it open."));
+        fields.append(this._field(
+          kind === "ssh" ? "Remote command" : "Start command",
+          start,
+          kind === "ssh" ? "Runs instead of a remote shell; the session ends when it finishes." : "Runs inside the shell and keeps it open.",
+        ));
       }
       const shortcut = this._textInput(profile.keybinding, "Optional, e.g. ctrl+alt+1");
       shortcut.addEventListener("input", () => { profile.keybinding = shortcut.value || null; });

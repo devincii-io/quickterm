@@ -49,6 +49,7 @@ Name: "contextmenu"; Description: "Add ""Open QuickTerm here"" to the folder rig
 Source: "..\dist\QuickTerm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; "Open QuickTerm here" — right-click a folder. %V is the folder path, passed
