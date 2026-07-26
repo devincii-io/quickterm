@@ -1,4 +1,4 @@
-﻿"""FastAPI app: REST session/profile/workspace API, WS attach, static frontend."""
+"""FastAPI app: REST session/profile/workspace API, WS attach, static frontend."""
 
 from __future__ import annotations
 
@@ -109,22 +109,13 @@ def create_app(
 
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
-        count = getattr(manager, "attachment_count", None)
-        activity_fn = getattr(manager, "session_activity", None)
-        metrics_fn = getattr(manager, "session_metrics", None)
-        if metrics_fn:
-            busy_set, metrics = metrics_fn()
-        else:
-            busy = getattr(manager, "busy_ids", None)  # test fakes may lack it
-            busy_set = busy() if busy else set()
-            metrics = {}
+        busy_set, metrics = manager.session_metrics()
         out = []
         for info in manager.list():
             d = _asdict(info)
-            d["attachments"] = count(info.id) if count else 0
+            d["attachments"] = manager.attachment_count(info.id)
             d["busy"] = info.id in busy_set
-            if activity_fn:
-                d["activity"] = activity_fn(info.id)
+            d["activity"] = manager.session_activity(info.id)
             if info.id in metrics:
                 d["usage"] = metrics[info.id]
             out.append(d)

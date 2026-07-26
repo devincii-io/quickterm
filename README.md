@@ -184,18 +184,20 @@ review checklist.
 
 ```
 uv sync --all-extras --dev
-uv run ruff check quickterm tests
-uv run pytest -q
+uv run --no-sync python scripts/check.py
 uv build --no-sources
 ```
 
 Architecture: one backend process owns all PTYs (`pty_session.py` /
 `pty_posix.py`, `session_manager.py`); views attach over a binary WebSocket
 protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
-xterm.js with no Node build step. See `plan.md` and `docs/CONTRACTS.md`.
+xterm.js with no Node build step. The pane protocol has headless Node tests, and
+the dashboard/settings sections live in focused modules rather than one UI god
+class. See `docs/CONTRACTS.md`.
 
-Run the verification commands above before merging changes. Release artifacts
+Run the manual-CI command above before merging changes. Release artifacts
 are built locally: the Windows application folder, per-user installer,
 portable archive, Python distributions, generated notes, and SHA-256 checksums.
+Release history is consolidated in `CHANGELOG.md` and on GitHub Releases.
 
 MIT licensed.

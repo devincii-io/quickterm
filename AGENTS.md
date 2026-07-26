@@ -15,7 +15,8 @@ path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test env
 uv run quickterm                  # run the app (native window; --port N to override)
 uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
-uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm.exe
+uv run --no-sync python scripts/check.py       # complete local/manual CI gate
+uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
 python scripts/bench_throughput.py 20                             # output throughput
 ```
 
@@ -66,7 +67,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
-  style); server tests use TestClient + fakes. Keep the suite < 40 s.
+  style); server tests use TestClient + complete-interface fakes; frontend
+  protocol tests use Node's built-in test runner. Keep the Python suite < 40 s.
+- CI is intentionally manual: run `uv run --no-sync python scripts/check.py`.
+  After building release files, add `--artifacts` to enforce the three-way
+  version invariant, JavaScript checks, exact asset names, and SHA-256 manifest.
 
 ## Packaging gotchas (learned the hard way)
 
@@ -81,7 +86,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   MUST be listed in `hiddenimports` in `quickterm.spec`, or the frozen build
   500s that endpoint with `ModuleNotFoundError`. When you add a new
   importlib-loaded route module, add it to the spec.
-- Verify any packaged build by launching `dist/QuickTerm.exe --port 8641`,
+- Verify any packaged build by launching `dist/QuickTerm/QuickTerm.exe --port 8641`,
   then: `/api/health` answers and `/api/sessions` (header `X-QuickTerm-Token`
   from `%APPDATA%/quickterm/runtime.token`) shows `alive: true`. Smoke-test the
   importlib routes too: `POST /api/open {"target":"ftp://x"}` -> 400 (not 500)
@@ -89,6 +94,14 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `update` is. Use a FREE port — never the user's live 8642/8620.
 - Frontend is served with `Cache-Control: no-cache` — required, WebView2
   otherwise serves stale JS/CSS after updates.
+- Bundled PuTTY tools (`plink/pscp/psftp` — ssh/sftp terminal types + on-PATH
+  in every session): `python scripts/fetch_putty.py` populates the gitignored
+  `vendor/putty/` and is a build prerequisite — `quickterm.spec` re-verifies
+  the pinned SHA-256s and hard-fails without it (dest "putty", covered by the
+  existing `upx=False`). Bumping PuTTY = update version + hashes in
+  `scripts/fetch_putty.py` from the official `sha256sums` (plain `w64/` lines,
+  not "installer version"), re-run the script, rebuild. Also ship
+  `THIRD-PARTY-NOTICES.md` (referenced by `packaging/quickterm.iss`).
 
 ## Local release workflow
 
@@ -101,7 +114,7 @@ them:
 ```
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /Q /DAppVersion=<ver> packaging\quickterm.iss
-Compress-Archive -Force -Path dist/QuickTerm.exe,README.md,LICENSE -DestinationPath QuickTerm-v<ver>-windows-x64.zip
+Compress-Archive -Force -Path dist/QuickTerm/*,README.md,LICENSE,THIRD-PARTY-NOTICES.md -DestinationPath QuickTerm-v<ver>-windows-x64.zip
 uv build --no-sources
 # SHA256SUMS.txt over: zip, dist/QuickTerm-v<ver>-Setup.exe, dist/*.whl, dist/*.tar.gz
 gh release create v<ver> <assets...> --verify-tag --title "QuickTerm v<ver>" --notes-file <notes>

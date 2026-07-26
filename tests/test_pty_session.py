@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 if os.name == "nt":
@@ -15,6 +16,23 @@ def test_raw_io_debug_requires_exact_opt_in(monkeypatch):
     assert pty_module._debug_io_enabled() is False
     monkeypatch.setenv("QUICKTERM_DEBUG_IO", "1")
     assert pty_module._debug_io_enabled() is True
+
+
+def test_write_failure_is_available_in_debug_log(caplog):
+    if os.name != "nt":
+        return
+
+    class BrokenPty:
+        def write(self, _text):
+            raise RuntimeError("write broke")
+
+    session = object.__new__(PtySession)
+    session._pid = 4242
+    session._pty = BrokenPty()
+    with caplog.at_level(logging.DEBUG, logger="quickterm.pty_session"):
+        session._do_write(b"hello")
+    assert "PTY write failed for process 4242" in caplog.text
+    assert "write broke" in caplog.text
 
 
 def _short(script: str) -> tuple[str, list[str]]:

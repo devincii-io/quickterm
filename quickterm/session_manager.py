@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import uuid
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 
 from .config import default_cwd, validate_environment
 from .process_usage import snapshot_processes, summarize_trees
+
+log = logging.getLogger(__name__)
 
 if os.name == "nt":
     from .pty_session import PtySession, pids_with_children
@@ -206,6 +209,7 @@ class SessionManager:
         try:
             parents = pids_with_children()
         except Exception:
+            log.debug("process child snapshot failed; busy state unavailable", exc_info=True)
             return set()
         return {
             sid

@@ -1,6 +1,7 @@
 """Busy detection: a session is busy while its shell has a child process."""
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import time
 
 import pytest
 
+import quickterm.session_manager as session_manager_module
 from quickterm.session_manager import SessionManager, pids_with_children
 
 
@@ -62,3 +64,14 @@ async def test_busy_ids_skips_dead_sessions(manager):
     while await asyncio.wait_for(att.queue.get(), timeout=15) is not None:
         pass  # drain to the exit sentinel
     assert info.id not in manager.busy_ids()
+
+
+async def test_busy_snapshot_failure_is_debuggable(manager, monkeypatch, caplog):
+    def fail():
+        raise RuntimeError("snapshot broke")
+
+    monkeypatch.setattr(session_manager_module, "pids_with_children", fail)
+    with caplog.at_level(logging.DEBUG, logger="quickterm.session_manager"):
+        assert manager.busy_ids() == set()
+    assert "process child snapshot failed" in caplog.text
+    assert "snapshot broke" in caplog.text

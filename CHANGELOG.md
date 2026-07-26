@@ -1,0 +1,254 @@
+# Changelog
+
+Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
+
+## QuickTerm 2.4.0
+
+### Tested terminal attachment
+
+- Extracted the pane replay, write-backpressure, resync, and live-input phases
+  into an explicit state machine.
+- Added fast Node tests for replay ordering, stale WebSocket callbacks, input
+  gating, and overflow-triggered resync, plus shared panel utility tests.
+- Added architectural contract tests that keep panes on the tested protocol and
+  prevent the panel coordinator growing back into a monolith.
+
+### Smaller, maintainable frontend
+
+- Split the 1,456-line panels class into a small coordinator and focused
+  dashboard, help, settings, terminal, snippet, appearance, and shared modules.
+- Preserved the existing no-build ES-module frontend and its public UI behavior.
+
+### One-command manual CI
+
+- Added `uv run --no-sync python scripts/check.py` as the local release gate:
+  Python tests, Ruff, byte compilation, JavaScript tests and syntax, version
+  consistency, and clean diffs.
+- Added `--artifacts` verification for the exact updater-facing release names
+  and their SHA-256 manifest. Hosted CI remains intentionally disabled.
+
+### Maintenance and diagnostics
+
+- Session and PTY snapshot/write failures now leave debug diagnostics instead
+  of disappearing silently.
+- Production routes now rely on the real session-manager interface; test fakes
+  implement that interface instead of shaping production branches.
+- Removed the stray server source BOM, consolidated duplicate agent guidance,
+  and replaced scattered root release notes with this changelog.
+
+## QuickTerm 2.3.0
+
+## Session controls that actually stay visible
+
+- Fixed the dashboard confirmation bug that hid **Kill** and **Kill all** before
+  measuring their position, which could place the confirmation outside the
+  visible window and make the action appear broken.
+- Destructive controls now remain visible and disabled while their confirmation
+  is open, and the confirmation is clamped above or below the trigger inside the
+  viewport.
+- Kill All reports verified per-session successes and failures. Only confirmed
+  kills are removed; failures remain visible and retryable.
+- Successful kills remove stale session ownership and pane references from saved
+  workspaces. Exited or stale session cards cannot be attached again.
+- A real WSL PTY kill and registry-removal smoke test passes.
+
+## Better background-agent awareness
+
+- Detached terminals now show when new output arrived, how much arrived, and how
+  long ago it appeared.
+- Reattaching acknowledges that output, providing a lightweight working/waiting
+  signal without guessing from terminal contents.
+
+## Expanded dark theme catalog
+
+- Added Catppuccin Frappé, Rosé Pine Moon, Tokyo Night Storm, GitHub Dark
+  Dimmed, and Oxocarbon.
+- The 27-theme catalog now separates Neon palettes while preserving custom
+  themes, live preview, cancel-to-revert, and fallback behavior.
+
+## Additional hardening
+
+- Configuration validation now rejects malformed runtime-facing field types
+  before they can break profile launch or accidentally enable autostart.
+- Ctrl-click accepts HTTP and HTTPS schemes case-insensitively.
+- Public contracts and agent guidance document the verified kill semantics.
+
+## Validation
+
+- 231 automated tests pass.
+- Ruff, Python compilation, JavaScript syntax checks, diff checks, real WSL
+  termination, PyInstaller packaging, and isolated packaged smoke tests pass.
+
+## QuickTerm 2.2.0
+
+## Familiar Windows shortcuts
+
+- `Ctrl+C` copies selected terminal text and remains the terminal interrupt
+  when nothing is selected.
+- `Ctrl+V` uses the native WebView2/xterm paste path. The existing
+  `Ctrl+Shift+C` and `Ctrl+Shift+V` gestures remain available as aliases.
+- `Ctrl+Plus`, `Ctrl+Minus`, and `Ctrl+0` now control terminal text size,
+  including German and other non-US keyboard-layout fallbacks.
+- Plain `Alt+V` remains untouched for Claude Code image paste.
+
+## Reliable session cleanup
+
+- Background-session kills are now verified instead of trusting that
+  `taskkill` succeeded. Windows uses a direct process-termination fallback
+  when necessary.
+- Kill, Kill All, scratch cleanup, and workspace deletion now report failures
+  instead of hiding a process that is still running.
+- Session state changes and removal timers are marshalled safely onto the
+  owning asyncio loop, so killed sessions disappear promptly and consistently.
+
+## Hardening and correctness
+
+- Live terminal WebSocket frames remain within their documented 128 KiB cap,
+  preserving input responsiveness during heavy output.
+- JSON requests and image uploads are size-bounded before buffering; malformed
+  JSON now produces a client error instead of an internal server error.
+- Corrupt local authentication tokens are repaired automatically, and OSC 52
+  clipboard writes from terminal output are capped at 1 MiB.
+- Workspace filenames no longer collide after Windows-safe normalization, and
+  malformed workspace files cannot break the workspace list.
+- Windows process APIs now use explicit 64-bit-safe handle signatures.
+
+## Validation
+
+- 215 automated tests pass.
+- Ruff, Python compilation, JavaScript syntax checks, the PyInstaller build,
+  and packaged health/opener/update smoke tests pass.
+
+## QuickTerm 2.1.0
+
+## SSH and SFTP terminals, powered by bundled PuTTY
+
+- **New terminal types: SSH and SFTP.** Create a profile in Settings →
+  Terminals with a host, optional port, username and PuTTY `.ppk` private
+  key. Sessions run through the bundled PuTTY `plink`/`psftp` — no separate
+  install needed. Passphrases and passwords are never stored; you are
+  prompted inside the terminal.
+- **`pscp`, `plink` and `psftp` work in every terminal.** The bundled tools
+  folder is appended to each session's `PATH`, so one-off transfers are as
+  simple as `pscp file.txt user@host:/tmp/`. A tool you installed yourself
+  still takes precedence.
+- **SSH remote command.** An SSH profile can run a single remote command
+  instead of opening a shell.
+- The PuTTY binaries (release 0.84) are pinned and SHA-256-verified against
+  the official published checksums at build time. Licences ship in
+  `THIRD-PARTY-NOTICES.md`.
+
+## Fixes and details
+
+- Settings: picking Git Bash or Nushell as a profile's type now fills in the
+  detected executable path automatically.
+- The launcher lists SSH/SFTP under personal profiles only; system entries
+  stay limited to shells that work without configuration.
+
+## QuickTerm 2.0.3
+
+This security release hardens terminal profile environment variables from
+storage through process launch without changing normal profile behavior.
+
+## Environment security
+
+- Encrypts profile environment values at rest with Windows current-user DPAPI
+  and automatically migrates existing plaintext values.
+- Protects administrator-terminal launch specifications with DPAPI instead of
+  placing recoverable Base64 JSON in the process command line.
+- Rejects malformed names, NUL characters, case-insensitive duplicates, and
+  oversized environment payloads consistently across config, API, UAC, and PTY
+  entry points.
+- Caps configuration/session JSON requests before buffering and prevents
+  sensitive API responses from being cached.
+
+## Local secret handling
+
+- Creates the local auth token atomically and enforces user-only token/config
+  permissions on POSIX fallback systems.
+- Enables raw terminal I/O logging only for the exact value
+  `QUICKTERM_DEBUG_IO=1`; values such as `0` no longer activate it accidentally.
+- Warns in the log whenever raw input tracing is enabled and documents that
+  child processes inherit profile variables.
+
+## Compatibility
+
+- Keeps the public in-memory and API environment shape as `dict[str, str]`.
+- Continues accepting legacy plaintext config values and rewrites them securely
+  after a successful load.
+
+Validated with 184 tests, Ruff, frontend syntax checks, Windows DPAPI
+round-trips, and a packaged application smoke test covering encrypted config,
+real ConPTY environment delivery, authentication, and dynamic routes.
+
+## QuickTerm 2.0.2
+
+This release adds visible resource usage and safer session controls while keeping QuickTerm's security claims precise and auditable.
+
+## Usage and limits
+
+- Added live per-terminal RAM, CPU, process-count, and uptime reporting, plus aggregate RAM in the dashboard.
+- Usage is measured locally from each terminal's process tree. No metrics are uploaded or persisted.
+- Added a configurable live-session limit. Once reached, QuickTerm refuses new sessions with a clear in-app message while existing sessions continue normally.
+- Reports WSL measurements as partial instead of implying host-and-guest accounting is exact.
+
+## Session termination
+
+- Added `Alt+Shift+W` to terminate the focused terminal's process tree and close its pane.
+- Added a Kill all action for terminating every live session.
+- Destructive actions use keyboard-accessible in-app confirmations next to the relevant control; Enter confirms and Escape cancels.
+- Removed browser-native confirmation dialogs from QuickTerm-owned flows, including terminal link handling.
+
+## UI and documentation
+
+- Fixed the launcher controls clipping their borders in narrow windows and kept the New terminal label readable.
+- Added an honest company-use security guide covering the local-only architecture, authentication boundaries, operational limitations, usage-measurement scope, deployment checklist, and Windows code-signing options.
+- Documented the new API fields, session-limit response, and kill-all endpoint.
+
+Validated with 167 tests, Ruff, frontend syntax checks, live browser interaction at desktop and 442 px widths, Windows process-tree metric probes, and packaged application/API smoke tests.
+
+## QuickTerm 2.0.1
+
+This is a broad developer-experience, reliability, and packaging pass over 2.0.
+
+## Faster and smaller in real use
+
+- Replaced the self-extracting one-file runtime with a normal per-user app-folder install. The installer is 17.23 MB, the portable ZIP is 20.15 MB, and the 45.1 MB runtime is shared by every window instead of extracting about 37.7 MB per process.
+- Health-ready startup averaged 1.60 s in local tests, down from 2.73 s for the old one-file build.
+- Desktop and Start Menu shortcuts point at the installed launcher; no administrator access is required.
+
+## Terminal usability
+
+- Added a compact View drawer with pane-first text sizing, explicit minus/plus/reset buttons, selected/all scope, width/height controls, split balancing, focus mode, and a Settings shortcut.
+- Fixed the decrease-font shortcut across WebView2 and international/numpad keyboard reports.
+- Made splitters wider and visible, pointer-friendly, arrow-key adjustable, and double-clickable to balance.
+- Restored a clearly visible themed scrollbar in every terminal with scrollback.
+- WSL profiles with no folder now start in Linux `~`; Windows shells start in the Windows user home. WSL profile folders and startup commands now resolve together correctly.
+- Session counts now distinguish open terminals from background sessions instead of presenting every backend process as a visible terminal.
+
+## Reliability and safety
+
+- Added paced, acknowledged scrollback replay and stale-reconnect guards.
+- Bounded PTY input queues on Windows and POSIX so blocked shells cannot stall or grow memory indefinitely.
+- Preserved autostart sessions and made autostart/global-hotkey launches use the same profile resolver as normal launches.
+- Added visible workspace-save state with retry and stopped optimistic UI deletion when backend operations fail.
+- Hardened config/workspace recovery, spawn and resize validation, passive-file opening, and update download URL/size/version/checksum verification.
+- Added categorized themes with live app-wide preview, stronger derived contrast, and a four-theme featured catalog.
+- MCP remains completely removed.
+
+Validated with 162 tests, Ruff, frontend syntax checks, live browser/xterm interaction, WSL path probes, packaged ConPTY/API smoke tests, and installer/portable builds.
+
+## QuickTerm 2.0.0
+
+QuickTerm 2.0 is a focused developer-workspace release.
+
+Highlights:
+
+- Reworked the interface into a compact, neutral workbench with flatter controls, denser panes, clearer focus and exit states, keyboard-operable splitters, stronger contrast, improved screen-reader semantics, and a four-theme featured picker with the remaining designs in a catalog.
+- Added easier directional split shortcuts: `Alt+Shift+Right` and `Alt+Shift+Down`. Existing `Alt+Shift+H/V` shortcuts remain available.
+- Hardened long-running sessions: touched or busy terminals are never idle-reaped, slow viewers resync instead of losing terminal control bytes, reconnect replay has no output race, resize geometry stays current, and stale workspace session references are pruned.
+- Improved responsiveness through bounded WebSocket queues, capped frames, disabled terminal compression, byte-accurate PTY batching, frontend write backpressure, and duplicate-spawn protection.
+- Made destructive session/workspace actions confirm intent, paused dashboard refresh while editing, fixed default-profile launching and the zero idle-timeout setting, and made JSON saves atomic.
+- Removed MCP completely: bridge executable, server module, REST surfaces, discovery environment variables, configuration, UI, documentation, tests, and packaging hooks are gone.
+
+This is a breaking major release for anyone who used `quickterm-mcp` or the removed terminal-control REST endpoints.

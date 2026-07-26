@@ -159,6 +159,19 @@ class FakeSessionManager:
     def has_attachments(self, sid: str) -> bool:
         return sid in getattr(self, "attached_ids", set())
 
+    def attachment_count(self, sid: str) -> int:
+        return int(self.has_attachments(sid))
+
+    def session_metrics(self) -> tuple[set[str], dict[str, dict]]:
+        return set(), {}
+
+    def session_activity(self, sid: str) -> dict[str, int | None]:
+        return {
+            "idle_seconds": 0,
+            "background_output_bytes": 0,
+            "background_output_age_seconds": None,
+        }
+
     def attach(self, sid: str) -> FakeAttachment:
         att = FakeAttachment()
         for chunk in self.initial_live:

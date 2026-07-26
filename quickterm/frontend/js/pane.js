@@ -6,6 +6,7 @@
 
 import * as api from "./api.js";
 import { getTheme, DEFAULT_THEME } from "./themes.js";
+import { PaneAttachProtocol } from "./pane_protocol.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
@@ -81,13 +82,9 @@ export class Pane {
     this.ws = null;
     this._webgl = null;
 
-    this._phase = "idle"; // idle | replay | prelive | live
-    this._replayDone = false;
-    this._replayWrites = 0;
+    this._protocol = new PaneAttachProtocol(CLIENT_QUEUE_LIMIT);
     this._queue = [];
-    this._queuedBytes = 0;
     this._pending = 0;
-    this._generation = 0; // ignores write callbacks/messages from an old connection
 
     this._backoff = BACKOFF_MIN;
     this._reconnectTimer = null;
@@ -123,6 +120,9 @@ export class Pane {
   get canReplace() {
     return !this.spawnPending && (this.state === "empty" || this.state === "exited");
   }
+
+  get _phase() { return this._protocol.phase; }
+  get _generation() { return this._protocol.generation; }
 
   beginSpawn() {
     if (this.spawnPending) return false;
@@ -471,7 +471,7 @@ export class Pane {
         // Do NOT intercept Ctrl+V or Ctrl+Shift+V: Chromium fires a native paste
         // event on xterm's textarea and xterm handles it. Programmatic clipboard
         // reads are permission-gated in WebView2, so this is the reliable path.
-        if (this._phase === "live" && !this._exited) this._markWrote();
+        if (this._protocol.canSendInput() && !this._exited) this._markWrote();
         return true;
       }
       return true;
@@ -545,12 +545,12 @@ export class Pane {
     // (DA/DSR) that xterm auto-answers during the async replay parse — those
     // answers must never reach the PTY as typed input.
     this.term.onData((d) => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited && this._phase === "live") {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited && this._protocol.canSendInput()) {
         this.ws.send(ENC.encode(d));
       }
     });
     this.term.onBinary((d) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this._exited || this._phase !== "live") return;
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this._exited || !this._protocol.canSendInput()) return;
       const b = new Uint8Array(d.length);
       for (let i = 0; i < d.length; i++) b[i] = d.charCodeAt(i) & 0xff;
       this.ws.send(b);
@@ -560,15 +560,11 @@ export class Pane {
 
   _connect() {
     if (this._disposed || this._detached || !this.session) return;
-    this._phase = "replay";
-    this._replayDone = false;
-    this._replayWrites = 0;
     this._queue.length = 0;
-    this._queuedBytes = 0;
     this._pending = 0;
     this.term.options.disableStdin = true;
     this.showNotice("[restoring terminal…]");
-    const generation = ++this._generation;
+    const generation = this._protocol.beginReplay();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
     const ws = new WebSocket(url, api.wsSubprotocols());
@@ -576,7 +572,7 @@ export class Pane {
     this.ws = ws;
     ws.onopen = () => { if (this.ws === ws) this._backoff = BACKOFF_MIN; };
     ws.onmessage = (ev) => {
-      if (this.ws !== ws || generation !== this._generation) return;
+      if (this.ws !== ws || !this._protocol.isCurrent(generation)) return;
       if (typeof ev.data === "string") {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
@@ -596,9 +592,7 @@ export class Pane {
         if (msg.cols > 0 && msg.rows > 0) this.term.resize(msg.cols, msg.rows);
         break;
       case "replay_done":
-        this._replayDone = true;
-        if (this._replayWrites === 0) this._goLive();
-        else this._phase = "prelive"; // wait for replay writes to flush
+        if (this._protocol.replayComplete()) this._goLive();
         break;
       case "overflow":
         this.flashNotice("[output busy · resynchronizing]");
@@ -612,32 +606,31 @@ export class Pane {
 
   _binary(buf, generation = this._generation) {
     const data = new Uint8Array(buf);
-    if (data.byteLength === 0) return; // xterm never acks empty writes
-    if (this._phase === "replay") {
-      this._replayWrites++;
+    const action = this._protocol.acceptBinary(data.byteLength);
+    if (action === "ignore") return; // xterm never acks empty writes
+    if (action === "replay") {
       this.term.write(data, () => {
-        if (generation !== this._generation) return;
-        this._replayWrites--;
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const completed = this._protocol.completeReplayWrite(generation);
+        if (completed.stale) return;
+        if (completed.acknowledge && this.ws && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ type: "replay_ack" }));
         }
-        if (this._replayDone && this._replayWrites === 0) this._goLive();
+        if (completed.goLive) this._goLive();
       });
     } else {
-      if (this._queuedBytes + data.byteLength > CLIENT_QUEUE_LIMIT) {
+      if (action === "overflow") {
         this.flashNotice("[output busy · resynchronizing]");
         if (this.ws) this.ws.close();
         return;
       }
       this._queue.push(data);
-      this._queuedBytes += data.byteLength;
       if (this._phase === "live") this._pump();
     }
   }
 
   _goLive() {
     if (this._disposed || this._exited) return;
-    this._phase = "live";
+    this._protocol.goLive();
     this.term.options.disableStdin = false;
     this.exitBar.hidden = true;
     try { this.fit.fit(); } catch (e) {}
@@ -653,10 +646,10 @@ export class Pane {
     while (this._queue.length && this._pending < PENDING_LIMIT) {
       const data = this._drainQueue();
       const generation = this._generation;
-      this._queuedBytes -= data.byteLength;
+      this._protocol.takeQueued(data.byteLength);
       this._pending += data.byteLength;
       this.term.write(data, () => {
-        if (generation !== this._generation) return;
+        if (!this._protocol.isCurrent(generation)) return;
         this._pending -= data.byteLength;
         if (this._queue.length && this._phase === "live") this._pump();
       });
@@ -687,7 +680,7 @@ export class Pane {
 
   _onExit(code) {
     this._exited = true;
-    this._phase = "idle";
+    this._protocol.exit();
     this.state = "exited";
     if (this.term) this.term.options.disableStdin = true;
     this._renderTab();
@@ -718,7 +711,7 @@ export class Pane {
   }
 
   _teardownWs() {
-    this._generation++;
+    this._protocol.invalidate();
     if (this.ws) {
       const w = this.ws;
       this.ws = null;

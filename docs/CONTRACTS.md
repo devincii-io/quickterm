@@ -324,6 +324,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
   pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
   `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
+- `panels.js` owns only panel lifecycle and shared controls. Dashboard, help,
+  settings sections, and DOM-free helpers live in `panel_*.js` modules. Keep
+  new tabs/large sections out of the coordinator.
+- `pane_protocol.js` is the DOM-free attach/replay/backpressure state machine
+  used by `pane.js`; `node --test tests/js/*.test.mjs` verifies replay gating,
+  stale generations, transition to live input, and overflow-driven resync.
 - `document.title = "QuickTerm"` (hotkey summon matches on this).
 - Layout tree in JS mirrors the workspace JSON schema exactly.
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use

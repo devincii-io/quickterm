@@ -42,7 +42,7 @@ _EXIT_WAIT_S = 10.0
 # Bounded so a huge burst still yields to the loop (keeps input responsive).
 _READ_COALESCE_BYTES = 128 * 1024
 
-log = logging.getLogger("quickterm.pty")
+log = logging.getLogger(__name__)
 # Opt-in raw-I/O tracing to pin down "wrong key" reports: logs the exact bytes
 # entering the PTY and the size of each output burst. Off unless the env var set.
 def _debug_io_enabled() -> bool:
@@ -206,7 +206,9 @@ class PtySession:
         try:
             self._pty.write(text)
         except Exception:
-            pass  # dead PTY or an unrepresentable 8-bit write; never mangle input
+            # Usually a dead PTY, but keep the original exception available in
+            # debug logs so encoding/runtime regressions are distinguishable.
+            log.debug("PTY write failed for process %s", self._pid, exc_info=True)
 
     def _stop_writer(self) -> None:
         try:

@@ -5,9 +5,13 @@ is plain JavaScript and CSS with no Node build step.
 
 ```bash
 uv sync --all-extras --dev
-uv run ruff check quickterm tests
-uv run pytest -q
+uv run --no-sync python scripts/check.py
 ```
+
+QuickTerm intentionally uses local/manual CI rather than hosted workflows. The
+single check command runs pytest, Ruff, Python compilation, Node's headless
+frontend protocol tests, syntax checks for every ES module, the three-way
+version invariant, and `git diff --check`.
 
 Keep terminal I/O as raw bytes, preserve the replay-then-resize sequence, and
 test on Windows when changing ConPTY or global-hotkey behavior. Open an issue
