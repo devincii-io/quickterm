@@ -1,5 +1,7 @@
-// Global keybindings, capture phase. QuickTerm claims only Alt combos that
-// nothing running inside the terminal wants:
+// Global keybindings, capture phase. QuickTerm follows Windows conventions
+// for terminal text size, then claims only Alt combos that nothing running
+// inside the terminal wants:
+//   Ctrl++/-/0         grow / shrink / reset terminal text size
 //   Alt+K              command palette
 //   Alt+Z              zoom pane
 //   Alt+W              detach pane
@@ -9,16 +11,36 @@
 //   Alt+Shift+V        split top and bottom
 //   Alt+Shift+Right    split to the right
 //   Alt+Shift+Down     split below
-//   Alt+Shift++/-/0    grow / shrink / reset terminal text size
 // Everything on plain Alt that shells and TUIs actually bind passes through:
 // Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
 // switch), Alt+H (PSReadLine parameter help), Alt+0..9/Alt+- (readline digit
 // arguments), Alt+B/F/D/. word motions — none of these are claimed here.
-// Copy and paste stay on Ctrl+Shift+C/V (handled in pane.js) because Ctrl+C
-// is the terminal's interrupt and must never be reused for the UI.
+// Selection-aware Ctrl+C and native Ctrl+V are handled in pane.js. With no
+// selection Ctrl+C still reaches the PTY as the terminal interrupt. The
+// Ctrl+Shift+C/V aliases remain available too.
 
 export function initKeys(actions) {
   window.addEventListener("keydown", (e) => {
+    // Windows-style text zoom. Use both key and code because WebView2 reports
+    // the shifted plus key differently across keyboard layouts. Claim only
+    // these exact Ctrl gestures; Ctrl+Alt and Meta combinations stay untouched.
+    if (e.ctrlKey && !e.altKey && !e.metaKey) {
+      const key = e.key.toLowerCase();
+      const reset = key === "0" || e.code === "Digit0" || e.code === "Numpad0";
+      const smaller = key === "-" || key === "_" || e.code === "Minus"
+        || e.code === "Slash" || e.code === "NumpadSubtract";
+      const bigger = key === "+" || key === "=" || key === "*"
+        || e.code === "Equal" || e.code === "BracketRight" || e.code === "NumpadAdd";
+      if (reset || smaller || bigger) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (reset) actions.fontReset();
+        else if (smaller) actions.fontSmaller();
+        else actions.fontBigger();
+        return;
+      }
+    }
+
     if (!e.altKey || e.ctrlKey || e.metaKey) return; // Alt-only layer
 
     const key = e.key.toLowerCase();
@@ -45,25 +67,12 @@ export function initKeys(actions) {
       return;
     }
 
-    // Alt+Shift layer: splits, pane resizing, and font size. Font controls
-    // prefer the produced character, with stable numpad and WebView fallbacks.
+    // Alt+Shift layer: splits and pane resizing.
     if (key === "h") return done(actions.splitH);
     if (key === "v") return done(actions.splitV);
     if (key === "w") return done(actions.killSession);
     if (key === "arrowright") return done(actions.splitH);
     if (key === "arrowdown") return done(actions.splitV);
 
-    // WebView2 differs across keyboard layouts here: the same minus gesture
-    // has been observed as key "_", code "Minus", code "Slash", and
-    // NumpadSubtract.  Alt+Shift is QuickTerm's reserved view namespace, so
-    // accept both the produced character and the known physical-key reports.
-    const reset = e.code === "Digit0" || e.code === "Numpad0";
-    const smaller = key === "-" || key === "_" || e.code === "NumpadSubtract"
-      || e.code === "Minus" || e.code === "Slash";
-    const bigger = key === "+" || key === "*" || e.code === "NumpadAdd"
-      || e.code === "Equal" || e.code === "BracketRight";
-    if (reset) return done(actions.fontReset);
-    if (smaller) return done(actions.fontSmaller);
-    if (bigger) return done(actions.fontBigger);
   }, true);
 }

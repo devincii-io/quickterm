@@ -10,6 +10,8 @@ import { getTheme, DEFAULT_THEME } from "./themes.js";
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
 const CLIENT_QUEUE_LIMIT = 2 << 20; // reconnect before sustained output grows JS heap
+const OSC52_MAX_BYTES = 1 << 20; // clipboard writes from terminal output
+const OSC52_MAX_BASE64 = Math.ceil(OSC52_MAX_BYTES / 3) * 4;
 
 // File-path links (Ctrl+click): quoted paths may contain spaces; bare ones
 // stop at whitespace/quotes. Windows drive + UNC, POSIX absolute, ~ paths.
@@ -296,7 +298,7 @@ export class Pane {
   // Write text to the system clipboard via the async API, falling back to the
   // legacy execCommand path when it is unavailable or denied (WebView2 denies
   // navigator.clipboard.writeText silently). onOk/onFail are optional feedback
-  // callbacks. Shared by the Ctrl+Shift+C / right-click selection copy and by
+  // callbacks. Shared by the Ctrl+C / right-click selection copy and by
   // the OSC 52 handler (apps inside the terminal — Claude Code, tmux, vim —
   // that copy programmatically). Read-only; never counts as user input.
   _writeClipboard(text, onOk, onFail) {
@@ -452,10 +454,11 @@ export class Pane {
         this.term.unicode.activeVersion = "11";
       }
     } catch (e) { /* v6 fallback, non-fatal */ }
-    // Ctrl+Shift+C/V copy & paste, scoped to the terminal so the plain
-    // Ctrl+C/V (SIGINT / literal paste event) keep their terminal meaning.
+    // Windows-style selection-aware copy and native paste. Ctrl+C copies only
+    // when xterm has a selection; otherwise it reaches the PTY as SIGINT.
+    // Ctrl+Shift+C/V remain compatible aliases.
     this.term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return true;
+      if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
       const key = e.key.toLowerCase();
       if (key === "c") {
         const selection = this.term.getSelection();
@@ -465,10 +468,9 @@ export class Pane {
         return false;
       }
       if (key === "v") {
-        // Do NOT intercept: Ctrl+Shift+V is Chromium's native "paste as plain
-        // text", which fires a paste event on xterm's textarea — xterm handles
-        // it. navigator.clipboard.readText() is permission-gated in WebView2
-        // (silently denied), so the native path is the only one that works.
+        // Do NOT intercept Ctrl+V or Ctrl+Shift+V: Chromium fires a native paste
+        // event on xterm's textarea and xterm handles it. Programmatic clipboard
+        // reads are permission-gated in WebView2, so this is the reliable path.
         if (this._phase === "live" && !this._exited) this._markWrote();
         return true;
       }
@@ -496,9 +498,13 @@ export class Pane {
         if (sep === -1) return true;
         const payload = data.slice(sep + 1);
         if (!payload || payload === "?") return true;
+        // Terminal output is untrusted. Bound work before atob allocates and
+        // verify decoded length too in case padding quirks slip through.
+        if (payload.length > OSC52_MAX_BASE64) return true;
         let text;
         try {
           const bin = atob(payload);
+          if (bin.length > OSC52_MAX_BYTES) return true;
           const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
           text = new TextDecoder().decode(bytes);
         } catch (e) { return true; } // malformed base64 -> ignore, don't leak
@@ -507,7 +513,7 @@ export class Pane {
       });
     } catch (e) { /* no parser API: copy-from-app unsupported, non-fatal */ }
     // Right-click copies the current selection (the Windows Terminal
-    // convention) with a visible confirmation. Paste stays on Ctrl+Shift+V —
+    // convention) with a visible confirmation. Paste stays native on Ctrl+V —
     // WebView2 silently denies programmatic clipboard reads, so there is no
     // reliable right-click paste to offer here.
     this.termHost.addEventListener("contextmenu", (e) => {

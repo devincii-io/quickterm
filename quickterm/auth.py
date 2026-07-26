@@ -10,6 +10,7 @@ server, never in logs) and stored in a user-private file for out-of-band callers
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import time
 
@@ -18,10 +19,16 @@ from quickterm.config import config_dir
 TOKEN_FILE = "runtime.token"
 SUBPROTOCOL_PREFIX = "qtauth."  # WebSocket clients can't set headers; they pass
 HEADER = "x-quickterm-token"    # the token as this subprotocol instead.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
 
 
 def token_path():
     return config_dir() / TOKEN_FILE
+
+
+def _valid_token(value: str) -> bool:
+    """Tokens must also be valid WebSocket subprotocol characters."""
+    return _TOKEN_RE.fullmatch(value) is not None
 
 
 def get_or_create_token() -> str:
@@ -34,7 +41,7 @@ def get_or_create_token() -> str:
     path = token_path()
     try:
         existing = path.read_text(encoding="utf-8").strip()
-        if existing:
+        if _valid_token(existing):
             if os.name != "nt":
                 path.chmod(0o600)
             return existing
@@ -49,7 +56,7 @@ def get_or_create_token() -> str:
         for _ in range(20):
             try:
                 existing = path.read_text(encoding="utf-8").strip()
-                if existing:
+                if _valid_token(existing):
                     if os.name != "nt":
                         path.chmod(0o600)
                     return existing

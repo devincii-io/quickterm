@@ -76,6 +76,16 @@ def test_corrupt_workspace_does_not_break_other_workspaces(fake_appdata):
     assert load_workspace("healthy").session_ids == ["live1"]
 
 
+def test_non_utf8_workspace_does_not_break_listing_or_loading(fake_appdata):
+    folder = fake_appdata / "quickterm" / "workspaces"
+    folder.mkdir(parents=True)
+    (folder / "broken.json").write_bytes(b"\xff\xfe")
+    save_workspace(Workspace(name="healthy", layout=LAYOUT))
+
+    assert list_workspaces() == ["broken", "healthy"]
+    assert load_workspace("broken") is None
+
+
 def test_name_sanitized_to_safe_filename(fake_appdata):
     weird = 'my/ws:with*bad"chars?'
     save_workspace(Workspace(name=weird, layout=LAYOUT))
@@ -86,3 +96,30 @@ def test_name_sanitized_to_safe_filename(fake_appdata):
     ws = load_workspace(weird)
     assert ws is not None
     assert ws.name == weird  # original name preserved inside the file
+
+
+def test_unsafe_names_cannot_overwrite_each_other(fake_appdata):
+    first = "project:one"
+    second = "project*one"
+    save_workspace(Workspace(name=first, layout={"id": 1}))
+    save_workspace(Workspace(name=second, layout={"id": 2}))
+
+    assert list_workspaces() == sorted([first, second])
+    assert load_workspace(first).layout == {"id": 1}
+    assert load_workspace(second).layout == {"id": 2}
+    assert len(list((fake_appdata / "quickterm" / "workspaces").glob("*.json"))) == 2
+
+
+def test_legacy_sanitized_workspace_remains_readable_and_migrates(fake_appdata):
+    folder = fake_appdata / "quickterm" / "workspaces"
+    folder.mkdir(parents=True)
+    legacy = folder / "project_one.json"
+    legacy.write_text(
+        json.dumps({"name": "project:one", "layout": {"old": True}}), encoding="utf-8",
+    )
+
+    assert load_workspace("project:one").layout == {"old": True}
+    save_workspace(Workspace(name="project:one", layout={"new": True}))
+
+    assert not legacy.exists()
+    assert load_workspace("project:one").layout == {"new": True}

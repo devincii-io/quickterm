@@ -127,6 +127,15 @@ async def test_pump_respects_coalesce_cap(monkeypatch):
     assert json.loads(ws.sent_text[0])["type"] == "exit"
 
 
+async def test_pump_splits_chunks_and_merged_frames_at_cap(monkeypatch):
+    monkeypatch.setattr(server, "_SEND_COALESCE_BYTES", 4)
+    ws = await _run_pump([b"abc", b"defghi", None])
+    assert ws.sent_bytes == [b"abcd", b"efgh", b"i"]
+    assert all(len(frame) <= 4 for frame in ws.sent_bytes)
+    assert b"".join(ws.sent_bytes) == b"abcdefghi"
+    assert json.loads(ws.sent_text[0])["type"] == "exit"
+
+
 async def test_pump_immediate_exit_on_leading_sentinel():
     ws = await _run_pump([None])
     assert ws.sent_bytes == []

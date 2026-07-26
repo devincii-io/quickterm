@@ -1399,9 +1399,9 @@ export class Panels {
       ["Alt Shift ↓", "Split below"], ["Alt arrows", "Move between panes"],
       ["Alt Z", "Focus one pane"], ["Alt W", "Detach current pane"],
       ["Alt Shift W", "Kill terminal and close pane"],
-      ["Alt Shift +", "Bigger terminal text"], ["Alt Shift -", "Smaller terminal text"],
-      ["Alt Shift 0", "Reset terminal text size"],
-      ["Ctrl Shift C", "Copy selection in terminal"], ["Ctrl Shift V", "Paste into terminal"],
+      ["Ctrl +", "Bigger terminal text"], ["Ctrl -", "Smaller terminal text"],
+      ["Ctrl 0", "Reset terminal text size"],
+      ["Ctrl C", "Copy selection (otherwise interrupt)"], ["Ctrl V", "Paste into terminal"],
       ["Right click", "Copy the current selection"],
       ["Ctrl click", "Open a link or file path printed in the terminal"],
     ];
@@ -1415,7 +1415,7 @@ export class Panels {
     const conceptCard = make("section", "help-card");
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
-      ["Your keys stay yours", "QuickTerm only claims cold Alt combos. Ctrl+C, Ctrl+P, Alt+V (Claude Code image paste), Alt+P (model switch), the Alt+B/F word motions and every other key reach the shell untouched."],
+      ["Your keys stay yours", "Ctrl+C copies only when text is selected; otherwise it interrupts the terminal. Plain Alt+V (Claude Code image paste), Alt+P (model switch), Ctrl+P, the Alt+B/F word motions and other shell keys pass through untouched."],
       ["Profiles", "Reusable terminal types, folders and start commands."],
       ["Workspaces", "Named arrangements that restore your split layout."],
       ["Sessions live in workspaces", "Detached sessions stay with their workspace and do not expire. The palette only shows the current workspace; moving a session from another workspace requires the explicit menu."],

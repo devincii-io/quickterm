@@ -151,9 +151,10 @@ class FakeSessionManager:
     def resize(self, sid: str, cols: int, rows: int) -> None:
         self.resizes.append((sid, cols, rows))
 
-    def kill(self, sid: str) -> None:
+    def kill(self, sid: str) -> bool:
         self.killed.append(sid)
         self.sessions.pop(sid, None)
+        return True
 
     def has_attachments(self, sid: str) -> bool:
         return sid in getattr(self, "attached_ids", set())
@@ -489,6 +490,14 @@ def test_kill_session(client, manager):
     assert client.delete("/api/sessions/deadbeef").status_code == 404
 
 
+def test_kill_session_reports_backend_failure(client, manager, monkeypatch):
+    info = manager.add_session()
+    monkeypatch.setattr(manager, "kill", lambda _sid: False)
+    response = client.delete(f"/api/sessions/{info.id}")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "terminal process could not be stopped"
+
+
 def test_cleanup_sessions(client, manager):
     first = manager.add_session(name="scratch-1")
     second = manager.add_session(name="scratch-2")
@@ -499,6 +508,32 @@ def test_cleanup_sessions(client, manager):
     assert manager.get(kept.id) is not None
 
 
+@pytest.mark.parametrize("method,path", [
+    ("patch", "/api/sessions/{sid}"),
+    ("post", "/api/sessions/cleanup"),
+    ("put", "/api/workspaces/dev"),
+    ("post", "/api/open"),
+])
+def test_json_endpoints_reject_malformed_and_oversized_bodies(
+    client, manager, fake_workspace, method, path,
+):
+    info = manager.add_session()
+    path = path.format(sid=info.id)
+    malformed = client.request(
+        method, path, content=b"{", headers={"content-type": "application/json"},
+    )
+    assert malformed.status_code == 400
+    assert malformed.json()["detail"] == "request body must be valid JSON"
+
+    oversized = client.request(
+        method,
+        path,
+        content=b" " * (1024 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+    assert oversized.status_code == 413
+
+
 def test_kill_all_sessions(client, manager):
     manager.add_session(name="one")
     manager.add_session(name="two")
@@ -507,6 +542,23 @@ def test_kill_all_sessions(client, manager):
     assert response.status_code == 200
     assert response.json() == {"killed": 2}
     assert len(manager.killed) == 2
+
+
+def test_kill_all_reports_partial_failure(client, manager, monkeypatch):
+    first = manager.add_session(name="one")
+    second = manager.add_session(name="two")
+
+    def kill(sid):
+        if sid == second.id:
+            return False
+        manager.sessions.pop(sid, None)
+        return True
+
+    monkeypatch.setattr(manager, "kill", kill)
+    response = client.post("/api/sessions/kill-all")
+    assert response.status_code == 500
+    assert manager.get(first.id) is None
+    assert manager.get(second.id) is not None
 
 
 def test_spawn_tags_workspace(client, manager):
@@ -703,6 +755,20 @@ def test_file_missing_404(client, tmp_path):
 def test_file_directory_400(client, tmp_path):
     r = client.get("/api/file", params={"path": str(tmp_path)})
     assert r.status_code == 400
+
+
+def test_asset_upload_is_bounded_before_storage(client, monkeypatch):
+    saved = []
+    mod = types.ModuleType("quickterm.assets")
+    mod.MAX_ASSET_BYTES = 16
+    mod.save_asset = lambda data, content_type: saved.append((data, content_type)) or "x.png"
+    monkeypatch.setitem(sys.modules, "quickterm.assets", mod)
+
+    response = client.post(
+        "/api/assets", content=b"x" * 17, headers={"content-type": "image/png"},
+    )
+    assert response.status_code == 413
+    assert saved == []
 
 
 # --- update endpoints ---------------------------------------------------------

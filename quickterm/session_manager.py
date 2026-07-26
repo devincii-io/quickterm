@@ -267,13 +267,50 @@ class SessionManager:
             s._ring_cols, s._ring_rows = cols, rows
             s.pty.resize(cols, rows)
 
-    def kill(self, sid: str) -> None:
+    def kill(self, sid: str) -> bool:
+        """Stop a session, returning only after the backend confirms the kill.
+
+        REST sync handlers run in a worker thread, so all asyncio queue and
+        timer mutation is marshalled back to the owning loop.  Previously the
+        grace-period timer was installed directly from that worker and the
+        session stayed visibly alive until the PTY reader eventually reported
+        EOF, which made dashboard kills look ineffective.
+        """
         s = self._sessions.get(sid)
         if not s:
-            return
+            return False
+        stopped = True
         if s.pty:
-            s.pty.kill()
-        self._loop.call_later(_KILL_REMOVE_GRACE_S, self._sessions.pop, sid, None)
+            result = s.pty.kill()
+            # Compatibility with small test/plugin PTY implementations whose
+            # historical kill method returned None.
+            stopped = result is not False
+        if not stopped:
+            return False
+        try:
+            self._loop.call_soon_threadsafe(self._finish_kill, sid, s)
+        except RuntimeError:
+            # The app is already shutting down; the OS process is nevertheless
+            # confirmed stopped, and there is no live registry to notify.
+            pass
+        return True
+
+    def _finish_kill(self, sid: str, session: Session) -> None:
+        if self._sessions.get(sid) is not session:
+            return
+        if session.info.alive:
+            session.info.alive = False
+            session.info.exit_code = session.pty.exit_code if session.pty else 1
+            if session.info.exit_code is None:
+                session.info.exit_code = 1
+            session.ended_at = time.monotonic()
+            session._fanout(None)
+        self._loop.call_later(_KILL_REMOVE_GRACE_S, self._remove_if_same, sid, session)
+
+    def _remove_if_same(self, sid: str, session: Session) -> None:
+        if self._sessions.get(sid) is session:
+            self._sessions.pop(sid, None)
+            self._cpu_samples.pop(sid, None)
 
     def attach(self, sid: str) -> Attachment:
         s = self._sessions[sid]
@@ -309,9 +346,7 @@ class SessionManager:
                 continue
             elif timeout_s > 0 and now - s.last_activity > timeout_s:
                 doomed.append(sid)
-        for sid in doomed:
-            self.kill(sid)
-        return doomed
+        return [sid for sid in doomed if self.kill(sid)]
 
     # loop-thread callbacks from PtySession
 
@@ -321,7 +356,9 @@ class SessionManager:
         session._fanout(data)
 
     def _on_exit(self, session: Session, code: int) -> None:
+        was_alive = session.info.alive
         session.info.alive = False
         session.info.exit_code = code
         session.ended_at = time.monotonic()
-        session._fanout(None)
+        if was_alive:
+            session._fanout(None)

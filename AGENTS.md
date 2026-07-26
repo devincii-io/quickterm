@@ -48,11 +48,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
   Alt+Z zoom, Alt+W close, Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
   (or H/V) split and
-  Alt+Shift+±/0 font on the Alt+Shift namespace. Plain Alt+V/P/H/0-9/- MUST pass
+  Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
-  bindings) — never re-claim them. Copy/paste stays Ctrl+Shift+C/V; the paste
-  handler must NOT preventDefault (WebView2 denies `clipboard.readText` silently —
-  let the native paste event reach xterm's textarea).
+  bindings) — never re-claim them. Ctrl+C copies only with a selection and
+  otherwise passes through as interrupt; Ctrl+Shift+C remains an alias. Ctrl+V
+  and Ctrl+Shift+V use native paste: the handler must NOT preventDefault (WebView2
+  denies `clipboard.readText` silently — let the paste event reach xterm's textarea).
 - Server handlers import stubbable modules via
   `importlib.import_module("quickterm.X")` — a plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.

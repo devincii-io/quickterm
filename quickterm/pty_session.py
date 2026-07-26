@@ -32,7 +32,9 @@ import winpty
 _CREATE_NO_WINDOW = 0x08000000
 _SYNCHRONIZE = 0x00100000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_PROCESS_TERMINATE = 0x0001
 _INFINITE = 0xFFFFFFFF
+_WAIT_OBJECT_0 = 0
 _DRAIN_IDLE_S = 0.15
 _DRAIN_MAX_S = 1.0
 _EXIT_WAIT_S = 10.0
@@ -50,6 +52,19 @@ def _debug_io_enabled() -> bool:
 _DEBUG_IO = _debug_io_enabled()
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+# ctypes defaults function results to 32-bit integers. Declare every HANDLE API
+# used here explicitly so process handles are never truncated on 64-bit Windows.
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_k32.WaitForSingleObject.restype = wintypes.DWORD
+_k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+_k32.GetExitCodeProcess.restype = wintypes.BOOL
+_k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+_k32.TerminateProcess.restype = wintypes.BOOL
+_k32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+_k32.CloseHandle.restype = wintypes.BOOL
+_k32.CloseHandle.argtypes = (wintypes.HANDLE,)
 
 _TH32CS_SNAPPROCESS = 0x00000002
 _k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
@@ -221,15 +236,55 @@ class PtySession:
     def pid(self) -> int:
         return self._pid
 
-    def kill(self) -> None:
-        if self._pid and not self._proc_dead.is_set():
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(self._pid)],
-                capture_output=True,
-                creationflags=_CREATE_NO_WINDOW,
-            )
-        self._stop_writer()
-        # watcher notices death, drains, then cancel_io() closes out the reader
+    def kill(self) -> bool:
+        """Force the process tree down and verify that the root actually died.
+
+        ``taskkill`` can fail (or only partially complete) without raising, so
+        treating invocation as success made the REST endpoint hide a still-live
+        terminal.  Verify through a fresh process handle and use the Win32
+        terminate primitive as a final root-process fallback.  ``taskkill /T``
+        remains the primary path because it also handles descendants.
+        """
+        if not self._pid or self._proc_dead.is_set():
+            self._stop_writer()
+            return True
+
+        process = _k32.OpenProcess(
+            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_TERMINATE,
+            False,
+            self._pid,
+        )
+        try:
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(self._pid)],
+                    capture_output=True,
+                    creationflags=_CREATE_NO_WINDOW,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                log.warning("taskkill failed for PTY process %s", self._pid, exc_info=True)
+
+            stopped = bool(process) and _k32.WaitForSingleObject(process, 2000) == _WAIT_OBJECT_0
+            if not stopped and process:
+                # A failed tree kill must not turn the UI into a false success.
+                # Terminating the root also tears down its ConPTY; descendants
+                # were already targeted by taskkill above.
+                _k32.TerminateProcess(process, 1)
+                stopped = _k32.WaitForSingleObject(process, 2000) == _WAIT_OBJECT_0
+            if not process:
+                # OpenProcess fails once the process has already disappeared.
+                try:
+                    stopped = not self._pty.isalive()
+                except winpty.WinptyError:
+                    stopped = True
+        finally:
+            if process:
+                _k32.CloseHandle(process)
+
+        if stopped:
+            self._stop_writer()
+        return stopped
 
     def _watch_exit(self) -> None:
         if self._hproc:

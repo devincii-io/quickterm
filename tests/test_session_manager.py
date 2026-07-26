@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 
 import pytest
 
@@ -158,6 +159,43 @@ async def test_kill_and_list_and_focus(manager):
     assert manager.get(info.id).info.alive is False
     await asyncio.sleep(1.2)  # grace period: session removed from registry
     assert manager.get(info.id) is None
+
+
+async def test_kill_marshals_state_change_from_worker_thread(manager):
+    """FastAPI sync DELETE handlers invoke manager.kill outside the loop."""
+    cmd, args = _interactive()
+    info = manager.spawn(cmd=cmd, args=args, name="worker-kill")
+    att = manager.attach(info.id)
+    result: list[bool] = []
+    done = threading.Event()
+
+    def kill_from_worker():
+        result.append(manager.kill(info.id))
+        done.set()
+
+    worker = threading.Thread(target=kill_from_worker)
+    worker.start()
+    while not done.is_set():
+        await asyncio.sleep(0.01)
+    worker.join(timeout=2)
+    assert result == [True]
+    await _drain(att)
+    assert manager.get(info.id).info.alive is False
+
+
+async def test_failed_backend_kill_keeps_session_visible(monkeypatch):
+    class _UnkillablePty(_RecordingPty):
+        def kill(self):
+            return False
+
+    monkeypatch.setattr(session_manager, "PtySession", _UnkillablePty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    info = mgr.spawn(cmd="x.exe")
+    assert mgr.kill(info.id) is False
+    await asyncio.sleep(0)
+    assert mgr.get(info.id).info.alive is True
+    # Avoid retrying the deliberately unkillable fake in manager.shutdown().
+    mgr._sessions.clear()
 
 
 async def test_live_session_limit_blocks_only_new_spawns():

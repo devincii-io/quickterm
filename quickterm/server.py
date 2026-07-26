@@ -215,7 +215,8 @@ def create_app(
     def kill_session(sid: str) -> Response:
         if manager.get(sid) is None:
             raise HTTPException(404, "no such session")
-        manager.kill(sid)
+        if manager.kill(sid) is False:
+            raise HTTPException(500, "terminal process could not be stopped")
         return Response(status_code=204)
 
     @app.patch("/api/sessions/{sid}")
@@ -223,7 +224,7 @@ def create_app(
         session = manager.get(sid)
         if session is None:
             raise HTTPException(404, "no such session")
-        body = await request.json()
+        body = await _read_json(request)
         name = str(body.get("name") or "").strip() if isinstance(body, dict) else ""
         if not name:
             raise HTTPException(400, "body must be {'name': <non-empty string>}")
@@ -232,18 +233,26 @@ def create_app(
 
     @app.post("/api/sessions/cleanup")
     async def cleanup_sessions(request: Request) -> Response:
-        body = await request.json()
+        body = await _read_json(request)
         session_ids = body.get("session_ids", []) if isinstance(body, dict) else []
+        failed: list[str] = []
         for sid in session_ids:
             if isinstance(sid, str) and manager.get(sid) is not None:
-                manager.kill(sid)
+                if manager.kill(sid) is False:
+                    failed.append(sid)
+        if failed:
+            raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
         return Response(status_code=204)
 
     @app.post("/api/sessions/kill-all")
     def kill_all_sessions() -> dict:
         session_ids = [info.id for info in manager.list() if info.alive]
+        failed: list[str] = []
         for sid in session_ids:
-            manager.kill(sid)
+            if manager.kill(sid) is False:
+                failed.append(sid)
+        if failed:
+            raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
         return {"killed": len(session_ids)}
 
     @app.get("/api/profiles")
@@ -273,7 +282,7 @@ def create_app(
     async def put_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
-        body = await request.json()
+        body = await _read_json(request)
         if not isinstance(body, dict) or "layout" not in body:
             raise HTTPException(400, "body must be {'layout': ...}")
         logo = body.get("logo")
@@ -304,9 +313,13 @@ def create_app(
             # terminals that are open in someone's current layout.
             owned = set(getattr(saved, "session_ids", []) or [])
             owned.update(_layout_session_ids(saved.layout))
+            failed: list[str] = []
             for sid in owned:
                 if manager.get(sid) is not None and not manager.has_attachments(sid):
-                    manager.kill(sid)
+                    if manager.kill(sid) is False:
+                        failed.append(sid)
+            if failed:
+                raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
         workspace.delete_workspace(name)
         return Response(status_code=204)
 
@@ -394,7 +407,7 @@ def create_app(
         # opener.py refuses non-http(s) URLs and reveals executables instead
         # of running them.
         opener = importlib.import_module("quickterm.opener")  # stubbable in tests
-        body = await request.json()
+        body = await _read_json(request)
         target = body.get("target") if isinstance(body, dict) else None
         if not isinstance(target, str):
             raise HTTPException(400, "body must be {'target': <string>}")
@@ -447,7 +460,10 @@ def create_app(
     async def upload_asset(request: Request) -> dict:
         assets = importlib.import_module("quickterm.assets")
         content_type = request.headers.get("content-type", "")
-        data = await request.body()
+        # Reject oversized uploads while streaming. ``request.body()`` would
+        # first buffer the entire payload, defeating assets.save_asset's cap.
+        maximum = int(getattr(assets, "MAX_ASSET_BYTES", 1024 * 1024))
+        data = await _read_body(request, maximum)
         try:
             asset_id = assets.save_asset(data, content_type)
         except ValueError as exc:
@@ -768,8 +784,10 @@ async def _live_phase(
 
 async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) -> None:
     # queue yields raw PTY bytes; None sentinel = session exited
+    carry: bytes | None = None
     while True:
-        chunk = await attachment.queue.get()
+        chunk = carry if carry is not None else await attachment.queue.get()
+        carry = None
         if chunk is None:
             await _send_exit(ws, session)
             return
@@ -780,6 +798,9 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
         # Coalesce whatever else is already queued into a single frame (capped so
         # one send can't monopolize the loop and starve input). Raw bytes stay a
         # plain byte stream to the client, so this is wire-compatible.
+        if len(chunk) > _SEND_COALESCE_BYTES:
+            carry = chunk[_SEND_COALESCE_BYTES:]
+            chunk = chunk[:_SEND_COALESCE_BYTES]
         parts = [chunk]
         total = len(chunk)
         exited = False
@@ -795,8 +816,12 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
                 await ws.send_text(json.dumps({"type": "overflow"}))
                 await ws.close(code=1013, reason="viewer fell behind; reconnect to replay")
                 return
-            parts.append(item)
-            total += len(item)
+            remaining = _SEND_COALESCE_BYTES - total
+            parts.append(item[:remaining])
+            total += min(len(item), remaining)
+            if len(item) > remaining:
+                carry = item[remaining:]
+                break
         await ws.send_bytes(parts[0] if len(parts) == 1 else b"".join(parts))
         if exited:
             await _send_exit(ws, session)
@@ -851,6 +876,17 @@ def _bounded_int(value: Any, name: str, minimum: int, maximum: int) -> int:
 
 async def _read_json(request: Request, maximum: int = JSON_BODY_CAP) -> Any:
     """Read a bounded JSON body without first buffering an unbounded request."""
+    raw = await _read_body(request, maximum)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+
+
+async def _read_body(request: Request, maximum: int) -> bytes:
+    """Read at most ``maximum`` bytes, including chunked request bodies."""
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -865,13 +901,7 @@ async def _read_json(request: Request, maximum: int = JSON_BODY_CAP) -> Any:
         if total > maximum:
             raise HTTPException(413, f"request body cannot exceed {maximum} bytes")
         chunks.append(chunk)
-    raw = b"".join(chunks)
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(400, "request body must be valid JSON") from exc
+    return b"".join(chunks)
 
 
 def _mount_frontend(app: FastAPI) -> None:

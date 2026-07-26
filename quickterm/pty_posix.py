@@ -154,9 +154,9 @@ class PtySession:
     def pid(self) -> int:
         return self._pid
 
-    def kill(self) -> None:
+    def kill(self) -> bool:
         if self._dead.is_set():
-            return
+            return True
         try:
             os.killpg(self._pid, signal.SIGKILL)  # child is its own group leader
         except (OSError, ProcessLookupError):
@@ -166,6 +166,7 @@ class PtySession:
                 pass
         self._stop_writer()
         # reader sees EOF/EIO and finishes exit handling
+        return True
 
     def _read_loop(self) -> None:
         while True:

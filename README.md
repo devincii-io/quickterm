@@ -71,9 +71,9 @@ before detaching, so one stray keystroke can't lose running work.
 
 ## Keys
 
-QuickTerm only claims Alt combos that nothing inside the terminal wants.
-Everything shells and TUIs actually bind passes through untouched: `Ctrl+C`,
-`Ctrl+P`, `Alt+V` (Claude Code image paste), `Alt+P` (Claude Code model
+QuickTerm uses familiar Windows copy, paste, and text-size conventions while
+leaving shell/TUI bindings intact. `Ctrl+C` copies when text is selected and
+otherwise reaches the terminal as interrupt. `Ctrl+P`, `Alt+V` (Claude Code image paste), `Alt+P` (Claude Code model
 switch), `Alt+H` (PSReadLine help), `Alt+0..9`/`Alt+-` (readline digit
 arguments), the `Alt+B`/`F` word motions, ...
 
@@ -85,8 +85,9 @@ arguments), the `Alt+B`/`F` word motions, ...
 | `Alt+Z` | Zoom focused pane |
 | `Alt+W` | Detach pane (session stays in this workspace; asks twice if something is running) |
 | `Alt+Shift+W` | Kill the focused terminal process tree and close its pane (asks first) |
-| `Alt+Shift+Plus` / `Alt+Shift+Minus` / `Alt+Shift+0` | Grow / shrink / reset terminal text size |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy selection / paste in a terminal |
+| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Grow / shrink / reset terminal text size |
+| `Ctrl+C` / `Ctrl+V` | Copy selection (or interrupt when none) / paste in a terminal |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Compatible copy / paste aliases |
 | `Ctrl+Click` | Open a URL or file path printed in the terminal |
 | `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable — also restores from tray) |
 

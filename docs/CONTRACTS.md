@@ -116,7 +116,7 @@ class PtySession:
     def exit_code(self) -> int | None
     @property
     def pid(self) -> int
-    def kill(self) -> None    # process TREE kill: taskkill /T /F on root pid, then close pty
+    def kill(self) -> bool    # verified process TREE kill; false when the process survives
 ```
 
 - Exit detection: watch the process (pywinpty `isalive()` poll thread or wait on
@@ -150,7 +150,7 @@ class SessionManager:
     def get(self, sid: str) -> Session | None
     def write(self, sid: str, data: bytes) -> None
     def resize(self, sid: str, cols: int, rows: int) -> None
-    def kill(self, sid: str) -> None          # tree kill + remove after grace
+    def kill(self, sid: str) -> bool          # verified tree kill + remove after grace
     def attach(self, sid: str) -> "Attachment"
     def busy_ids(self) -> set[str]            # sessions whose shell has a child process
     def session_metrics(self) -> tuple[set[str], dict[str, dict]]
@@ -349,7 +349,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Quick settings: the status-bar View drawer controls font size for either the
   focused pane or all panes, resizes the focused pane against its nearest
   horizontal/vertical split, balances that split, toggles focus mode, and links
-  to full Settings. Alt+Shift+±/0 follows the selected scope; pane-only
+  to full Settings. Ctrl+±/0 follows the selected scope; pane-only
   overrides are temporary, while All panes persists the global default.
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
@@ -361,25 +361,26 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Keybindings (in addition to palette): Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom,
   Alt+W detach pane (two-step when the session is busy), Alt+Shift+W confirms
   a process-tree kill and closes the pane, Alt+arrows focus move,
-  Alt+Shift+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
+  Ctrl+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).
 - Destructive UI actions use an in-app confirmation placed by the triggering
   control (or inside the focused pane for keyboard actions). Confirm receives
   focus so Enter accepts; Escape and the Cancel button cancel. Application code
   does not use browser `alert`, `confirm`, or `prompt` dialogs.
 - Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link
-  provider) via POST /api/open. Paste is native-only: Ctrl+Shift+V must never
+  provider) via POST /api/open. Paste is native-only: Ctrl+V and Ctrl+Shift+V must never
   be preventDefault'ed (WebView2 denies navigator.clipboard.readText silently).
   QuickTerm also overrides xterm's default OSC hyperlink handler, which would
   otherwise use a browser confirmation dialog.
-- Copy: Ctrl+Shift+C or right-click copies the current selection
+- Copy: Ctrl+C, Ctrl+Shift+C, or right-click copies the current selection
   (navigator.clipboard.writeText, execCommand fallback), with a visible
   `[copied]` / `[copy failed]` confirmation; copy is read-only and never counts
-  as user input. No selection → the combo passes through to the shell.
+  as user input. No selection → Ctrl+C passes through to the shell as interrupt.
 - OSC 52: apps inside the terminal (Claude Code, tmux, vim, …) copy to the
   system clipboard by emitting `ESC]52;c;<base64>`; the pane honors it via the
   same write path (async + execCommand fallback). Read requests (`…;?`) are
-  declined. Without this the copy is silently dropped though the app reports it.
+  declined and decoded writes are capped at 1 MiB. Without this the copy is
+  silently dropped though the app reports it.
 - Rendering: WebGL renderer (DOM fallback) + Unicode 11 width tables
   (`addon-unicode11`, activeVersion "11") so emoji/wide glyphs measure correctly
   and modern TUIs don't drift the cursor; falls back to xterm's built-in v6.

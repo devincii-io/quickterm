@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -34,20 +35,49 @@ def _safe_name(name: str) -> str:
 
 
 def _path_for(name: str) -> Path:
+    safe = _safe_name(name)
+    reserved = safe.split(".", 1)[0].upper() in {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    if safe != name or len(safe) > 80 or reserved:
+        digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+        safe = f"{safe[:80]}--{digest}"
+    return _workspaces_dir() / f"{safe}.json"
+
+
+def _legacy_path_for(name: str) -> Path:
+    """Pre-2.1 path shape, retained only for reading/migrating old files."""
     return _workspaces_dir() / f"{_safe_name(name)}.json"
 
 
+def _stored_name(path: Path) -> str | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    value = raw.get("name") if isinstance(raw, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def list_workspaces() -> list[str]:
-    return sorted(p.stem for p in _workspaces_dir().glob("*.json"))
+    # The display name lives in the document. Filenames may carry a collision-
+    # resistant suffix for characters Windows cannot represent directly.
+    return sorted({_stored_name(p) or p.stem for p in _workspaces_dir().glob("*.json")})
 
 
 def load_workspace(name: str) -> Workspace | None:
     path = _path_for(name)
     if not path.exists():
+        legacy = _legacy_path_for(name)
+        if legacy != path and _stored_name(legacy) == name:
+            path = legacy
+    if not path.exists():
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -84,6 +114,12 @@ def save_workspace(ws: Workspace) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
+        legacy = _legacy_path_for(ws.name)
+        if legacy != path and _stored_name(legacy) == ws.name:
+            try:
+                legacy.unlink()
+            except OSError:
+                pass  # migration cleanup is best-effort; the new file is durable
     except BaseException:
         try:
             os.unlink(temp_name)
@@ -108,3 +144,6 @@ def delete_workspace(name: str) -> None:
     path = _path_for(name)
     if path.exists():
         path.unlink()
+    legacy = _legacy_path_for(name)
+    if legacy != path and _stored_name(legacy) == name:
+        legacy.unlink()
