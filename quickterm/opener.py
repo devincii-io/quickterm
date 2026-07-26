@@ -15,7 +15,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 # Ctrl+click may be induced by untrusted terminal output. Open only file types
 # that are conventionally passive; reveal every other file in Explorer/Finder
 # so executable-capable extensions (.cpl/.msc/.chm/.url/...) never launch.
@@ -34,7 +34,10 @@ def open_target(target: str) -> dict:
     cleaned = (target or "").strip().strip('"').strip("'")
     if not cleaned:
         raise ValueError("empty target")
-    if cleaned.startswith(("http://", "https://")):
+    # URI schemes are case-insensitive (RFC 3986). Terminal link providers can
+    # preserve the spelling printed by a tool, so accept HTTPS:// just like a
+    # browser does instead of misclassifying it as an unsupported scheme.
+    if cleaned.lower().startswith(("http://", "https://")):
         webbrowser.open(cleaned)
         return {"action": "url"}
     if _SCHEME.match(cleaned):

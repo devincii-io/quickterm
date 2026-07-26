@@ -127,6 +127,37 @@ async def test_slow_subscriber_requests_clean_resync(manager):
     assert att.queue.get_nowait() is att.overflow_sentinel
 
 
+async def test_background_output_is_reported_and_attach_acknowledges(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    info = mgr.spawn(cmd="x.exe")
+    first = mgr.attach(info.id)
+
+    mgr._on_output(mgr.get(info.id), b"while open")
+    assert mgr.session_activity(info.id)["background_output_bytes"] == 0
+
+    first.detach()
+    mgr._on_output(mgr.get(info.id), b"finished\r\n")
+    activity = mgr.session_activity(info.id)
+    assert activity["background_output_bytes"] == len(b"finished\r\n")
+    assert activity["background_output_age_seconds"] == 0
+
+    second = mgr.attach(info.id)
+    assert mgr.session_activity(info.id)["background_output_bytes"] == 0
+    assert mgr.session_activity(info.id)["background_output_age_seconds"] is None
+    second.detach()
+    mgr._sessions.clear()
+
+
+async def test_initial_prompt_before_first_attach_is_not_unread(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    info = mgr.spawn(cmd="x.exe")
+    mgr._on_output(mgr.get(info.id), b"prompt> ")
+    assert mgr.session_activity(info.id)["background_output_bytes"] == 0
+    mgr._sessions.clear()
+
+
 async def test_idle_reaper_spares_attached_and_workspace_sessions(manager):
     cmd, args = _interactive()
     first = manager.spawn(cmd=cmd, args=args, name="idle")

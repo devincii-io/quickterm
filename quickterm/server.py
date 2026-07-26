@@ -110,6 +110,7 @@ def create_app(
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
         count = getattr(manager, "attachment_count", None)
+        activity_fn = getattr(manager, "session_activity", None)
         metrics_fn = getattr(manager, "session_metrics", None)
         if metrics_fn:
             busy_set, metrics = metrics_fn()
@@ -122,6 +123,8 @@ def create_app(
             d = _asdict(info)
             d["attachments"] = count(info.id) if count else 0
             d["busy"] = info.id in busy_set
+            if activity_fn:
+                d["activity"] = activity_fn(info.id)
             if info.id in metrics:
                 d["usage"] = metrics[info.id]
             out.append(d)
@@ -247,13 +250,18 @@ def create_app(
     @app.post("/api/sessions/kill-all")
     def kill_all_sessions() -> dict:
         session_ids = [info.id for info in manager.list() if info.alive]
+        killed: list[str] = []
         failed: list[str] = []
         for sid in session_ids:
             if manager.kill(sid) is False:
                 failed.append(sid)
-        if failed:
-            raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
-        return {"killed": len(session_ids)}
+            else:
+                killed.append(sid)
+        # A partial result is still actionable: clients must remove only the
+        # sessions the backend verified as stopped and keep failures visible
+        # for retry. Returning a generic 500 previously discarded that detail
+        # and made Kill all look as though it had done nothing.
+        return {"killed": len(killed), "killed_ids": killed, "failed_ids": failed}
 
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:
@@ -502,6 +510,9 @@ def create_app(
         await ws.accept(subprotocol=(auth.SUBPROTOCOL_PREFIX + token) if token else None)
         if session is None:
             await ws.close(code=4404)
+            return
+        if not session.info.alive:
+            await ws.close(code=4410, reason="session has exited")
             return
         # Subscribe before taking the replay snapshot. Both calls are
         # synchronous on the event-loop thread, so output cannot slip between

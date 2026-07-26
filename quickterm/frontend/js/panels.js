@@ -12,8 +12,9 @@ import {
 const DASHBOARD_REFRESH_MS = 5000;
 
 const THEME_CATALOG_GROUPS = [
-  ["Dark", ["graphite", "one-dark", "dracula", "tokyo-night", "github-dark", "solarized-dark", "material-ocean", "night-owl", "cobalt2"]],
-  ["Soft", ["catppuccin-mocha", "catppuccin-macchiato", "nord", "everforest", "rose-pine", "ayu-mirage"]],
+  ["Dark", ["graphite", "one-dark", "dracula", "github-dark", "github-dark-dimmed", "solarized-dark", "material-ocean", "night-owl", "oxocarbon"]],
+  ["Neon", ["tokyo-night", "tokyo-night-storm", "cobalt2"]],
+  ["Soft", ["catppuccin-mocha", "catppuccin-macchiato", "catppuccin-frappe", "nord", "everforest", "rose-pine", "rose-pine-moon", "ayu-mirage"]],
   ["Warm", ["gruvbox-dark", "kanagawa", "monokai", "horizon"]],
   ["Light", ["rose-pine-dawn", "github-light", "solarized-light"]],
   ["Custom", [CUSTOM_THEME]],
@@ -258,18 +259,27 @@ export class Panels {
 
   _clearInlineConfirmation(restoreButton = true) {
     if (!this._inlineConfirmation) return;
-    const { box, button } = this._inlineConfirmation;
+    const { box, button, wasDisabled } = this._inlineConfirmation;
     this._inlineConfirmation = null;
     box.remove();
-    if (restoreButton && button.isConnected) {
-      button.hidden = false;
-      button.focus();
+    if (button.isConnected) {
+      button.disabled = wasDisabled;
+      button.setAttribute("aria-expanded", "false");
+      if (restoreButton) button.focus();
     }
   }
 
   _confirmNear(button, message, confirmLabel, action) {
     this._clearInlineConfirmation(false);
-    button.hidden = true;
+    // Measure before changing the trigger. The previous implementation hid it
+    // first, making getBoundingClientRect() return a zero rectangle and placing
+    // confirmations at the top-right of the window (usually outside the
+    // scrolled dashboard view). Keep the sole destructive control visible and
+    // disabled while its confirmation is open.
+    const rect = button.getBoundingClientRect();
+    const wasDisabled = button.disabled;
+    button.disabled = true;
+    button.setAttribute("aria-expanded", "true");
     const box = make("div", "inline-confirmation");
     box.setAttribute("role", "group");
     box.setAttribute("aria-label", "Confirm destructive action");
@@ -280,10 +290,17 @@ export class Panels {
     actions.append(confirm, cancel);
     box.append(copy, actions);
     document.body.append(box);
-    const rect = button.getBoundingClientRect();
-    box.style.top = `${Math.min(window.innerHeight - 90, rect.bottom + 6)}px`;
-    box.style.right = `${Math.max(12, window.innerWidth - rect.right)}px`;
-    this._inlineConfirmation = { box, button };
+    const boxRect = box.getBoundingClientRect();
+    const margin = 12;
+    const gap = 6;
+    const maxLeft = Math.max(margin, window.innerWidth - boxRect.width - margin);
+    const left = Math.max(margin, Math.min(maxLeft, rect.right - boxRect.width));
+    let top = rect.bottom + gap;
+    if (top + boxRect.height > window.innerHeight - margin) top = rect.top - boxRect.height - gap;
+    top = Math.max(margin, Math.min(window.innerHeight - boxRect.height - margin, top));
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+    this._inlineConfirmation = { box, button, wasDisabled };
 
     const run = async () => {
       confirm.disabled = true;
@@ -419,8 +436,11 @@ export class Panels {
         const count = liveSessions.length;
         const warning = `Stop ${count} live terminal${count === 1 ? "" : "s"} across all QuickTerm windows? Their panes in this window will close and unsaved shell work will be lost.`;
         this._confirmNear(killAll, warning, "Kill all", async () => {
-          await this.app.killAllSessions();
+          const result = await this.app.killAllSessions();
           if (this.open === "dashboard") this._dashboard(true);
+          if (result.failed) {
+            throw new Error(`${result.failed} terminal${result.failed === 1 ? "" : "s"} could not be stopped and remain visible.`);
+          }
         });
       });
       usageHeading.append(killAll);
@@ -436,7 +456,7 @@ export class Panels {
       const identity = make("div", "usage-identity");
       const scope = usage.scope === "host-process-tree-partial-wsl"
         ? "host side only · WSL workload excluded"
-        : `${session.attachments > 0 ? "open" : "background"} · ${session.profile || "terminal"}`;
+        : `${session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background")} · ${session.profile || "terminal"}`;
       identity.append(make("strong", "", session.name || session.id), make("small", "", scope));
       const values = make("div", "usage-values");
       const cpu = usage.cpu_percent == null ? "Sampling…" : `${usage.cpu_percent.toFixed(1)}%`;
@@ -595,9 +615,13 @@ export class Panels {
     const sessionRow = (session, workspaceName, isCurrent) => {
       const row = make("div", "detached-session-row");
       const copy = make("div", "detached-session-copy");
+      const unreadBytes = session.activity?.background_output_bytes || 0;
+      const activity = unreadBytes > 0
+        ? `New output ${formatBytes(unreadBytes)} · ${formatUptime(session.activity?.background_output_age_seconds || 0)} ago`
+        : `Quiet ${formatUptime(session.activity?.idle_seconds || 0)} · ${session.id}`;
       copy.append(
         make("strong", "", session.name || session.id),
-        make("small", "", `${session.profile || "terminal"} · ${session.id}`),
+        make("small", "", `${session.profile || "terminal"} · ${activity}`),
       );
       const actions = make("div", "detached-session-actions");
       const attach = this._button(isCurrent ? "Attach" : "Move here & attach", "secondary-button compact");

@@ -71,6 +71,14 @@ class Session:
         self.started_at = self.last_activity
         self.ended_at: float | None = None
         self.resource_scope = "host-process-tree"
+        # Background output is a deliberately simple, deterministic attention
+        # signal: bytes produced after a viewer has detached remain unread until
+        # the next attach.  This is useful for long-running builds and coding
+        # agents without trying to infer semantic "working/waiting" state from
+        # terminal escape sequences.
+        self.ever_attached = False
+        self.background_output_bytes = 0
+        self.background_output_at: float | None = None
 
     def scrollback(self) -> tuple[bytes, int, int]:
         # Joined only here, at attach time (rare) — not on the hot output path.
@@ -251,6 +259,26 @@ class SessionManager:
             self._cpu_samples.pop(sid, None)
         return busy, metrics
 
+    def session_activity(self, sid: str) -> dict[str, int | None]:
+        """Return lightweight attention metadata for one session."""
+        session = self._sessions.get(sid)
+        if session is None:
+            return {
+                "idle_seconds": 0,
+                "background_output_bytes": 0,
+                "background_output_age_seconds": None,
+            }
+        now = time.monotonic()
+        return {
+            "idle_seconds": max(0, int(now - session.last_activity)),
+            "background_output_bytes": session.background_output_bytes,
+            "background_output_age_seconds": (
+                max(0, int(now - session.background_output_at))
+                if session.background_output_at is not None
+                else None
+            ),
+        }
+
     def has_attachments(self, sid: str) -> bool:
         s = self._sessions.get(sid)
         return bool(s and s._attachments)
@@ -314,6 +342,12 @@ class SessionManager:
 
     def attach(self, sid: str) -> Attachment:
         s = self._sessions[sid]
+        # Opening the terminal acknowledges output accumulated while it was in
+        # the background. Do this before registering the viewer so the state is
+        # consistent for concurrent session-list requests.
+        s.ever_attached = True
+        s.background_output_bytes = 0
+        s.background_output_at = None
         att = Attachment(s)
         s._attachments.add(att)
         if not s.info.alive:
@@ -352,6 +386,9 @@ class SessionManager:
 
     def _on_output(self, session: Session, data: bytes) -> None:
         session.last_activity = time.monotonic()
+        if data and session.ever_attached and not session._attachments:
+            session.background_output_bytes += len(data)
+            session.background_output_at = session.last_activity
         session._record(data)
         session._fanout(data)
 

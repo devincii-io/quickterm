@@ -272,6 +272,12 @@ async function boot() {
   }
 
   function attachSession(info) {
+    // Session cards can become stale between a dashboard refresh and a click.
+    // Never create a pane for an API record already known to have exited.
+    if (!info || !info.id || info.alive === false) {
+      refreshStatusSoon();
+      return false;
+    }
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
@@ -280,6 +286,7 @@ async function boot() {
     ownSession(info.id);
     scheduleWorkspaceSave();
     refreshStatusSoon();
+    return true;
   }
 
   async function persistCurrentWorkspace() {
@@ -496,6 +503,17 @@ async function boot() {
     scheduleWorkspaceSave();
   }
 
+  function removeSessionFromLayout(node, sessionId) {
+    if (!node) return false;
+    if (node.type === "split") {
+      return (node.children || []).reduce((changed, child) =>
+        removeSessionFromLayout(child, sessionId) || changed, false);
+    }
+    if (node.session_id !== sessionId) return false;
+    delete node.session_id;
+    return true;
+  }
+
   async function removeWorkspaceOwnership(name, sessionId) {
     if (name === currentWorkspace) {
       workspaceSessionIds.delete(sessionId);
@@ -505,20 +523,47 @@ async function boot() {
     const saved = await workspace.details(name).catch(() => null);
     if (!saved) return;
     const ids = new Set(saved.session_ids || []);
-    sessionIdsInLayout(saved.layout, ids);
-    ids.delete(sessionId);
-    await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+    const removedOwnership = ids.delete(sessionId);
+    const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
+    const changed = removedOwnership || removedLayoutReference;
+    if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+  }
+
+  async function removeSessionsFromSavedWorkspaces(sessionIds) {
+    if (!sessionIds.size) return;
+    const names = await api.listWorkspaces().catch(() => []);
+    await Promise.all(names.map(async (name) => {
+      const saved = await workspace.details(name).catch(() => null);
+      if (!saved) return;
+      const ids = new Set(saved.session_ids || []);
+      let changed = false;
+      for (const sessionId of sessionIds) {
+        const removedOwnership = ids.delete(sessionId);
+        const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
+        changed = removedOwnership || removedLayoutReference || changed;
+      }
+      if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+    }));
   }
 
   async function moveSessionHere(info, fromWorkspace) {
     if (!info || !info.id) return;
+    const current = await api.getSessions().catch(() => []);
+    const fresh = current.find((session) => session.id === info.id && session.alive);
+    if (!fresh) {
+      if (fromWorkspace) await removeWorkspaceOwnership(fromWorkspace, info.id);
+      forgetSession(info.id);
+      setWorkspaceSaveState("terminal already exited", "error");
+      refreshStatusSoon();
+      return false;
+    }
     if (!currentWorkspace && !(await ensureScratchWorkspace())) return;
     if (fromWorkspace && fromWorkspace !== currentWorkspace) {
       await removeWorkspaceOwnership(fromWorkspace, info.id);
     }
     workspaceSessionIds.add(info.id);
     await persistCurrentWorkspace();
-    attachSession(info);
+    return attachSession(fresh);
   }
 
   async function killWorkspaceSession(info, workspaceName) {
@@ -596,16 +641,21 @@ async function boot() {
     },
     killAllSessions: async () => {
       const result = await api.killAllSessions();
+      const killedIds = new Set(result?.killed_ids || []);
       for (const pane of [...layout.panes()]) {
-        if (!pane.session) continue;
+        if (!pane.session || !killedIds.has(pane.session.id)) continue;
         forgetSession(pane.session.id);
         layout.closePane(pane);
       }
-      workspaceSessionIds.clear();
-      scratchSessionIds.clear();
+      for (const sessionId of killedIds) forgetSession(sessionId);
+      await removeSessionsFromSavedWorkspaces(killedIds);
       scheduleWorkspaceSave();
       refreshStatusSoon();
-      return result?.killed || 0;
+      const failed = result?.failed_ids || [];
+      if (failed.length) {
+        setWorkspaceSaveState(`${failed.length} terminal${failed.length === 1 ? "" : "s"} could not be stopped`, "error");
+      }
+      return { killed: result?.killed || 0, failed: failed.length };
     },
     moveSessionHere,
     killWorkspaceSession,

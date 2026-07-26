@@ -276,6 +276,21 @@ def test_list_sessions(client, manager):
     assert data[0]["alive"] is True
 
 
+def test_list_sessions_includes_background_activity(client, manager):
+    info = manager.add_session(name="agent")
+    manager.session_activity = lambda sid: {
+        "idle_seconds": 12,
+        "background_output_bytes": 4096 if sid == info.id else 0,
+        "background_output_age_seconds": 3,
+    }
+    activity = client.get("/api/sessions").json()[0]["activity"]
+    assert activity == {
+        "idle_seconds": 12,
+        "background_output_bytes": 4096,
+        "background_output_age_seconds": 3,
+    }
+
+
 def test_spawn_with_explicit_cmd(client, manager):
     r = client.post("/api/sessions", json={"cmd": "cmd.exe", "args": ["/c", "echo hi"],
                                            "name": "t", "cols": 100, "rows": 40})
@@ -535,12 +550,16 @@ def test_json_endpoints_reject_malformed_and_oversized_bodies(
 
 
 def test_kill_all_sessions(client, manager):
-    manager.add_session(name="one")
-    manager.add_session(name="two")
+    first = manager.add_session(name="one")
+    second = manager.add_session(name="two")
     manager.add_session(name="stopped", alive=False)
     response = client.post("/api/sessions/kill-all")
     assert response.status_code == 200
-    assert response.json() == {"killed": 2}
+    assert response.json() == {
+        "killed": 2,
+        "killed_ids": [first.id, second.id],
+        "failed_ids": [],
+    }
     assert len(manager.killed) == 2
 
 
@@ -556,7 +575,12 @@ def test_kill_all_reports_partial_failure(client, manager, monkeypatch):
 
     monkeypatch.setattr(manager, "kill", kill)
     response = client.post("/api/sessions/kill-all")
-    assert response.status_code == 500
+    assert response.status_code == 200
+    assert response.json() == {
+        "killed": 1,
+        "killed_ids": [first.id],
+        "failed_ids": [second.id],
+    }
     assert manager.get(first.id) is None
     assert manager.get(second.id) is not None
 
@@ -899,6 +923,17 @@ def test_ws_unknown_session_closes_4404(client):
         msg = ws.receive()
     assert msg["type"] == "websocket.close"
     assert msg["code"] == 4404
+
+
+def test_ws_exited_session_is_not_reattachable(client, manager):
+    info = manager.add_session(alive=False, exit_code=0)
+    with client.websocket_connect(
+        f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}
+    ) as ws:
+        msg = ws.receive()
+    assert msg["type"] == "websocket.close"
+    assert msg["code"] == 4410
+    assert manager.last_attachment is None
 
 
 def test_ws_detach_on_client_disconnect(client, manager):

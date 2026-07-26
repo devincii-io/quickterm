@@ -74,9 +74,12 @@ def save_config(cfg: AppConfig) -> None
 def validate_environment(env: object) -> dict[str, str]
 ```
 
-Saving validates that every non-WSL profile's configured starting folder is an
-existing local directory. WSL profiles accept Linux paths and are not checked
-against the Windows filesystem. `ssh`/`sftp` profiles require a non-empty
+Saving validates runtime-facing field types (including font family, update
+toggle, profile terminal type, startup command, autostart, and shortcut) so a
+malformed JSON config cannot reach launcher or spawn code and fail there.
+Every non-WSL profile's configured starting folder must be an existing local
+directory. WSL profiles accept Linux paths and are not checked against the
+Windows filesystem. `ssh`/`sftp` profiles require a non-empty
 `ssh_host`; the Settings UI keeps their `cwd` empty (a remote session has no
 local starting folder). Passphrases and passwords are never stored — plink and
 psftp prompt interactively inside the terminal.
@@ -154,6 +157,7 @@ class SessionManager:
     def attach(self, sid: str) -> "Attachment"
     def busy_ids(self) -> set[str]            # sessions whose shell has a child process
     def session_metrics(self) -> tuple[set[str], dict[str, dict]]
+    def session_activity(self, sid: str) -> dict[str, int | None]
     def set_max_sessions(self, limit: int) -> None
     def shutdown(self) -> None                # kill all
 
@@ -207,11 +211,11 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage}]`; `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. WSL scope is explicitly partial. |
+| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides); 409 when the live-terminal limit is reached. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
-| POST | /api/sessions/kill-all | → kill every live session → `{killed: int}` |
+| POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
@@ -235,7 +239,8 @@ JSON bodies for session creation, elevation, and full-config updates are capped
 at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
 immutable asset responses retain their explicit long-lived cache policy.
 
-WebSocket `/ws/session/{id}` — attach protocol, in order:
+WebSocket `/ws/session/{id}` — attach protocol, in order. Exited sessions are
+rejected with close code `4410` and cannot be reattached; unknown IDs use `4404`:
 
 1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (size scrollback was recorded at)
 2. server → binary scrollback frames of at most 128 KiB; after xterm finishes
@@ -343,7 +348,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `ssh`/`sftp` profiles swap the starting-folder field for Host/Port/Username/Private key (`.ppk`);
   `ssh` relabels start command as a remote command; `sftp` hides it.
 - Themes: four featured choices stay visible; the catalog groups all remaining
-  palettes under Dark, Soft, Warm, Light, and Custom. Clicking a theme previews
+  palettes under Dark, Neon, Soft, Warm, Light, and Custom. Clicking a theme previews
   both application chrome and every open xterm immediately; Cancel restores the
   persisted theme.
 - Quick settings: the status-bar View drawer controls font size for either the

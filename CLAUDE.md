@@ -59,6 +59,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `sys.modules` stubs and writes to the real `%APPDATA%`.
 - Session activity tracking uses `touched` (set on user input via `onKey`, not
   `onData` — xterm auto-replies to DA/DSR must not count).
+- Session termination is verified per process. Bulk kills return successful and
+  failed IDs separately; clients must remove only verified kills and leave
+  failures visible. Destructive confirmation triggers must remain visible and
+  their popovers must be clamped inside the viewport.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`

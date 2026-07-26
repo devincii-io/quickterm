@@ -275,6 +275,14 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("Terminal limit must be between 0 and 100")
     if not isinstance(cfg.theme, str) or not cfg.theme.strip():
         raise ValueError("Theme must be a non-empty string")
+    if not isinstance(cfg.font_family, str) or not cfg.font_family.strip():
+        raise ValueError("Font family must be a non-empty string")
+    if cfg.logo is not None and not isinstance(cfg.logo, str):
+        raise ValueError("Logo must be a string or null")
+    if not isinstance(cfg.default_profile, str):
+        raise ValueError("Default profile must be a string")
+    if not isinstance(cfg.update_check, bool):
+        raise ValueError("Update check must be true or false")
     if not isinstance(cfg.custom_theme, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
         for key, value in cfg.custom_theme.items()
@@ -298,6 +306,17 @@ def validate_config(cfg: AppConfig) -> None:
         profile_names.add(folded)
         if not isinstance(profile.cmd, str):
             raise ValueError(f'Terminal profile "{name}": command must be a string')
+        for field_label, value in (
+            ("terminal type", profile.terminal_type),
+            ("WSL distribution", profile.wsl_distro),
+            ("startup command", profile.start_command),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(
+                    f'Terminal profile "{name}": {field_label} must be a string'
+                )
+        if not isinstance(profile.autostart, bool):
+            raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
         if profile.terminal_type == "custom" and not profile.cmd.strip():
             raise ValueError(f'Terminal profile "{name}": executable is required')
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
@@ -320,9 +339,9 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f'Terminal profile "{name}": {exc}') from exc
         if profile.cwd is not None and not isinstance(profile.cwd, str):
             raise ValueError(f'Terminal profile "{name}": starting folder must be a string')
+        if profile.keybinding is not None and not isinstance(profile.keybinding, str):
+            raise ValueError(f'Terminal profile "{name}": shortcut must be a string')
         if profile.keybinding:
-            if not isinstance(profile.keybinding, str):
-                raise ValueError(f'Terminal profile "{name}": shortcut must be a string')
             parsed = parse_binding(profile.keybinding)
             if parsed in hotkey_owners:
                 raise ValueError(

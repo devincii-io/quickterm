@@ -30,6 +30,14 @@ def test_http_url_opens_browser(monkeypatch):
     assert calls == ["https://example.com/x", "http://example.com"]
 
 
+def test_http_url_scheme_is_case_insensitive(monkeypatch):
+    calls = []
+    monkeypatch.setattr(opener.webbrowser, "open", lambda url: calls.append(url))
+
+    assert opener.open_target("HTTPS://example.com/Release") == {"action": "url"}
+    assert calls == ["HTTPS://example.com/Release"]
+
+
 def test_existing_dir_opens(monkeypatch, tmp_path):
     opened = []
     if sys.platform == "win32":

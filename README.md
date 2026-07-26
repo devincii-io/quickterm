@@ -111,10 +111,15 @@ run, but Scratch and all of its sessions are discarded when QuickTerm quits.
 set, sampled CPU, process count, and uptime for every live terminal. The status
 bar shows the measured total. WSL is labelled **host side only** because Linux
 processes inside the WSL VM cannot be attributed reliably to one Windows
-terminal. Settings can cap live terminals from 1–100; `0` keeps the default
+terminal. Output produced after a terminal is detached is marked **New output**
+with its byte count and age, then acknowledged automatically when you attach it.
+Settings can cap live terminals from 1–100; `0` keeps the default
 unlimited behavior. Reaching the cap blocks new spawns and never kills an
 existing terminal. The dashboard also has a confirmed **Kill all terminals**
-action for intentionally stopping every live session.
+action for intentionally stopping every live session. It removes only terminals
+the backend verifies as stopped; any failure stays visible and is reported for retry.
+Kill confirmations remain visible beside their trigger and are clamped inside
+the window, including for sessions near the bottom of a scrolled dashboard.
 
 ## Configuration
 
@@ -155,8 +160,10 @@ value written manually remains supported and is protected on the next load:
 Snippets, custom themes, global and per-workspace logos, the idle-session
 timeout, summon hotkey, port, scrollback size, and font live in the same file.
 Settings shows four featured color themes and groups the full catalog into
-Dark, Soft, Warm, Light, and Custom sections. Theme previews update the whole
-workbench and every open terminal immediately, then revert on Cancel.
+Dark, Neon, Soft, Warm, Light, and Custom sections. The expanded dark catalog
+includes low-glare, pastel, blue-black, and true-black palettes. Theme previews
+update the whole workbench and every open terminal immediately, then revert on
+Cancel.
 (A local voice-input mode exists behind `uv sync --extra voice` but is parked
 until it gets a proper capture overlay.) Named workspaces are saved under the QuickTerm config directory
 and can be switched from the app bar or dashboard. Logs rotate under `logs/` in

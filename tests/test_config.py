@@ -245,3 +245,38 @@ def test_save_rejects_conflicting_global_shortcuts(fake_appdata):
     ])
     with pytest.raises(ValueError, match="conflicts"):
         save_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("font_family", 123, "Font family"),
+        ("logo", {"id": "logo.png"}, "Logo"),
+        ("default_profile", [], "Default profile"),
+        ("update_check", "false", "Update check"),
+    ],
+)
+def test_save_rejects_wrong_global_field_types(fake_appdata, field, value, message):
+    cfg = AppConfig()
+    setattr(cfg, field, value)
+    with pytest.raises(ValueError, match=message):
+        save_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("terminal_type", [], "terminal type"),
+        ("wsl_distro", 24, "WSL distribution"),
+        ("start_command", ["echo", "ready"], "startup command"),
+        ("autostart", "false", "autostart"),
+        ("keybinding", 0, "shortcut"),
+    ],
+)
+def test_save_rejects_profile_fields_that_would_break_runtime(
+    fake_appdata, field, value, message
+):
+    profile = Profile(name="Broken", cmd="cmd.exe")
+    setattr(profile, field, value)
+    with pytest.raises(ValueError, match=message):
+        save_config(AppConfig(profiles=[profile]))
