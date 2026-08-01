@@ -167,6 +167,10 @@ an optional command to run inside the shell, environment variables, a global
 shortcut and autostart. With no folder configured, Windows shells start in the
 Windows user home and WSL starts in the distro's Linux home. A WSL profile can
 use Linux paths such as `~/dev`; its startup command runs from that location.
+Every local profile folder field keeps direct path entry and adds a native
+**Browse** picker in the installed app. WSL can still use a manually entered
+Linux path, while Browse can select an absolute Windows folder accepted by
+`wsl.exe --cd`.
 
 Claude Code is a first-class project profile rather than a name convention.
 Bind it to a project folder and choose **Continue latest**, Claude's native

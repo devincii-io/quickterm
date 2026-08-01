@@ -2,6 +2,18 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.0.1
+
+### Native profile folder picker
+
+- Added a Windows folder chooser beside every local terminal profile's
+  Starting folder or Claude Project folder while preserving direct path entry.
+- Cancel leaves the existing path untouched; failed dialogs remain retryable,
+  and standalone browsers clearly disable the native-only control rather than
+  pretending they can disclose a host path.
+- WSL profiles continue accepting Linux paths manually and can use Browse to
+  select an absolute Windows directory for `wsl.exe --cd`.
+
 ## QuickTerm 3.0.0
 
 ### Terminal-first workspace

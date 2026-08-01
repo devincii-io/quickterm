@@ -56,6 +56,44 @@ class _PrivacyFormatter(logging.Formatter):
         return rendered
 
 
+class _DesktopApi:
+    """Small, local-only bridge for native desktop capabilities.
+
+    The browser frontend deliberately cannot learn arbitrary host paths. The
+    installed pywebview shell can expose a folder selected by the user through
+    an operating-system dialog, which is the only path this bridge returns.
+    """
+
+    def __init__(self) -> None:
+        self._window: Any | None = None
+
+    def _bind_window(self, window: Any) -> None:
+        self._window = window
+
+    def pick_folder(self, initial_directory: str = "") -> str | None:
+        window = self._window
+        if window is None:
+            return None
+        initial = initial_directory.strip() if isinstance(initial_directory, str) else ""
+        if initial:
+            expanded = os.path.expandvars(os.path.expanduser(initial))
+            initial = expanded if os.path.isdir(expanded) else ""
+        try:
+            # pywebview FileDialog.FOLDER is the stable value 20. Keeping the
+            # bridge independent of a module-global webview import preserves
+            # headless imports and the existing POSIX fallback.
+            selected = window.create_file_dialog(20, directory=initial)
+        except Exception:
+            log.warning("native folder picker failed", exc_info=True)
+            return None
+        if not selected:
+            return None
+        candidate = selected if isinstance(selected, str) else selected[0]
+        if not isinstance(candidate, str) or not os.path.isdir(candidate):
+            return None
+        return os.path.abspath(candidate)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
@@ -311,6 +349,7 @@ def _run_desktop(
         return False
 
     title = "QuickTerm - Administrator" if elevated else "QuickTerm"
+    desktop_api = _DesktopApi()
     window = webview.create_window(
         title,
         _window_url(cfg.port, cwd),
@@ -318,8 +357,10 @@ def _run_desktop(
         height=800,
         min_size=(760, 480),
         background_color="#171918",
+        js_api=desktop_api,
         text_select=True,
     )
+    desktop_api._bind_window(window)
     _wire_native_file_drop(window)
 
     # Hide-to-tray: closing the primary window keeps terminals alive in the

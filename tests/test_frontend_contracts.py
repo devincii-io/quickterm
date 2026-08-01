@@ -111,6 +111,17 @@ def test_claude_code_is_an_explicit_project_profile_type():
     assert '"Project folder"' in source
 
 
+def test_every_local_profile_folder_field_has_the_native_picker():
+    source = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
+    app = (Path(__file__).parents[1] / "quickterm" / "app.py").read_text(encoding="utf-8")
+
+    assert 'class _DesktopApi:' in app
+    assert 'js_api=desktop_api' in app
+    assert 'pickNativeFolder(cwd.value)' in source
+    assert 'folder-picker-control' in source
+    assert 'kind === "claude-code" ? "Project folder" : "Starting folder"' in source
+
+
 def test_sidebar_collapse_returns_input_focus_to_the_terminal():
     source = LAUNCHER_JS.read_text(encoding="utf-8")
     assert "requestAnimationFrame(() => options.onLaunchComplete?.())" in source

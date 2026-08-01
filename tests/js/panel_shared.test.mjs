@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   countPanes, displaySnippet, environmentError, formatBytes, inferTerminalType,
-  layoutSessionIds, parseEnvLines, runnableSnippet,
+  layoutSessionIds, nativeFolderPickerAvailable, parseEnvLines, pickNativeFolder,
+  runnableSnippet,
 } from "../../quickterm/frontend/js/panel_shared.js";
 
 test("layout helpers count panes and collect bound sessions", () => {
@@ -36,4 +37,38 @@ test("terminal and snippet helpers preserve their UI contracts", () => {
   assert.equal(displaySnippet("echo ready\r"), "echo ready");
   assert.equal(runnableSnippet("echo ready"), "echo ready\r");
   assert.equal(formatBytes(1024 * 1024), "1.0 MB");
+});
+
+test("native folder picker distinguishes selection, cancel, and browser fallback", async () => {
+  const previous = globalThis.pywebview;
+  try {
+    delete globalThis.pywebview;
+    assert.equal(nativeFolderPickerAvailable(), false);
+    assert.deepEqual(await pickNativeFolder("C:\\old"), {
+      available: false, path: null, failed: false,
+    });
+
+    let initial = null;
+    globalThis.pywebview = { api: { pick_folder: async (value) => {
+      initial = value;
+      return "C:\\projects\\quickterm";
+    } } };
+    assert.equal(nativeFolderPickerAvailable(), true);
+    assert.deepEqual(await pickNativeFolder("C:\\old"), {
+      available: true, path: "C:\\projects\\quickterm", failed: false,
+    });
+    assert.equal(initial, "C:\\old");
+
+    globalThis.pywebview.api.pick_folder = async () => null;
+    assert.deepEqual(await pickNativeFolder(""), {
+      available: true, path: null, failed: false,
+    });
+    globalThis.pywebview.api.pick_folder = async () => { throw new Error("dialog failed"); };
+    assert.deepEqual(await pickNativeFolder(""), {
+      available: true, path: null, failed: true,
+    });
+  } finally {
+    if (previous === undefined) delete globalThis.pywebview;
+    else globalThis.pywebview = previous;
+  }
 });

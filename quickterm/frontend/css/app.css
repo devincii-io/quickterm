@@ -429,6 +429,9 @@ body.zoomed #sb-zoom { display: inline; }
 .settings-field { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .field-label { color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .field-hint { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.folder-picker-control { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.folder-picker-button { min-height: 40px; padding-inline: 11px; gap: 6px; display: inline-flex; align-items: center; justify-content: center; }
+.folder-picker-button.picker-failed { border-color: var(--danger); color: var(--danger); }
 .theme-picker { margin-top: 18px; }
 .theme-picker-title { margin: 0 0 3px; color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .theme-picker > .field-hint { display: block; margin-bottom: 11px; }

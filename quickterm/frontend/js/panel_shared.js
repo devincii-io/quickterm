@@ -73,6 +73,22 @@ export function inferTerminalType(profile) {
   return "custom";
 }
 
+export function nativeFolderPickerAvailable() {
+  return typeof globalThis.pywebview?.api?.pick_folder === "function";
+}
+
+export async function pickNativeFolder(initialDirectory = "") {
+  const picker = globalThis.pywebview?.api?.pick_folder;
+  if (typeof picker !== "function") return { available: false, path: null, failed: false };
+  try {
+    const selected = await picker(String(initialDirectory || ""));
+    const path = typeof selected === "string" && selected ? selected : null;
+    return { available: true, path, failed: false };
+  } catch (_) {
+    return { available: true, path: null, failed: true };
+  }
+}
+
 export function countPanes(layout) {
   if (!layout) return 0;
   if (layout.type !== "split") return 1;

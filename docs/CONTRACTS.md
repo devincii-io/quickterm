@@ -275,6 +275,9 @@ HTTP and WebSocket surface against DNS rebinding and cross-origin browser use.
 
 ```python
 def main() -> None
+
+class _DesktopApi:
+    def pick_folder(self, initial_directory: str = "") -> str | None
 ```
 
 - Fail fast unless `sys.getwindowsversion().build >= 17763` (Win10 1809).
@@ -283,13 +286,15 @@ def main() -> None
   ordinary process posts the folder to the authenticated `/api/launches` queue,
   summons the existing native viewer, and exits. The viewer opens it in Scratch.
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
-  launch browser `--app=http://127.0.0.1:<port>` (try msedge, then chrome,
-  else webbrowser.open).
+  native Edge WebView2 viewer. The viewer receives `_DesktopApi` as its
+  pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
+  one existing selected directory or `None` on Cancel/failure.
 - Spawn autostart profiles on startup.
 - Clean shutdown: manager.shutdown() on exit.
 - Close-to-tray (win32, non-elevated): closing the primary window hides to the
   system tray (quickterm/tray.py, ctypes Shell_NotifyIcon) iff any live session
-  has `touched=True` or its shell has a child process — otherwise the app quits.
+  has `touched=True`, `retained=True`, or its shell has a child process —
+  otherwise the app quits.
   Tray menu: Open / Quit. The summon hotkey also restores a tray-hidden window.
 
 ## quickterm/hotkeys.py
@@ -382,7 +387,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
-  startup command runs after that location is selected.
+  startup command runs after that location is selected. Every local profile's
+  Starting folder / Project folder control includes a native pywebview folder
+  picker while retaining manual entry. Cancel preserves the prior value; the
+  picker is visibly unavailable in a standalone browser because browsers may
+  not disclose an arbitrary host directory path.
 - Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v, zoom, detach, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.

@@ -1,7 +1,7 @@
 import json
 import logging
 
-from quickterm.app import _PrivacyFormatter, _native_drop_paths, _queue_running_launch
+from quickterm.app import _DesktopApi, _PrivacyFormatter, _native_drop_paths, _queue_running_launch
 
 
 def test_privacy_formatter_redacts_common_user_paths(monkeypatch):
@@ -65,3 +65,27 @@ def test_native_drop_bridge_uses_only_host_verified_full_paths():
     }
     assert _native_drop_paths(event) == [r"C:\work\image.png"]
     assert _native_drop_paths({"dataTransfer": {"files": [{"name": "only.txt"}]}}) == []
+
+
+def test_desktop_folder_picker_returns_only_a_selected_existing_directory(tmp_path):
+    picker = _DesktopApi()
+    assert picker.pick_folder(str(tmp_path)) is None
+
+    class Window:
+        def __init__(self):
+            self.selected = (str(tmp_path),)
+            self.calls = []
+
+        def create_file_dialog(self, dialog_type, *, directory):
+            self.calls.append((dialog_type, directory))
+            return self.selected
+
+    window = Window()
+    picker._bind_window(window)
+    assert picker.pick_folder(str(tmp_path)) == str(tmp_path.resolve())
+    assert window.calls == [(20, str(tmp_path))]
+
+    window.selected = None
+    assert picker.pick_folder(str(tmp_path)) is None
+    window.selected = (str(tmp_path / "missing"),)
+    assert picker.pick_folder(str(tmp_path)) is None

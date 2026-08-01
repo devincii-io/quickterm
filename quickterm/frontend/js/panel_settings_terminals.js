@@ -1,6 +1,7 @@
 import { icon } from "./icons.js";
 import {
-  TERMINAL_TYPES, envToLines, inferTerminalType, make, parseEnvLines,
+  TERMINAL_TYPES, envToLines, inferTerminalType, make, nativeFolderPickerAvailable,
+  parseEnvLines, pickNativeFolder,
 } from "./panel_shared.js";
 export function renderTerminalSettings(host, rerender) {
     const cfg = this.settingsDraft;
@@ -115,10 +116,41 @@ export function renderTerminalSettings(host, rerender) {
       } else {
         const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
         cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-        const folderHint = kind === "wsl" ? "Use a Linux path for WSL."
+        const folderControl = make("span", "folder-picker-control");
+        const browse = this._button("", "secondary-button folder-picker-button");
+        browse.type = "button";
+        browse.append(icon("folder", 14), make("span", "", "Browse"));
+        browse.setAttribute("aria-label", `Choose ${kind === "claude-code" ? "project" : "starting"} folder`);
+        const syncPickerAvailability = () => {
+          browse.disabled = !nativeFolderPickerAvailable();
+          browse.title = browse.disabled
+            ? "Folder picker is available in the installed QuickTerm app"
+            : "Choose a folder";
+        };
+        syncPickerAvailability();
+        if (browse.disabled) document.addEventListener("pywebviewready", syncPickerAvailability, { once: true });
+        browse.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          browse.disabled = true;
+          const result = await pickNativeFolder(cwd.value);
+          if (result.path) {
+            cwd.value = result.path;
+            profile.cwd = result.path;
+            cwd.focus();
+          }
+          browse.disabled = false;
+          if (result.failed) {
+            browse.title = "Folder picker failed; enter the path manually or try again";
+            browse.classList.add("picker-failed");
+            setTimeout(() => browse.classList.remove("picker-failed"), 2000);
+          }
+        });
+        folderControl.append(cwd, browse);
+        const folderHint = kind === "wsl" ? "Enter a Linux path, or browse for an absolute Windows folder."
           : kind === "claude-code" ? "Required project context for Claude's continue and session picker."
             : "Leave empty to start in your home folder.";
-        fields.append(this._field(kind === "claude-code" ? "Project folder" : "Starting folder", cwd, folderHint));
+        fields.append(this._field(kind === "claude-code" ? "Project folder" : "Starting folder", folderControl, folderHint));
       }
       if (kind === "claude-code") {
         const launchMode = this._select([
