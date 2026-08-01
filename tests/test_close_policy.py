@@ -10,6 +10,7 @@ from quickterm.app import _sessions_worth_keeping
 class _Info:
     alive: bool
     touched: bool
+    retained: bool = False
 
 
 class _Manager:
@@ -31,6 +32,12 @@ def test_touched_live_session_keeps_app_resident():
 
 def test_untouched_scratch_shell_quits():
     assert _sessions_worth_keeping(_Manager([_Info(alive=True, touched=False)])) is False
+
+
+def test_explicitly_retained_shell_keeps_app_resident_without_faking_input():
+    info = _Info(alive=True, touched=False, retained=True)
+    assert _sessions_worth_keeping(_Manager([info])) is True
+    assert info.touched is False
 
 
 def test_dead_sessions_do_not_keep_app_alive():

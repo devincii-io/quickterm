@@ -11,10 +11,11 @@ export function renderTerminalSettings(host, rerender) {
       let n = 1;
       const names = new Set(cfg.profiles.map((profile) => profile.name));
       while (names.has(`Terminal ${n}`)) n += 1;
-      const available = (this.terminalInventory.types || []).find((type) => type.executable && type.available !== false);
+      const available = (this.terminalInventory.types || []).find((type) =>
+        type.executable && type.available !== false && type.id !== "claude-code");
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -61,9 +62,13 @@ export function renderTerminalSettings(host, rerender) {
         // nushell, ssh/sftp); the static list is only the pre-load fallback.
         const known = (this.terminalInventory.types || []).find((item) => item.id === type.value)
           || TERMINAL_TYPES.find((item) => item.id === type.value);
-        if (known && known.executable) profile.cmd = known.executable;
+        // Clear an executable from the previous type even when the newly
+        // selected integration is not installed. Otherwise PowerShell could
+        // accidentally be launched with Claude's `--continue` arguments.
+        profile.cmd = known?.executable || "";
         if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
         else profile.args = [];
+        if (type.value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";
         rerender();
       });
       fields.append(this._field("Profile name", name), this._field("Terminal type", type));
@@ -110,9 +115,25 @@ export function renderTerminalSettings(host, rerender) {
       } else {
         const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
         cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-        fields.append(this._field("Starting folder", cwd, kind === "wsl" ? "Use a Linux path for WSL." : "Leave empty to start in your Desktop folder."));
+        const folderHint = kind === "wsl" ? "Use a Linux path for WSL."
+          : kind === "claude-code" ? "Required project context for Claude's continue and session picker."
+            : "Leave empty to start in your home folder.";
+        fields.append(this._field(kind === "claude-code" ? "Project folder" : "Starting folder", cwd, folderHint));
       }
-      if (kind !== "custom" && kind !== "sftp") {
+      if (kind === "claude-code") {
+        const launchMode = this._select([
+          { value: "continue", label: "Continue latest in this project" },
+          { value: "resume", label: "Choose from Claude sessions" },
+          { value: "agents", label: "Open Claude background-agent manager" },
+          { value: "new", label: "Always start a new conversation" },
+        ], profile.claude_mode || "continue");
+        launchMode.addEventListener("change", () => { profile.claude_mode = launchMode.value; });
+        fields.append(this._field(
+          "Claude launch",
+          launchMode,
+          "Uses Claude's native continue, session picker, or background-agent view in the project folder.",
+        ));
+      } else if (kind !== "custom" && kind !== "sftp") {
         const start = this._textInput(profile.start_command, kind === "ssh" ? "Optional, runs on the remote host" : "Optional, e.g. uv run dev");
         start.addEventListener("input", () => { profile.start_command = start.value || null; });
         fields.append(this._field(

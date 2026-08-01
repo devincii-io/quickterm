@@ -69,6 +69,30 @@ def test_save_load_roundtrip(fake_appdata):
     assert ubuntu.start_command == "source .venv/bin/activate"
 
 
+def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
+    cfg = AppConfig(profiles=[Profile(
+        name="project-agent",
+        cmd="claude.exe",
+        cwd=str(fake_appdata),
+        terminal_type="claude-code",
+        claude_mode="resume",
+    )])
+    save_config(cfg)
+
+    loaded = load_config().profiles[0]
+    assert loaded.terminal_type == "claude-code"
+    assert loaded.claude_mode == "resume"
+
+    loaded.claude_mode = "guess"
+    with pytest.raises(ValueError, match="Claude launch mode"):
+        save_config(AppConfig(profiles=[loaded]))
+
+    loaded.claude_mode = "continue"
+    loaded.cwd = None
+    with pytest.raises(ValueError, match="project folder is required"):
+        save_config(AppConfig(profiles=[loaded]))
+
+
 def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
     fake_appdata, monkeypatch
 ):

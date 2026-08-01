@@ -69,8 +69,13 @@ export class Panels {
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
     if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
-    if (this.returnFocus && this.returnFocus.isConnected) this.returnFocus.focus();
-    else this.app.refocusTerm();
+    // QuickTerm is a terminal-first workbench: closing a full-screen panel must
+    // make the focused pane immediately typeable again. Returning focus to a
+    // sidebar trigger leaves the next paste/keystroke outside xterm and feels
+    // like the terminal lost focus. Keep the trigger only as a no-pane
+    // accessibility fallback.
+    if (!this.app.refocusTerm()
+        && this.returnFocus && this.returnFocus.isConnected) this.returnFocus.focus();
   }
 
   toggle(name) {
@@ -273,6 +278,12 @@ export class Panels {
   }
   _terminalLabel(profile) {
     const type = inferTerminalType(profile);
+    if (type === "claude-code") {
+      const mode = profile.claude_mode === "resume" ? "choose session"
+        : profile.claude_mode === "agents" ? "agent manager"
+          : profile.claude_mode === "new" ? "new conversation" : "continue latest";
+      return `Claude Code · ${mode}`;
+    }
     if (type === "wsl" && profile.wsl_distro) return `WSL · ${profile.wsl_distro}`;
     if ((type === "ssh" || type === "sftp") && profile.ssh_host) {
       const target = profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host;

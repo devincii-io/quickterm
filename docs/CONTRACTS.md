@@ -28,10 +28,12 @@ class Profile:
     keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
     autostart: bool = False
     terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/
-                                      # git-bash/nushell/ssh/sftp/custom (POSIX adds bash/zsh/fish)
+                                      # git-bash/nushell/claude-code/ssh/sftp/custom
+                                      # (POSIX adds bash/zsh/fish)
     wsl_distro: str | None = None
     start_command: str | None = None  # run inside supported shells, then remain interactive;
                                       # for ssh: remote command run instead of a shell
+    claude_mode: str | None = None    # claude-code only: new/continue/resume/agents
     ssh_host: str | None = None       # ssh/sftp only; required for those types
     ssh_port: int | None = None       # None = 22; validated 1..65535
     ssh_user: str | None = None
@@ -134,6 +136,7 @@ class SessionInfo:
     id: str; name: str; profile: str | None
     alive: bool; exit_code: int | None; cols: int; rows: int
     touched: bool               # True once the user typed/pasted into it
+    retained: bool              # explicit detach; keep even if untouched/idle
     workspace: str | None = None  # workspace this session belongs to
 
 class Session:
@@ -151,6 +154,7 @@ class SessionManager:
               workspace: str | None = None) -> SessionInfo
     def list(self) -> list[SessionInfo]
     def get(self, sid: str) -> Session | None
+    def sync_workspace(self, name: str, session_ids: set[str]) -> None
     def write(self, sid: str, data: bytes) -> None
     def resize(self, sid: str, cols: int, rows: int) -> None
     def kill(self, sid: str) -> bool          # verified tree kill + remove after grace
@@ -182,8 +186,9 @@ Layout tree (JSON-serializable, shared with the frontend — SAME schema):
 ```
 
 Pane nodes may also contain `launch_spec` for system terminals opened without a
-saved profile. `session_id` is preferred when restoring; a missing/dead session
-falls back to spawning `profile` or `launch_spec`.
+saved profile. `session_id` is preferred when restoring. A missing/dead ID
+becomes an explicit transcript-free unavailable pane; only a user-selected
+recovery action may start a replacement or resume a Claude conversation.
 
 ```python
 @dataclass
@@ -211,9 +216,12 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?}` → `SessionInfo` (profile name resolves from config; explicit cmd overrides); 409 when the live-terminal limit is reached. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
+| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `?metrics=false` skips process-tree sampling and returns lifecycle/activity data with unavailable usage for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides); 409 when the live-terminal limit is reached. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
+| POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
+| POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
+| GET | /api/launches/next | Long-poll and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
 | DELETE | /api/sessions/{id} | kill tree → 204 |
@@ -222,7 +230,7 @@ REST (JSON, under `/api`):
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` |
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?}` → 204 |
-| DELETE | /api/workspaces/{name} | kill sessions referenced by the workspace, delete it → 204 |
+| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204 |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
 | GET | /api/config/full | → complete `AppConfig` |
 | PUT | /api/config | complete `AppConfig` → 204 |
@@ -271,9 +279,9 @@ def main() -> None
 
 - Fail fast unless `sys.getwindowsversion().build >= 17763` (Win10 1809).
 - Optional positional `path` arg (Explorer "Open QuickTerm here"): if it is a
-  directory, the window URL carries `?cwd=<dir>` (query before the `#t=` token
-  fragment) and the frontend opens its first terminal there. Works whether or
-  not a backend is already running (a second process opens a new window).
+  directory, a first launch carries `?cwd=<dir>` in the window URL. A later
+  ordinary process posts the folder to the authenticated `/api/launches` queue,
+  summons the existing native viewer, and exits. The viewer opens it in Scratch.
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
   launch browser `--app=http://127.0.0.1:<port>` (try msedge, then chrome,
   else webbrowser.open).
@@ -336,23 +344,32 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `term.write(data, cb)` callbacks for backpressure.
 - Focus: 2px theme-accent rail with a compact semantic state dot; inactive
   terminals remain fully readable.
-- Launcher: compact profile dropdown with an explicit open action and dashboard/settings/help navigation.
-- Dashboard: saved workspace cards with layout previews and quick profile launch
-  (no separate live-session list — sessions always belong to a workspace).
-- App bar workspace dropdown: named workspaces autosave layout and session IDs
-  and restore the exact live sessions; the last active one is remembered
-  locally. Scratch lifecycle: an unsaved scratch layout adopts the reserved
+- Launcher: collapsible terminal-style sidebar with a compact profile dropdown,
+  explicit open/admin actions, workspace/session rows, and dashboard/settings/help navigation.
+- Dashboard: dense saved-workspace rows, global/current ownership and resource
+  statistics, detached-session management, and quick profile launch.
+- Sidebar workspace rows: named workspaces autosave layout and session IDs and
+  restore the exact live sessions; the last active one is remembered locally.
+  Scratch lifecycle: an unsaved scratch layout adopts the reserved
   workspace name `scratch` on the FIRST user keystroke (replacing the previous
   scratch file and its background-only sessions), autosaves from then on, and
   survives window close within a run; the backend deletes `workspaces/scratch.json`
   at process start and shutdown so it never survives a run. The name `scratch`
   (any case) and dot-prefixed names are rejected in user save paths; workspace
   names must survive `_safe_name` unchanged.
-- App bar terminal dropdown: custom-rendered Personal and System sections. System entries are availability-aware; WSL auto-selects one installed distro or expands a distro submenu for several. `ssh`/`sftp` never appear as System entries (profile-only — they need a host).
+- Collapsible left sidebar: flat Personal/System terminal picker, one-click open/admin actions, workspaces, live/background sessions, and navigation. The terminal grid starts at the top edge and expands when the sidebar collapses; no top app bar or card shell owns vertical space.
+  Session counts distinguish the current workspace from all backend sessions;
+  when different the sidebar uses `workspace/global`, the status names the total,
+  and Dashboard has separate **this workspace** / **all live** statistics plus
+  explicit Unassigned ownership.
 - Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Terminal profiles expose shell type,
   detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
   `ssh`/`sftp` profiles swap the starting-folder field for Host/Port/Username/Private key (`.ppk`);
   `ssh` relabels start command as a remote command; `sftp` hides it.
+  `claude-code` exposes a project folder and native launch modes: new,
+  continue latest (`--continue`), choose a session (`--resume`), or open the
+  background-agent manager (`claude agents`). Its executable is detected in the
+  terminal inventory but is profile-only rather than a generic system shell.
 - Themes: four featured choices stay visible; the catalog groups all remaining
   palettes under Dark, Neon, Soft, Warm, Light, and Custom. Clicking a theme previews
   both application chrome and every open xterm immediately; Cancel restores the
@@ -366,14 +383,28 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
   startup command runs after that location is selected.
-- Command palette Alt+K: fuzzy over profiles / actions (split h/v, zoom, kill,
+- Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v, zoom, detach, kill,
   workspace save/switch, open file viewer) / snippets (paste = send text over WS)
   / recent sessions.
-- Keybindings (in addition to palette): Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom,
-  Alt+W detach pane (two-step when the session is busy), Alt+Shift+W confirms
-  a process-tree kill and closes the pane, Alt+arrows focus move,
+- Split actions launch the selected terminal choice in the source pane's
+  best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
+  signals, falling back to their launch folder; prompt text is never parsed.
+  Sidebar Open and Alt+N keep the selected profile's configured folder. A
+  Claude split always uses its project folder and substitutes a normal
+  conversation when that profile's default mode is `agents`; the palette's
+  explicit **Split Claude agent view** runs `claude agents --cwd <project>`.
+- Keybindings (in addition to palette): Alt+N opens a new default terminal,
+  Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom, Alt+D detaches and
+  retains the process, Alt+W always opens confirmation before a process-tree
+  kill and pane close, Alt+arrows focus move,
   Ctrl+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).
+  Alt+Shift+Left/Up cycle the previous/next new-terminal profile. Ctrl+Left/Right
+  remain untouched for PowerShell/readline word navigation.
+- A second ordinary QuickTerm process never creates another native viewer.
+  It authenticates to the existing loopback backend, queues an optional Explorer
+  folder through `/api/launches`, and restores/focuses the one existing window.
+  The viewer atomically claims folder requests and opens them in Scratch.
 - Destructive UI actions use an in-app confirmation placed by the triggering
   control (or inside the focused pane for keyboard actions). Confirm receives
   focus so Enter accepts; Escape and the Cancel button cancel. Application code
@@ -387,6 +418,26 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (navigator.clipboard.writeText, execCommand fallback), with a visible
   `[copied]` / `[copy failed]` confirmation; copy is read-only and never counts
   as user input. No selection → Ctrl+C passes through to the shell as interrupt.
+- Desktop file/image drops use pywebview's native WebView2 bridge to obtain
+  host-verified full paths, then insert them shell-quoted and separated by
+  spaces without submitting the command. WSL receives `/mnt/<drive>/...`
+  translation; SSH/SFTP refuse misleading local paths. A browser that withholds
+  the native path produces an explicit Copy-as-path/Ctrl+V hint rather than a
+  fake basename. Native Ctrl+V/Ctrl+Shift+V remains the ordinary
+  PowerShell-friendly paste path.
+- Pane focus is reasserted after creation, attach, and replay completion only
+  while that pane is still selected; a late callback may never steal focus from
+  a pane the user subsequently selected. Closing a full-screen Settings,
+  Dashboard, Help, or similar panel returns focus to the selected terminal
+  before considering the control that originally opened the panel.
+- Workspace restore attaches only matching live session IDs. A missing process
+  restores as a transcript-free unavailable pane with explicit replacement and,
+  for Claude profiles, `claude --continue` recovery actions; it is never silently
+  replaced under the old terminal identity.
+- Normal persistent logging is warning/error-only, bounded to one 128 KB file
+  plus one rotation, and redacts common user-local path prefixes. Session IDs
+  and terminal transcripts are excluded. `QUICKTERM_DEBUG_IO=1` is the sole
+  explicit exception for raw input diagnostics.
 - OSC 52: apps inside the terminal (Claude Code, tmux, vim, …) copy to the
   system clipboard by emitting `ESC]52;c;<base64>`; the pane honors it via the
   same write path (async + execCommand fallback). Read requests (`…;?`) are

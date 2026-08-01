@@ -3,18 +3,20 @@
 // inside the terminal wants:
 //   Ctrl++/-/0         grow / shrink / reset terminal text size
 //   Alt+K              command palette
+//   Alt+N              new default terminal
 //   Alt+Z              zoom pane
-//   Alt+W              detach pane
-//   Alt+Shift+W        kill terminal process tree and close pane
+//   Alt+D              detach pane; process keeps running
+//   Alt+W              confirm kill terminal process tree and close pane
 //   Alt+Arrows         move focus between panes
 //   Alt+Shift+H        split side by side
 //   Alt+Shift+V        split top and bottom
 //   Alt+Shift+Right    split to the right
 //   Alt+Shift+Down     split below
+//   Alt+Shift+Left/Up  previous / next new-terminal profile
 // Everything on plain Alt that shells and TUIs actually bind passes through:
 // Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
 // switch), Alt+H (PSReadLine parameter help), Alt+0..9/Alt+- (readline digit
-// arguments), Alt+B/F/D/. word motions — none of these are claimed here.
+// arguments), Alt+B/F/. word motions — none of these are claimed here.
 // Selection-aware Ctrl+C and native Ctrl+V are handled in pane.js. With no
 // selection Ctrl+C still reaches the PTY as the terminal interrupt. The
 // Ctrl+Shift+C/V aliases remain available too.
@@ -60,8 +62,10 @@ export function initKeys(actions) {
         arrowright: () => actions.focusDir("right"),
         arrowup: () => actions.focusDir("up"),
         arrowdown: () => actions.focusDir("down"),
+        n: actions.newTerminal,
         z: actions.zoom,
-        w: actions.closePane,
+        d: actions.closePane,
+        w: actions.killSession,
       };
       if (plain[key]) done(plain[key]);
       return;
@@ -70,7 +74,8 @@ export function initKeys(actions) {
     // Alt+Shift layer: splits and pane resizing.
     if (key === "h") return done(actions.splitH);
     if (key === "v") return done(actions.splitV);
-    if (key === "w") return done(actions.killSession);
+    if (key === "arrowleft") return done(() => actions.cycleTerminal(-1));
+    if (key === "arrowup") return done(() => actions.cycleTerminal(1));
     if (key === "arrowright") return done(actions.splitH);
     if (key === "arrowdown") return done(actions.splitV);
 

@@ -11,6 +11,7 @@ from quickterm.hotkeys import (
     MOD_SHIFT,
     MOD_WIN,
     HotkeyManager,
+    _title_matches,
     parse_binding,
 )
 
@@ -25,6 +26,11 @@ VK_ESCAPE = 0x1B
 def test_parse_ctrl_alt_1():
     assert parse_binding("ctrl+alt+1") == (
         MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("1"))
+
+
+def test_normal_window_title_never_matches_administrator_viewer():
+    assert _title_matches("QuickTerm", "QuickTerm") is True
+    assert _title_matches("QuickTerm - Administrator", "QuickTerm") is False
 
 
 def test_parse_win_f12():

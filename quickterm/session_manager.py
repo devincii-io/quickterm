@@ -41,6 +41,7 @@ class SessionInfo:
     cols: int
     rows: int
     touched: bool = False  # True once the user has written any input
+    retained: bool = False  # Explicit detach: keep even if untouched and idle
     workspace: str | None = None  # workspace this session belongs to
 
 
@@ -106,6 +107,18 @@ class Session:
                     self._ring_bytes -= overflow
         self._ring_cols, self._ring_rows = self.info.cols, self.info.rows
 
+    def set_scrollback_cap(self, cap: int) -> None:
+        self._cap = cap
+        while self._ring_bytes > self._cap and self._chunks:
+            oldest = self._chunks[0]
+            overflow = self._ring_bytes - self._cap
+            if len(oldest) <= overflow:
+                self._chunks.popleft()
+                self._ring_bytes -= len(oldest)
+            else:
+                self._chunks[0] = oldest[overflow:]
+                self._ring_bytes -= overflow
+
     def _fanout(self, item: bytes | None) -> None:
         for att in tuple(self._attachments):
             if att.overflowed:
@@ -137,6 +150,11 @@ class SessionManager:
 
     def set_max_sessions(self, limit: int) -> None:
         self._max_sessions = limit
+
+    def set_scrollback_bytes(self, cap: int) -> None:
+        self._cap = cap
+        for session in self._sessions.values():
+            session.set_scrollback_cap(cap)
 
     def live_count(self) -> int:
         return sum(1 for session in self._sessions.values() if session.info.alive)
@@ -189,6 +207,20 @@ class SessionManager:
 
     def list(self) -> list[SessionInfo]:
         return [s.info for s in self._sessions.values()]
+
+    def sync_workspace(self, name: str, session_ids: set[str]) -> None:
+        """Mirror one saved workspace's membership into live session metadata.
+
+        Workspace JSON remains the durable authority. This lightweight live
+        label makes global/session views accurate immediately after a Scratch
+        promotion or an explicit move without scanning every workspace on each
+        sidebar poll.
+        """
+        for sid, session in self._sessions.items():
+            if sid in session_ids:
+                session.info.workspace = name
+            elif session.info.workspace == name:
+                session.info.workspace = None
 
     def get(self, sid: str) -> Session | None:
         return self._sessions.get(sid)
@@ -380,7 +412,7 @@ class SessionManager:
                 continue
             if not s.info.alive:
                 doomed.append(sid)
-            elif sid in protected or s.info.touched or sid in busy:
+            elif sid in protected or s.info.touched or s.info.retained or sid in busy:
                 continue
             elif timeout_s > 0 and now - s.last_activity > timeout_s:
                 doomed.append(sid)

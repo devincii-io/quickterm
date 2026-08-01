@@ -39,6 +39,21 @@ async def test_spawn_preserves_profile_env_and_workspace_metadata(monkeypatch):
     assert info.workspace == "proj"
 
 
+async def test_sync_workspace_moves_and_unassigns_live_metadata(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop())
+    first = mgr.spawn(cmd="x.exe", workspace="old")
+    second = mgr.spawn(cmd="x.exe")
+
+    mgr.sync_workspace("new", {first.id, second.id})
+    assert first.workspace == "new"
+    assert second.workspace == "new"
+
+    mgr.sync_workspace("new", {second.id})
+    assert first.workspace is None
+    assert second.workspace == "new"
+
+
 def _short(script: str) -> tuple[str, list[str]]:
     if os.name == "nt":
         return "cmd.exe", ["/c", script]
@@ -113,6 +128,19 @@ async def test_scrollback_ring_truncates():
         mgr.shutdown()
 
 
+async def test_scrollback_cap_updates_live_and_releases_old_bytes(monkeypatch):
+    monkeypatch.setattr(session_manager, "PtySession", _RecordingPty)
+    mgr = SessionManager(asyncio.get_running_loop(), scrollback_bytes=128)
+    info = mgr.spawn(cmd="x.exe")
+    session = mgr.get(info.id)
+    mgr._on_output(session, b"a" * 64 + b"b" * 64)
+    assert len(session.scrollback()[0]) == 128
+
+    mgr.set_scrollback_bytes(32)
+    assert session.scrollback()[0] == b"b" * 32
+    mgr._sessions.clear()
+
+
 async def test_slow_subscriber_requests_clean_resync(manager):
     cmd, args = _short("echo hi")
     info = manager.spawn(cmd=cmd, args=args)
@@ -177,6 +205,16 @@ async def test_idle_reaper_spares_touched_sessions(manager):
     sess.info.touched = True
     sess.last_activity -= 600
     assert manager.reap_idle(300, set()) == []
+
+
+async def test_idle_reaper_spares_explicitly_retained_sessions(manager):
+    cmd, args = _interactive()
+    info = manager.spawn(cmd=cmd, args=args, name="detached")
+    sess = manager.get(info.id)
+    sess.info.retained = True
+    sess.last_activity -= 600
+    assert manager.reap_idle(300, set()) == []
+    assert sess.info.touched is False
 
 
 async def test_kill_and_list_and_focus(manager):

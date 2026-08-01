@@ -12,6 +12,7 @@ export const THEME_CATALOG_GROUPS = [
 ];
 
 export const TERMINAL_TYPES = [
+  { id: "claude-code", label: "Claude Code", executable: "claude.exe" },
   { id: "powershell-core", label: "PowerShell 7", executable: "pwsh.exe" },
   { id: "windows-powershell", label: "Windows PowerShell", executable: "powershell.exe" },
   { id: "command-prompt", label: "Command Prompt", executable: "cmd.exe" },
@@ -60,6 +61,9 @@ export function environmentError(env) {
 export function inferTerminalType(profile) {
   if (profile.terminal_type) return profile.terminal_type;
   const cmd = (profile.cmd || "").toLowerCase().split(/[\\/]/).pop();
+  // Claude integration is opt-in via terminal_type. A legacy custom command
+  // named `claude` may carry bespoke args and must not silently acquire
+  // continue/picker semantics merely by opening Settings.
   if (cmd === "pwsh" || cmd === "pwsh.exe") return "powershell-core";
   if (cmd === "powershell" || cmd === "powershell.exe") return "windows-powershell";
   if (cmd === "cmd" || cmd === "cmd.exe") return "command-prompt";

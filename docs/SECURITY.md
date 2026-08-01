@@ -26,6 +26,9 @@ claim a certification or guarantee suitability for every regulated setting.
 - Terminal scrollback is held in backend memory while a session lives. Saved
   workspace files retain layout, profile, folder, and live-session IDs, not a
   persistent transcript of terminal output.
+- The bounded local diagnostic log records warning/error events only, omits
+  session IDs, and redacts common user-local path prefixes. A one-time migration
+  removes verbose rotations created by older builds.
 - Update checks are optional. They contact the pinned QuickTerm GitHub
   repository; installer downloads are accepted only from that release payload
   and checked against its published `SHA256SUMS.txt` entry.

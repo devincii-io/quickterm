@@ -16,7 +16,7 @@ import re
 import threading
 from ctypes import wintypes
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -191,31 +191,52 @@ class HotkeyManager:
             item.done.set()
 
 
-def toggle_window(title_substring: str = "QuickTerm") -> None:
-    """Quake-style summon/hide: minimize if foreground, else restore + focus.
+def _title_matches(candidate: str, requested: str) -> bool:
+    return candidate == requested
 
-    Also finds a window hidden to the tray (not just minimized), so the summon
-    hotkey can bring QuickTerm back after its close-to-tray. Best-effort.
-    """
+
+def _quickterm_windows(title: str) -> tuple[Any, list[int], list[int]]:
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    visible: list[int] = []
+    hidden: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _enum(hwnd, _lparam):
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            # The administrator viewer is a different backend. A normal
+            # Explorer handoff must summon exactly "QuickTerm", never the
+            # first "QuickTerm - Administrator" window in enumeration order.
+            if _title_matches(buf.value, title):
+                (visible if user32.IsWindowVisible(hwnd) else hidden).append(hwnd)
+                if visible:
+                    return False
+        return True
+
+    user32.EnumWindows(_enum, 0)
+    return user32, visible, hidden
+
+
+def summon_window(title: str = "QuickTerm") -> None:
+    """Restore and focus the one QuickTerm window; never toggle it away."""
     try:
-        user32 = ctypes.windll.user32
-        user32.GetForegroundWindow.restype = wintypes.HWND
-        visible: list[int] = []
-        hidden: list[int] = []
+        user32, visible, hidden = _quickterm_windows(title)
+        matches = visible or hidden
+        if matches:
+            user32.ShowWindow(matches[0], _SW_RESTORE)
+            user32.SetForegroundWindow(matches[0])
+    except Exception:
+        log.debug("summon_window failed", exc_info=True)
 
-        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        def _enum(hwnd, _lparam):
-            n = user32.GetWindowTextLengthW(hwnd)
-            if n:
-                buf = ctypes.create_unicode_buffer(n + 1)
-                user32.GetWindowTextW(hwnd, buf, n + 1)
-                if title_substring in buf.value:
-                    (visible if user32.IsWindowVisible(hwnd) else hidden).append(hwnd)
-                    if visible:
-                        return False  # a visible match wins; stop enumeration
-            return True
 
-        user32.EnumWindows(_enum, 0)
+def toggle_window(title: str = "QuickTerm") -> None:
+    """Quake-style summon/hide: minimize if foreground, else restore + focus."""
+    try:
+        user32, visible, hidden = _quickterm_windows(title)
+
         if visible:
             hwnd = visible[0]
             if user32.GetForegroundWindow() == hwnd:

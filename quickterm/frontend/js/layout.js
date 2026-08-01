@@ -31,6 +31,9 @@ export class LayoutManager {
       title: title || null,
       onFocusRequest: (p) => this.focusPane(p),
       onStateChange: (p) => { if (this.opts.onPaneState) this.opts.onPaneState(p); },
+      onActionRequest: (action, p) => {
+        if (this.opts.onPaneAction) this.opts.onPaneAction(action, p);
+      },
     });
   }
 
@@ -72,6 +75,11 @@ export class LayoutManager {
   setFontSize(px) {
     this.opts.fontSize = px;
     for (const p of this.panes()) p.setFontSize(px);
+  }
+
+  setFontFamily(family) {
+    this.opts.fontFamily = family;
+    for (const p of this.panes()) p.setFontFamily(family);
   }
 
   // ---- structural ops ----
@@ -228,6 +236,7 @@ export class LayoutManager {
       const out = { type: "pane", profile: node.pane.profileName };
       if (node.pane.cwd) out.cwd = node.pane.cwd;
       if (node.pane.session && node.pane.session.id) out.session_id = node.pane.session.id;
+      else if (node.pane.savedSessionId) out.session_id = node.pane.savedSessionId;
       if (node.pane.launchSpec) out.launch_spec = node.pane.launchSpec;
       if (node.pane.title) out.title = node.pane.title;
       return out;

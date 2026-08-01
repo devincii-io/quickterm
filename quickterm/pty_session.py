@@ -38,6 +38,34 @@ _WAIT_OBJECT_0 = 0
 _DRAIN_IDLE_S = 0.15
 _DRAIN_MAX_S = 1.0
 _EXIT_WAIT_S = 10.0
+
+# pywinpty 3.0.x tries to allocate and hide a process console in GUI-subsystem
+# applications.  Its ShowWindow(SW_HIDE).unwrap() path treats the perfectly
+# valid "window was already hidden" return as an error and can panic with an
+# unrelated stale HRESULT.  More importantly, a PTY that allocates the console
+# also frees that process-wide console when it is dropped, disrupting sibling
+# panes.  Give the frozen GUI one hidden host console up front so every PTY sees
+# an existing console that QuickTerm, rather than an individual pane, owns.
+_HOST_CONSOLE_LOCK = threading.Lock()
+_HOST_CONSOLE_READY = False
+_SW_HIDE = 0
+
+
+def _ensure_host_console() -> None:
+    global _HOST_CONSOLE_READY
+    if _HOST_CONSOLE_READY:
+        return
+    with _HOST_CONSOLE_LOCK:
+        if _HOST_CONSOLE_READY:
+            return
+        get_console_window = ctypes.windll.kernel32.GetConsoleWindow
+        get_console_window.restype = wintypes.HWND
+        window = get_console_window()
+        if not window and ctypes.windll.kernel32.AllocConsole():
+            window = get_console_window()
+        if window:
+            ctypes.windll.user32.ShowWindow(window, _SW_HIDE)
+        _HOST_CONSOLE_READY = True
 # Upper bound on how much immediately-available output one read callback carries.
 # Bounded so a huge burst still yields to the loop (keeps input responsive).
 _READ_COALESCE_BYTES = 128 * 1024
@@ -142,6 +170,7 @@ class PtySession:
             raise FileNotFoundError(f"command not found: {cmd}")
         env_block = "\0".join(f"{k}={v}" for k, v in merged.items()) + "\0"
 
+        _ensure_host_console()
         self._pty = winpty.PTY(cols, rows)
         cmdline = " " + subprocess.list2cmdline(args) if args else None
         self._pty.spawn(exe, cmdline=cmdline, cwd=cwd or os.getcwd(), env=env_block)

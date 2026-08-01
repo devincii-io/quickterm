@@ -12,21 +12,23 @@
 </head>
 <body>
 <div id="app">
-  <header id="launcher" class="launcher"></header>
-  <main id="grid" class="grid" aria-label="Terminal workspace"></main>
-  <div id="zoom-host" class="zoom-host" hidden></div>
-  <footer id="statusbar" class="statusbar">
-    <span id="sb-workspace" class="sb-item"></span>
-    <span id="sb-save" class="sb-save" role="status" aria-live="polite"></span>
-    <span class="sb-sep">&middot;</span>
-    <span id="sb-sessions" class="sb-item"></span>
-    <span id="sb-zoom">zoom</span>
-    <span class="sb-flex"></span>
-    <button id="sb-quick" type="button" aria-expanded="false" aria-controls="quick-settings">View <span id="sb-font-size">14 px</span></button>
-    <button id="sb-shortcuts" type="button">Commands <kbd>Alt+K</kbd></button>
-    <span id="voice-indicator"></span>
-    <span id="sb-clock" class="sb-item"></span>
-  </footer>
+  <aside id="launcher" class="launcher sidebar" aria-label="QuickTerm sidebar"></aside>
+  <div class="workspace-shell">
+    <main id="grid" class="grid" aria-label="Terminal workspace"></main>
+    <div id="zoom-host" class="zoom-host" hidden></div>
+    <footer id="statusbar" class="statusbar">
+      <span id="sb-workspace" class="sb-item"></span>
+      <span id="sb-save" class="sb-save" role="status" aria-live="polite"></span>
+      <span class="sb-sep">&middot;</span>
+      <span id="sb-sessions" class="sb-item"></span>
+      <span id="sb-zoom">zoom</span>
+      <span class="sb-flex"></span>
+      <button id="sb-quick" type="button" aria-expanded="false" aria-controls="quick-settings">View <span id="sb-font-size">14 px</span></button>
+      <button id="sb-shortcuts" type="button">Commands <kbd>Alt+K</kbd></button>
+      <span id="voice-indicator"></span>
+      <span id="sb-clock" class="sb-item"></span>
+    </footer>
+  </div>
   <aside id="quick-settings" class="quick-settings" role="dialog" aria-labelledby="quick-settings-title" hidden>
     <header class="quick-settings-head">
       <div><strong id="quick-settings-title">Quick settings</strong><small>View controls</small></div>

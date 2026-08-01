@@ -151,6 +151,9 @@ export class Palette {
       { kind: "action", label: "dashboard", run: () => a.openPanel("dashboard") },
       { kind: "action", label: "settings", run: () => a.openPanel("settings") },
       { kind: "action", label: "help", run: () => a.openPanel("help") },
+      { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal() },
+      { kind: "action", label: "previous new-terminal profile", hint: "Alt+Shift+Left", run: () => a.cycleTerminal(-1) },
+      { kind: "action", label: "next new-terminal profile", hint: "Alt+Shift+Up", run: () => a.cycleTerminal(1) },
       { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH() },
       { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV() },
       { kind: "action", label: "zoom pane", hint: "Alt+Z", run: () => a.zoom() },
@@ -162,8 +165,8 @@ export class Palette {
       { kind: "view", label: "pane height: shorter", run: () => a.resizeFocused("v", -0.05) },
       { kind: "view", label: "pane height: taller", run: () => a.resizeFocused("v", 0.05) },
       { kind: "view", label: "balance nearest pane split", run: () => a.balanceFocused() },
-      { kind: "action", label: "detach pane", hint: "Alt+W", run: () => a.closePane() },
-      { kind: "action", label: "kill session and close pane", hint: "Alt+Shift+W", run: () => a.killFocusedSession() },
+      { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
+      { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession() },
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),
@@ -195,6 +198,15 @@ export class Palette {
         hint: [p.cmd, ...(p.args || [])].join(" "),
         run: () => a.runProfile(p),
       });
+      if (p.terminal_type === "claude-code") {
+        items.push(
+          { kind: "claude", label: `claude new conversation: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "new") },
+          { kind: "claude", label: `claude continue: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "continue") },
+          { kind: "claude", label: `claude choose session: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "resume") },
+          { kind: "claude", label: `claude agent manager: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "agents") },
+          { kind: "claude", label: `split Claude agent view: ${p.name}`, hint: `claude agents --cwd ${p.cwd || "project"}`, run: () => a.splitClaudeAgentView(p) },
+        );
+      }
     }
     for (const s of a.snippets) {
       items.push({

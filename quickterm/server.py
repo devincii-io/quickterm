@@ -48,6 +48,7 @@ def create_app(
     from quickterm import auth
 
     app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
+    pending_launches: asyncio.Queue[dict] = asyncio.Queue(maxsize=32)
     allowed_hosts, allowed_origins = _allowed_origins(cfg)
 
     def _token_required(request: Request) -> bool:
@@ -108,16 +109,19 @@ def create_app(
         return {"app": "quickterm", "version": __version__}
 
     @app.get("/api/sessions")
-    def list_sessions() -> list[dict]:
-        busy_set, metrics = manager.session_metrics()
+    def list_sessions(metrics: bool = True) -> list[dict]:
+        # Sidebar/status polling needs lifecycle and attention state, not an
+        # expensive full OS process snapshot. Dashboard callers retain the
+        # detailed default for backwards compatibility.
+        busy_set, usage = manager.session_metrics() if metrics else (set(), {})
         out = []
         for info in manager.list():
             d = _asdict(info)
             d["attachments"] = manager.attachment_count(info.id)
-            d["busy"] = info.id in busy_set
+            d["busy"] = info.id in busy_set if metrics else None
             d["activity"] = manager.session_activity(info.id)
-            if info.id in metrics:
-                d["usage"] = metrics[info.id]
+            if info.id in usage:
+                d["usage"] = usage[info.id]
             out.append(d)
         return out
 
@@ -131,6 +135,8 @@ def create_app(
         args = body.get("args")
         cwd = body.get("cwd")
         env = body.get("env")
+        start_command = body.get("start_command")
+        claude_mode = body.get("claude_mode")
         prof = None
         if profile_name is not None:
             if not isinstance(profile_name, str) or not profile_name.strip():
@@ -138,13 +144,28 @@ def create_app(
             prof = next((p for p in cfg.profiles if p.name == profile_name), None)
             if prof is None:
                 raise HTTPException(404, f"unknown profile: {profile_name}")
-            resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, cwd)
+            if start_command is not None:
+                if not isinstance(start_command, str) or len(start_command) > 8192:
+                    raise HTTPException(400, "start_command must be a string of at most 8192 characters")
+                prof = dataclasses.replace(prof, start_command=start_command)
+            if claude_mode is not None:
+                if getattr(prof, "terminal_type", None) != "claude-code":
+                    raise HTTPException(400, "claude_mode requires a Claude Code profile")
+                if claude_mode not in {"new", "continue", "resume", "agents"}:
+                    raise HTTPException(400, "claude_mode must be new, continue, resume, or agents")
+                prof = dataclasses.replace(prof, claude_mode=claude_mode)
+            try:
+                resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, cwd)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             cmd = cmd or resolved_cmd
             args = args if args is not None else resolved_args
             # _resolve_profile incorporates the request override.  WSL embeds
             # it in `--cd` and deliberately returns no Windows process cwd.
             cwd = resolved_cwd
             env = env if env is not None else dict(prof.env)
+        elif start_command is not None or claude_mode is not None:
+            raise HTTPException(400, "start_command and claude_mode require a profile")
         if not isinstance(cmd, str) or not cmd.strip():
             raise HTTPException(400, "either 'profile' or 'cmd' is required")
         cmd = cmd.strip()
@@ -212,6 +233,42 @@ def create_app(
         if manager.kill(sid) is False:
             raise HTTPException(500, "terminal process could not be stopped")
         return Response(status_code=204)
+
+    @app.post("/api/sessions/{sid}/retain")
+    def retain_session(sid: str) -> dict:
+        """Keep an explicitly detached terminal out of the untouched-shell reaper."""
+        session = manager.get(sid)
+        if session is None:
+            raise HTTPException(404, "no such session")
+        session.info.retained = True
+        return _asdict(session.info)
+
+    @app.post("/api/launches")
+    async def queue_launch(request: Request) -> dict:
+        body = await _read_json(request)
+        cwd = body.get("cwd") if isinstance(body, dict) else None
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise HTTPException(400, "cwd must be a non-empty string")
+        resolved = Path(os.path.expandvars(os.path.expanduser(cwd)))
+        if not resolved.is_dir():
+            raise HTTPException(400, "launch folder does not exist")
+        launch = {"cwd": str(resolved)}
+        if pending_launches.full():
+            try:
+                pending_launches.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        pending_launches.put_nowait(launch)
+        return launch
+
+    @app.get("/api/launches/next", response_model=None)
+    async def next_launch(wait: bool = True) -> Any:
+        try:
+            return await asyncio.wait_for(
+                pending_launches.get(), timeout=20.0 if wait else 0.001
+            )
+        except TimeoutError:
+            return Response(status_code=204)
 
     @app.patch("/api/sessions/{sid}")
     async def rename_session(sid: str, request: Request) -> dict:
@@ -299,6 +356,7 @@ def create_app(
                 session_ids=session_ids,
             )
         )
+        manager.sync_workspace(name, set(session_ids))
         return Response(status_code=204)
 
     @app.delete("/api/workspaces/{name}")
@@ -314,11 +372,17 @@ def create_app(
             owned.update(_layout_session_ids(saved.layout))
             failed: list[str] = []
             for sid in owned:
-                if manager.get(sid) is not None and not manager.has_attachments(sid):
+                session = manager.get(sid)
+                # Workspace files can contain a stale duplicate after an old
+                # client failure. The live owner is authoritative: deleting A
+                # must never kill a terminal that has since moved to B.
+                owns_live_session = session is not None and session.info.workspace == name
+                if owns_live_session and not manager.has_attachments(sid):
                     if manager.kill(sid) is False:
                         failed.append(sid)
             if failed:
                 raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
+        manager.sync_workspace(name, set())
         workspace.delete_workspace(name)
         return Response(status_code=204)
 
@@ -429,13 +493,16 @@ def create_app(
         # Apply live-updatable fields in place; port and global hotkeys need a restart.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "max_sessions", "default_profile", "profiles", "snippets", "voice", "update_check",
+            "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice", "update_check",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
         set_limit = getattr(manager, "set_max_sessions", None)
         if set_limit:
             set_limit(cfg.max_sessions)
+        set_scrollback = getattr(manager, "set_scrollback_bytes", None)
+        if set_scrollback:
+            set_scrollback(cfg.scrollback_bytes)
         return Response(status_code=204)
 
     @app.get("/api/file")
@@ -580,6 +647,18 @@ def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, l
     cwd = cwd_override or getattr(prof, "cwd", None)
     existing_args = list(getattr(prof, "args", []) or [])
 
+    if terminal_type == "claude-code":
+        executable = (getattr(prof, "cmd", None) or "").strip()
+        if not executable:
+            executable = shutil.which("claude") or ("claude.exe" if os.name == "nt" else "claude")
+        mode = getattr(prof, "claude_mode", None) or "continue"
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ValueError("Claude Code profile requires a project folder")
+        mode_args = {
+            "new": [], "continue": ["--continue"], "resume": ["--resume"],
+            "agents": ["agents", "--cwd", cwd],
+        }
+        return executable, mode_args.get(mode, ["--continue"]) + existing_args, cwd
     if terminal_type == "powershell-core":
         args = ["-NoLogo"]
         if start:
@@ -653,6 +732,11 @@ def _terminal_inventory() -> dict:
     pwsh_candidates = [program_files / "PowerShell" / "7" / "pwsh.exe"]
     pwsh_candidates.extend(sorted((program_files / "PowerShell").glob("*/pwsh.exe"), reverse=True))
     shells = [
+        (
+            "claude-code",
+            "Claude Code",
+            _first_executable("claude"),
+        ),
         (
             "powershell-core",
             "PowerShell 7",
@@ -747,6 +831,13 @@ def _posix_inventory() -> dict:
     login_name = Path(login).name if login else ""
     order = [login_name] + [s for s in ("zsh", "bash", "fish") if s != login_name]
     types = []
+    claude = shutil.which("claude")
+    types.append({
+        "id": "claude-code",
+        "label": "Claude Code",
+        "executable": claude,
+        "available": claude is not None,
+    })
     for shell in order:
         if not shell:
             continue

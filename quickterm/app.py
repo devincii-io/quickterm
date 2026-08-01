@@ -12,13 +12,15 @@ import subprocess
 import socket
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from typing import TYPE_CHECKING, Any, Callable
 
-import uvicorn
+from uvicorn.config import Config as UvicornConfig
+from uvicorn.server import Server as UvicornServer
 
 from quickterm import __version__
 from quickterm.server import create_app
@@ -30,6 +32,28 @@ if TYPE_CHECKING:
 MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
 REAP_INTERVAL_S = 30
 log = logging.getLogger("quickterm")
+
+
+class _PrivacyFormatter(logging.Formatter):
+    """Redact common user-local path prefixes from shareable diagnostics."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        prefixes = {
+            "USERPROFILE": os.environ.get("USERPROFILE"),
+            "APPDATA": os.environ.get("APPDATA"),
+            "LOCALAPPDATA": os.environ.get("LOCALAPPDATA"),
+            "TEMP": os.environ.get("TEMP"),
+            "TMP": os.environ.get("TMP"),
+        }
+        for label, value in sorted(
+            prefixes.items(), key=lambda item: len(item[1] or ""), reverse=True
+        ):
+            if not value:
+                continue
+            rendered = rendered.replace(value, f"%{label}%")
+            rendered = rendered.replace(value.replace("\\", "/"), f"%{label}%")
+        return rendered
 
 
 def main() -> None:
@@ -63,11 +87,15 @@ def main() -> None:
         cfg.port = _free_port()
     _setup_logging()
     log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
-    # One backend per port: a second launch just summons the existing window.
+    # One ordinary backend and one viewer: later launches hand work to it and
+    # summon it instead of creating another window onto the same session set.
     if not elevated and _already_running(cfg.port):
-        log.info("QuickTerm already running on port %s; opening window", cfg.port)
+        if open_dir:
+            _queue_running_launch(cfg.port, open_dir)
         if sys.platform == "win32":
-            _open_native_window(cfg.port, cwd=open_dir)
+            from quickterm.hotkeys import summon_window
+
+            summon_window()
         else:
             _launch_window(cfg.port, cwd=open_dir)
         return
@@ -86,15 +114,31 @@ def _setup_logging() -> None:
 
     log_dir = config_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    # Older builds kept INFO-level lifecycle records and three rotations. Purge
+    # those once when adopting the privacy-first warning/error log policy.
+    privacy_marker = log_dir / ".privacy-v2"
+    if not privacy_marker.exists():
+        for old_log in log_dir.glob("quickterm.log*"):
+            if old_log.is_file():
+                try:
+                    old_log.unlink()
+                except OSError:
+                    pass
+        try:
+            privacy_marker.touch()
+        except OSError:
+            pass
+    debug_io = os.environ.get("QUICKTERM_DEBUG_IO") == "1"
     handler = RotatingFileHandler(
-        log_dir / "quickterm.log", maxBytes=512 * 1024, backupCount=3, encoding="utf-8"
+        log_dir / "quickterm.log", maxBytes=128 * 1024, backupCount=1, encoding="utf-8"
     )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setLevel(logging.INFO if debug_io else logging.WARNING)
+    handler.setFormatter(_PrivacyFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         root.setLevel(logging.INFO)
         root.addHandler(handler)
-    if os.environ.get("QUICKTERM_DEBUG_IO") == "1":
+    if debug_io:
         log.warning(
             "QUICKTERM_DEBUG_IO=1: raw terminal input is being written to the local log"
         )
@@ -107,6 +151,27 @@ def _already_running(port: int) -> bool:
         return isinstance(data, dict) and data.get("app") == "quickterm"
     except Exception:
         return False
+
+
+def _queue_running_launch(port: int, cwd: str) -> bool:
+    """Hand Explorer's folder launch to the already-running authenticated app."""
+    from quickterm import auth
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/launches",
+        data=json.dumps({"cwd": cwd}).encode("utf-8"),
+        headers={"Content-Type": "application/json", auth.HEADER: auth.get_or_create_token()},
+        method="POST",
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=1.5) as response:
+                return response.status == 200
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.15)
+    log.error("running-instance folder handoff failed")
+    return False
 
 
 def _check_windows_build() -> None:
@@ -134,11 +199,15 @@ async def _serve(
     loop = asyncio.get_running_loop()
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
     app = create_app(manager, cfg, auth.get_or_create_token(), elevated=elevated)
-    server = uvicorn.Server(
-        uvicorn.Config(
+    server = UvicornServer(
+        UvicornConfig(
             app,
             host=cfg.host,
             port=cfg.port,
+            loop="asyncio",
+            http="h11",
+            ws="websockets-sansio",
+            lifespan="on",
             log_config=None,
             access_log=False,
             ws_max_size=256 * 1024,
@@ -180,13 +249,17 @@ async def _serve(
 
 def _sessions_worth_keeping(manager: Any) -> bool:
     """Closing the window only hides to tray when quitting would lose real
-    work: a live session the user typed into or one with a child process.
+    work: a live session the user typed into, explicitly retained, or one with a child process.
     Untouched empty shells are not worth staying resident for.
     """
     try:
         busy = manager.busy_ids() if hasattr(manager, "busy_ids") else set()
         return any(
-            i.alive and (getattr(i, "touched", False) or getattr(i, "id", None) in busy)
+            i.alive and (
+                getattr(i, "touched", False)
+                or getattr(i, "retained", False)
+                or getattr(i, "id", None) in busy
+            )
             for i in manager.list()
         )
     except Exception:
@@ -247,6 +320,7 @@ def _run_desktop(
         background_color="#171918",
         text_select=True,
     )
+    _wire_native_file_drop(window)
 
     # Hide-to-tray: closing the primary window keeps terminals alive in the
     # background when they hold real work; otherwise it quits. Elevated windows
@@ -307,31 +381,54 @@ def _show_window(window: Any) -> None:
         log.debug("tray show failed", exc_info=True)
 
 
+def _native_drop_paths(event: Any) -> list[str]:
+    """Extract host-verified full paths added by pywebview's WebView2 bridge."""
+    if not isinstance(event, dict):
+        return []
+    transfer = event.get("dataTransfer")
+    files = transfer.get("files", []) if isinstance(transfer, dict) else []
+    paths: list[str] = []
+    for file in files if isinstance(files, list) else []:
+        path = file.get("pywebviewFullPath") if isinstance(file, dict) else None
+        if isinstance(path, str) and path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _wire_native_file_drop(window: Any) -> None:
+    """Bridge WebView2 file objects to the page without guessing basenames.
+
+    Browser JavaScript intentionally cannot see an Explorer drop's absolute
+    path. pywebview obtains it from CoreWebView2File and adds
+    ``pywebviewFullPath`` to its Python DOM event; only that host-derived value
+    is sent back to the selected pane.
+    """
+    def install() -> None:
+        try:
+            from webview.dom import DOMEventHandler
+
+            def on_drop(event: Any) -> None:
+                paths = _native_drop_paths(event)
+                if not paths:
+                    return
+                payload = json.dumps(paths, ensure_ascii=False)
+                window.evaluate_js(
+                    f"window.quicktermNativeDrop && window.quicktermNativeDrop({payload})"
+                )
+
+            window.dom.document.events.drop += DOMEventHandler(on_drop)
+        except Exception:
+            log.warning("native file-drop bridge unavailable", exc_info=True)
+
+    window.events.loaded += install
+
+
 def _quit_window(window: Any, quitting: threading.Event) -> None:
     quitting.set()  # checked by on_closing: this close is a real quit
     try:
         window.destroy()
     except Exception:
         log.debug("tray quit failed", exc_info=True)
-
-
-def _open_native_window(port: int, cwd: str | None = None) -> bool:
-    """Open another native view onto an already-running QuickTerm backend."""
-    try:
-        import webview
-    except ImportError:
-        return False
-    webview.create_window(
-        "QuickTerm",
-        _window_url(port, cwd),
-        width=1280,
-        height=800,
-        min_size=(760, 480),
-        background_color="#171918",
-        text_select=True,
-    )
-    webview.start(gui="edgechromium", private_mode=False)
-    return True
 
 
 def _free_port() -> int:
@@ -352,7 +449,7 @@ def _window_url(port: int, cwd: str | None = None) -> str:
 
 
 async def _after_ready(
-    server: uvicorn.Server,
+    server: UvicornServer,
     manager: "SessionManager",
     cfg: "AppConfig",
     *,
@@ -381,7 +478,10 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
         try:
             reaped = manager.reap_idle(cfg.idle_timeout_s, _workspace_session_ids())
             if reaped:
-                log.info("reaped %d idle session(s): %s", len(reaped), ", ".join(reaped))
+                # Lifecycle logs deliberately omit session IDs. They are not
+                # terminal history, but retaining identifiers adds no value to
+                # routine diagnostics and makes logs harder to share safely.
+                log.info("reaped %d idle session(s)", len(reaped))
         except Exception:
             log.exception("reaper pass failed")
 

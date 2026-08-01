@@ -41,7 +41,14 @@ export async function renderDashboard(refreshing = false) {
     const liveSessions = sessions.filter((session) => session.alive);
     const measuredMemory = liveSessions.reduce((sum, session) =>
       sum + (session.usage?.available ? session.usage.working_set_bytes || 0 : 0), 0);
-    for (const [value, label] of [[workspaces.length, "workspaces"], [liveSessions.length, "live terminals"], [formatBytes(measuredMemory), "host RAM"]]) {
+    const currentOwned = new Set(this.app.ownedSessionIds ? this.app.ownedSessionIds() : []);
+    const currentLive = liveSessions.filter((session) => currentOwned.has(session.id));
+    for (const [value, label] of [
+      [workspaces.length, "workspaces"],
+      [currentLive.length, "this workspace"],
+      [liveSessions.length, "all live"],
+      [formatBytes(measuredMemory), "host RAM"],
+    ]) {
       const stat = make("div", "dashboard-stat");
       stat.append(make("strong", "", String(value).padStart(2, "0")), make("span", "", label));
       stats.append(stat);
@@ -58,7 +65,7 @@ export async function renderDashboard(refreshing = false) {
       const killAll = this._button("Kill all terminals…", "secondary-button danger-text");
       killAll.addEventListener("click", () => {
         const count = liveSessions.length;
-        const warning = `Stop ${count} live terminal${count === 1 ? "" : "s"} across all QuickTerm windows? Their panes in this window will close and unsaved shell work will be lost.`;
+        const warning = `Stop ${count} live terminal${count === 1 ? "" : "s"} across all workspaces? Attached panes will close and unsaved shell work will be lost.`;
         this._confirmNear(killAll, warning, "Kill all", async () => {
           const result = await this.app.killAllSessions();
           if (this.open === "dashboard") this._dashboard(true);
@@ -78,9 +85,12 @@ export async function renderDashboard(refreshing = false) {
       const usage = session.usage || {};
       const row = make("div", "usage-row");
       const identity = make("div", "usage-identity");
+      const ownership = currentOwned.has(session.id)
+        ? "this workspace"
+        : session.workspace ? `workspace ${session.workspace}` : "unassigned";
       const scope = usage.scope === "host-process-tree-partial-wsl"
         ? "host side only · WSL workload excluded"
-        : `${session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background")} · ${session.profile || "terminal"}`;
+        : `${ownership} · ${session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background")} · ${session.profile || "terminal"}`;
       identity.append(make("strong", "", session.name || session.id), make("small", "", scope));
       const values = make("div", "usage-values");
       const cpu = usage.cpu_percent == null ? "Sampling…" : `${usage.cpu_percent.toFixed(1)}%`;
@@ -288,7 +298,7 @@ export async function renderDashboard(refreshing = false) {
       sessionGroups.append(other);
     }
     if (!groups.length) {
-      sessionGroups.append(make("p", "detached-empty", "Nothing is detached. Alt+W puts a used terminal here without stopping it."));
+      sessionGroups.append(make("p", "detached-empty", "Nothing is detached. Alt+D puts a terminal here without stopping it."));
     }
     sessionSection.append(sessionGroups);
     this.bodyEl.append(sessionSection);

@@ -11,7 +11,15 @@ sys.path.insert(0, os.path.join(SPECPATH, "scripts"))
 from fetch_putty import PUTTY_SHA256, VENDOR_DIR  # noqa: E402
 
 
-hiddenimports = collect_submodules("uvicorn") + collect_submodules("webview")
+# The server explicitly selects these protocol implementations. Avoid bundling
+# Uvicorn's development reloader, alternate parsers and every optional loop;
+# they add roughly a megabyte and are never reachable in the desktop app.
+hiddenimports = collect_submodules("webview") + [
+    "uvicorn.lifespan.on",
+    "uvicorn.loops.asyncio",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets.websockets_sansio_impl",
+]
 # Server handlers reach these via importlib.import_module(...) so tests can stub
 # them; PyInstaller's static graph can't see a runtime string, so list them here
 # or they go missing from the frozen build (a missing one 500s the endpoint).
@@ -62,7 +70,15 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["quickterm.pty_posix"],
+    excludes=[
+        "quickterm.pty_posix",
+        "httptools",
+        "watchfiles",
+        "yaml",
+        "uvicorn.loops.uvloop",
+        "uvicorn.protocols.http.httptools_impl",
+        "uvicorn.protocols.websockets.wsproto_impl",
+    ],
     noarchive=False,
     optimize=1,
 )

@@ -2,6 +2,59 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.0.0
+
+### Terminal-first workspace
+
+- Replaced the card-heavy launcher and top bar with a compact, collapsible
+  terminal-style sidebar while letting panes use the full window height.
+- Added dense pane chrome for horizontal and vertical splits, zoom, true
+  detach, and confirmed process-tree termination, plus current-workspace and
+  global live-session counters.
+- Added `Alt+N` new-terminal, `Alt+D` detach, `Alt+W` confirmed kill,
+  `Alt+Z` zoom, directional focus/split shortcuts, and fast profile cycling
+  while preserving native PowerShell/readline navigation and Chromium paste.
+
+### Reliable sessions and desktop handoff
+
+- Separated explicit retention from typed activity so detached shells remain
+  alive without falsifying usage state; verified kills remove only processes
+  the backend actually terminated.
+- Restored missing sessions as transcript-free unavailable panes with explicit
+  recovery instead of silently starting a different process under the old ID.
+- Made workspace ownership and destructive cleanup server-authoritative, with
+  protection against stale duplicate references killing a moved terminal.
+- A second ordinary QuickTerm launch now hands Explorer's folder to the
+  authenticated running instance, summons that one window, and opens the
+  terminal in Scratch instead of creating another QuickTerm.
+- Hardened focus restoration across terminal creation, splits, attach/replay,
+  panel close, recovery, detach, kill, and workspace transitions.
+
+### Claude Code, folders, and file drops
+
+- Promoted Claude Code to a first-class project profile with new, continue,
+  session-picker, and background-agent-manager modes plus explicit recovery
+  actions when its PTY is gone.
+- Splits use the selected terminal profile in the focused pane's OSC 7 or
+  OSC 9;9 directory, falling back to its launch/project folder without prompt
+  scraping. Claude agent views remain an explicit separate action.
+- Explorer file and image drops now insert host-verified, shell-quoted paths
+  without submitting the command, including WSL path conversion and explicit
+  refusal for misleading remote-terminal paths.
+
+### Privacy, performance, and packaging
+
+- Kept terminal transcripts and session IDs off disk. Normal diagnostics are
+  warning/error-only, path-redacted, and bounded to 128 KiB plus one rotation;
+  raw terminal bytes remain opt-in through `QUICKTERM_DEBUG_IO=1` only.
+- Reduced status polling and frozen dependencies while retaining bounded
+  scrollback, subscriber resynchronization, WebSocket coalescing, and xterm
+  write-backpressure. The unpacked Windows build is 47.05 MB.
+- Fixed GUI-subsystem ConPTY startup by allocating one hidden process-wide
+  console before pywinpty creates terminal sessions.
+- Added a packaged-app smoke test that verifies authenticated real-PTY spawn,
+  initial attach, reconnect replay, live I/O, exit, and dynamic route bundling.
+
 ## QuickTerm 2.4.0
 
 ### Tested terminal attachment

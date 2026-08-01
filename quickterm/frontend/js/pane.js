@@ -13,6 +13,14 @@ const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
 const CLIENT_QUEUE_LIMIT = 2 << 20; // reconnect before sustained output grows JS heap
 const OSC52_MAX_BYTES = 1 << 20; // clipboard writes from terminal output
 const OSC52_MAX_BASE64 = Math.ceil(OSC52_MAX_BYTES / 3) * 4;
+let nativeDropPane = null;
+
+if (typeof window !== "undefined") {
+  window.quicktermNativeDrop = (paths) => {
+    if (!nativeDropPane || nativeDropPane._disposed) return false;
+    return nativeDropPane.pasteDroppedPaths(Array.isArray(paths) ? paths : []);
+  };
+}
 
 // File-path links (Ctrl+click): quoted paths may contain spaces; bare ones
 // stop at whitespace/quotes. Windows drive + UNC, POSIX absolute, ~ paths.
@@ -57,6 +65,82 @@ const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
 
+export function fileUrlToPath(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:") return null;
+    let path = decodeURIComponent(url.pathname || "");
+    if (/^\/[A-Za-z]:\//.test(path)) return path.slice(1).replaceAll("/", "\\");
+    if (url.hostname) return `\\\\${url.hostname}${path.replaceAll("/", "\\")}`;
+    return path;
+  } catch (_) {
+    return null;
+  }
+}
+
+export function droppedFilePaths(dataTransfer) {
+  if (!dataTransfer) return [];
+  const paths = [];
+  const add = (value) => {
+    const path = String(value || "").trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  };
+  for (const file of dataTransfer.files || []) {
+    // WebView hosts may expose a desktop-only File.path. Standard Chromium
+    // deliberately does not; never substitute File.name because that is not a
+    // usable path and could point at the wrong file in the shell's cwd.
+    if (typeof file.path === "string" && file.path) add(file.path);
+  }
+  for (const type of ["text/uri-list", "text/plain"]) {
+    let text = "";
+    try { text = dataTransfer.getData(type) || ""; } catch (_) { /* unavailable */ }
+    for (const line of text.split(/\r?\n/)) {
+      if (!line || line.startsWith("#")) continue;
+      const path = fileUrlToPath(line.trim());
+      if (path) add(path);
+    }
+  }
+  return paths;
+}
+
+export function quoteDroppedPath(path, shellHint = "") {
+  const hint = shellHint.toLowerCase();
+  if (hint.includes("command prompt") || /(^|\W)cmd(?:\.exe)?(\W|$)/.test(hint)) {
+    return `"${path.replaceAll('"', '""')}"`;
+  }
+  if (hint.includes("powershell") || hint.includes("pwsh") || /^[A-Za-z]:\\/.test(path)) {
+    return `'${path.replaceAll("'", "''")}'`;
+  }
+  return `'${path.replaceAll("'", "'\\''")}'`;
+}
+
+export function windowsPathForWsl(path) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(path);
+  if (!match) return path;
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll("\\", "/")}`;
+}
+
+export function parseOscCwd(code, data, terminalType = null) {
+  let value = String(data || "");
+  if (code === 9) {
+    if (!value.startsWith("9;")) return null;
+    value = value.slice(2);
+  } else if (code !== 7) {
+    return null;
+  }
+  if (!value || value.length > 4096 || /[\x00-\x1f]/.test(value)) return null;
+  if (value.startsWith("file:")) {
+    if (terminalType === "wsl") {
+      try {
+        const url = new URL(value);
+        return url.protocol === "file:" ? decodeURIComponent(url.pathname || "") || null : null;
+      } catch (_) { return null; }
+    }
+    return fileUrlToPath(value);
+  }
+  return value;
+}
+
 export class Pane {
   constructor(opts = {}) {
     this.fontFamily = opts.fontFamily || "JetBrains Mono";
@@ -64,10 +148,13 @@ export class Pane {
     this.theme = opts.theme || getTheme(DEFAULT_THEME).xterm;
     this.onFocusRequest = opts.onFocusRequest || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
+    this.onActionRequest = opts.onActionRequest || (() => {});
     this.profileName = opts.profile || null;
     this.cwd = opts.cwd || null;
+    this.currentCwd = this.cwd;
     this.savedSessionId = opts.sessionId || null;
     this.launchSpec = opts.launchSpec || null;
+    this.terminalType = opts.terminalType || null;
     this.title = opts.title || null; // user-given name, wins over session name
     this.userWrote = false;    // real keystrokes/paste in this pane
     this.spawnedFresh = false; // session was created by this pane (vs reattached)
@@ -97,6 +184,13 @@ export class Pane {
     el.className = "pane";
     el.innerHTML =
       '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span></div>' +
+      '<div class="pane-actions" aria-label="Pane actions">' +
+        '<button class="pane-action" type="button" data-action="split-h" title="Split right (Alt+Shift+Right)">|</button>' +
+        '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">—</button>' +
+        '<button class="pane-action" type="button" data-action="zoom" title="Zoom pane (Alt+Z)">□</button>' +
+        '<button class="pane-action detach" type="button" data-action="detach" title="Detach pane; terminal keeps running (Alt+D)">D</button>' +
+        '<button class="pane-action kill" type="button" data-action="kill" title="Kill terminal with confirmation (Alt+W)">×</button>' +
+      '</div>' +
       '<div class="term-host"></div>' +
       '<div class="pane-empty">no session &middot; alt+k</div>' +
       '<div class="pane-dim"></div>' +
@@ -110,7 +204,17 @@ export class Pane {
     this.tabNameEl = el.querySelector(".pane-tab-name");
     this.tabDotEl = el.querySelector(".pane-tab-dot");
     this.tabEl.addEventListener("dblclick", (e) => { e.stopPropagation(); this._startRename(); });
+    el.querySelector(".pane-actions").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.onFocusRequest(this);
+      this.onActionRequest(button.dataset.action, this);
+      requestAnimationFrame(() => this.focusSoon());
+    });
     el.addEventListener("mousedown", () => this.onFocusRequest(this));
+    this._wireDrop();
     this._renderTab();
 
     this._ro = new ResizeObserver(() => this.fitSoon());
@@ -124,8 +228,16 @@ export class Pane {
   get _phase() { return this._protocol.phase; }
   get _generation() { return this._protocol.generation; }
 
+  bestKnownCwd() { return this.currentCwd || this.cwd || null; }
+
+  setLaunchCwd(cwd) {
+    this.cwd = cwd || null;
+    this.currentCwd = this.cwd;
+  }
+
   beginSpawn() {
     if (this.spawnPending) return false;
+    this._clearRecovery();
     this.spawnPending = true;
     this.state = "spawning";
     this.emptyEl.hidden = false;
@@ -143,7 +255,19 @@ export class Pane {
 
   setFocused(focused) {
     this.el.classList.toggle("focused", focused);
-    if (focused && this.term) this.term.focus();
+    if (focused) this.focusSoon();
+  }
+
+  focusSoon() {
+    const focus = () => {
+      // Async spawn/replay callbacks from an older pane must never steal focus
+      // after the user has already moved elsewhere.
+      if (this._disposed || !this.term || !this.el.classList.contains("focused")) return;
+      try { this.term.focus(); } catch (_) { /* terminal is being recreated */ }
+    };
+    focus();
+    requestAnimationFrame(focus);
+    setTimeout(focus, 0);
   }
 
   setTheme(theme) {
@@ -156,6 +280,14 @@ export class Pane {
     this.fontSize = px;
     if (this.term) {
       this.term.options.fontSize = px;
+      this.fitSoon();
+    }
+  }
+
+  setFontFamily(family) {
+    this.fontFamily = family || "JetBrains Mono";
+    if (this.term) {
+      this.term.options.fontFamily = `"${this.fontFamily}", "JetBrains Mono", "Cascadia Mono", Consolas, monospace`;
       this.fitSoon();
     }
   }
@@ -210,16 +342,136 @@ export class Pane {
 
   showNotice(text) {
     if (this._confirmation) this.cancelConfirmation();
+    this._clearRecovery();
     this.exitBar.textContent = text;
     this.exitBar.hidden = false;
     const live = document.getElementById("live-status");
     if (live) live.textContent = text.replace(/^\[|\]$/g, "");
   }
 
+  markUnavailable({ exitCode = null, onRestart, onResumeClaude, onPickClaude } = {}) {
+    this._clearRecovery();
+    this.session = null;
+    this.state = "missing";
+    this.emptyEl.hidden = false;
+    this.emptyEl.textContent = "saved terminal is not running";
+    this._renderTab();
+    const copy = document.createElement("span");
+    copy.className = "pane-confirm-copy";
+    copy.textContent = exitCode === null
+      ? "Live session unavailable — nothing was silently restarted."
+      : `Session exited with code ${exitCode} — nothing was silently restarted.`;
+    const actions = document.createElement("span");
+    actions.className = "pane-recovery-actions";
+    const makeAction = (label, action, primary = false) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      if (primary) button.classList.add("primary");
+      button.addEventListener("click", async () => {
+        for (const item of actions.querySelectorAll("button")) item.disabled = true;
+        try {
+          const recovered = await action();
+          if (!recovered) {
+            copy.textContent = "Recovery did not start. The previous session was not replaced.";
+            for (const item of actions.querySelectorAll("button")) item.disabled = false;
+          }
+        } catch (error) {
+          copy.textContent = error?.detail || "Recovery failed. The previous session was not replaced.";
+          for (const item of actions.querySelectorAll("button")) item.disabled = false;
+        }
+      });
+      actions.append(button);
+    };
+    if (onResumeClaude) makeAction("Continue latest", onResumeClaude, true);
+    if (onPickClaude) makeAction("Choose session", onPickClaude);
+    if (onRestart) makeAction("Start replacement shell", onRestart, !onResumeClaude);
+    this.exitBar.textContent = "";
+    this.exitBar.append(copy, actions);
+    this.exitBar.classList.add("confirming", "recovering");
+    this.exitBar.hidden = false;
+    this._recovery = { actions };
+  }
+
+  _clearRecovery() {
+    if (!this._recovery) return;
+    this._recovery = null;
+    this.exitBar.classList.remove("confirming", "recovering");
+    this.exitBar.hidden = true;
+  }
+
+  _wireDrop() {
+    let depth = 0;
+    const accepts = (event) => {
+      const types = [...(event.dataTransfer?.types || [])];
+      return types.includes("Files") || types.includes("text/uri-list");
+    };
+    this.el.addEventListener("dragenter", (event) => {
+      if (!accepts(event)) return;
+      event.preventDefault();
+      nativeDropPane = this;
+      depth += 1;
+      this.el.classList.add("drop-target");
+    });
+    this.el.addEventListener("dragover", (event) => {
+      if (!accepts(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    });
+    this.el.addEventListener("dragleave", (event) => {
+      if (!accepts(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) this.el.classList.remove("drop-target");
+    });
+    this.el.addEventListener("drop", (event) => {
+      if (!accepts(event)) return;
+      event.preventDefault();
+      depth = 0;
+      this.el.classList.remove("drop-target");
+      this.onFocusRequest(this);
+      const paths = droppedFilePaths(event.dataTransfer);
+      if (!paths.length) {
+        clearTimeout(this._dropFallbackTimer);
+        this._dropFallbackTimer = setTimeout(() => {
+          this.flashNotice("[full file path unavailable · use Copy as path, then Ctrl+V]");
+        }, 400);
+        return;
+      }
+      this.pasteDroppedPaths(paths);
+    });
+  }
+
+  pasteDroppedPaths(paths) {
+    clearTimeout(this._dropFallbackTimer);
+    const clean = paths.filter((path) => typeof path === "string" && path);
+    if (!clean.length) return false;
+    if (this.terminalType === "ssh" || this.terminalType === "sftp") {
+      this.flashNotice("[local file paths are unavailable inside a remote terminal]");
+      return false;
+    }
+    const mapped = this.terminalType === "wsl" ? clean.map(windowsPathForWsl) : clean;
+    const signature = mapped.join("\0");
+    const now = Date.now();
+    if (signature === this._lastDropSignature && now - (this._lastDropAt || 0) < 1000) return true;
+    this._lastDropSignature = signature;
+    this._lastDropAt = now;
+    const hint = [this.terminalType, this.displayName(), this.profileName, this.launchSpec?.cmd]
+      .filter(Boolean).join(" ");
+    this.sendText(mapped.map((path) => quoteDroppedPath(path, hint)).join(" "));
+    this.flashNotice(`[pasted ${mapped.length} file path${mapped.length === 1 ? "" : "s"}]`);
+    return true;
+  }
+
   // Short-lived notice (e.g. "no room to split") that cleans up after itself.
   flashNotice(text) {
+    if (this._recovery) {
+      const live = document.getElementById("live-status");
+      if (live) live.textContent = text.replace(/^\[|\]$/g, "");
+      return;
+    }
     this.showNotice(text);
     clearTimeout(this._noticeTimer);
+    clearTimeout(this._dropFallbackTimer);
     this._noticeTimer = setTimeout(() => {
       if (this.state !== "exited" && !this.closeArmed) this.exitBar.hidden = true;
     }, 2000);
@@ -337,7 +589,8 @@ export class Pane {
   }
 
   sendText(text) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN
+      && this._protocol.canSendInput() && !this._exited) {
       this._markWrote();
       this.ws.send(ENC.encode(text));
     }
@@ -383,6 +636,7 @@ export class Pane {
     this._exited = false;
     this._detached = false;
     this._backoff = BACKOFF_MIN;
+    this._clearRecovery();
     this.exitBar.hidden = true;
     this.emptyEl.hidden = true;
     this.state = "attached";
@@ -392,7 +646,7 @@ export class Pane {
     // A split focuses the new pane before its terminal exists, so setFocused()
     // could not focus the xterm textarea (it was still null). Re-apply now that
     // the terminal is live, or the freshly-split pane swallows no keystrokes.
-    if (this.el.classList.contains("focused")) this.term.focus();
+    this.focusSoon();
     this.onStateChange(this);
   }
 
@@ -412,6 +666,8 @@ export class Pane {
     clearTimeout(this._fitTimer);
     clearTimeout(this._closeArmTimer);
     clearTimeout(this._noticeTimer);
+    clearTimeout(this._dropFallbackTimer);
+    if (nativeDropPane === this) nativeDropPane = null;
     this.cancelConfirmation();
     this._ro.disconnect();
     if (this._linkProvider) { try { this._linkProvider.dispose(); } catch (e) {} this._linkProvider = null; }
@@ -512,6 +768,18 @@ export class Pane {
         return true;
       });
     } catch (e) { /* no parser API: copy-from-app unsupported, non-fatal */ }
+    // Shell integration directory signals. OSC 7 is the portable convention;
+    // OSC 9;9 is emitted by Windows shell integrations. Never scrape prompts.
+    try {
+      const trackCwd = (code, data) => {
+        const cwd = parseOscCwd(code, data, this.terminalType);
+        if (!cwd) return false;
+        this.currentCwd = cwd;
+        return true;
+      };
+      this.term.parser.registerOscHandler(7, (data) => trackCwd(7, data));
+      this.term.parser.registerOscHandler(9, (data) => trackCwd(9, data));
+    } catch (e) { /* shell integration is optional */ }
     // Right-click copies the current selection (the Windows Terminal
     // convention) with a visible confirmation. Paste stays native on Ctrl+V —
     // WebView2 silently denies programmatic clipboard reads, so there is no
@@ -636,6 +904,9 @@ export class Pane {
     try { this.fit.fit(); } catch (e) {}
     this._sendResize();
     this._pump();
+    // Sidebar clicks and long scrollback replay can both outlive the original
+    // focus event. Reassert focus only if this pane is still the chosen pane.
+    this.focusSoon();
   }
 
   // Write queued output; when >PENDING_LIMIT bytes are unacknowledged by

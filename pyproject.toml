@@ -1,6 +1,6 @@
 [project]
 name = "quickterm"
-version = "2.4.0"
+version = "3.0.0"
 description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,11 @@ dependencies = [
     "pywinpty>=2.0; sys_platform == 'win32'",
     "pywebview>=6.2.1; sys_platform == 'win32'",
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
+    # QuickTerm pins Uvicorn to its pure-Python h11/WebSocket path. The
+    # "standard" extra also installs reloaders and alternative parsers that a
+    # frozen desktop server never uses.
+    "uvicorn>=0.35",
+    "websockets>=10.4",
 ]
 
 [project.optional-dependencies]

@@ -23,7 +23,7 @@ export function renderGeneralSettings(host) {
     const fields = make("div", "settings-grid two-column");
     fields.append(
       this._field("Terminal font", font, "Use any monospace font installed on this computer."),
-      this._field("Terminal text size", fontSize, "Also adjust anytime with Alt+Shift+plus / minus."),
+      this._field("Terminal text size", fontSize, "Also adjust anytime with Ctrl+plus / minus / 0."),
       this._field("Default terminal", defaultProfile, "Opened when QuickTerm starts."),
     );
     group.append(fields);
@@ -57,10 +57,17 @@ export function renderGeneralSettings(host) {
     port.type = "number";
     port.addEventListener("input", () => { cfg.port = Number(port.value) || 8620; });
     const scrollback = this._select([
+      { value: String(64 * 1024), label: "64 KB" },
+      { value: String(128 * 1024), label: "128 KB" },
       { value: String(256 * 1024), label: "256 KB" },
       { value: String(512 * 1024), label: "512 KB" },
       { value: String(1024 * 1024), label: "1 MB" },
       { value: String(2 * 1024 * 1024), label: "2 MB" },
+      { value: String(4 * 1024 * 1024), label: "4 MB" },
+      { value: String(8 * 1024 * 1024), label: "8 MB" },
+      { value: String(16 * 1024 * 1024), label: "16 MB" },
+      { value: String(32 * 1024 * 1024), label: "32 MB" },
+      { value: String(64 * 1024 * 1024), label: "64 MB" },
     ], String(cfg.scrollback_bytes));
     scrollback.addEventListener("change", () => { cfg.scrollback_bytes = Number(scrollback.value); });
     const idleTimeout = this._select([
@@ -83,7 +90,7 @@ export function renderGeneralSettings(host) {
     appFields.append(
       this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."),
       this._field("Local server port", port, "Only available on this computer."),
-      this._field("Session scrollback", scrollback, "History retained for each live session."),
+      this._field("In-memory scrollback", scrollback, "Per live session. Never written to disk; released when the terminal is removed."),
       this._field("Clean unused shells", idleTimeout, "Only untouched, detached shells are ended after this time; used and busy terminals are kept."),
       this._field("Live terminal limit", maxSessions, "0 means unlimited. At the limit, new terminals are blocked; existing terminals are never stopped."),
     );

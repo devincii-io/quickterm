@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from types import SimpleNamespace
 
 if os.name == "nt":
     import quickterm.pty_session as pty_module
@@ -16,6 +17,38 @@ def test_raw_io_debug_requires_exact_opt_in(monkeypatch):
     assert pty_module._debug_io_enabled() is False
     monkeypatch.setenv("QUICKTERM_DEBUG_IO", "1")
     assert pty_module._debug_io_enabled() is True
+
+
+def test_gui_host_console_is_allocated_hidden_and_reused(monkeypatch):
+    if os.name != "nt":
+        return
+
+    calls: list[object] = []
+    windows = iter([0, 1234])
+
+    class GetConsoleWindow:
+        restype = None
+
+        def __call__(self):
+            calls.append("get")
+            return next(windows)
+
+    fake_windll = SimpleNamespace(
+        kernel32=SimpleNamespace(
+            GetConsoleWindow=GetConsoleWindow(),
+            AllocConsole=lambda: calls.append("alloc") or 1,
+        ),
+        user32=SimpleNamespace(
+            ShowWindow=lambda window, mode: calls.append(("hide", window, mode))
+        ),
+    )
+    monkeypatch.setattr(pty_module.ctypes, "windll", fake_windll)
+    monkeypatch.setattr(pty_module, "_HOST_CONSOLE_READY", False)
+
+    pty_module._ensure_host_console()
+    pty_module._ensure_host_console()
+
+    assert calls == ["get", "alloc", "get", ("hide", 1234, 0)]
 
 
 def test_write_failure_is_available_in_debug_log(caplog):

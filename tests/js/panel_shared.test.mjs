@@ -31,6 +31,8 @@ test("environment editor parses comments and rejects unsafe values", () => {
 
 test("terminal and snippet helpers preserve their UI contracts", () => {
   assert.equal(inferTerminalType({ cmd: "C:\\Windows\\System32\\wsl.exe" }), "wsl");
+  assert.equal(inferTerminalType({ cmd: "C:\\Users\\me\\bin\\claude.exe" }), "custom");
+  assert.equal(inferTerminalType({ cmd: "claude.exe", terminal_type: "claude-code" }), "claude-code");
   assert.equal(displaySnippet("echo ready\r"), "echo ready");
   assert.equal(runnableSnippet("echo ready"), "echo ready\r");
   assert.equal(formatBytes(1024 * 1024), "1.0 MB");

@@ -33,6 +33,7 @@ class Profile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    claude_mode: str | None = None
     ssh_host: str | None = None
     ssh_port: int | None = None
     ssh_user: str | None = None
@@ -310,6 +311,7 @@ def validate_config(cfg: AppConfig) -> None:
             ("terminal type", profile.terminal_type),
             ("WSL distribution", profile.wsl_distro),
             ("startup command", profile.start_command),
+            ("Claude launch mode", profile.claude_mode),
         ):
             if value is not None and not isinstance(value, str):
                 raise ValueError(
@@ -319,6 +321,18 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
         if profile.terminal_type == "custom" and not profile.cmd.strip():
             raise ValueError(f'Terminal profile "{name}": executable is required')
+        if profile.terminal_type == "claude-code" and profile.claude_mode not in {
+            None, "new", "continue", "resume", "agents"
+        }:
+            raise ValueError(
+                f'Terminal profile "{name}": Claude launch mode must be new, continue, resume, or agents'
+            )
+        if profile.terminal_type == "claude-code" and not (
+            isinstance(profile.cwd, str) and profile.cwd.strip()
+        ):
+            raise ValueError(
+                f'Terminal profile "{name}": project folder is required for Claude Code'
+            )
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
         if profile.terminal_type in ("ssh", "sftp"):

@@ -1,10 +1,20 @@
 import { icon } from "./icons.js";
 
+const SIDEBAR_KEY = "quickterm.sidebarCollapsed";
+
+function make(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
 function shellLabel(profile) {
   const target = profile.ssh_host
     ? (profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host)
     : "";
   const labels = {
+    "claude-code": `Claude Code · ${profile.claude_mode === "resume" ? "choose session" : profile.claude_mode === "agents" ? "agent manager" : profile.claude_mode === "new" ? "new" : "continue"}`,
     "powershell-core": "PowerShell 7",
     "windows-powershell": "Windows PowerShell",
     "command-prompt": "Command Prompt",
@@ -16,284 +26,118 @@ function shellLabel(profile) {
   return labels[profile.terminal_type] || profile.cmd || "Terminal";
 }
 
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+const SYSTEM_META = {
+  "powershell-core": { args: ["-NoLogo"] },
+  "windows-powershell": { args: ["-NoLogo"] },
+  "command-prompt": { args: [] },
+  wsl: { args: ["--cd", "~"] },
+  bash: { args: ["-l"] },
+  zsh: { args: ["-l"] },
+  fish: { args: ["-l"] },
+  "git-bash": { args: ["-l"] },
+  nushell: { args: [] },
+};
+
+function terminalChoices(options) {
+  const choices = [];
+  for (const profile of options.profiles || []) {
+    choices.push({
+      key: `profile:${profile.name}`,
+      group: "Personal",
+      kind: "profile",
+      profile,
+      label: profile.name,
+      detail: shellLabel(profile),
+    });
+  }
+  for (const type of options.inventory?.types || []) {
+    if (!type.executable || type.available === false || ["custom", "ssh", "sftp", "claude-code"].includes(type.id)) continue;
+    const meta = SYSTEM_META[type.id] || { args: [] };
+    if (type.id === "wsl" && (options.inventory?.wsl_distributions || []).length) {
+      for (const distro of options.inventory.wsl_distributions) {
+        choices.push({
+          key: `system:wsl:${distro}`,
+          group: "System",
+          kind: "system",
+          id: type.id,
+          cmd: type.executable,
+          args: ["-d", distro],
+          distro,
+          label: `WSL · ${distro}`,
+          detail: distro,
+        });
+      }
+      continue;
+    }
+    choices.push({
+      key: `system:${type.id}`,
+      group: "System",
+      kind: "system",
+      id: type.id,
+      cmd: type.executable,
+      args: meta.args,
+      label: type.label,
+      detail: type.executable,
+    });
+  }
+  return choices;
 }
 
-// mark: a short monogram string ("PS") or an icon name passed as {icon: "..."}.
-function menuItem(label, detail, mark) {
-  const button = element("button", "dropdown-item");
+function choiceKey(choice) {
+  if (!choice) return "";
+  if (choice.kind === "profile") return `profile:${choice.profile?.name || ""}`;
+  return choice.distro ? `system:${choice.id}:${choice.distro}` : `system:${choice.id}`;
+}
+
+function section(title, count) {
+  const head = make("div", "sidebar-section-head");
+  head.append(make("span", "sidebar-label", title));
+  if (count !== undefined) head.append(make("span", "sidebar-count", String(count)));
+  return head;
+}
+
+function actionButton(iconName, label, onClick) {
+  const button = make("button", "sidebar-action");
   button.type = "button";
-  const markEl = element("span", "dropdown-item-mark");
-  if (mark && typeof mark === "object" && mark.icon) markEl.append(icon(mark.icon, 13));
-  else markEl.textContent = mark || ">";
-  const copy = element("span", "dropdown-item-copy");
-  copy.append(element("strong", "", label));
-  if (detail) copy.append(element("small", "", detail));
-  button.append(markEl, copy);
+  button.title = label;
+  button.append(icon(iconName, 15), make("span", "sidebar-label", label));
+  button.addEventListener("click", onClick);
   return button;
 }
 
-function dropdownShell(className) {
-  const root = element("div", `app-dropdown ${className}`);
-  const trigger = element("button", "dropdown-trigger");
-  trigger.type = "button";
-  trigger.setAttribute("aria-expanded", "false");
-  const menu = element("div", "dropdown-menu");
-  menu.hidden = true;
-  root.append(trigger, menu);
-  const setOpen = (open) => {
-    menu.hidden = !open;
-    trigger.setAttribute("aria-expanded", String(open));
-    root.classList.toggle("open", open);
-  };
-  trigger.addEventListener("click", (event) => {
-    event.stopPropagation();
-    document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns", { detail: root }));
-    setOpen(menu.hidden);
-  });
-  root.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      setOpen(false);
-      trigger.focus();
-    }
-    event.stopPropagation();
-  });
-  return { root, trigger, menu, setOpen };
+function workspaceButton(name, currentWorkspace, onOpen) {
+  const scratch = name === null || name === "scratch";
+  const active = scratch
+    ? !currentWorkspace || currentWorkspace === "scratch"
+    : currentWorkspace === name;
+  const button = make("button", `sidebar-row workspace-row${active ? " active" : ""}`);
+  button.type = "button";
+  button.title = scratch ? "New disposable scratch workspace" : `Open workspace ${name}`;
+  const mark = make("span", `sidebar-mark${scratch ? " scratch" : ""}`);
+  mark.append(icon(scratch ? "circle-dashed" : "diamond", 12));
+  const copy = make("span", "sidebar-row-copy");
+  copy.append(
+    make("strong", "", scratch ? "scratch" : name),
+    make("small", "", active ? "current" : scratch ? "disposable" : "saved"),
+  );
+  button.append(mark, copy);
+  button.addEventListener("click", () => onOpen(name));
+  return button;
 }
 
-function chevron() {
-  const wrap = element("span", "dropdown-chevron");
-  wrap.append(icon("chevron-down", 14));
-  return wrap;
+function defaultBrandMark() {
+  const image = make("img", "sidebar-logo");
+  image.src = "/assets/icon-64.png";
+  image.alt = "";
+  return image;
 }
 
-function sectionLabel(text) {
-  return element("div", "dropdown-section-label", text);
+function loadCollapsed() {
+  try { return localStorage.getItem(SIDEBAR_KEY) === "1"; } catch (_) { return false; }
 }
 
-function selectedMark() {
-  const mark = element("span", "dropdown-selected-mark");
-  mark.append(icon("check", 12));
-  return mark;
-}
-
-function buildWorkspaceDropdown(options) {
-  const { root, trigger, menu, setOpen } = dropdownShell("workspace-dropdown");
-  // "scratch" is the adopted disposable workspace: it autosaves during the
-  // run but the file dies with the app, so it is never presented as saved.
-  const isScratch = !options.currentWorkspace || options.currentWorkspace === "scratch";
-  const renderTrigger = () => {
-    trigger.textContent = "";
-    const copy = element("span", "dropdown-trigger-copy");
-    copy.append(
-      element("small", "", "Workspace"),
-      element("strong", "", isScratch ? "Scratch" : options.currentWorkspace),
-    );
-    trigger.append(element("span", `workspace-state ${isScratch ? "scratch" : "saved"}`), copy, chevron());
-  };
-  renderTrigger();
-
-  menu.append(sectionLabel("Workspace mode"));
-  const scratch = menuItem("New scratch", "Disposable · closes with the app", { icon: "circle-dashed" });
-  if (!options.currentWorkspace) {
-    scratch.classList.add("selected");
-    scratch.append(selectedMark());
-  }
-  scratch.addEventListener("click", () => {
-    setOpen(false);
-    options.onWorkspace(null);
-  });
-  menu.append(scratch, sectionLabel("Saved workspaces"));
-  if (!options.workspaces.length) {
-    menu.append(element("div", "dropdown-empty", "No workspaces saved yet"));
-  }
-  for (const name of options.workspaces) {
-    // The adopted "scratch" workspace stays listed (that is how you return
-    // to it) but is labelled for what it is: gone when the app quits.
-    const disposable = name === "scratch";
-    const item = menuItem(
-      name,
-      name === options.currentWorkspace ? "Currently open" : disposable ? "Disposable · this run only" : "Sessions and layout saved",
-      { icon: disposable ? "circle-dashed" : "diamond" },
-    );
-    if (name === options.currentWorkspace) {
-      item.classList.add("selected");
-      item.append(selectedMark());
-    }
-    item.addEventListener("click", () => {
-      setOpen(false);
-      options.onWorkspace(name);
-    });
-    menu.append(item);
-  }
-  const footer = element("button", "dropdown-footer");
-  footer.type = "button";
-  footer.append(element("span", "", "Manage workspaces"), icon("chevron-right", 13));
-  footer.addEventListener("click", () => {
-    setOpen(false);
-    options.onManage();
-  });
-  menu.append(footer);
-  return root;
-}
-
-// Known system terminal metadata; anything else from the server inventory
-// still shows up with generic defaults, so posix shells work unchanged.
-const SYSTEM_META = {
-  "powershell-core": { detail: "Modern PowerShell", mark: "PS", args: ["-NoLogo"] },
-  "windows-powershell": { detail: "Built into Windows", mark: "PS", args: ["-NoLogo"] },
-  "command-prompt": { detail: "Classic Windows shell", mark: "C:\\", args: [] },
-  wsl: { detail: "Linux on Windows", mark: "LX", args: ["--cd", "~"] },
-  bash: { detail: "GNU Bash", mark: "$", args: ["-l"] },
-  zsh: { detail: "Z shell", mark: "%", args: ["-l"] },
-  fish: { detail: "Friendly shell", mark: "><>", args: ["-l"] },
-  "git-bash": { detail: "Git for Windows shell", mark: "$", args: ["-l"] },
-  nushell: { detail: "Modern structured shell", mark: "nu", args: [] },
-};
-
-function systemChoices(inventory) {
-  // ssh/sftp need a host and are therefore profile-only: launched hostless,
-  // plink/psftp would just print usage and exit.
-  return (inventory.types || [])
-    .filter((type) => type.executable && type.available !== false
-      && type.id !== "custom" && type.id !== "ssh" && type.id !== "sftp")
-    .map((type) => {
-      const meta = SYSTEM_META[type.id] || { detail: type.executable, mark: ">", args: [] };
-      return { id: type.id, label: type.label, detail: meta.detail, cmd: type.executable, args: meta.args, mark: meta.mark };
-    });
-}
-
-function buildTerminalControl(options) {
-  const control = element("div", "launch-control");
-  const { root, trigger, menu, setOpen } = dropdownShell("terminal-dropdown");
-  root.classList.add("launch-dropdown");
-  const systems = systemChoices(options.inventory);
-  // The current selection is the window's default terminal: splits and new
-  // panes open it. Survive launcher rebuilds by restoring the prior choice.
-  const prior = options.selectedTerminal;
-  let selected = null;
-  if (prior && prior.kind === "profile") {
-    const match = options.profiles.find((profile) => profile.name === prior.profile.name);
-    if (match) selected = { kind: "profile", profile: match, label: match.name, detail: shellLabel(match) };
-  } else if (prior && prior.kind === "system" && systems.some((system) => system.id === prior.id)) {
-    selected = { ...prior };
-  }
-  if (!selected) {
-    const preferredProfile = options.profiles.find((profile) => profile.name === options.defaultProfile);
-    const preferredSystem = systems.find((system) => system.id === options.defaultProfile);
-    selected = preferredProfile
-      ? { kind: "profile", profile: preferredProfile, label: preferredProfile.name, detail: shellLabel(preferredProfile) }
-      : preferredSystem ? { kind: "system", ...preferredSystem }
-      : options.profiles.length
-        ? { kind: "profile", profile: options.profiles[0], label: options.profiles[0].name, detail: shellLabel(options.profiles[0]) }
-        : systems.length ? { kind: "system", ...systems[0] } : null;
-  }
-  if (options.onSelectTerminal && selected) options.onSelectTerminal(selected);
-
-  const renderTrigger = () => {
-    trigger.textContent = "";
-    const copy = element("span", "dropdown-trigger-copy");
-    copy.append(element("small", "", "New terminal"));
-    const value = element("span", "launch-value");
-    value.append(element("strong", "", selected ? selected.label : "No terminal found"));
-    if (selected) value.append(element("em", "", selected.detail || ""));
-    copy.append(value);
-    trigger.append(copy, chevron());
-  };
-
-  const select = (choice) => {
-    selected = choice;
-    if (options.onSelectTerminal) options.onSelectTerminal(choice);
-    renderTrigger();
-    setOpen(false);
-  };
-
-  menu.append(sectionLabel("Personal"));
-  if (!options.profiles.length) menu.append(element("div", "dropdown-empty", "No personal terminals yet — create one in Settings"));
-  for (const profile of options.profiles) {
-    const item = menuItem(profile.name, shellLabel(profile), (profile.name || "> ").slice(0, 2).toUpperCase());
-    item.addEventListener("click", () => select({ kind: "profile", profile, label: profile.name, detail: shellLabel(profile) }));
-    menu.append(item);
-  }
-
-  menu.append(sectionLabel("System terminals"));
-  for (const system of systems) {
-    const item = menuItem(system.label, system.detail, system.mark);
-    if (system.id !== "wsl") {
-      item.addEventListener("click", () => select({ kind: "system", ...system }));
-      menu.append(item);
-      continue;
-    }
-
-    const distros = options.inventory.wsl_distributions || [];
-    const group = element("div", "dropdown-nested-group");
-    const nestedChevron = element("span", "nested-chevron");
-    nestedChevron.append(icon("chevron-right", 14));
-    item.append(nestedChevron);
-    const distroList = element("div", "dropdown-nested");
-    distroList.hidden = true;
-    if (!distros.length) {
-      item.disabled = true;
-      item.querySelector("small").textContent = "No Linux distributions installed";
-    } else if (distros.length === 1) {
-      item.querySelector("small").textContent = `${distros[0]} · auto-selected`;
-      item.addEventListener("click", () => select({
-        kind: "system", ...system, label: `WSL · ${distros[0]}`,
-        detail: distros[0], distro: distros[0], args: ["-d", distros[0]],
-      }));
-    } else {
-      item.querySelector("small").textContent = `${distros.length} distributions · choose one`;
-      item.addEventListener("click", (event) => {
-        event.stopPropagation();
-        distroList.hidden = !distroList.hidden;
-        group.classList.toggle("expanded", !distroList.hidden);
-      });
-      for (const distro of distros) {
-        const distroItem = menuItem(distro, "WSL distribution", "LX");
-        distroItem.addEventListener("click", () => select({
-          kind: "system", ...system, label: `WSL · ${distro}`,
-          detail: distro, distro, args: ["-d", distro],
-        }));
-        distroList.append(distroItem);
-      }
-    }
-    group.append(item, distroList);
-    menu.append(group);
-  }
-  renderTrigger();
-
-  const openButton = element("button", "launch-button");
-  openButton.type = "button";
-  openButton.append(element("span", "", "Open"), icon("arrow-up-right", 14));
-  openButton.addEventListener("click", () => {
-    if (!selected) return;
-    if (selected.kind === "profile") options.onRunProfile(selected.profile);
-    else options.onRunSystem(selected);
-  });
-  control.append(root, openButton);
-  // In an elevated window every new terminal is already an administrator (it
-  // inherits the elevated server), so the "open a new admin window" button is
-  // pointless there — the red frame and badge already say you are admin.
-  if (options.elevated) {
-    control.classList.add("no-admin");
-  } else {
-    const adminButton = element("button", "admin-button");
-    adminButton.type = "button";
-    adminButton.title = "Open in a new administrator window (shows a Windows UAC prompt)";
-    adminButton.setAttribute("aria-label", "Open as administrator");
-    adminButton.append(icon("shield", 15), element("span", "", "Admin"));
-    adminButton.addEventListener("click", () => {
-      if (!selected) return;
-      if (selected.kind === "profile") options.onElevateProfile(selected.profile);
-      else options.onElevateSystem(selected);
-    });
-    control.append(adminButton);
-  }
-  return control;
+function saveCollapsed(collapsed) {
+  try { localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); } catch (_) { /* optional */ }
 }
 
 export function initLauncher(el, options) {
@@ -301,64 +145,199 @@ export function initLauncher(el, options) {
   const abort = new AbortController();
   el._launcherAbort = abort;
   el.textContent = "";
+  el.classList.add("sidebar");
 
-  const brand = element("div", "launcher-brand");
+  const head = make("div", "sidebar-head");
+  const brand = make("div", "sidebar-brand");
   if (options.logoUrl) {
-    const frame = element("span", "brand-logo-frame");
-    const image = element("img", "brand-logo");
+    const image = make("img", "sidebar-logo");
     image.src = options.logoUrl;
     image.alt = "";
-    image.addEventListener("error", () => frame.replaceWith(defaultBrandMark()));
-    frame.append(image);
-    brand.append(frame);
+    image.addEventListener("error", () => image.replaceWith(defaultBrandMark()));
+    brand.append(image);
   } else {
     brand.append(defaultBrandMark());
   }
-  const brandCopy = element("span", "brand-copy");
-  brandCopy.append(
-    element("strong", "", "QuickTerm"),
-    element("small", "", options.currentWorkspace || "workspaces"),
-  );
+  const brandCopy = make("span", "sidebar-brand-copy sidebar-label");
+  brandCopy.append(make("strong", "", "quickterm"), make("small", "", options.currentWorkspace || "scratch"));
   brand.append(brandCopy);
-  if (options.elevated) {
-    const badge = element("span", "admin-badge");
-    badge.append(icon("shield", 13), element("span", "", "Administrator"));
-    brand.append(badge);
-  }
-  const controls = element("div", "launcher-controls");
-  controls.append(buildWorkspaceDropdown(options), buildTerminalControl(options));
-  el.append(brand, controls);
+  const collapse = make("button", "sidebar-collapse");
+  collapse.type = "button";
+  collapse.setAttribute("aria-label", "Collapse sidebar");
+  collapse.append(icon("chevron-right", 14));
+  head.append(brand, collapse);
+  el.append(head);
 
-  const nav = element("nav", "launcher-nav");
-  nav.setAttribute("aria-label", "Application");
-  const navIcons = { dashboard: "dashboard", settings: "settings", help: "help" };
-  for (const [label, onClick] of options.chrome || []) {
-    const button = element("button", "nav-button");
-    button.type = "button";
-    button.append(icon(navIcons[label] || "terminal", 15), element("span", "", label));
-    button.addEventListener("click", onClick);
-    nav.append(button);
-  }
-  el.append(nav);
+  let collapsed = loadCollapsed();
+  const applyCollapsed = () => {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    collapse.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+    collapse.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    collapse.setAttribute("aria-expanded", String(!collapsed));
+    saveCollapsed(collapsed);
+    if (options.onSidebarResize) options.onSidebarResize();
+  };
+  collapse.addEventListener("click", () => {
+    collapsed = !collapsed;
+    applyCollapsed();
+    requestAnimationFrame(() => options.onLaunchComplete?.());
+  });
+  applyCollapsed();
 
-  document.addEventListener("quickterm:close-dropdowns", (event) => {
-    for (const root of el.querySelectorAll(".app-dropdown.open")) {
-      if (root === event.detail) continue;
-      root.classList.remove("open");
-      root.querySelector(":scope > .dropdown-menu").hidden = true;
-      root.querySelector(":scope > .dropdown-trigger").setAttribute("aria-expanded", "false");
+  const launch = make("section", "sidebar-section sidebar-launch");
+  launch.append(section("new terminal"));
+  const choices = terminalChoices(options);
+  const select = make("select", "sidebar-terminal-select");
+  select.setAttribute("aria-label", "Terminal for new panes");
+  const grouped = new Map();
+  for (const choice of choices) {
+    if (!grouped.has(choice.group)) grouped.set(choice.group, []);
+    grouped.get(choice.group).push(choice);
+  }
+  for (const [label, items] of grouped) {
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const choice of items) {
+      const option = make("option", "", choice.label);
+      option.value = choice.key;
+      option.title = choice.detail;
+      group.append(option);
     }
-  }, { signal: abort.signal });
-  document.addEventListener("click", () => {
-    document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns"));
-  }, { signal: abort.signal });
-}
+    select.append(group);
+  }
+  let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
+  if (!selected && options.defaultProfile) {
+    selected = choices.find((choice) =>
+      choice.key === `profile:${options.defaultProfile}` || choice.key === `system:${options.defaultProfile}`);
+  }
+  selected ||= choices[0] || null;
+  if (selected) {
+    select.value = selected.key;
+    options.onSelectTerminal?.(selected);
+  } else {
+    const empty = make("option", "", "No shell found");
+    empty.value = "";
+    select.append(empty);
+    select.disabled = true;
+  }
+  select.addEventListener("change", () => {
+    selected = choices.find((choice) => choice.key === select.value) || null;
+    if (selected) options.onSelectTerminal?.(selected);
+  });
+  const launchActions = make("div", "sidebar-launch-actions");
+  const open = actionButton("plus", "New terminal", () => {
+    if (!selected) return;
+    const launched = selected.kind === "profile"
+      ? options.onRunProfile(selected.profile)
+      : options.onRunSystem(selected);
+    Promise.resolve(launched).finally(() => options.onLaunchComplete?.());
+  });
+  open.querySelector(".sidebar-label").textContent = "open";
+  open.classList.add("primary");
+  launchActions.append(open);
+  if (!options.elevated) {
+    const admin = actionButton("shield", "New administrator terminal", () => {
+      if (!selected) return;
+      if (selected.kind === "profile") options.onElevateProfile(selected.profile);
+      else options.onElevateSystem(selected);
+    });
+    admin.querySelector(".sidebar-label").textContent = "admin";
+    launchActions.append(admin);
+  }
+  launch.append(select, launchActions);
+  el.append(launch);
 
-function defaultBrandMark() {
-  const frame = element("span", "brand-logo-frame");
-  const image = element("img", "brand-logo");
-  image.src = "/assets/icon-64.png";
-  image.alt = "";
-  frame.append(image);
-  return frame;
+  const workspaces = make("section", "sidebar-section sidebar-workspaces");
+  workspaces.append(section("workspaces", (options.workspaces || []).filter((name) => name !== "scratch").length));
+  const workspaceList = make("div", "sidebar-list");
+  workspaceList.append(workspaceButton(null, options.currentWorkspace, options.onWorkspace));
+  for (const name of options.workspaces || []) {
+    if (name === "scratch") continue;
+    workspaceList.append(workspaceButton(name, options.currentWorkspace, options.onWorkspace));
+  }
+  workspaces.append(workspaceList);
+  const manage = actionButton("dashboard", "Manage workspaces", options.onManage);
+  manage.classList.add("sidebar-manage");
+  workspaces.append(manage);
+  el.append(workspaces);
+
+  const terminals = make("section", "sidebar-section sidebar-sessions");
+  const terminalsHead = section("terminals", 0);
+  const terminalsCount = terminalsHead.querySelector(".sidebar-count");
+  const sessionList = make("div", "sidebar-list sidebar-session-list");
+  terminals.append(terminalsHead, sessionList);
+  el.append(terminals);
+
+  const footer = make("nav", "sidebar-footer");
+  footer.setAttribute("aria-label", "Application");
+  const navIcons = { dashboard: "dashboard", settings: "settings", help: "help", commands: "terminal" };
+  for (const [label, onClick] of options.chrome || []) {
+    const button = actionButton(navIcons[label] || "terminal", label, onClick);
+    button.classList.add("sidebar-nav-button");
+    footer.append(button);
+  }
+  if (options.elevated) {
+    const badge = make("div", "sidebar-admin");
+    badge.title = "Administrator mode";
+    badge.append(icon("shield", 14), make("span", "sidebar-label", "administrator"));
+    footer.prepend(badge);
+  }
+  el.append(footer);
+
+  const updateSessions = (sessions = [], attachedIds = [], ownedIds = []) => {
+    const attached = new Set(attachedIds);
+    const owned = new Set(ownedIds);
+    const visible = sessions
+      .filter((session) => session.alive && (owned.has(session.id) || attached.has(session.id)))
+      .sort((a, b) => Number(attached.has(b.id)) - Number(attached.has(a.id))
+        || (a.name || a.id).localeCompare(b.name || b.id));
+    const totalLive = sessions.filter((session) => session.alive).length;
+    terminalsCount.textContent = totalLive === visible.length
+      ? String(visible.length)
+      : `${visible.length}/${totalLive}`;
+    terminalsCount.title = totalLive === visible.length
+      ? `${totalLive} live in this workspace`
+      : `${visible.length} in this workspace · ${totalLive} live overall`;
+    sessionList.textContent = "";
+    if (!visible.length) {
+      sessionList.append(make("div", "sidebar-empty sidebar-label", "no live terminals"));
+      return;
+    }
+    for (const session of visible) {
+      const isAttached = attached.has(session.id);
+      const unread = session.activity?.background_output_bytes || 0;
+      const row = make("button", `sidebar-row session-row${isAttached ? " attached" : " detached"}${unread ? " unread" : ""}`);
+      row.type = "button";
+      row.title = isAttached
+        ? `Focus ${session.name || session.id}`
+        : `Attach background terminal ${session.name || session.id}`;
+      const state = make("span", "session-state");
+      const copy = make("span", "sidebar-row-copy");
+      copy.append(
+        make("strong", "", session.name || session.id.slice(0, 8)),
+        make("small", "", isAttached ? "open" : unread ? "new output" : "background"),
+      );
+      row.append(state, copy);
+      row.addEventListener("click", () => {
+        if (isAttached) options.onFocusSession?.(session.id);
+        else options.onAttachSession?.(session);
+      });
+      sessionList.append(row);
+    }
+  };
+
+  updateSessions(options.sessions, options.attachedSessionIds, options.ownedSessionIds);
+  return {
+    updateSessions,
+    cycleTerminal(delta = 1) {
+      if (!choices.length) return null;
+      const current = Math.max(0, choices.indexOf(selected));
+      selected = choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length];
+      select.value = selected.key;
+      options.onSelectTerminal?.(selected);
+      requestAnimationFrame(() => options.onLaunchComplete?.());
+      return selected;
+    },
+    setCollapsed(value) { collapsed = Boolean(value); applyCollapsed(); },
+  };
 }

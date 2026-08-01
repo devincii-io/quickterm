@@ -33,12 +33,15 @@ async function req(method, path, body) {
 export const getConfig = () => req("GET", "/api/config");
 export const getProfiles = () => req("GET", "/api/profiles");
 export const getSnippets = () => req("GET", "/api/snippets");
-export const getSessions = () => req("GET", "/api/sessions");
+export const getSessions = (options = {}) =>
+  req("GET", options.metrics === false ? "/api/sessions?metrics=false" : "/api/sessions");
 export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+export const retainSession = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/retain`, {});
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
 export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
 export const killAllSessions = () => req("POST", "/api/sessions/kill-all", {});
+export const claimLaunch = () => req("GET", "/api/launches/next");
 // busy = the shell has a child process (ssh, build, editor) running right now
 export const sessionBusy = (id) =>
   getSessions().then((list) => Boolean((list.find((s) => s.id === id) || {}).busy)).catch(() => false);

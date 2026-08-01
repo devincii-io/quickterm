@@ -6,6 +6,7 @@ import { initLauncher } from "./launcher.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
+import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
 
 document.title = "QuickTerm";
 
@@ -85,6 +86,7 @@ async function boot() {
   if (!currentWorkspace) rememberWorkspace(null);
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
+  let lastSessions = initialSessions;
   const scratchSessionIds = new Set();
   let workspaceSessionIds = new Set();
   let statusTimer = null;
@@ -95,6 +97,7 @@ async function boot() {
   let workspaceSavePending = false;
   let transitioning = true;
   let panels;
+  let launcherView = null;
   let workspaceLogo = null;
   let fontSize = clampFont(cfg.font_size);
   let fontSaveTimer = null;
@@ -130,6 +133,14 @@ async function boot() {
       scheduleWorkspaceSave();
     },
     onLayoutChange: () => scheduleWorkspaceSave(),
+    onPaneAction: (action, pane) => {
+      layout.focusPane(pane);
+      if (action === "split-h") app.splitH();
+      else if (action === "split-v") app.splitV();
+      else if (action === "zoom") app.zoom();
+      else if (action === "detach") app.closePane();
+      else if (action === "kill") app.killFocusedSession();
+    },
   });
 
   function defaultProfile() {
@@ -141,12 +152,13 @@ async function boot() {
   // With no personal profiles, fall back to the first available system shell.
   function defaultSystemSpec() {
     const types = (terminalInventory && terminalInventory.types) || [];
-    const usable = types.find((type) => type.executable && type.available !== false && type.id !== "custom");
+    const usable = types.find((type) => type.executable && type.available !== false
+      && !["custom", "claude-code", "ssh", "sftp"].includes(type.id));
     if (!usable) return null;
     const args = usable.id === "powershell-core" || usable.id === "windows-powershell"
       ? ["-NoLogo"]
       : usable.id === "wsl" ? ["--cd", "~"] : [];
-    return { cmd: usable.executable, args, name: usable.label };
+    return { cmd: usable.executable, args, name: usable.label, terminalType: usable.id };
   }
 
   function autoDir(pane) {
@@ -155,13 +167,30 @@ async function boot() {
   }
 
   function serializableSpec(spec) {
-    return {
+    const out = {
       cmd: spec.cmd,
       args: [...(spec.args || [])],
       cwd: spec.cwd || null,
       env: { ...(spec.env || {}) },
       name: spec.name || spec.label || spec.cmd,
     };
+    if (spec.terminalType || spec.terminal_type) {
+      out.terminal_type = spec.terminalType || spec.terminal_type;
+    }
+    return out;
+  }
+
+  function profileTerminalType(name) {
+    return profiles.find((profile) => profile.name === name)?.terminal_type || null;
+  }
+
+  function commandTerminalType(spec) {
+    if (spec.terminal_type || spec.terminalType) return spec.terminal_type || spec.terminalType;
+    const command = String(spec.cmd || "").toLowerCase();
+    if (/(^|[\\/])wsl(?:\.exe)?$/.test(command)) return "wsl";
+    if (/(^|[\\/])psftp(?:\.exe)?$/.test(command)) return "sftp";
+    if (/(^|[\\/])plink(?:\.exe)?$/.test(command)) return "ssh";
+    return null;
   }
 
   // Tag new sessions with their named workspace. Scratch remains untagged
@@ -170,15 +199,21 @@ async function boot() {
     return currentWorkspace && currentWorkspace !== SCRATCH_WS ? currentWorkspace : undefined;
   }
 
-  async function spawnInto(pane, profileName, cwd) {
+  async function spawnInto(pane, profileName, cwd, options = {}) {
     if (!pane.beginSpawn()) return null;
     try {
       const info = await api.createSession({
-        profile: profileName, cwd: cwd || undefined, workspace: spawnWorkspaceTag(),
+        profile: profileName,
+        cwd: cwd || undefined,
+        workspace: spawnWorkspaceTag(),
+        ...(options.startCommand !== undefined ? { start_command: options.startCommand } : {}),
+        ...(options.claudeMode !== undefined ? { claude_mode: options.claudeMode } : {}),
+        ...(options.args !== undefined ? { args: options.args } : {}),
       });
       pane.profileName = profileName;
+      pane.terminalType = profileTerminalType(profileName);
       pane.launchSpec = null;
-      if (cwd) pane.cwd = cwd;
+      pane.setLaunchCwd(cwd || profiles.find((profile) => profile.name === profileName)?.cwd || null);
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -199,7 +234,8 @@ async function boot() {
       // workspace tags the request only (not the persisted launchSpec).
       const info = await api.createSession({ ...launchSpec, workspace: spawnWorkspaceTag() });
       pane.profileName = null;
-      pane.cwd = launchSpec.cwd;
+      pane.terminalType = commandTerminalType(launchSpec);
+      pane.setLaunchCwd(launchSpec.cwd);
       pane.launchSpec = launchSpec;
       pane.attach(info);
       pane.spawnedFresh = true;
@@ -228,6 +264,7 @@ async function boot() {
         args: selectedTerminal.args || [],
         cwd: cwdOverride || null,
         name: selectedTerminal.label,
+        terminalType: selectedTerminal.id,
       });
     }
     const profile = defaultProfile();
@@ -239,12 +276,66 @@ async function boot() {
     return Promise.resolve(null);
   }
 
+  function splitCwd(source, choice) {
+    return splitDirectory(
+      source?.bestKnownCwd?.() || null,
+      source?.terminalType || null,
+      choice,
+      /Windows/i.test(navigator.userAgent),
+    );
+  }
+
+  function spawnSplitInto(pane, source) {
+    if (selectedTerminal) {
+      const cwd = splitCwd(source, selectedTerminal);
+      if (selectedTerminal.kind === "profile") {
+        const profile = selectedTerminal.profile;
+        const claudeMode = normalClaudeSplitMode(profile);
+        return spawnInto(pane, profile.name, cwd || profile.cwd || null, { claudeMode });
+      }
+      return spawnSpecInto(pane, {
+        cmd: selectedTerminal.cmd,
+        args: selectedTerminal.args || [],
+        cwd,
+        name: selectedTerminal.label,
+        terminalType: selectedTerminal.id,
+      });
+    }
+    const profile = defaultProfile();
+    if (profile) {
+      const choice = { kind: "profile", profile };
+      return spawnInto(pane, profile.name, splitCwd(source, choice) || profile.cwd || null, {
+        claudeMode: normalClaudeSplitMode(profile),
+      });
+    }
+    const system = defaultSystemSpec();
+    if (!system) return spawnDefaultInto(pane);
+    const choice = { kind: "system", id: system.terminalType, ...system };
+    return spawnSpecInto(pane, { ...system, cwd: splitCwd(source, choice) });
+  }
+
   async function runProfile(profile) {
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     await spawnInto(pane, profile.name, profile.cwd || null);
+  }
+
+  async function runClaudeMode(profile, claudeMode) {
+    let pane = layout.focused || layout.init();
+    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane) return;
+    layout.focusPane(pane);
+    await spawnInto(pane, profile.name, profile.cwd || null, { claudeMode });
+  }
+
+  async function splitClaudeAgentView(profile) {
+    const source = layout.focused || layout.init();
+    const pane = layout.splitPane(source, autoDir(source));
+    if (!pane) return null;
+    layout.focusPane(pane);
+    return spawnInto(pane, profile.name, profile.cwd || null, { claudeMode: "agents" });
   }
 
   async function runSystemTerminal(system) {
@@ -256,6 +347,7 @@ async function boot() {
       cmd: system.cmd,
       args: system.args || [],
       name: system.label,
+      terminalType: system.id,
     });
   }
 
@@ -278,10 +370,16 @@ async function boot() {
       refreshStatusSoon();
       return false;
     }
+    const targetOwner = currentWorkspace || null;
+    if (info.workspace && info.workspace !== targetOwner) {
+      setWorkspaceSaveState(`terminal belongs to ${info.workspace} · use Move here & attach`, "error");
+      return false;
+    }
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
+    pane.terminalType = info.profile ? profileTerminalType(info.profile) : pane.terminalType;
     pane.attach(info);
     ownSession(info.id);
     scheduleWorkspaceSave();
@@ -380,7 +478,7 @@ async function boot() {
     if (scratchAdoption) return scratchAdoption;
     scratchAdoption = (async () => {
     try {
-      // Single-window guard: two windows share one backend and one scratch.json.
+      // Defensive guard for an externally opened viewer sharing this backend.
       // If another window already adopted "scratch", stay in pure scratch here
       // rather than fighting over the file (its sessions stay disposable).
       const names = await api.listWorkspaces().catch(() => null);
@@ -420,24 +518,71 @@ async function boot() {
     return true;
   }
 
+  function claudeProfileForPane(pane) {
+    const profile = profiles.find((item) => item.name === pane.profileName) || null;
+    if (!profile) return null;
+    if (profile.terminal_type === "claude-code") return profile;
+    const hint = [profile.name, profile.cmd, profile.start_command, pane.title]
+      .filter(Boolean).join(" ");
+    const mentionsClaude = /\bclaude(?:\.cmd|\.exe)?\b/i.test(hint);
+    const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
+    const resumableShell = [
+      "powershell-core", "windows-powershell", "command-prompt", "wsl", "bash", "zsh", "fish",
+    ].includes(profile.terminal_type);
+    return mentionsClaude && (directClaude || resumableShell) ? profile : null;
+  }
+
+  async function restartSavedPane(pane) {
+    if (pane.profileName) return spawnInto(pane, pane.profileName, pane.cwd);
+    if (pane.launchSpec) return spawnSpecInto(pane, pane.launchSpec);
+    return spawnDefaultInto(pane, pane.cwd);
+  }
+
+  async function resumeClaudePane(pane, mode = "continue") {
+    const profile = claudeProfileForPane(pane);
+    if (!profile) return null;
+    // Explicit recovery only: continue the latest project conversation or let
+    // Claude present its own native picker. Neither path impersonates the old PTY.
+    if (profile.terminal_type === "claude-code") {
+      return spawnInto(pane, profile.name, pane.cwd, { claudeMode: mode });
+    }
+    const flag = mode === "resume" ? "--resume" : "--continue";
+    const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
+    if (directClaude) {
+      return spawnInto(pane, profile.name, pane.cwd, {
+        args: [...(profile.args || []), flag],
+      });
+    }
+    return spawnInto(pane, profile.name, pane.cwd, { startCommand: `claude ${flag}` });
+  }
+
   async function restoreWorkspace(name) {
     const saved = await workspace.details(name).catch(() => null);
     if (!saved || !saved.layout) return false;
     const savedLayout = saved.layout;
     workspaceLogo = saved.logo || null;
-    const liveSessions = await api.getSessions().catch(() => []);
-    const byId = new Map(liveSessions.filter((session) => session.alive).map((session) => [session.id, session]));
-    workspaceSessionIds = new Set(
-      (saved.session_ids || []).filter((sessionId) => byId.has(sessionId)),
-    );
+    const knownSessions = await api.getSessions({ metrics: false }).catch(() => []);
+    const knownById = new Map(knownSessions.map((session) => [session.id, session]));
+    const byId = new Map(knownSessions.filter((session) => session.alive).map((session) => [session.id, session]));
+    workspaceSessionIds = new Set(saved.session_ids || []);
     for (const sessionId of sessionIdsInLayout(savedLayout)) {
       if (byId.has(sessionId)) workspaceSessionIds.add(sessionId);
     }
     const panes = layout.restore(savedLayout);
     for (const pane of panes) {
+      if (pane.profileName) pane.terminalType = profileTerminalType(pane.profileName);
+      else if (pane.launchSpec) pane.terminalType = commandTerminalType(pane.launchSpec);
       const live = pane.savedSessionId && byId.get(pane.savedSessionId);
       if (live) {
         pane.attach(live);
+      } else if (pane.savedSessionId) {
+        const prior = knownById.get(pane.savedSessionId);
+        pane.markUnavailable({
+          exitCode: typeof prior?.exit_code === "number" ? prior.exit_code : null,
+          onRestart: () => restartSavedPane(pane),
+          onResumeClaude: claudeProfileForPane(pane) ? () => resumeClaudePane(pane) : null,
+          onPickClaude: claudeProfileForPane(pane) ? () => resumeClaudePane(pane, "resume") : null,
+        });
       } else if (pane.profileName) {
         await spawnInto(pane, pane.profileName, pane.cwd);
       } else if (pane.launchSpec) {
@@ -450,18 +595,19 @@ async function boot() {
     return true;
   }
 
-  async function startScratch() {
+  async function startScratch(cwdOverride = null) {
     currentWorkspace = null;
     workspaceLogo = null;
     workspaceSessionIds = new Set();
     rememberWorkspace(null);
     const pane = layout.restore(null)[0];
-    await spawnDefaultInto(pane);
+    const started = await spawnDefaultInto(pane, cwdOverride);
     layout.focusPane(pane);
+    return Boolean(started);
   }
 
-  async function switchWorkspace(name) {
-    if ((name || null) === currentWorkspace) return;
+  async function switchWorkspace(name, scratchCwd = null) {
+    if ((name || null) === currentWorkspace) return true;
     const leavingWorkspace = currentWorkspace;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
@@ -476,7 +622,7 @@ async function boot() {
       } catch (_) {
         transitioning = false;
         setWorkspaceSaveState("save failed · workspace not switched", "error");
-        return;
+        return false;
       }
     } else if (name) {
       // A never-adopted scratch has no workspace file; leaving it is the one
@@ -484,23 +630,68 @@ async function boot() {
       await discardScratch();
     }
 
+    let opened = true;
     if (name) {
       currentWorkspace = name;
       rememberWorkspace(name);
       const restored = await restoreWorkspace(name);
-      if (!restored) await startScratch();
+      if (!restored) opened = await startScratch();
     } else {
       // "New scratch" is explicit replacement. Ordinary workspace switching
       // preserves the adopted Scratch workspace for the rest of this run.
       if (leavingWorkspace === SCRATCH_WS) await discardScratch();
       else if (workspaceNames.includes(SCRATCH_WS)) await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
-      await startScratch();
+      opened = await startScratch(scratchCwd);
     }
     transitioning = false;
     buildLauncher();
     refreshStatusSoon();
     scheduleWorkspaceSave();
+    return opened;
+  }
+
+  async function openFolderInScratch(cwd) {
+    if (!cwd || transitioning) return false;
+    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) {
+      if (workspaceNames.includes(SCRATCH_WS)) {
+        if (!(await switchWorkspace(SCRATCH_WS)) || currentWorkspace !== SCRATCH_WS) return false;
+      }
+      else {
+        return switchWorkspace(null, cwd);
+      }
+    }
+    let pane = layout.focused || layout.init();
+    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane) return false;
+    layout.focusPane(pane);
+    const started = await spawnDefaultInto(pane, cwd);
+    if (!started) return false;
+    scheduleWorkspaceSave();
+    refreshStatusSoon();
+    return true;
+  }
+
+  let launchLoopStopped = false;
+  async function claimLaunchLoop() {
+    while (!launchLoopStopped) {
+      try {
+        while (transitioning && !launchLoopStopped) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const launch = await api.claimLaunch();
+        if (launch?.cwd) {
+          let opened = false;
+          while (!opened && !launchLoopStopped) {
+            if (transitioning) await new Promise((resolve) => setTimeout(resolve, 100));
+            else opened = await openFolderInScratch(launch.cwd);
+            if (!opened) await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+      } catch (_) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
   }
 
   function removeSessionFromLayout(node, sessionId) {
@@ -585,46 +776,54 @@ async function boot() {
     snippets,
     idleTimeoutSeconds: cfg.idle_timeout_s ?? 300,
     runProfile,
+    runClaudeMode,
+    splitClaudeAgentView,
     runSystemTerminal,
     attachSession,
-    splitH: () => { const pane = layout.splitFocused("h"); if (pane) spawnDefaultInto(pane); },
-    splitV: () => { const pane = layout.splitFocused("v"); if (pane) spawnDefaultInto(pane); },
+    splitH: () => {
+      const source = layout.focused;
+      const pane = layout.splitFocused("h");
+      if (pane) spawnSplitInto(pane, source);
+    },
+    splitV: () => {
+      const source = layout.focused;
+      const pane = layout.splitFocused("v");
+      if (pane) spawnSplitInto(pane, source);
+    },
+    newTerminal: () => {
+      let pane = layout.focused || layout.init();
+      if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+      if (pane) spawnDefaultInto(pane);
+    },
+    cycleTerminal: (delta) => {
+      const choice = launcherView?.cycleTerminal(delta);
+      if (choice) layout.focused?.flashNotice(`[new terminal: ${choice.label}]`);
+      return choice;
+    },
     zoom: () => layout.toggleZoom(),
-    // Closing a pane detaches its session. If this pane spawned the session
-    // itself and nothing was ever typed into it, kill it too so untouched
-    // shells don't pile up as background clutter. Reattached sessions and
-    // sessions other windows are using are never auto-killed.
+    // D/Alt+D is a true detach: retain the process first, then remove only its
+    // viewer. It must never share the kill semantics of X/Alt+W.
     closePane: async () => {
       const pane = layout.focused;
       if (!pane) return;
       const session = pane.session;
-      const freshUnused = pane.spawnedFresh && !pane.userWrote;
-      if (session && !freshUnused && !currentWorkspace) await maybeAdoptScratch(pane);
-      let busy = false;
-      if (session && pane.state === "attached") {
-        // Busy guard: a shell with something running inside (ssh, a build,
-        // claude, ...) is too easy to lose to one keypress. First press only
-        // warns; a second within 3s proceeds — and never auto-kills.
-        busy = await api.sessionBusy(session.id);
-        if (busy && !pane.closeArmed) {
-          if (layout.focused === pane) pane.armClose();
+      if (session) {
+        try {
+          await api.retainSession(session.id);
+        } catch (_) {
+          pane.flashNotice("[could not retain terminal — pane left open]");
           return;
         }
+        if (!currentWorkspace) {
+          const adopted = await ensureScratchWorkspace().catch(() => false);
+          // Another window may already own Scratch. Retain still guarantees
+          // this process lives; exclude it from this viewer's exit cleanup.
+          if (!adopted) scratchSessionIds.delete(session.id);
+        }
       }
-      if (freshUnused && session) forgetSession(session.id);
       layout.closePane(pane);
+      scheduleWorkspaceSave();
       refreshStatusSoon();
-      if (!session || !freshUnused || busy) return;
-      setTimeout(() => { // let our own detach land server-side first
-        api.getSessions().then((list) => {
-          const live = list.find((item) => item.id === session.id);
-          if (live && live.alive && !(live.attachments > 0)) {
-            api.killSession(session.id).catch(() => {});
-            // the server removes killed sessions after a short grace period
-            setTimeout(refreshStatus, 1300);
-          }
-        }).catch(() => {});
-      }, 350);
     },
     killFocusedSession: async () => {
       const pane = layout.focused;
@@ -748,7 +947,11 @@ async function boot() {
       .filter((pane) => pane.session && pane.state === "attached")
       .map((pane) => pane.session.id),
     ownedSessionIds: () => [...ownedSessionIds()],
-    refocusTerm: () => { if (layout.focused) layout.focused.setFocused(true); },
+    refocusTerm: () => {
+      if (!layout.focused) return false;
+      layout.focused.setFocused(true);
+      return true;
+    },
     onConfigSaved: async () => {
       const [fresh, freshInventory] = await Promise.all([
         api.getConfig().catch(() => null),
@@ -764,6 +967,7 @@ async function boot() {
       app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
       applyChromeTheme(fresh.theme, fresh.custom_theme);
       layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
+      layout.setFontFamily(fresh.font_family || "JetBrains Mono");
       setFontSize(fresh.font_size, false);
       buildLauncher();
     },
@@ -930,11 +1134,11 @@ async function boot() {
   // Update notification: a quiet accent pill in the nav when a newer release
   // exists. Clicking it opens Settings > About, where install lives.
   function showUpdatePill(latest) {
-    const nav = document.querySelector(".launcher-nav");
+    const nav = document.querySelector(".sidebar-footer");
     if (!nav || nav.querySelector(".update-pill")) return;
     const pill = document.createElement("button");
     pill.type = "button";
-    pill.className = "nav-button update-pill";
+    pill.className = "sidebar-action sidebar-nav-button update-pill";
     pill.title = `QuickTerm v${latest} is available - open About to install`;
     pill.textContent = `Update v${latest}`;
     pill.addEventListener("click", () => {
@@ -964,6 +1168,8 @@ async function boot() {
     paletteOpen: () => palette.open || panels.open !== null,
     splitH: app.splitH,
     splitV: app.splitV,
+    newTerminal: app.newTerminal,
+    cycleTerminal: app.cycleTerminal,
     zoom: app.zoom,
     closePane: app.closePane,
     killSession: app.killFocusedSession,
@@ -974,7 +1180,7 @@ async function boot() {
   });
 
   function buildLauncher() {
-    initLauncher($("launcher"), {
+    launcherView = initLauncher($("launcher"), {
       profiles,
       inventory: terminalInventory,
       workspaces: workspaceNames,
@@ -985,12 +1191,23 @@ async function boot() {
       logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
       onRunProfile: runProfile,
       onRunSystem: runSystemTerminal,
+      onLaunchComplete: () => layout.focused?.focusSoon(),
       onElevateProfile: elevateProfile,
       onElevateSystem: elevateSystemTerminal,
       onWorkspace: switchWorkspace,
       onManage: () => panels.toggle("dashboard"),
+      onFocusSession: (sessionId) => {
+        const pane = layout.panes().find((item) => item.session?.id === sessionId);
+        if (pane) layout.focusPane(pane);
+      },
+      onAttachSession: attachSession,
+      onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
+      sessions: lastSessions,
+      attachedSessionIds: app.attachedSessionIds(),
+      ownedSessionIds: app.ownedSessionIds(),
       elevated: Boolean(cfg.elevated),
       chrome: [
+        ["commands", () => { panels.close(); palette.toggle(); }],
         ["dashboard", () => panels.toggle("dashboard")],
         ["settings", () => panels.toggle("settings")],
         ["help", () => panels.toggle("help")],
@@ -1002,21 +1219,23 @@ async function boot() {
     $("sb-workspace").textContent = currentWorkspace && currentWorkspace !== "scratch"
       ? `ws ${currentWorkspace}`
       : "scratch · disposable";
-    api.getSessions().then((list) => {
+    if (document.hidden) return;
+    api.getSessions({ metrics: false }).then((list) => {
+      lastSessions = list;
       const owned = new Set(app.ownedSessionIds());
       const attached = new Set(app.attachedSessionIds());
       const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
       const visible = liveOwned.filter((session) => attached.has(session.id)).length;
       const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
-      const measuredMemory = list.reduce((sum, session) =>
-        sum + (session.alive && session.usage?.available ? session.usage.working_set_bytes || 0 : 0), 0);
-      const memoryLabel = measuredMemory >= 1024 * 1024 * 1024
-        ? `${(measuredMemory / (1024 * 1024 * 1024)).toFixed(1)} GB RAM`
-        : `${Math.round(measuredMemory / (1024 * 1024))} MB RAM`;
-      const countLabel = detached
+      const workspaceLabel = detached
         ? `${visible} open · ${detached} background`
         : `${visible} open`;
-      $("sb-sessions").textContent = `${countLabel} · ${memoryLabel}`;
+      const totalLive = list.filter((session) => session.alive).length;
+      const countLabel = totalLive === liveOwned.length
+        ? workspaceLabel
+        : `${workspaceLabel} · ${totalLive} total`;
+      $("sb-sessions").textContent = countLabel;
+      launcherView?.updateSessions(list, [...attached], [...owned]);
     }).catch(() => { $("sb-sessions").textContent = "offline"; });
   }
 
@@ -1032,6 +1251,7 @@ async function boot() {
   }
 
   function persistOnExit() {
+    launchLoopStopped = true;
     if (currentWorkspace && layout.root && !transitioning) {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
@@ -1058,6 +1278,12 @@ async function boot() {
   tickClock();
   setInterval(tickClock, 15000);
   setInterval(refreshStatus, 10000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      refreshStatus();
+      layout.fitAll();
+    }
+  });
 
   // "Open QuickTerm here" opens this window as a scratch window whose first
   // terminal starts in the given folder, regardless of any remembered workspace.
@@ -1084,6 +1310,7 @@ async function boot() {
   transitioning = false;
   buildLauncher();
   refreshStatus();
+  claimLaunchLoop();
   scheduleWorkspaceSave();
 }
 

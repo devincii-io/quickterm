@@ -33,6 +33,7 @@ class FakeProfile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    claude_mode: str | None = None
     ssh_host: str | None = None
     ssh_port: int | None = None
     ssh_user: str | None = None
@@ -83,6 +84,7 @@ class FakeSessionInfo:
     cols: int
     rows: int
     touched: bool = False
+    retained: bool = False
     workspace: str | None = None
 
 
@@ -141,6 +143,13 @@ class FakeSessionManager:
 
     def list(self) -> list[FakeSessionInfo]:
         return [s.info for s in self.sessions.values()]
+
+    def sync_workspace(self, name: str, session_ids: set[str]) -> None:
+        for sid, session in self.sessions.items():
+            if sid in session_ids:
+                session.info.workspace = name
+            elif session.info.workspace == name:
+                session.info.workspace = None
 
     def get(self, sid: str) -> FakeSession | None:
         return self.sessions.get(sid)
@@ -304,6 +313,19 @@ def test_list_sessions_includes_background_activity(client, manager):
     }
 
 
+def test_list_sessions_lightweight_skips_process_metrics(client, manager, monkeypatch):
+    manager.add_session(name="agent")
+
+    def fail_if_sampled():
+        raise AssertionError("lightweight session listing sampled processes")
+
+    monkeypatch.setattr(manager, "session_metrics", fail_if_sampled)
+    response = client.get("/api/sessions?metrics=false")
+    assert response.status_code == 200
+    assert response.json()[0]["busy"] is None
+    assert "usage" not in response.json()[0]
+
+
 def test_spawn_with_explicit_cmd(client, manager):
     r = client.post("/api/sessions", json={"cmd": "cmd.exe", "args": ["/c", "echo hi"],
                                            "name": "t", "cols": 100, "rows": 40})
@@ -344,6 +366,86 @@ def test_spawn_profile_start_command(client, manager, cfg, tmp_path):
     assert manager.last_spawn["cmd"] == "pwsh.exe"
     assert manager.last_spawn["args"] == ["-NoLogo", "-NoExit", "-Command", "uv run dev"]
     assert manager.last_spawn["cwd"] == str(project_cwd)
+
+
+def test_spawn_profile_allows_explicit_recovery_command(client, manager, cfg, tmp_path):
+    project_cwd = tmp_path / "recover"
+    project_cwd.mkdir()
+    cfg.profiles.append(FakeProfile(
+        name="claude-shell",
+        cmd="pwsh.exe",
+        terminal_type="powershell-core",
+        start_command="claude",
+        cwd=str(project_cwd),
+    ))
+    response = client.post(
+        "/api/sessions",
+        json={"profile": "claude-shell", "start_command": "claude --continue"},
+    )
+    assert response.status_code == 200
+    assert manager.last_spawn["args"] == [
+        "-NoLogo", "-NoExit", "-Command", "claude --continue",
+    ]
+
+
+def test_spawn_first_class_claude_profile_supports_continue_and_picker(
+    client, manager, cfg, tmp_path
+):
+    project_cwd = tmp_path / "claude-project"
+    project_cwd.mkdir()
+    cfg.profiles.append(FakeProfile(
+        name="project-agent",
+        cmd="claude.exe",
+        terminal_type="claude-code",
+        claude_mode="resume",
+        cwd=str(project_cwd),
+    ))
+
+    response = client.post("/api/sessions", json={"profile": "project-agent"})
+    assert response.status_code == 200
+    assert manager.last_spawn["cmd"] == "claude.exe"
+    assert manager.last_spawn["args"] == ["--resume"]
+    assert manager.last_spawn["cwd"] == str(project_cwd)
+
+    response = client.post(
+        "/api/sessions", json={"profile": "project-agent", "claude_mode": "continue"}
+    )
+    assert response.status_code == 200
+    assert manager.last_spawn["args"] == ["--continue"]
+
+    response = client.post(
+        "/api/sessions", json={"profile": "project-agent", "claude_mode": "agents"}
+    )
+    assert response.status_code == 200
+    assert manager.last_spawn["args"] == ["agents", "--cwd", str(project_cwd)]
+
+
+def test_claude_profile_rejects_missing_project_folder(client, cfg):
+    cfg.profiles.append(FakeProfile(
+        name="unscoped-agent",
+        cmd="claude.exe",
+        terminal_type="claude-code",
+        claude_mode="continue",
+    ))
+    response = client.post("/api/sessions", json={"profile": "unscoped-agent"})
+    assert response.status_code == 400
+    assert "project folder" in response.json()["detail"]
+
+
+def test_claude_mode_override_is_bounded_to_claude_profiles(client):
+    response = client.post(
+        "/api/sessions", json={"profile": "powershell", "claude_mode": "resume"}
+    )
+    assert response.status_code == 400
+    assert "Claude Code profile" in response.json()["detail"]
+
+
+def test_spawn_recovery_command_requires_profile(client):
+    response = client.post(
+        "/api/sessions",
+        json={"cmd": "cmd.exe", "start_command": "claude --continue"},
+    )
+    assert response.status_code == 400
 
 
 def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg):
@@ -526,6 +628,31 @@ def test_kill_session_reports_backend_failure(client, manager, monkeypatch):
     assert response.json()["detail"] == "terminal process could not be stopped"
 
 
+def test_retain_session_marks_explicit_detach_as_user_owned(client, manager):
+    info = manager.add_session(touched=False, retained=False)
+    response = client.post(f"/api/sessions/{info.id}/retain", json={})
+
+    assert response.status_code == 200
+    assert response.json()["retained"] is True
+    assert manager.get(info.id).info.retained is True
+    assert manager.get(info.id).info.touched is False
+    assert client.post("/api/sessions/deadbeef/retain", json={}).status_code == 404
+
+
+def test_single_viewer_launch_queue_hands_off_folder_once(client, tmp_path):
+    folder = tmp_path / "open-here"
+    folder.mkdir()
+
+    queued = client.post("/api/launches", json={"cwd": str(folder)})
+    assert queued.status_code == 200
+    assert queued.json() == {"cwd": str(folder)}
+
+    claimed = client.get("/api/launches/next?wait=false")
+    assert claimed.status_code == 200
+    assert claimed.json() == {"cwd": str(folder)}
+    assert client.get("/api/launches/next?wait=false").status_code == 204
+
+
 def test_cleanup_sessions(client, manager):
     first = manager.add_session(name="scratch-1")
     second = manager.add_session(name="scratch-2")
@@ -706,6 +833,24 @@ def test_workspace_crud(client, fake_workspace):
     assert client.get("/api/workspaces").json() == []
 
 
+def test_workspace_save_and_delete_sync_live_ownership(client, manager, fake_workspace):
+    moved = manager.add_session(name="moved", workspace="old")
+    removed = manager.add_session(name="removed", workspace="dev")
+    manager.attached_ids = {moved.id, removed.id}
+
+    layout = {"type": "pane", "session_id": moved.id}
+    response = client.put(
+        "/api/workspaces/dev",
+        json={"layout": layout, "session_ids": [moved.id]},
+    )
+    assert response.status_code == 204
+    assert moved.workspace == "dev"
+    assert removed.workspace is None
+
+    assert client.delete("/api/workspaces/dev").status_code == 204
+    assert moved.workspace is None
+
+
 def test_workspace_put_requires_layout(client, fake_workspace):
     assert client.put("/api/workspaces/dev", json={"nope": 1}).status_code == 400
 
@@ -741,6 +886,21 @@ def test_deleting_workspace_spares_attached_sessions(client, manager, fake_works
     assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert manager.killed == [detached.id]  # the attached terminal survives
+
+
+def test_deleting_stale_workspace_reference_never_kills_new_owner(
+    client, manager, fake_workspace,
+):
+    moved = manager.add_session(name="moved")
+    layout = {"type": "pane", "session_id": moved.id}
+    assert client.put("/api/workspaces/old", json={"layout": layout}).status_code == 204
+    assert client.put("/api/workspaces/new", json={"layout": layout}).status_code == 204
+    assert moved.workspace == "new"
+
+    assert client.delete("/api/workspaces/old").status_code == 204
+    assert manager.killed == []
+    assert manager.get(moved.id) is not None
+    assert moved.workspace == "new"
 
 
 def test_workspace_keeps_and_deletes_detached_session_ids(client, manager, fake_workspace):

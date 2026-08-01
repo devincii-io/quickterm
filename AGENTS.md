@@ -17,6 +17,7 @@ uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
+uv run --no-sync python scripts/smoke_packaged.py                  # frozen PTY/auth/replay/routes smoke
 python scripts/bench_throughput.py 20                             # output throughput
 ```
 
@@ -37,7 +38,8 @@ in phase "live".
 
 `docs/CONTRACTS.md` is the binding surface spec — update it when changing any
 public surface. `app.py` boots backend + pywebview window; close-to-tray
-(`tray.py`, ctypes) only when a live session has `touched=True`, else quit.
+(`tray.py`, ctypes) only when a live session is touched, explicitly retained,
+or busy, else quit.
 `update.py` probes the pinned GitHub repo's latest release; install downloads
 the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
@@ -47,8 +49,9 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   decode for winpty is strict-UTF-8 with surrogateescape fallback — never
   `errors="replace"` (mangles 8-bit input).
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
-  Alt+Z zoom, Alt+W close, Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
-  (or H/V) split and
+  Alt+N new terminal, Alt+Z zoom, Alt+D detach, Alt+W confirmed kill, and
+  Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
+  (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; and
   Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
   bindings) — never re-claim them. Ctrl+C copies only with a selection and
@@ -59,11 +62,16 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `importlib.import_module("quickterm.X")` — a plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.
 - Session activity tracking uses `touched` (set on user input via `onKey`, not
-  `onData` — xterm auto-replies to DA/DSR must not count).
+  `onData` — xterm auto-replies to DA/DSR must not count). Explicit detach also
+  uses the separate `retained` flag before removing the viewer, so idle cleanup
+  cannot turn D/Alt+D into a delayed kill or fake user input.
 - Session termination is verified per process. Bulk kills return successful and
   failed IDs separately; clients must remove only verified kills and leave
   failures visible. Destructive confirmation triggers must remain visible and
   their popovers must be clamped inside the viewport.
+- Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
+  (`new`, `continue`, `resume`, or `agents`) and a project `cwd`. Recovery uses
+  Claude's own CLI flags and must remain explicit when the old PTY is gone.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
@@ -80,6 +88,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   "winpty") and keep `upx=False` (UPX corrupts them + the WebView2 loader).
   Symptom when broken: every terminal spawns then dies instantly with exit
   0xC000013A / 3221225786.
+- A GUI-subsystem frozen process must allocate one hidden process-wide console
+  before constructing any pywinpty PTY. Keep `_ensure_host_console()` in
+  `pty_session.py`: without it pywinpty can panic on a false `ShowWindow`
+  return or let one PTY free console state shared by its siblings.
 - Any module reached ONLY via `importlib.import_module("quickterm.X")` (server
   stubbable modules: `opener`, `update`, plus `workspace`/`config` which happen
   to also be static-imported) is invisible to PyInstaller's static graph and
