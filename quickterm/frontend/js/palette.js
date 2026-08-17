@@ -3,6 +3,16 @@
 // Two-step prompts (workspace name, file path) reuse the same input.
 
 import * as api from "./api.js";
+import { displaySnippet } from "./panel_shared.js";
+
+// Snippet rows must show what will actually be sent. Keep it to one line so a
+// long multi-line snippet cannot push the destination out of view.
+function snippetHint(text) {
+  const body = displaySnippet(text);
+  const lines = body.split("\n");
+  const head = lines[0].length > 60 ? `${lines[0].slice(0, 59)}…` : lines[0];
+  return lines.length > 1 ? `${head} … (+${lines.length - 1} more)` : head;
+}
 
 function layoutSessionIds(node, out = new Set()) {
   if (!node) return out;
@@ -130,7 +140,7 @@ export class Palette {
         this.foreignSessions.push({ info: s, workspace: owner || "Unassigned" });
       }
     }
-    this._refilter();
+    this._refilter(false);
   }
 
   close() {
@@ -160,24 +170,22 @@ export class Palette {
       { kind: "view", label: "text size: smaller", hint: "Ctrl+−", run: () => a.fontSmaller() },
       { kind: "view", label: "text size: bigger", hint: "Ctrl++", run: () => a.fontBigger() },
       { kind: "view", label: "text size: reset", hint: "Ctrl+0", run: () => a.fontReset() },
-      { kind: "view", label: "pane width: narrower", run: () => a.resizeFocused("h", -0.05) },
-      { kind: "view", label: "pane width: wider", run: () => a.resizeFocused("h", 0.05) },
-      { kind: "view", label: "pane height: shorter", run: () => a.resizeFocused("v", -0.05) },
-      { kind: "view", label: "pane height: taller", run: () => a.resizeFocused("v", 0.05) },
-      { kind: "view", label: "balance nearest pane split", run: () => a.balanceFocused() },
+      // Pane sizing lives on the splitter (drag / arrows / double-click) and in
+      // Quick settings. Duplicating it as five palette rows only crowded the list.
       { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
       { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession() },
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),
       },
+      // Saving and loading are name-exact operations, and a free-text prompt
+      // here used to tear the whole layout down on a typo. Loading is offered
+      // only as enumerated "load workspace: <name>" rows (added in
+      // openPalette); saving is handed to the Dashboard, which validates the
+      // name and shows the error.
       {
-        kind: "action", label: "save workspace…", keepOpen: true,
-        run: () => this._promptMode("workspace name", (v) => a.saveWorkspace(v)),
-      },
-      {
-        kind: "action", label: "load workspace…", keepOpen: true,
-        run: () => this._promptMode("workspace name", (v) => a.loadWorkspace(v)),
+        kind: "action", label: "save workspace…", hint: "opens Dashboard",
+        run: () => a.openPanel("dashboard"),
       },
       {
         kind: "action", label: "open file viewer…", keepOpen: true,
@@ -208,10 +216,16 @@ export class Palette {
         );
       }
     }
+    // Snippets type straight into the focused terminal, so the row has to show
+    // both what is sent and where it lands — two similarly named snippets are
+    // otherwise indistinguishable in the list.
+    const target = a.focusedPaneName?.();
     for (const s of a.snippets) {
+      const command = snippetHint(s.text);
       items.push({
         kind: "snippet",
         label: `snippet: ${s.name}`,
+        hint: target ? `${command} → ${target}` : command,
         run: () => a.sendSnippet(s),
       });
     }
@@ -291,14 +305,19 @@ export class Palette {
     }
   }
 
-  _refilter() {
+  // resetSelection=false keeps the highlighted row when the list is rebuilt for
+  // a reason the user did not trigger (late session/workspace enrichment).
+  // Resetting there let Enter run a different item than the one highlighted.
+  _refilter(resetSelection = true) {
     const q = this.input.value.trim();
+    const previous = resetSelection ? null : this.filtered[this.sel];
     this.filtered = this.items
       .map((item, i) => ({ item, i, score: fuzzyScore(q, item.label) }))
       .filter((x) => x.score >= 0)
       .sort((x, y) => y.score - x.score || x.i - y.i)
       .map((x) => x.item);
-    this.sel = 0;
+    const kept = previous ? this.filtered.findIndex((item) => item.label === previous.label) : -1;
+    this.sel = kept >= 0 ? kept : 0;
     this._renderList();
   }
 

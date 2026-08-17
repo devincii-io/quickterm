@@ -54,7 +54,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; and
   Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
-  bindings) — never re-claim them. Ctrl+C copies only with a selection and
+  bindings) — never re-claim them. The zoom layer matches only keys that really
+  produce `+`/`-`/`0`; never match a physical `code` alone (`Slash` and
+  `BracketRight` are the QWERTZ `-`/`+` positions but Ctrl+/ and Ctrl+] on
+  ANSI, where readline undo and the vim tag jump must reach the shell). Ctrl+C copies only with a selection and
   otherwise passes through as interrupt; Ctrl+Shift+C remains an alias. Ctrl+V
   and Ctrl+Shift+V use native paste: the handler must NOT preventDefault (WebView2
   denies `clipboard.readText` silently — let the paste event reach xterm's textarea).
@@ -65,10 +68,26 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `onData` — xterm auto-replies to DA/DSR must not count). Explicit detach also
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
-- Session termination is verified per process. Bulk kills return successful and
-  failed IDs separately; clients must remove only verified kills and leave
-  failures visible. Destructive confirmation triggers must remain visible and
-  their popovers must be clamped inside the viewport.
+- Session termination is verified per process (both backends — POSIX `kill()`
+  must not swallow EPERM). Bulk kills return successful and failed IDs
+  separately; clients must remove only verified kills and leave failures
+  visible. Destructive confirmation triggers must remain visible, their
+  popovers must be clamped inside the viewport and follow a scrolling panel,
+  and **Cancel** owns the initial focus.
+- No destructive action may be reachable without consent or feedback. `×` on a
+  pane detaches, never kills; kill is a separate labelled `.danger` control.
+  Clicking the workspace row you are already on is a no-op, scratch included.
+  There is no free-text workspace prompt. Errors go to the `#app-error` banner
+  or the pane notice — `#sb-save` is the saving/saved lifecycle only.
+- Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
+  (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan, and
+  the `ShellExecuteW` UAC handshake all go through `asyncio.to_thread`. The
+  session registry is mutated on the loop thread but read from the threadpool
+  and the GUI thread, so every iteration snapshots with `list(...)` first.
+- The WS attach must never lose bytes: a fresh subscription is drained from the
+  moment it exists (`_HandshakeBuffer`, bounded), an exited session still in the
+  registry is served replay-only rather than refused, and the client reconnects
+  after a 1013 overflow even if the session has since exited.
 - Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
   (`new`, `continue`, `resume`, or `agents`) and a project `cwd`. Recovery uses
   Claude's own CLI flags and must remain explicit when the old PTY is gone.

@@ -123,3 +123,27 @@ def test_legacy_sanitized_workspace_remains_readable_and_migrates(fake_appdata):
 
     assert not legacy.exists()
     assert load_workspace("project:one").layout == {"new": True}
+
+
+def test_case_differing_names_do_not_share_a_file():
+    """NTFS filenames are case-insensitive.
+
+    "dev" and "Dev" resolved to the same path, so saving one silently
+    destroyed the other's layout and its session-ownership list.
+    """
+    save_workspace(
+        Workspace(name="dev", layout={"type": "pane", "profile": "a"}, session_ids=["a1"])
+    )
+    save_workspace(
+        Workspace(name="Dev", layout={"type": "pane", "profile": "b"}, session_ids=["b1"])
+    )
+
+    lower = load_workspace("dev")
+    upper = load_workspace("Dev")
+
+    assert lower is not None and upper is not None
+    assert lower.layout["profile"] == "a"
+    assert upper.layout["profile"] == "b"
+    assert lower.session_ids == ["a1"]
+    assert upper.session_ids == ["b1"]
+    assert sorted(list_workspaces()) == ["Dev", "dev"]

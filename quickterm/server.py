@@ -286,11 +286,18 @@ def create_app(
     async def cleanup_sessions(request: Request) -> Response:
         body = await _read_json(request)
         session_ids = body.get("session_ids", []) if isinstance(body, dict) else []
-        failed: list[str] = []
-        for sid in session_ids:
-            if isinstance(sid, str) and manager.get(sid) is not None:
-                if manager.kill(sid) is False:
-                    failed.append(sid)
+
+        def _kill_all() -> list[str]:
+            # manager.kill spawns taskkill and waits on process handles; on the
+            # event loop that freezes every pane for the duration.
+            missed: list[str] = []
+            for sid in session_ids:
+                if isinstance(sid, str) and manager.get(sid) is not None:
+                    if manager.kill(sid) is False:
+                        missed.append(sid)
+            return missed
+
+        failed = await asyncio.to_thread(_kill_all)
         if failed:
             raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
         return Response(status_code=204)
@@ -405,11 +412,24 @@ def create_app(
             "update_check": cfg.update_check,
             "idle_timeout_s": cfg.idle_timeout_s,
             "max_sessions": cfg.max_sessions,
+            # Startup hotkey registration failure (another program owns the
+            # combination). Settings shows it next to the shortcut field
+            # instead of leaving the user with a silently dead shortcut.
+            "hotkey_error": getattr(cfg, "hotkey_error", None),
         }
 
     @app.get("/api/config/full")
     def get_full_config() -> dict:
-        return _asdict(cfg)
+        # Serve the PERSISTED config, not the live one. app.py overwrites
+        # cfg.port at startup (--port 0, and unconditionally for an elevated
+        # instance), and Settings PUTs this whole object straight back — which
+        # wrote the ephemeral port into config.json and destroyed the
+        # configured one for every later launch.
+        config_mod = importlib.import_module("quickterm.config")
+        try:
+            return _asdict(config_mod.load_config())
+        except Exception:
+            return _asdict(cfg)
 
     @app.get("/api/system/terminals")
     def get_system_terminals() -> dict:
@@ -440,7 +460,11 @@ def create_app(
         try:
             from quickterm.elevation import launch
 
-            launch(spec)
+            # ShellExecuteW(..., "runas", ...) does not return until the UAC
+            # consent dialog is resolved — up to minutes if the user walks
+            # away. On the event loop that parks every PTY pump long enough to
+            # overflow the fan-out queues and force every pane to resync.
+            await asyncio.to_thread(launch, spec)
         except (OSError, ValueError) as exc:
             raise HTTPException(500, str(exc)) from exc
         return {"launched": True}
@@ -487,6 +511,19 @@ def create_app(
 
         try:
             new_cfg = config_mod.config_from_dict(await _read_json(request))
+            # Belt to /api/config/full's braces: a client holding a page that
+            # was rendered from the LIVE config (an older build, or a window
+            # opened before this fix) would otherwise write the runtime port
+            # back to disk. A value identical to the runtime one was not
+            # edited by the user, so the persisted value wins.
+            try:
+                on_disk = config_mod.load_config()
+            except Exception:
+                on_disk = None
+            if on_disk is not None:
+                for name in ("port", "host", "summon_hotkey"):
+                    if getattr(new_cfg, name, None) == getattr(cfg, name, None):
+                        setattr(new_cfg, name, getattr(on_disk, name))
             config_mod.save_config(new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
@@ -570,47 +607,127 @@ def create_app(
             await ws.close(code=4404)
             return
         if not session.info.alive:
-            await ws.close(code=4410, reason="session has exited")
+            # Replay-only reattach. Refusing an exited session outright made
+            # overflow permanently lossy: the client is told to reconnect and
+            # replay the ring, and if the PTY died around the overflow that
+            # replay could never happen — so the session's final output (the
+            # build result, the error) was unreachable while still sitting in
+            # the ring. Serve the scrollback, report the exit, accept no input.
+            try:
+                if await _send_replay(ws, session):
+                    await _send_exit(ws, session)
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                pass
             return
         # Subscribe before taking the replay snapshot. Both calls are
         # synchronous on the event-loop thread, so output cannot slip between
         # the snapshot and the live queue (the old order permanently lost it).
         attachment = manager.attach(sid)
-        chunks_fn = getattr(session, "scrollback_chunks", None)
-        if chunks_fn is not None:
-            replay_chunks, cols, rows = chunks_fn()
-        else:  # test fakes and third-party managers implementing the old surface
-            data, cols, rows = session.scrollback()
-            replay_chunks = (data,) if data else ()
+        # ...and start draining that subscription immediately: nothing consumed
+        # the queue until the live phase began, so a busy session could fill
+        # its 8-item queue during the (multi-round-trip) handshake and be
+        # closed 1013 the instant it went live — the client then reconnected
+        # into exactly the same trap, forever.
+        buffer = _HandshakeBuffer(attachment)
         try:
-            await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
-            sent_replay = False
-            for frame in _coalesce_replay(replay_chunks):
-                sent_replay = True
-                await ws.send_bytes(frame)
-                try:
-                    ack_text = await asyncio.wait_for(ws.receive_text(), timeout=30)
-                    ack = json.loads(ack_text)
-                except (asyncio.TimeoutError, TypeError, json.JSONDecodeError):
-                    await ws.close(code=1002, reason="invalid replay acknowledgement")
-                    return
-                if not isinstance(ack, dict) or ack.get("type") != "replay_ack":
-                    await ws.close(code=1002, reason="invalid replay acknowledgement")
-                    return
-            # Keep the original wire shape for empty terminals.  The empty
-            # frame has nothing for xterm to parse, so it intentionally does
-            # not participate in replay acknowledgement flow control.
-            if not sent_replay:
-                await ws.send_bytes(b"")
-            await ws.send_text(json.dumps({"type": "replay_done"}))
-            await _live_phase(ws, attachment, manager, session, sid)
+            if not await _send_replay(ws, session):
+                return
+            # Hand the buffer over, not its contents: _pump_output takes it as
+            # its very first statement, so there is never a turn of the loop
+            # with nobody draining the queue.
+            await _live_phase(ws, attachment, manager, session, sid, buffer)
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
+            buffer.take()
             attachment.detach()
 
     _mount_frontend(app)
     return app
+
+
+class _HandshakeBuffer:
+    """Consume a fresh subscription while the replay handshake is in flight.
+
+    The fan-out queue counts items, not bytes, so eight PTY reader callbacks
+    are enough to mark an attachment overflowed. The handshake is several
+    round trips (one per 128 KiB replay frame, each awaiting an ack), which is
+    ample time for a verbose build to produce them — and the reconnect landed
+    in the same window every time. Draining here keeps the subscription alive;
+    everything collected is handed to the live pump in order.
+    """
+
+    # Bounded so this cannot become the unbounded buffer the queue cap exists
+    # to prevent. Past the cap we stop and let the normal resync take over.
+    MAX_BUFFERED_BYTES = 8 * _SEND_COALESCE_BYTES
+
+    def __init__(self, attachment: "Attachment") -> None:
+        self._attachment = attachment
+        self._items: list = []
+        self._taken = False
+        # Set once a terminal item (exit or overflow) has been buffered: after
+        # that nothing further in the queue can matter, and continuing to
+        # collect it would defeat MAX_BUFFERED_BYTES.
+        self._sealed = False
+        self._task = asyncio.ensure_future(self._drain())
+
+    async def _drain(self) -> None:
+        buffered = 0
+        while True:
+            item = await self._attachment.queue.get()
+            self._items.append(item)
+            if item is None or item is self._attachment.overflow_sentinel:
+                self._sealed = True
+                return
+            buffered += len(item)
+            if buffered >= self.MAX_BUFFERED_BYTES:
+                self._items.append(self._attachment.overflow_sentinel)
+                self._sealed = True
+                return
+
+    def take(self) -> list:
+        """Stop draining and return everything buffered, in arrival order."""
+        if self._taken:
+            return []
+        self._taken = True
+        self._task.cancel()
+        while not self._sealed:
+            try:
+                self._items.append(self._attachment.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return self._items
+
+
+async def _send_replay(ws: WebSocket, session: Any) -> bool:
+    """Run the replay handshake. Returns False if the socket was closed."""
+    chunks_fn = getattr(session, "scrollback_chunks", None)
+    if chunks_fn is not None:
+        replay_chunks, cols, rows = chunks_fn()
+    else:  # test fakes and third-party managers implementing the old surface
+        data, cols, rows = session.scrollback()
+        replay_chunks = (data,) if data else ()
+    await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
+    sent_replay = False
+    for frame in _coalesce_replay(replay_chunks):
+        sent_replay = True
+        await ws.send_bytes(frame)
+        try:
+            ack_text = await asyncio.wait_for(ws.receive_text(), timeout=30)
+            ack = json.loads(ack_text)
+        except (asyncio.TimeoutError, TypeError, json.JSONDecodeError):
+            await ws.close(code=1002, reason="invalid replay acknowledgement")
+            return False
+        if not isinstance(ack, dict) or ack.get("type") != "replay_ack":
+            await ws.close(code=1002, reason="invalid replay acknowledgement")
+            return False
+    # Keep the original wire shape for empty terminals.  The empty frame has
+    # nothing for xterm to parse, so it intentionally does not participate in
+    # replay acknowledgement flow control.
+    if not sent_replay:
+        await ws.send_bytes(b"")
+    await ws.send_text(json.dumps({"type": "replay_done"}))
+    return True
 
 
 def _coalesce_replay(chunks: Any):
@@ -853,9 +970,14 @@ def _posix_inventory() -> dict:
 
 
 async def _live_phase(
-    ws: WebSocket, attachment: "Attachment", manager: "SessionManager", session: Any, sid: str
+    ws: WebSocket,
+    attachment: "Attachment",
+    manager: "SessionManager",
+    session: Any,
+    sid: str,
+    buffer: "_HandshakeBuffer | None" = None,
 ) -> None:
-    out = asyncio.ensure_future(_pump_output(ws, attachment, session))
+    out = asyncio.ensure_future(_pump_output(ws, attachment, session, buffer))
     inp = asyncio.ensure_future(_pump_input(ws, manager, sid))
     try:
         done, pending = await asyncio.wait({out, inp}, return_when=asyncio.FIRST_COMPLETED)
@@ -875,11 +997,29 @@ async def _live_phase(
         await asyncio.gather(out, inp, return_exceptions=True)
 
 
-async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) -> None:
+async def _pump_output(
+    ws: WebSocket,
+    attachment: "Attachment",
+    session: Any,
+    buffer: "_HandshakeBuffer | None" = None,
+) -> None:
     # queue yields raw PTY bytes; None sentinel = session exited
+    # Take over from the handshake buffer BEFORE the first await, so no turn of
+    # the loop passes with the subscriber queue unconsumed. `pending` holds
+    # what it collected and is drained, in order, ahead of the live queue.
+    pending = buffer.take() if buffer is not None else []
+
+    async def _next() -> Any:
+        return pending.pop(0) if pending else await attachment.queue.get()
+
+    def _next_nowait() -> Any:
+        if pending:
+            return pending.pop(0)
+        return attachment.queue.get_nowait()
+
     carry: bytes | None = None
     while True:
-        chunk = carry if carry is not None else await attachment.queue.get()
+        chunk = carry if carry is not None else await _next()
         carry = None
         if chunk is None:
             await _send_exit(ws, session)
@@ -899,7 +1039,7 @@ async def _pump_output(ws: WebSocket, attachment: "Attachment", session: Any) ->
         exited = False
         while total < _SEND_COALESCE_BYTES:
             try:
-                item = attachment.queue.get_nowait()
+                item = _next_nowait()
             except asyncio.QueueEmpty:
                 break
             if item is None:

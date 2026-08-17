@@ -2,6 +2,79 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.1.0
+
+### Nothing destructive without consent
+
+- The pane title bar's `×` now closes the view and leaves the terminal
+  running, matching what that glyph means everywhere else. Killing moved to a
+  separate, divided, labelled **Kill** control, and every destructive
+  confirmation now opens with **Cancel** focused so a reflexive Enter cannot
+  complete it.
+- Clicking the workspace row you are already on is a no-op for every workspace,
+  scratch included. Previously the row drawn as “current” discarded every live
+  scratch terminal without asking; replacing scratch is now the explicit,
+  confirmed **new scratch** action.
+- Removed the palette's free-text workspace prompts, where a typo silently tore
+  down the whole layout. Workspaces are offered as exact `load workspace: <name>`
+  rows, and saving is handled by the Dashboard, which validates the name.
+- The in-app updater now stands the window down before starting Setup. It used
+  to launch the installer while close-to-tray was actively refusing to close,
+  leaving Setup stalled on a window missing from the taskbar — or
+  force-terminating the app and every terminal in it.
+
+### Nothing fails silently
+
+- Added a single dismissible message banner for blocking failures, drawn above
+  the panel overlay. Errors previously went to a 9 px status-bar slot that
+  collapsed when empty, never cleared, and sat underneath open panels.
+- The sidebar **admin** button now reports its outcome instead of swallowing
+  every failure, including a declined UAC prompt, in an empty catch.
+- A global shortcut that Windows refuses to register (another program owns it)
+  is now reported in Settings next to the field, along with the fact that the
+  shortcut and port apply after a restart.
+- Failed workspace saves roll back instead of leaving the app pointing at a
+  workspace that was never written, and rejected names explain themselves.
+- Snippets show the command and the destination pane before running, and
+  multi-line snippets are confirmed in the pane first.
+- Settings' **System default shell** option works; it previously always
+  resolved to the first personal profile.
+
+### No lost terminal output
+
+- A viewer that falls behind now recovers even if the session exits during the
+  resync: an exited session still in the registry is served in replay-only
+  mode instead of being refused, so its final output stays reachable.
+- A fresh attachment is drained from the moment it exists. A busy session could
+  previously overflow its queue during the replay handshake and be disconnected
+  the instant it went live, looping on “output busy · resynchronizing” forever.
+- Output still queued in the browser when a session exits is flushed to the
+  terminal instead of being dropped mid-stream and then retained.
+
+### Correctness and performance
+
+- Saving Settings no longer writes the runtime port into `config.json`. An
+  Administrator window or any `--port` launch used to overwrite the configured
+  port with an ephemeral one for every later launch.
+- `Ctrl+]` and `Ctrl+/` reach the shell again on US/UK layouts — the vim tag
+  jump and the readline/PSReadLine undo were being swallowed as font zoom.
+- Moved the idle reaper, bulk session cleanup and the UAC handshake off the
+  event loop; a reaper pass that killed a live shell froze every pane for
+  hundreds of milliseconds and then overflowed the queues it had stalled.
+- Process metrics sample only the session process trees rather than every
+  process on the machine, and the dashboard stops polling while hidden.
+- Workspace names that differ only in case no longer share one file on NTFS.
+- POSIX `kill()` verifies termination instead of reporting success on `EPERM`,
+  and the POSIX resize/write paths can no longer touch a recycled descriptor.
+- Fixed Escape closing a whole panel instead of cancelling the destructive
+  confirmation inside it, confirmation popovers drifting away from their
+  trigger while the panel scrolled, pane resizing silently dropping zoom, the
+  palette running a different item than the highlighted one, Advanced-tab JSON
+  edits being discarded on tab switch, a folder handoff retrying a permanently
+  failing spawn forever, and replaced branding assets never being reclaimed.
+- Removed duplicate entry points: the Dashboard had two adjacent identical
+  sidebar buttons, and pane sizing was offered in three places at once.
+
 ## QuickTerm 3.0.1
 
 ### Native profile folder picker

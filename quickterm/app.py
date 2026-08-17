@@ -33,6 +33,24 @@ MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
 REAP_INTERVAL_S = 30
 log = logging.getLogger("quickterm")
 
+# Set by the in-app updater immediately before it launches the installer. The
+# close-to-tray policy must stand down for that one close, or Inno Setup is
+# left asking a window that refuses to go away.
+_updating = threading.Event()
+_shutdown_hook: Callable[[], None] | None = None
+
+
+def begin_update_shutdown() -> None:
+    """Stand down close-to-tray and quit shortly, for the in-app updater."""
+    _updating.set()
+    hook = _shutdown_hook
+    if hook is None:
+        return
+    # Deferred so the /api/update/install response reaches the window first.
+    timer = threading.Timer(1.5, hook)
+    timer.daemon = True
+    timer.start()
+
 
 class _PrivacyFormatter(logging.Formatter):
     """Redact common user-local path prefixes from shareable diagnostics."""
@@ -301,7 +319,10 @@ def _sessions_worth_keeping(manager: Any) -> bool:
             for i in manager.list()
         )
     except Exception:
-        return False
+        # Fail safe: an unexpected error here must hide to tray, never quit and
+        # take the user's running terminals with it.
+        log.exception("could not evaluate session keep policy; hiding to tray")
+        return True
 
 
 def _run_desktop(
@@ -367,6 +388,8 @@ def _run_desktop(
     # background when they hold real work; otherwise it quits. Elevated windows
     # always quit on close — a resident admin backend would be a foot-gun.
     quitting = threading.Event()
+    global _shutdown_hook
+    _shutdown_hook = lambda: _quit_window(window, quitting)  # noqa: E731 — updater hand-off
     tray = None
     if not elevated:
         try:
@@ -376,13 +399,20 @@ def _run_desktop(
                 on_open=lambda: _show_window(window),
                 on_quit=lambda: _quit_window(window, quitting),
             )
-            tray.start()
+            # start() now reports whether an icon really exists. Without that,
+            # close-to-tray could hide the window behind nothing.
+            if tray.start() is False:
+                log.warning("tray icon unavailable; window close will quit")
+                tray.dispose()
+                tray = None
         except Exception:
             log.exception("tray unavailable; window close will quit")
             tray = None
 
     def on_closing() -> bool:
-        if quitting.is_set() or tray is None:
+        # _updating: the in-app updater is about to run Setup, which asks this
+        # window to close. Hiding to tray there strands the installer.
+        if quitting.is_set() or _updating.is_set() or tray is None:
             return True
         if not _sessions_worth_keeping(state.get("manager")):
             return True  # nothing running worth the RAM: real quit
@@ -517,7 +547,17 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
     while True:
         await asyncio.sleep(REAP_INTERVAL_S)
         try:
-            reaped = manager.reap_idle(cfg.idle_timeout_s, _workspace_session_ids())
+            # Everything in this pass is blocking: _workspace_session_ids()
+            # globs and parses every workspace file, busy_ids() takes a full
+            # Toolhelp snapshot, and killing a live shell spawns taskkill /T /F
+            # and waits on process handles (hundreds of ms). On the event loop
+            # that froze every pane and every keystroke for the duration — and
+            # the freeze then overflowed the fan-out queues it had stalled.
+            # kill()/_finish_kill already marshal their registry and queue
+            # mutations back with call_soon_threadsafe.
+            reaped = await asyncio.to_thread(
+                _reap_pass, manager, cfg.idle_timeout_s
+            )
             if reaped:
                 # Lifecycle logs deliberately omit session IDs. They are not
                 # terminal history, but retaining identifiers adds no value to
@@ -525,6 +565,11 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
                 log.info("reaped %d idle session(s)", len(reaped))
         except Exception:
             log.exception("reaper pass failed")
+
+
+def _reap_pass(manager: "SessionManager", idle_timeout_s: int) -> list:
+    """One reaper pass. Runs in a worker thread — never on the event loop."""
+    return manager.reap_idle(idle_timeout_s, _workspace_session_ids())
 
 
 def _discard_scratch_workspace() -> None:
@@ -596,14 +641,31 @@ def _start_hotkeys(
         import quickterm.hotkeys as hotkeys_mod
 
         hk = hotkeys_mod.HotkeyManager(loop)
+        # register() returns False when the combination parses but Windows
+        # refuses it — almost always because another program already owns it.
+        # Discarding that made the documented escape hatch for a tray-hidden
+        # window fail silently; Settings renders cfg.hotkey_error next to the
+        # field instead.
+        # Only Windows has RegisterHotKey; elsewhere register() always returns
+        # False and there is nothing worth reporting.
+        report = os.name == "nt"
+        failed: list[str] = []
         for prof in cfg.profiles:
-            if prof.keybinding:
-                hk.register(prof.keybinding, _profile_callback(manager, prof, cfg))
+            if not prof.keybinding:
+                continue
+            ok = hk.register(prof.keybinding, _profile_callback(manager, prof, cfg))
+            if report and ok is False:
+                failed.append(f"{prof.keybinding} ({prof.name})")
         toggle = getattr(hotkeys_mod, "toggle_window", None) or getattr(
             hotkeys_mod, "summon_window", None
         )
         if cfg.summon_hotkey and toggle is not None:
-            hk.register(cfg.summon_hotkey, toggle)
+            if hk.register(cfg.summon_hotkey, toggle) is False and report:
+                failed.append(cfg.summon_hotkey)
+        if failed:
+            detail = ", ".join(failed)
+            cfg.hotkey_error = f"already in use by another program: {detail}"
+            log.warning("global hotkey registration failed: %s", detail)
         _wire_voice(hk, manager, cfg)
         hk.start()
         return hk

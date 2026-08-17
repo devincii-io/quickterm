@@ -1,5 +1,6 @@
 """opener.open_target: scheme filtering, existence checks, executable reveal."""
 
+import os
 import sys
 
 import pytest
@@ -43,7 +44,7 @@ def test_existing_dir_opens(monkeypatch, tmp_path):
     if sys.platform == "win32":
         monkeypatch.setattr(opener.os, "startfile", lambda p: opened.append(p), raising=False)
     else:
-        monkeypatch.setattr(opener.subprocess, "Popen", lambda argv: opened.append(argv[-1]))
+        monkeypatch.setattr(opener.subprocess, "Popen", lambda argv, **kw: opened.append(argv[-1]))
     assert opener.open_target(str(tmp_path)) == {"action": "opened"}
     assert opened == [str(tmp_path)]
 
@@ -52,7 +53,7 @@ def test_executable_is_revealed_not_run(monkeypatch, tmp_path):
     exe = tmp_path / "installer.exe"
     exe.write_bytes(b"MZ")
     popen_calls = []
-    monkeypatch.setattr(opener.subprocess, "Popen", lambda argv: popen_calls.append(argv))
+    monkeypatch.setattr(opener.subprocess, "Popen", lambda argv, **kw: popen_calls.append(argv))
     if sys.platform == "win32":
         monkeypatch.setattr(
             opener.os, "startfile",
@@ -61,6 +62,13 @@ def test_executable_is_revealed_not_run(monkeypatch, tmp_path):
         )
     assert opener.open_target(str(exe)) == {"action": "revealed"}
     assert len(popen_calls) == 1  # explorer /select or xdg-open of the parent
+    if sys.platform == "win32":
+        # Absolute image path: a bare "explorer" resolves through the current
+        # directory before System32, which an elevated instance inherits from
+        # the Explorer "Open QuickTerm here" verb.
+        image = popen_calls[0][0]
+        assert image.lower().endswith("\\explorer.exe")
+        assert os.path.isabs(image)
 
 
 @pytest.mark.parametrize("suffix", [".cpl", ".msc", ".chm", ".url", ".application"])
@@ -68,7 +76,7 @@ def test_other_executable_capable_files_are_revealed(monkeypatch, tmp_path, suff
     target = tmp_path / f"printed-by-terminal{suffix}"
     target.write_text("payload", encoding="utf-8")
     popen_calls = []
-    monkeypatch.setattr(opener.subprocess, "Popen", lambda argv: popen_calls.append(argv))
+    monkeypatch.setattr(opener.subprocess, "Popen", lambda argv, **kw: popen_calls.append(argv))
     if sys.platform == "win32":
         monkeypatch.setattr(
             opener.os,

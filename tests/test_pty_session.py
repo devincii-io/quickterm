@@ -144,3 +144,42 @@ async def test_kill_terminates_tree():
     await asyncio.wait_for(exited.wait(), timeout=15)
     assert sess.alive is False
     assert sess.exit_code is not None
+
+
+async def test_kill_reports_verified_termination():
+    """kill() must report VERIFIED termination, per CONTRACTS.md.
+
+    The POSIX backend used to `return True` unconditionally, swallowing EPERM
+    — a surviving process then disappeared from the UI while it kept running.
+    """
+    if os.name == "nt":
+        return  # the Windows backend has its own verification tests
+    loop = asyncio.get_running_loop()
+    session = PtySession(
+        "sleep", ["5"], None, {}, 80, 24, loop,
+        on_output=lambda data: None, on_exit=lambda code: None,
+    )
+    try:
+        assert session.kill() is True
+        assert session.alive is False
+    finally:
+        if session.alive:
+            session.kill()
+
+
+async def test_resize_after_exit_does_not_touch_a_recycled_descriptor():
+    """_read_loop closes the fd and clears it; resize must not use a stale one."""
+    if os.name == "nt":
+        return
+    loop = asyncio.get_running_loop()
+    session = PtySession(
+        "true", [], None, {}, 80, 24, loop,
+        on_output=lambda data: None, on_exit=lambda code: None,
+    )
+    for _ in range(200):
+        if not session.alive:
+            break
+        await asyncio.sleep(0.01)
+    assert session.alive is False
+    assert session._fd == -1
+    session.resize(120, 40)  # must be a silent no-op, not an ioctl on a reused fd

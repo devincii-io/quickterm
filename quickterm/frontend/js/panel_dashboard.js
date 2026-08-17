@@ -136,7 +136,13 @@ export async function renderDashboard(refreshing = false) {
         return;
       }
       saveButton.disabled = true;
-      await this.app.saveWorkspace(name);
+      const failure = await this.app.saveWorkspace(name);
+      saveButton.disabled = false;
+      if (failure) {
+        saveNote.textContent = failure;
+        saveInput.focus();
+        return;
+      }
       if (this.open === "dashboard") this._dashboard(true);
     };
     saveButton.addEventListener("click", save);

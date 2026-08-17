@@ -9,6 +9,29 @@ import { renderTerminalSettings } from "./panel_settings_terminals.js";
 import { renderSnippetSettings } from "./panel_settings_snippets.js";
 import { renderAboutSettings, renderVoiceSettings, renderAdvancedSettings } from "./panel_settings_about.js";
 import { renderHelp } from "./panel_help.js";
+
+// The Advanced tab hands back arbitrary JSON. "null", "42" and "[]" all parse
+// happily and then throw on the first property access, past the parse guard —
+// so the shape is checked here, not later.
+function parseSettingsJson(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (_) {
+    return { error: "Fix the JSON before saving." };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { error: "The configuration must be a JSON object." };
+  }
+  if (value.profiles !== undefined && !Array.isArray(value.profiles)) {
+    return { error: "“profiles” must be a list." };
+  }
+  if (value.snippets !== undefined && !Array.isArray(value.snippets)) {
+    return { error: "“snippets” must be a list." };
+  }
+  return { value };
+}
+
 export class Panels {
   constructor(app) {
     this.app = app;
@@ -40,6 +63,13 @@ export class Panels {
       if (this.open && event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
+        // Escape cancels the destructive confirmation first. This listener runs
+        // in the capture phase, so the box's own Escape handler never sees the
+        // event — without this, "are you sure?" closed the whole panel.
+        if (this._inlineConfirmation) {
+          this._clearInlineConfirmation();
+          return;
+        }
         this.close();
       } else if (this.open && event.key === "Tab") {
         const focusable = [...this.panelEl.querySelectorAll(
@@ -117,6 +147,9 @@ export class Panels {
       // Rebuilding the dashboard steals focus from action buttons just as
       // surely as from inputs. Pause while focus is anywhere in its body;
       // header/close-button focus does not block background refreshes.
+      // A hidden window (trayed, minimized, other virtual desktop) must not
+      // keep issuing 2+N requests and rebuilding the whole panel every 5 s.
+      if (document.hidden) return;
       const interacting = this.bodyEl.contains(document.activeElement);
       if (this.open === "dashboard" && !this._dashLoading
           && !interacting && !this._inlineConfirmation) this._dashboard(true);
@@ -153,8 +186,12 @@ export class Panels {
 
   _clearInlineConfirmation(restoreButton = true) {
     if (!this._inlineConfirmation) return;
-    const { box, button, wasDisabled } = this._inlineConfirmation;
+    const { box, button, wasDisabled, reposition } = this._inlineConfirmation;
     this._inlineConfirmation = null;
+    if (reposition) {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    }
     box.remove();
     if (button.isConnected) {
       button.disabled = wasDisabled;
@@ -184,17 +221,33 @@ export class Panels {
     actions.append(confirm, cancel);
     box.append(copy, actions);
     document.body.append(box);
-    const boxRect = box.getBoundingClientRect();
-    const margin = 12;
-    const gap = 6;
-    const maxLeft = Math.max(margin, window.innerWidth - boxRect.width - margin);
-    const left = Math.max(margin, Math.min(maxLeft, rect.right - boxRect.width));
-    let top = rect.bottom + gap;
-    if (top + boxRect.height > window.innerHeight - margin) top = rect.top - boxRect.height - gap;
-    top = Math.max(margin, Math.min(window.innerHeight - boxRect.height - margin, top));
-    box.style.left = `${left}px`;
-    box.style.top = `${top}px`;
-    this._inlineConfirmation = { box, button, wasDisabled };
+    // The box is position:fixed but the panel body scrolls underneath it, so a
+    // one-time placement detaches from its trigger and ends up floating over
+    // unrelated rows. Follow the trigger, and give up if it scrolls away.
+    const place = (triggerRect = button.getBoundingClientRect()) => {
+      const boxRect = box.getBoundingClientRect();
+      const margin = 12;
+      const gap = 6;
+      const maxLeft = Math.max(margin, window.innerWidth - boxRect.width - margin);
+      const left = Math.max(margin, Math.min(maxLeft, triggerRect.right - boxRect.width));
+      let top = triggerRect.bottom + gap;
+      if (top + boxRect.height > window.innerHeight - margin) top = triggerRect.top - boxRect.height - gap;
+      top = Math.max(margin, Math.min(window.innerHeight - boxRect.height - margin, top));
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+    };
+    place(rect);
+    const reposition = () => {
+      if (!this._inlineConfirmation || !button.isConnected) return;
+      const triggerRect = button.getBoundingClientRect();
+      const offscreen = triggerRect.bottom < 0 || triggerRect.top > window.innerHeight
+        || (triggerRect.width === 0 && triggerRect.height === 0);
+      if (offscreen) { this._clearInlineConfirmation(false); return; }
+      place(triggerRect);
+    };
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    this._inlineConfirmation = { box, button, wasDisabled, reposition };
 
     const run = async () => {
       confirm.disabled = true;
@@ -322,6 +375,17 @@ export class Panels {
       ["advanced", "Advanced", "Raw configuration"],
       ["about", "About", "Version, updates and links"],
     ];
+    // Reconcile the Advanced tab's textarea into the draft before the DOM that
+    // holds it is thrown away. Without this, switching tabs silently discarded
+    // raw JSON edits and a later Save reported "Saved." for the old config.
+    const absorbJson = () => {
+      const textarea = content.querySelector(".settings-json");
+      if (!textarea) return null;
+      const parsed = parseSettingsJson(textarea.value);
+      if (parsed.error) return parsed.error;
+      this.settingsDraft = parsed.value;
+      return null;
+    };
     const render = () => {
       for (const button of nav.querySelectorAll("button")) button.classList.toggle("active", button.dataset.tab === this.settingsTab);
       content.textContent = "";
@@ -337,6 +401,12 @@ export class Panels {
       button.dataset.tab = id;
       button.append(make("strong", "", title), make("small", "", note));
       button.addEventListener("click", () => {
+        const problem = absorbJson();
+        if (problem) {
+          message.textContent = problem;
+          message.classList.add("error");
+          return;
+        }
         this.settingsTab = id;
         render();
       });
@@ -351,16 +421,12 @@ export class Panels {
     cancel.addEventListener("click", () => this.close());
     const save = this._button("Save changes", "primary-button");
     save.addEventListener("click", async () => {
-      const textarea = content.querySelector(".settings-json");
-      if (textarea) {
-        try {
-          this.settingsDraft = JSON.parse(textarea.value);
-        } catch (_) {
-          message.textContent = "Fix the JSON before saving.";
-          message.classList.add("error");
-          textarea.focus();
-          return;
-        }
+      const jsonProblem = absorbJson();
+      if (jsonProblem) {
+        message.textContent = jsonProblem;
+        message.classList.add("error");
+        content.querySelector(".settings-json")?.focus();
+        return;
       }
       const profiles = this.settingsDraft.profiles || [];
       if (profiles.some((profile) => !(profile.name || "").trim())) {

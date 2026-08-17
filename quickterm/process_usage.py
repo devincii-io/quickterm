@@ -25,6 +25,30 @@ class TreeUsage:
     process_count: int
 
 
+def reachable_pids(
+    identities: "list[tuple[int, int]]", root_pids: set[int]
+) -> set[int]:
+    """PIDs reachable from any root, given cheap (pid, parent) pairs.
+
+    Opening a handle and reading counters for every process on the machine is
+    the expensive part of a snapshot, and everything outside the session trees
+    is discarded again by summarize_trees. Walking the parent map first lets
+    the caller sample only what it will actually use.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, parent in identities:
+        children.setdefault(parent, []).append(pid)
+    seen: set[int] = set()
+    pending = list(root_pids)
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        pending.extend(children.get(pid, ()))
+    return seen
+
+
 def summarize_trees(
     processes: dict[int, ProcessSample], root_pids: set[int]
 ) -> dict[int, TreeUsage]:
@@ -103,9 +127,10 @@ if os.name == "nt":
         return ticks / 10_000_000.0
 
     def _windows_counters(pid: int) -> tuple[int, float] | None:
-        handle = _k32.OpenProcess(
-            _PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_VM_READ, False, pid
-        )
+        # PROCESS_VM_READ is not required by GetProcessMemoryInfo on any
+        # supported Windows version, and asking for it makes OpenProcess fail
+        # on processes we could otherwise measure.
+        handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return None
         try:
@@ -133,7 +158,8 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(ctypes.c_void_p(handle))
 
-    def snapshot_processes() -> dict[int, ProcessSample]:
+    def snapshot_processes(roots: set[int] | None = None) -> dict[int, ProcessSample]:
+        """Sample process counters. With ``roots``, only their trees."""
         snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if not snap or snap == _INVALID_HANDLE:
             return {}
@@ -152,23 +178,30 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(ctypes.c_void_p(snap))
 
+        wanted = reachable_pids(identities, roots) if roots is not None else None
         result: dict[int, ProcessSample] = {}
         for pid, parent in identities:
+            if wanted is not None and pid not in wanted:
+                continue
             counters = _windows_counters(pid)
             if counters is not None:
                 result[pid] = ProcessSample(parent, counters[0], counters[1])
         return result
 
 else:
-    def snapshot_processes() -> dict[int, ProcessSample]:
-        """Read Linux /proc counters; return unavailable on other POSIX systems."""
+    def snapshot_processes(roots: set[int] | None = None) -> dict[int, ProcessSample]:
+        """Read Linux /proc counters; return unavailable on other POSIX systems.
+
+        With ``roots``, only the processes in those trees are returned (the
+        parse still touches every /proc entry — that read is the cheap part).
+        """
         try:
             entries = os.listdir("/proc")
             clock_ticks = os.sysconf("SC_CLK_TCK")
             page_size = os.sysconf("SC_PAGE_SIZE")
         except (OSError, ValueError):
             return {}
-        result: dict[int, ProcessSample] = {}
+        samples: dict[int, ProcessSample] = {}
         for name in entries:
             if not name.isdigit():
                 continue
@@ -179,7 +212,12 @@ else:
                 parent = int(tail[1])
                 cpu = (int(tail[11]) + int(tail[12])) / clock_ticks
                 memory = int(tail[21]) * page_size
-                result[int(name)] = ProcessSample(parent, memory, cpu)
+                samples[int(name)] = ProcessSample(parent, memory, cpu)
             except (OSError, ValueError, IndexError):
                 continue  # process vanished, access was denied, or row was malformed
-        return result
+        if roots is None:
+            return samples
+        wanted = reachable_pids(
+            [(pid, sample.parent_pid) for pid, sample in samples.items()], roots
+        )
+        return {pid: sample for pid, sample in samples.items() if pid in wanted}

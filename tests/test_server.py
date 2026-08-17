@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import dataclasses
 import json
 import os
 import sys
@@ -765,24 +766,31 @@ def test_spawn_rejects_oversized_json_before_parsing(client, manager):
 
 
 @pytest.fixture
-def fake_config_mod(monkeypatch):
+def fake_config_mod(monkeypatch, cfg):
     mod = types.ModuleType("quickterm.config")
     saved: list = []
+    # The PERSISTED config, as distinct from the live one. app.py rewrites
+    # cfg.port at startup (--port 0, elevated instances), so server.py must
+    # serve and preserve this one for port/host/summon_hotkey.
+    mod.disk_config = dataclasses.replace(cfg)
 
     def config_from_dict(raw: dict):
         if raw.get("font_family") == "explode":
             raise ValueError("bad font")
-        cfg = FakeConfig()
+        parsed = FakeConfig()
         for k, v in raw.items():
-            if k in {"font_family", "default_profile", "max_sessions"}:
-                setattr(cfg, k, v)
-        return cfg
+            if k in {"font_family", "default_profile", "max_sessions", "port",
+                     "host", "summon_hotkey"}:
+                setattr(parsed, k, v)
+        return parsed
 
     mod.config_from_dict = config_from_dict
-    def save_config(cfg):
-        if cfg.default_profile == "save-explode":
+    mod.load_config = lambda: dataclasses.replace(mod.disk_config)
+
+    def save_config(new_cfg):
+        if new_cfg.default_profile == "save-explode":
             raise ValueError("bad profile folder")
-        saved.append(cfg)
+        saved.append(new_cfg)
 
     mod.save_config = save_config
     monkeypatch.setitem(sys.modules, "quickterm.config", mod)
@@ -1098,14 +1106,26 @@ def test_ws_unknown_session_closes_4404(client):
     assert msg["code"] == 4404
 
 
-def test_ws_exited_session_is_not_reattachable(client, manager):
-    info = manager.add_session(alive=False, exit_code=0)
+def test_ws_exited_session_serves_replay_only(client, manager):
+    """An exited session still in the registry replays, reports its exit, and closes.
+
+    Refusing it outright (close 4410) made overflow permanently lossy: the
+    client is told to reconnect and replay the ring, and if the PTY died around
+    the overflow that replay could never happen — so the session's final output
+    was unreachable while still sitting in the ring.
+    """
+    info = manager.add_session(alive=False, exit_code=0, scrollback=b"build done\r\n")
     with client.websocket_connect(
         f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}
     ) as ws:
-        msg = ws.receive()
-    assert msg["type"] == "websocket.close"
-    assert msg["code"] == 4410
+        first = json.loads(ws.receive_text())
+        assert first["type"] == "replay_size"
+        assert ws.receive_bytes() == b"build done\r\n"
+        ws.send_text(json.dumps({"type": "replay_ack"}))
+        assert json.loads(ws.receive_text()) == {"type": "replay_done"}
+        assert json.loads(ws.receive_text()) == {"type": "exit", "code": 0}
+        assert ws.receive()["type"] == "websocket.close"
+    # Replay-only: no live subscription is created and no input is accepted.
     assert manager.last_attachment is None
 
 
@@ -1177,3 +1197,132 @@ def test_config_reports_elevated(manager, cfg):
         assert c.get("/api/config").json()["elevated"] is True
     with TestClient(create_app(manager, cfg), base_url=base) as c:
         assert c.get("/api/config").json()["elevated"] is False
+
+
+# --- config: the runtime port must never reach disk -------------------------
+
+def test_full_config_serves_the_persisted_port_not_the_runtime_one(
+    client, cfg, fake_config_mod
+):
+    """Settings edits the persisted config, not the live one.
+
+    app.py overwrites cfg.port at startup for `--port 0` and unconditionally
+    for an elevated instance. Serving that value made Settings PUT it straight
+    back, writing the ephemeral port into config.json and destroying the
+    configured one for every later launch.
+    """
+    sys.modules["quickterm.config"].disk_config.port = 8620
+    cfg.port = 53871  # e.g. an Administrator window on a free port
+
+    body = client.get("/api/config/full").json()
+
+    assert body["port"] == 8620
+
+
+def test_put_config_keeps_the_persisted_port_for_a_stale_client(
+    client, cfg, fake_config_mod
+):
+    """A page rendered from the live config must not write the runtime port back."""
+    sys.modules["quickterm.config"].disk_config.port = 8620
+    cfg.port = 53871
+
+    response = client.put(
+        "/api/config", json={"font_family": "Cascadia Mono", "port": 53871}
+    )
+
+    assert response.status_code == 204
+    assert fake_config_mod[-1].port == 8620
+
+
+def test_put_config_still_honours_a_deliberate_port_change(client, cfg, fake_config_mod):
+    sys.modules["quickterm.config"].disk_config.port = 8620
+    cfg.port = 8620
+
+    response = client.put("/api/config", json={"font_family": "x", "port": 8700})
+
+    assert response.status_code == 204
+    assert fake_config_mod[-1].port == 8700
+
+
+def test_config_reports_a_failed_hotkey_registration(client, cfg):
+    """A shortcut another program owns must not fail silently.
+
+    It is the documented escape hatch for a tray-hidden window; without this
+    the user sees "Saved.", nothing happens, and a restart makes it worse.
+    """
+    assert client.get("/api/config").json()["hotkey_error"] is None
+
+    cfg.hotkey_error = "already in use by another program: ctrl+alt+q"
+    assert client.get("/api/config").json()["hotkey_error"] == (
+        "already in use by another program: ctrl+alt+q"
+    )
+
+
+# --- the replay handshake must not starve a fresh subscription --------------
+
+async def test_handshake_buffer_drains_a_bounded_queue():
+    """Nothing consumed the subscriber queue until the live phase started.
+
+    The fan-out queue counts items, so eight PTY reader callbacks during the
+    (multi-round-trip) handshake were enough to mark the attachment overflowed
+    — and the client reconnected into exactly the same window every time.
+    """
+    from quickterm.server import _HandshakeBuffer
+
+    attachment = FakeAttachment()
+    attachment.queue = asyncio.Queue(maxsize=8)
+    buffer = _HandshakeBuffer(attachment)
+
+    for index in range(20):  # far more than the queue could ever hold
+        attachment.queue.put_nowait(bytes([index]))
+        await asyncio.sleep(0)  # let the drain task run, as the handshake would
+
+    buffered = buffer.take()
+
+    assert buffered == [bytes([index]) for index in range(20)]
+    assert attachment.queue.empty()
+
+
+async def test_handshake_buffer_stops_at_the_exit_sentinel():
+    from quickterm.server import _HandshakeBuffer
+
+    attachment = FakeAttachment()
+    buffer = _HandshakeBuffer(attachment)
+    attachment.queue.put_nowait(b"tail")
+    attachment.queue.put_nowait(None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert buffer.take() == [b"tail", None]
+
+
+async def test_handshake_buffer_is_bounded():
+    """It must not become the unbounded buffer the queue cap exists to prevent."""
+    from quickterm.server import _HandshakeBuffer
+
+    attachment = FakeAttachment()
+    buffer = _HandshakeBuffer(attachment)
+    chunk = b"x" * (128 * 1024)
+    for _ in range(12):  # cap is 8 frames' worth
+        attachment.queue.put_nowait(chunk)
+        await asyncio.sleep(0)
+
+    buffered = buffer.take()
+
+    assert attachment.overflow_sentinel in buffered
+    assert sum(1 for item in buffered if item is chunk) <= 8
+
+
+def test_handshake_output_is_delivered_after_replay(client, manager):
+    """Output produced during the handshake arrives, in order, once live."""
+    info = manager.add_session(scrollback=b"old")
+    with client.websocket_connect(
+        f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}
+    ) as ws:
+        assert json.loads(ws.receive_text())["type"] == "replay_size"
+        assert ws.receive_bytes() == b"old"
+        manager.last_attachment.push_threadsafe(b"during-")
+        manager.last_attachment.push_threadsafe(b"handshake")
+        ws.send_text(json.dumps({"type": "replay_ack"}))
+        assert json.loads(ws.receive_text()) == {"type": "replay_done"}
+        assert ws.receive_bytes() == b"during-handshake"

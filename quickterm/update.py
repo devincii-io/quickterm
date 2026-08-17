@@ -145,12 +145,42 @@ def download_and_run() -> dict:
     if wanted is None or not re.fullmatch(r"[0-9a-fA-F]{64}", wanted) or wanted.lower() != digest:
         raise ValueError("installer failed checksum verification")
 
+    _sweep_old_update_dirs()
     update_dir = Path(tempfile.mkdtemp(prefix="quickterm-update-"))
     path = update_dir / str(setup["name"])
     path.write_bytes(blob)
+    # Tell the desktop shell to stand down BEFORE the installer starts. Inno's
+    # CloseApplications asks the top-level window to close, which lands in
+    # app.on_closing — and with any touched/retained/busy session (exactly the
+    # state of someone who has been working) that hid to tray and cancelled the
+    # close. Setup then either stalled on "the following applications are in
+    # use", pointing at a window gone from the taskbar, or force-terminated the
+    # process and took every terminal with it.
+    _request_app_shutdown()
     # Detached: the installer outlives us — it closes QuickTerm and upgrades.
     subprocess.Popen([str(path)], close_fds=True)
     return {"launched": True, "version": latest}
+
+
+def _request_app_shutdown() -> None:
+    try:
+        import quickterm.app as app
+
+        app.begin_update_shutdown()
+    except Exception:  # headless/test runs have no desktop shell
+        pass
+
+
+def _sweep_old_update_dirs() -> None:
+    """Remove installers left behind by earlier in-app updates (up to 200 MB each)."""
+    import shutil
+
+    try:
+        for entry in Path(tempfile.gettempdir()).glob("quickterm-update-*"):
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _expected_hash(sums_text: str, filename: str) -> str | None:

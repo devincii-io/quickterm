@@ -141,13 +141,20 @@ class TrayIcon:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._balloon_shown = False
+        self._icon_added = False
         self._taskbar_created = 0
         self._wndproc = _WNDPROC(self._wnd_proc)  # keep alive: GC'd proc = crash
 
-    def start(self) -> None:
+    def start(self) -> bool:
+        """Start the tray thread. Returns whether an icon is actually there.
+
+        Reporting success unconditionally let on_closing hide the window behind
+        a tray icon that had never been created — no way back and no balloon.
+        """
         self._thread = threading.Thread(target=self._run, name="tray", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=5)
+        return bool(self._hwnd) and self._icon_added
 
     def dispose(self) -> None:
         hwnd = self._hwnd
@@ -215,7 +222,11 @@ class TrayIcon:
         nid.uCallbackMessage = _WM_TRAY
         nid.hIcon = self._hicon
         nid.szTip = self._tip[:127]
-        _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+        # Shell_NotifyIconW returns BOOL; discarding it hid a failed add.
+        added = bool(_shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid)))
+        self._icon_added = added
+        if not added:
+            log.warning("tray icon could not be added (Shell_NotifyIconW failed)")
 
     def _menu(self) -> None:
         menu = _user32.CreatePopupMenu()

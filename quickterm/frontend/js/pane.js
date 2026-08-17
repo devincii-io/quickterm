@@ -178,6 +178,7 @@ export class Pane {
     this._fitTimer = null;
     this._detached = false;
     this._exited = false;
+    this._resync = false; // last close was a 1013 overflow: reconnect to replay
     this._disposed = false;
 
     const el = document.createElement("div");
@@ -188,8 +189,12 @@ export class Pane {
         '<button class="pane-action" type="button" data-action="split-h" title="Split right (Alt+Shift+Right)">|</button>' +
         '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">—</button>' +
         '<button class="pane-action" type="button" data-action="zoom" title="Zoom pane (Alt+Z)">□</button>' +
-        '<button class="pane-action detach" type="button" data-action="detach" title="Detach pane; terminal keeps running (Alt+D)">D</button>' +
-        '<button class="pane-action kill" type="button" data-action="kill" title="Kill terminal with confirmation (Alt+W)">×</button>' +
+        // "×" means "close this view" everywhere else, so it detaches: the
+        // terminal keeps running. Killing is a separate, labelled danger
+        // control — never the glyph a user reaches for to tidy up a pane.
+        '<button class="pane-action detach" type="button" data-action="detach" title="Close view — the terminal keeps running (Alt+D)">×</button>' +
+        '<span class="pane-action-sep" aria-hidden="true"></span>' +
+        '<button class="pane-action kill danger" type="button" data-action="kill" title="Kill the terminal and everything running in it (Alt+W)">Kill</button>' +
       '</div>' +
       '<div class="term-host"></div>' +
       '<div class="pane-empty">no session &middot; alt+k</div>' +
@@ -349,8 +354,18 @@ export class Pane {
     if (live) live.textContent = text.replace(/^\[|\]$/g, "");
   }
 
-  markUnavailable({ exitCode = null, onRestart, onResumeClaude, onPickClaude } = {}) {
+  markUnavailable(opts = {}) {
+    this._renderRecovery(opts, null);
+  }
+
+  // Every recovery action runs through spawnInto(), which begins with
+  // _clearRecovery() and, on failure, showNotice() — both detach these nodes.
+  // So a failed attempt re-renders the whole bar from the same descriptor
+  // instead of writing into detached DOM and leaving a bare empty pane.
+  _renderRecovery({ exitCode = null, onRestart, onResumeClaude, onPickClaude } = {}, errorText = null) {
+    const opts = { exitCode, onRestart, onResumeClaude, onPickClaude };
     this._clearRecovery();
+    clearTimeout(this._noticeTimer);
     this.session = null;
     this.state = "missing";
     this.emptyEl.hidden = false;
@@ -358,9 +373,9 @@ export class Pane {
     this._renderTab();
     const copy = document.createElement("span");
     copy.className = "pane-confirm-copy";
-    copy.textContent = exitCode === null
+    copy.textContent = errorText || (exitCode === null
       ? "Live session unavailable — nothing was silently restarted."
-      : `Session exited with code ${exitCode} — nothing was silently restarted.`;
+      : `Session exited with code ${exitCode} — nothing was silently restarted.`);
     const actions = document.createElement("span");
     actions.className = "pane-recovery-actions";
     const makeAction = (label, action, primary = false) => {
@@ -372,13 +387,12 @@ export class Pane {
         for (const item of actions.querySelectorAll("button")) item.disabled = true;
         try {
           const recovered = await action();
-          if (!recovered) {
-            copy.textContent = "Recovery did not start. The previous session was not replaced.";
-            for (const item of actions.querySelectorAll("button")) item.disabled = false;
+          if (!recovered && !this._disposed) {
+            this._renderRecovery(opts, "Recovery did not start. The previous session was not replaced.");
           }
         } catch (error) {
-          copy.textContent = error?.detail || "Recovery failed. The previous session was not replaced.";
-          for (const item of actions.querySelectorAll("button")) item.disabled = false;
+          if (this._disposed) return;
+          this._renderRecovery(opts, error?.detail || "Recovery failed. The previous session was not replaced.");
         }
       });
       actions.append(button);
@@ -390,7 +404,7 @@ export class Pane {
     this.exitBar.append(copy, actions);
     this.exitBar.classList.add("confirming", "recovering");
     this.exitBar.hidden = false;
-    this._recovery = { actions };
+    this._recovery = { actions, opts };
   }
 
   _clearRecovery() {
@@ -457,7 +471,14 @@ export class Pane {
     this._lastDropAt = now;
     const hint = [this.terminalType, this.displayName(), this.profileName, this.launchSpec?.cmd]
       .filter(Boolean).join(" ");
-    this.sendText(mapped.map((path) => quoteDroppedPath(path, hint)).join(" "));
+    // Only claim the paste happened if the bytes actually reached the PTY —
+    // an empty, exited or reconnecting pane silently drops them, and the
+    // dedupe window below would then swallow the user's retry.
+    if (!this.sendText(mapped.map((path) => quoteDroppedPath(path, hint)).join(" "))) {
+      this._lastDropSignature = null;
+      if (this.state !== "exited") this.flashNotice("[no live terminal here · nothing was pasted]");
+      return false;
+    }
     this.flashNotice(`[pasted ${mapped.length} file path${mapped.length === 1 ? "" : "s"}]`);
     return true;
   }
@@ -473,12 +494,16 @@ export class Pane {
     clearTimeout(this._noticeTimer);
     clearTimeout(this._dropFallbackTimer);
     this._noticeTimer = setTimeout(() => {
+      // A confirmation or recovery bar rendered into the same element since
+      // this timer was armed must never be hidden out from under the user.
+      if (this._confirmation || this._recovery) return;
       if (this.state !== "exited" && !this.closeArmed) this.exitBar.hidden = true;
     }, 2000);
   }
 
   confirmAction(message, action, confirmLabel = "Kill") {
     this.cancelConfirmation();
+    clearTimeout(this._noticeTimer);
     const text = document.createElement("span");
     text.className = "pane-confirm-copy";
     text.textContent = message;
@@ -524,7 +549,9 @@ export class Pane {
     };
     this.exitBar.addEventListener("keydown", keyHandler);
     this._confirmation = { confirm, cancel, keyHandler };
-    requestAnimationFrame(() => confirm.focus());
+    // Cancel owns the initial focus: a reflexive Enter on a bar the user did
+    // not expect must never complete a destructive action.
+    requestAnimationFrame(() => cancel.focus());
   }
 
   cancelConfirmation(refocus = false) {
@@ -570,6 +597,10 @@ export class Pane {
   // unavailable or denied. Uses an off-screen textarea and restores terminal
   // focus afterward.
   _execCopy(text) {
+    // OSC 52 is driven by terminal *output*, so this can run for a pane the
+    // user is not looking at. Put focus back exactly where it was rather than
+    // pulling it into this pane.
+    const previous = document.activeElement;
     try {
       const ta = document.createElement("textarea");
       ta.value = text;
@@ -581,19 +612,27 @@ export class Pane {
       ta.select();
       const copied = document.execCommand("copy");
       document.body.removeChild(ta);
-      try { this.term.focus(); } catch (e) {}
+      try {
+        if (previous && previous !== document.body && document.contains(previous)
+          && typeof previous.focus === "function") previous.focus();
+        else if (this.el.classList.contains("focused")) this.term.focus();
+      } catch (e) {}
       return copied;
     } catch (e) {
       return false;
     }
   }
 
+  // Returns whether the bytes actually reached the PTY. Callers that report
+  // "[pasted …]" must not claim success when this is false.
   sendText(text) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN
       && this._protocol.canSendInput() && !this._exited) {
       this._markWrote();
       this.ws.send(ENC.encode(text));
+      return true;
     }
+    return false;
   }
 
   // First real input flips userWrote and notifies once: the workspace layer
@@ -634,6 +673,7 @@ export class Pane {
     this.savedSessionId = info.id;
     if (info.profile) this.profileName = info.profile;
     this._exited = false;
+    this._resync = false;
     this._detached = false;
     this._backoff = BACKOFF_MIN;
     this._clearRecovery();
@@ -864,6 +904,7 @@ export class Pane {
         break;
       case "overflow":
         this.flashNotice("[output busy · resynchronizing]");
+        this._resync = true;
         if (this.ws) this.ws.close();
         break;
       case "exit":
@@ -888,6 +929,7 @@ export class Pane {
     } else {
       if (action === "overflow") {
         this.flashNotice("[output busy · resynchronizing]");
+        this._resync = true;
         if (this.ws) this.ws.close();
         return;
       }
@@ -922,8 +964,23 @@ export class Pane {
       this.term.write(data, () => {
         if (!this._protocol.isCurrent(generation)) return;
         this._pending -= data.byteLength;
-        if (this._queue.length && this._phase === "live") this._pump();
+        // Resume after exit too: _onExit flips the phase to "idle", and gating
+        // the resume on "live" alone stranded everything still queued.
+        if (this._queue.length && !this._disposed
+          && (this._phase === "live" || this._exited)) this._pump();
       });
+    }
+  }
+
+  // Write everything still queued straight to xterm, ignoring the pending
+  // budget. Used on exit, where the pump's callback-driven resume can no
+  // longer fire and queued bytes would otherwise be dropped and retained.
+  _flushQueue() {
+    if (!this.term) { this._queue.length = 0; return; }
+    while (this._queue.length) {
+      const data = this._drainQueue();
+      this._protocol.takeQueued(data.byteLength);
+      try { this.term.write(data); } catch (e) { break; }
     }
   }
 
@@ -951,6 +1008,9 @@ export class Pane {
 
   _onExit(code) {
     this._exited = true;
+    // Drain before the phase flips to "idle" — the session's final output is
+    // usually the part the user actually wants (build result, exit message).
+    this._flushQueue();
     this._protocol.exit();
     this.state = "exited";
     if (this.term) this.term.options.disableStdin = true;
@@ -962,7 +1022,19 @@ export class Pane {
   _closed() {
     this.ws = null;
     if (this._disposed || this._detached || this._exited) return;
-    api.getSessions().then((list) => {
+    // A 1013 overflow close is an instruction to reconnect and replay the
+    // ring. Reconnect even if the session has meanwhile exited: its final
+    // output only exists in that replay, and the server now serves it in
+    // replay-only mode. Without this the pane rendered "[exited]" over a
+    // transcript truncated at the overflow point.
+    if (this._resync) {
+      this._resync = false;
+      this._connect();
+      return;
+    }
+    // Only alive/exit_code are read here — never ask for the full-machine
+    // metrics scan on a socket close.
+    api.getSessions({ metrics: false }).then((list) => {
       if (this._disposed || this._detached || this._exited) return;
       const s = list.find((x) => x.id === this.session.id);
       if (!s) { this._onExit(null); return; }

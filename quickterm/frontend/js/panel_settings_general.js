@@ -86,10 +86,16 @@ export function renderGeneralSettings(host) {
     maxSessions.addEventListener("input", () => {
       cfg.max_sessions = Math.max(0, Math.min(100, Number(maxSessions.value) || 0));
     });
+    // summon_hotkey and port are deliberately excluded from the live-update
+    // whitelist in server.py, and Windows can refuse a shortcut another program
+    // already owns — say both here instead of letting "Saved." imply it worked.
+    const hotkeyHint = this.app.hotkeyError && this.app.hotkeyError()
+      ? `Could not be registered: ${this.app.hotkeyError()}. Applies after restart.`
+      : "Show or hide QuickTerm globally. Applies after restart.";
     const appFields = make("div", "settings-grid two-column");
     appFields.append(
-      this._field("Summon shortcut", hotkey, "Show or hide QuickTerm globally."),
-      this._field("Local server port", port, "Only available on this computer."),
+      this._field("Summon shortcut", hotkey, hotkeyHint),
+      this._field("Local server port", port, "Only available on this computer. Applies after restart."),
       this._field("In-memory scrollback", scrollback, "Per live session. Never written to disk; released when the terminal is removed."),
       this._field("Clean unused shells", idleTimeout, "Only untouched, detached shells are ended after this time; used and busy terminals are kept."),
       this._field("Live terminal limit", maxSessions, "0 means unlimited. At the limit, new terminals are blocked; existing terminals are never stopped."),

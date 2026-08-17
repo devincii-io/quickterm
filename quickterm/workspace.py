@@ -41,6 +41,13 @@ def _path_for(name: str) -> Path:
         *(f"COM{i}" for i in range(1, 10)),
         *(f"LPT{i}" for i in range(1, 10)),
     }
+    # NTFS filenames are case-insensitive, so "dev" and "Dev" resolved to the
+    # same file and saving one silently destroyed the other's layout and
+    # session ownership. Anything that is not already lowercase gets the
+    # collision-resistant digest suffix.
+    if safe != safe.lower():
+        safe = f"{safe[:80]}--{hashlib.sha256(name.encode('utf-8', 'surrogatepass')).hexdigest()[:10]}"
+        return _workspaces_dir() / f"{safe}.json"
     if safe != name or len(safe) > 80 or reserved:
         digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:10]
         safe = f"{safe[:80]}--{digest}"

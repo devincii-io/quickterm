@@ -57,9 +57,11 @@ def test_mixed_sessions_keep_if_any_touched_alive():
     assert _sessions_worth_keeping(_Manager(infos)) is True
 
 
-def test_manager_error_defaults_to_quit():
-    assert _sessions_worth_keeping(_Broken()) is False
+# Fail safe: an unexpected error while evaluating the keep policy must hide to
+# tray, never quit and take the user's running terminals with it.
+def test_manager_error_defaults_to_hiding():
+    assert _sessions_worth_keeping(_Broken()) is True
 
 
-def test_missing_manager_defaults_to_quit():
-    assert _sessions_worth_keeping(None) is False
+def test_missing_manager_defaults_to_hiding():
+    assert _sessions_worth_keeping(None) is True

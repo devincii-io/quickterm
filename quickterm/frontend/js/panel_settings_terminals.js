@@ -67,6 +67,11 @@ export function renderTerminalSettings(host, rerender) {
         // selected integration is not installed. Otherwise PowerShell could
         // accidentally be launched with Claude's `--continue` arguments.
         profile.cmd = known?.executable || "";
+        // A remote profile has no local working directory, and the field that
+        // would show it is not rendered for ssh/sftp — so a leftover local cwd
+        // stayed invisible while the backend kept validating it, and the
+        // profile stopped launching once that folder was deleted.
+        if (type.value === "ssh" || type.value === "sftp") profile.cwd = null;
         if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
         else profile.args = [];
         if (type.value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";

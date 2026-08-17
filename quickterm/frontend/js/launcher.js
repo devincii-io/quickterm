@@ -112,7 +112,11 @@ function workspaceButton(name, currentWorkspace, onOpen) {
     : currentWorkspace === name;
   const button = make("button", `sidebar-row workspace-row${active ? " active" : ""}`);
   button.type = "button";
-  button.title = scratch ? "New disposable scratch workspace" : `Open workspace ${name}`;
+  // Clicking the row you are already on is a no-op for every workspace,
+  // scratch included — replacing scratch is the separate "New scratch" action.
+  button.title = active
+    ? `${scratch ? "Scratch" : name} is already open`
+    : scratch ? "Open the disposable scratch workspace" : `Open workspace ${name}`;
   const mark = make("span", `sidebar-mark${scratch ? " scratch" : ""}`);
   mark.append(icon(scratch ? "circle-dashed" : "diamond", 12));
   const copy = make("span", "sidebar-row-copy");
@@ -236,10 +240,16 @@ export function initLauncher(el, options) {
   open.classList.add("primary");
   launchActions.append(open);
   if (!options.elevated) {
+    // Elevation spawns a separate process, so success is invisible here and a
+    // declined UAC prompt is indistinguishable from a dead button. Hold the
+    // button while the request is in flight and let main.js report the outcome.
     const admin = actionButton("shield", "New administrator terminal", () => {
-      if (!selected) return;
-      if (selected.kind === "profile") options.onElevateProfile(selected.profile);
-      else options.onElevateSystem(selected);
+      if (!selected || admin.disabled) return;
+      admin.disabled = true;
+      const request = selected.kind === "profile"
+        ? options.onElevateProfile(selected.profile)
+        : options.onElevateSystem(selected);
+      Promise.resolve(request).finally(() => { admin.disabled = false; });
     });
     admin.querySelector(".sidebar-label").textContent = "admin";
     launchActions.append(admin);
@@ -256,9 +266,12 @@ export function initLauncher(el, options) {
     workspaceList.append(workspaceButton(name, options.currentWorkspace, options.onWorkspace));
   }
   workspaces.append(workspaceList);
-  const manage = actionButton("dashboard", "Manage workspaces", options.onManage);
-  manage.classList.add("sidebar-manage");
-  workspaces.append(manage);
+  // Explicit, confirmed replacement of the live scratch layout. The scratch row
+  // itself only opens scratch; it never discards running terminals.
+  const newScratch = actionButton("circle-dashed", "New scratch workspace", () => options.onNewScratch?.());
+  newScratch.querySelector(".sidebar-label").textContent = "new scratch";
+  newScratch.classList.add("sidebar-manage");
+  workspaces.append(newScratch);
   el.append(workspaces);
 
   const terminals = make("section", "sidebar-section sidebar-sessions");

@@ -188,8 +188,15 @@ def smoke(executable: Path, port: int) -> None:
             if open_status != 400:
                 raise RuntimeError(f"packaged opener route returned {open_status}, expected 400")
             update_status, _ = _request(base, "/api/update", token=token, timeout=20)
-            if update_status >= 500:
-                raise RuntimeError(f"packaged update route returned {update_status}")
+            # 502 is the deliberate network-failure mapping, so an offline or
+            # rate-limited machine must not fail the release gate. Only a 500
+            # (ModuleNotFoundError from a missing hiddenimport) is a packaging
+            # failure, which is exactly what this check exists to catch.
+            if update_status == 500:
+                raise RuntimeError(
+                    f"packaged update route returned {update_status} "
+                    "(quickterm.update missing from hiddenimports?)"
+                )
 
             package_bytes = sum(
                 path.stat().st_size for path in executable.parent.rglob("*") if path.is_file()

@@ -210,9 +210,7 @@ export class LayoutManager {
     // Growing child 0 increases the ratio; growing child 1 decreases it.
     const signed = (hit.childIndex === 0 ? 1 : -1) * amount;
     hit.node.ratio = Math.min(0.9, Math.max(0.1, hit.node.ratio + signed));
-    this.render();
-    if (this.focused) this.focusPane(this.focused);
-    this._changed();
+    this._commitRatio(hit.node);
     return true;
   }
 
@@ -222,10 +220,22 @@ export class LayoutManager {
     const hit = this._focusedSplit("h") || this._focusedSplit("v");
     if (!hit) return false;
     hit.node.ratio = 0.5;
-    this.render();
-    if (this.focused) this.focusPane(this.focused);
-    this._changed();
+    this._commitRatio(hit.node);
     return true;
+  }
+
+  // Apply a changed ratio without rebuilding the tree, so a zoomed pane stays
+  // zoomed (render() tears the zoom down while the UI still says "Show all
+  // panes"). Falls back to a full render if this split has no live element.
+  _commitRatio(node) {
+    if (node.el && node.el.isConnected) {
+      this._applyRatio(node, node.el);
+      this.fitAll();
+    } else {
+      this.render();
+      if (this.focused) this.focusPane(this.focused);
+    }
+    this._changed();
   }
 
   // ---- persistence ----
@@ -301,6 +311,10 @@ export class LayoutManager {
     el.appendChild(a);
     el.appendChild(sp);
     el.appendChild(b);
+    // Remembered so ratio changes from the Quick-settings drawer and the
+    // palette can update this split in place, exactly like the splitter does.
+    // Going through render() instead silently dropped zoom.
+    node.el = el;
     this._applyRatio(node, el);
     return el;
   }

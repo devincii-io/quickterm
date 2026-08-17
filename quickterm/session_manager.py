@@ -153,11 +153,11 @@ class SessionManager:
 
     def set_scrollback_bytes(self, cap: int) -> None:
         self._cap = cap
-        for session in self._sessions.values():
+        for session in list(self._sessions.values()):
             session.set_scrollback_cap(cap)
 
     def live_count(self) -> int:
-        return sum(1 for session in self._sessions.values() if session.info.alive)
+        return sum(1 for session in list(self._sessions.values()) if session.info.alive)
 
     def spawn(
         self,
@@ -206,7 +206,11 @@ class SessionManager:
         return info
 
     def list(self) -> list[SessionInfo]:
-        return [s.info for s in self._sessions.values()]
+        # The registry is mutated on the event-loop thread but iterated from
+        # the anyio threadpool (sync REST handlers) and the pywebview GUI
+        # thread (the close policy). Every iteration here snapshots first, so a
+        # spawn or reap mid-scan can never raise "dictionary changed size".
+        return [s.info for s in list(self._sessions.values())]
 
     def sync_workspace(self, name: str, session_ids: set[str]) -> None:
         """Mirror one saved workspace's membership into live session metadata.
@@ -216,7 +220,7 @@ class SessionManager:
         promotion or an explicit move without scanning every workspace on each
         sidebar poll.
         """
-        for sid, session in self._sessions.items():
+        for sid, session in list(self._sessions.items()):
             if sid in session_ids:
                 session.info.workspace = name
             elif session.info.workspace == name:
@@ -245,7 +249,7 @@ class SessionManager:
             return set()
         return {
             sid
-            for sid, s in self._sessions.items()
+            for sid, s in list(self._sessions.items())
             if s.info.alive and s.pty is not None and s.pty.pid in parents
         }
 
@@ -257,17 +261,20 @@ class SessionManager:
         may exceed 100%.
         """
         now = time.monotonic()
-        processes = snapshot_processes()
         roots = {
             session.pty.pid
-            for session in self._sessions.values()
+            for session in list(self._sessions.values())
             if session.info.alive and session.pty is not None and session.pty.pid
         }
+        # Sample only the session trees. Opening a handle and reading counters
+        # for every PID on the machine was the expensive half of the snapshot,
+        # and summarize_trees discarded all of it anyway.
+        processes = snapshot_processes(roots)
         totals = summarize_trees(processes, roots)
         metrics: dict[str, dict] = {}
         busy: set[str] = set()
         active_ids: set[str] = set()
-        for sid, session in self._sessions.items():
+        for sid, session in list(self._sessions.items()):
             active_ids.add(sid)
             root = session.pty.pid if session.pty is not None else 0
             total = totals.get(root)
@@ -325,7 +332,7 @@ class SessionManager:
 
     def resize(self, sid: str, cols: int, rows: int) -> None:
         s = self._sessions.get(sid)
-        if s and s.pty:
+        if s and s.pty and s.info.alive:
             s.info.cols, s.info.rows = cols, rows
             # Reconnect geometry must stay current even while the PTY is silent.
             s._ring_cols, s._ring_rows = cols, rows
@@ -391,7 +398,7 @@ class SessionManager:
         return att
 
     def shutdown(self) -> None:
-        for s in self._sessions.values():
+        for s in list(self._sessions.values()):
             if s.pty:
                 s.pty.kill()
         self._sessions.clear()
@@ -407,7 +414,7 @@ class SessionManager:
         now = time.monotonic()
         busy = self.busy_ids()
         doomed: list[str] = []
-        for sid, s in self._sessions.items():
+        for sid, s in list(self._sessions.items()):
             if s._attachments:
                 continue
             if not s.info.alive:

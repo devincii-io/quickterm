@@ -47,7 +47,16 @@ def open_target(target: str) -> dict:
         raise FileNotFoundError(cleaned)
     if sys.platform == "win32":
         if path.is_file() and path.suffix.lower() not in _OPEN_EXTS:
-            subprocess.Popen(["explorer", f"/select,{path}"])
+            # Absolute path and an explicit safe cwd: a bare "explorer" leaves
+            # lpApplicationName NULL, so CreateProcess searches the current
+            # directory before System32 (SafeProcessSearchMode is off by
+            # default). QuickTerm never chdirs, and the Explorer "Open
+            # QuickTerm here" verb starts it in the folder the user clicked —
+            # which an elevated instance then inherits.
+            explorer = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe"
+            )
+            subprocess.Popen([explorer, f"/select,{path}"], cwd=os.environ.get("SystemRoot", r"C:\Windows"))
             return {"action": "revealed"}
         os.startfile(str(path))  # noqa: S606 - deliberate: user's own click
         return {"action": "opened"}

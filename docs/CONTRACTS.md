@@ -231,9 +231,9 @@ REST (JSON, under `/api`):
 | GET | /api/workspaces/{name} | → `Workspace` |
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?}` → 204 |
 | DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204 |
-| GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool}` |
-| GET | /api/config/full | → complete `AppConfig` |
-| PUT | /api/config | complete `AppConfig` → 204 |
+| GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool, hotkey_error: str\|null}` — `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. |
+| GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. |
+| PUT | /api/config | complete `AppConfig` → 204. `port`, `host` and `summon_hotkey` need a restart and are not applied live; a submitted value identical to the running one is treated as unedited and the persisted value is kept, so a stale page can never write an ephemeral port to disk. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
@@ -247,8 +247,16 @@ JSON bodies for session creation, elevation, and full-config updates are capped
 at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
 immutable asset responses retain their explicit long-lived cache policy.
 
-WebSocket `/ws/session/{id}` — attach protocol, in order. Exited sessions are
-rejected with close code `4410` and cannot be reattached; unknown IDs use `4404`:
+WebSocket `/ws/session/{id}` — attach protocol, in order. Unknown IDs are
+rejected with close code `4404`. An **exited** session that is still in the
+registry is served in replay-only mode — steps 1-3 below, then
+`{"type":"exit","code":N}` and close — and accepts no input. (It used to be
+refused with `4410`, which made overflow permanently lossy: the client is told
+to reconnect and replay the ring, and if the PTY died around the overflow that
+replay could never happen, so the session's final output was unreachable while
+still sitting in the ring.) A fresh subscription is drained from the moment it
+exists, so output produced during the replay handshake is delivered in order
+once the live phase begins instead of overflowing the bounded queue:
 
 1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (size scrollback was recorded at)
 2. server → binary scrollback frames of at most 128 KiB; after xterm finishes
@@ -392,9 +400,14 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   picker while retaining manual entry. Cancel preserves the prior value; the
   picker is visibly unavailable in a standalone browser because browsers may
   not disclose an arbitrary host directory path.
-- Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v, zoom, detach, kill,
-  workspace save/switch, open file viewer) / snippets (paste = send text over WS)
-  / recent sessions.
+- Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v,
+  zoom, detach, kill, open file viewer) / snippets / recent sessions. Workspaces
+  are offered ONLY as enumerated `load workspace: <name>` rows — there is no
+  free-text workspace prompt, because a typo used to tear the whole layout down
+  silently; saving is owned by the Dashboard, which validates the name and shows
+  the error. Snippet rows carry the command text and the destination pane, and a
+  multi-line snippet is confirmed in the pane before it runs. Pane sizing is not
+  duplicated here; it lives on the splitter and in Quick settings.
 - Split actions launch the selected terminal choice in the source pane's
   best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
   signals, falling back to their launch folder; prompt text is never parsed.
@@ -408,6 +421,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   kill and pane close, Alt+arrows focus move,
   Ctrl+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell
   (Claude Code image paste & model switch, PSReadLine/readline bindings).
+  The zoom layer matches only keys that actually produce `+`/`-`/`0`: physical
+  codes are never matched on their own, so Ctrl+`]` (vim tag jump) and Ctrl+`/`
+  (readline/PSReadLine undo) reach the shell on ANSI layouts.
   Alt+Shift+Left/Up cycle the previous/next new-terminal profile. Ctrl+Left/Right
   remain untouched for PowerShell/readline word navigation.
 - A second ordinary QuickTerm process never creates another native viewer.
@@ -415,9 +431,29 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   folder through `/api/launches`, and restores/focuses the one existing window.
   The viewer atomically claims folder requests and opens them in Scratch.
 - Destructive UI actions use an in-app confirmation placed by the triggering
-  control (or inside the focused pane for keyboard actions). Confirm receives
-  focus so Enter accepts; Escape and the Cancel button cancel. Application code
-  does not use browser `alert`, `confirm`, or `prompt` dialogs.
+  control (or inside the focused pane for keyboard actions). **Cancel** receives
+  focus, so a reflexive Enter on a bar the user did not expect can never
+  complete a destructive action; Escape and the Cancel button also cancel, and
+  Escape inside a panel cancels the confirmation before it closes the panel. A
+  short-lived pane notice never hides an open confirmation, and an inline
+  popover follows its trigger while the panel body scrolls (dismissing itself if
+  the trigger leaves the viewport). Application code does not use browser
+  `alert`, `confirm`, or `prompt` dialogs.
+- Pane title-bar verbs: `×` **detaches** (closes the view; the terminal keeps
+  running), matching what that glyph means in every tabbed application. Killing
+  is a separate, visually divided, text-labelled `.danger` control. The two must
+  never be adjacent unlabelled glyphs.
+- Sidebar workspace rows are idempotent: clicking the row you are already on is
+  a no-op for every workspace, **scratch included**. Replacing the live scratch
+  layout is the separate, confirmed "new scratch" action — no click on a row
+  drawn as "current" may kill a running terminal.
+- One visible failure surface: every gesture-triggered error goes to the
+  dismissible `#app-error` banner (drawn above `.panel-overlay`) or to the
+  focused pane's notice. `#sb-save` is reserved for the saving/saved lifecycle;
+  it collapses when empty and sits under the panel overlay, so it must never
+  carry anything the user has to act on. Nothing fails silently: elevation,
+  workspace save/validation, bulk-kill failures and hotkey registration all
+  report.
 - Links: Ctrl+click opens URLs (web-links addon) and file paths (custom link
   provider) via POST /api/open. Paste is native-only: Ctrl+V and Ctrl+Shift+V must never
   be preventDefault'ed (WebView2 denies navigator.clipboard.readText silently).

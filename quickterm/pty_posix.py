@@ -92,6 +92,10 @@ class PtySession:
                 os._exit(127)
         self._pid = pid
         self._fd = fd
+        # Serializes every use of _fd against _read_loop closing it. A closed
+        # descriptor number is immediately recyclable, so an unguarded write or
+        # ioctl could land on whatever opened next.
+        self._fd_lock = threading.Lock()
         self.resize(cols, rows)
 
         self._reader = threading.Thread(
@@ -119,7 +123,10 @@ class PtySession:
             view = memoryview(data)
             while view and not self._dead.is_set():
                 try:
-                    written = os.write(self._fd, view)
+                    with self._fd_lock:
+                        if self._fd < 0:
+                            return  # _read_loop closed it; the number is recyclable
+                        written = os.write(self._fd, view)
                 except OSError:
                     return
                 if written <= 0:
@@ -137,8 +144,14 @@ class PtySession:
                 pass
 
     def resize(self, cols: int, rows: int) -> None:
+        # Read once: _read_loop can close and clear the descriptor concurrently,
+        # and the number is recyclable the moment it is closed — resizing a
+        # stale fd would resize whatever inherited it.
         try:
-            fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            with self._fd_lock:
+                if self._fd < 0:
+                    return
+                fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         except OSError:
             pass  # dead pty
 
@@ -162,11 +175,27 @@ class PtySession:
         except (OSError, ProcessLookupError):
             try:
                 os.kill(self._pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
+            except ProcessLookupError:
+                return True  # already gone
+            except OSError:
+                pass  # EPERM and friends: verified below
         self._stop_writer()
-        # reader sees EOF/EIO and finishes exit handling
-        return True
+        # CONTRACTS.md requires kill() to report VERIFIED termination — clients
+        # remove only what the backend confirms stopped. Returning True
+        # unconditionally swallowed EPERM and made a surviving process
+        # disappear from the UI while it kept running. The reader thread does
+        # the exit bookkeeping; wait briefly for it, then probe the process.
+        # Never waitpid() here: the reader thread owns reaping, and stealing
+        # the status from it would lose the real exit code.
+        if self._dead.wait(timeout=2.0):
+            return True
+        try:
+            os.kill(self._pid, 0)
+        except ProcessLookupError:
+            return True  # gone; the reader simply has not finished bookkeeping
+        except OSError:
+            return False  # exists and we cannot signal it (EPERM)
+        return False
 
     def _read_loop(self) -> None:
         while True:
@@ -189,10 +218,13 @@ class PtySession:
             self._exit_code = 1
         self._dead.set()
         self._stop_writer()
-        try:
-            os.close(self._fd)
-        except OSError:
-            pass
+        with self._fd_lock:
+            fd, self._fd = self._fd, -1
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         self._post(self._on_exit, self._exit_code)
 
     def _post(self, cb: Callable, arg) -> None:

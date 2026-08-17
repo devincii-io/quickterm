@@ -26,13 +26,17 @@ export function initKeys(actions) {
     // Windows-style text zoom. Use both key and code because WebView2 reports
     // the shifted plus key differently across keyboard layouts. Claim only
     // these exact Ctrl gestures; Ctrl+Alt and Meta combinations stay untouched.
+    // Never match a physical code whose produced character is not +/-/0:
+    // "Slash" and "BracketRight" are the QWERTZ positions of -/+ (already
+    // covered by the e.key tests) but are Ctrl+/ and Ctrl+] on ANSI layouts,
+    // where readline undo and the vim tag jump must reach the shell.
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
       const key = e.key.toLowerCase();
       const reset = key === "0" || e.code === "Digit0" || e.code === "Numpad0";
       const smaller = key === "-" || key === "_" || e.code === "Minus"
-        || e.code === "Slash" || e.code === "NumpadSubtract";
+        || e.code === "NumpadSubtract";
       const bigger = key === "+" || key === "=" || key === "*"
-        || e.code === "Equal" || e.code === "BracketRight" || e.code === "NumpadAdd";
+        || e.code === "Equal" || e.code === "NumpadAdd";
       if (reset || smaller || bigger) {
         e.preventDefault();
         e.stopPropagation();
