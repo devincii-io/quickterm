@@ -27,7 +27,7 @@ export function renderHelp() {
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
       ["Your keys stay yours", "Ctrl+C copies only when text is selected; otherwise it interrupts the terminal. Plain Alt+V (Claude Code image paste), Alt+P (model switch), Ctrl+P, the Alt+B/F word motions and other shell keys pass through untouched."],
-      ["Profiles", "Reusable terminal types, start commands and shortcuts. A profile follows the folder of whatever workspace you open it in, optionally into a subfolder, unless you pin it to one fixed folder."],
+      ["Profiles", "Reusable terminal types, start commands and shortcuts. A profile carries no folder: it always opens in the folder of the workspace you launch it from, so one profile works in every project."],
       ["Split folders", "Splits use OSC 7 or OSC 9;9 shell directory signals, falling back to the pane launch folder. Open and Alt+N start in the workspace folder."],
       ["Claude agent view", "Normal Claude splits stay in the profile project and never surprise-open the agent manager. Use the explicit Split Claude agent view command in Alt+K."],
       ["Workspaces", "A workspace is a folder plus a saved split layout. Every terminal you open in it starts in that folder, so switching workspace switches project. Set or change the folder from the Dashboard."],

@@ -1,11 +1,11 @@
 import { icon } from "./icons.js";
 import {
-  TERMINAL_TYPES, envToLines, folderPickerControl, inferTerminalType, make,
+  TERMINAL_TYPES, envToLines, inferTerminalType, make,
   parseEnvLines,
 } from "./panel_shared.js";
 export function renderTerminalSettings(host, rerender) {
     const cfg = this.settingsDraft;
-    const heading = this._sectionHeading("Terminal profiles", "Your own terminals: a shell plus folder, command and shortcut. System shells are always available in the launcher without any setup.");
+    const heading = this._sectionHeading("Terminal profiles", "Your own terminals: a shell plus start command and shortcut. The workspace supplies the folder. System shells are always available in the launcher without any setup.");
     const add = this._button("", "primary-button compact");
     add.append(icon("plus", 13), make("span", "", "Add terminal"));
     add.addEventListener("click", () => {
@@ -16,7 +16,7 @@ export function renderTerminalSettings(host, rerender) {
         type.executable && type.available !== false && type.id !== "claude-code");
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, subpath: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -24,7 +24,7 @@ export function renderTerminalSettings(host, rerender) {
     host.append(heading);
     if (!cfg.profiles.length) {
       const empty = make("div", "profiles-empty");
-      empty.append(make("p", "", "No personal terminals yet. The launcher already offers every shell installed on this computer. Add a profile when you want a preset folder, start command or global shortcut."));
+      empty.append(make("p", "", "No personal terminals yet. The launcher already offers every shell installed on this computer. Add a profile when you want a start command or a global shortcut."));
       host.append(empty);
     }
 
@@ -67,11 +67,6 @@ export function renderTerminalSettings(host, rerender) {
         // selected integration is not installed. Otherwise PowerShell could
         // accidentally be launched with Claude's `--continue` arguments.
         profile.cmd = known?.executable || "";
-        // A remote profile has no local working directory, and the field that
-        // would show it is not rendered for ssh/sftp, so a leftover local cwd
-        // stayed invisible while the backend kept validating it, and the
-        // profile stopped launching once that folder was deleted.
-        if (type.value === "ssh" || type.value === "sftp") { profile.cwd = null; profile.subpath = null; }
         if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
         else profile.args = [];
         if (type.value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";
@@ -119,50 +114,14 @@ export function renderTerminalSettings(host, rerender) {
           this._field("Private key", keyInput, "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal."),
         );
       } else {
-        // Workspaces own the folder now. A profile either follows the
-        // workspace it is opened in (optionally into a subfolder) or pins
-        // itself to one fixed directory, never both, so switching leaves
-        // nothing invisible behind.
-        const pinned = Boolean(profile.cwd);
-        const mode = this._select([
-          { value: "workspace", label: "Follow the workspace folder" },
-          { value: "fixed", label: "Always this folder" },
-        ], pinned ? "fixed" : "workspace");
-        mode.addEventListener("change", () => {
-          if (mode.value === "fixed") {
-            profile.cwd = profile.cwd || "";
-            profile.subpath = null;
-          } else {
-            profile.cwd = null;
-          }
-          rerender();
-        });
-        fields.append(this._field(
-          kind === "claude-code" ? "Project folder" : "Starting folder",
-          mode,
+        // The workspace owns the folder outright. A profile has no folder of
+        // any kind, so one "Claude Code" or "PowerShell" profile is usable in
+        // every project and nothing can point somewhere invisible.
+        fields.append(this._note(
           kind === "claude-code"
-            ? "Claude's project context. Following the workspace keeps one profile usable in every project."
-            : "Following the workspace means this terminal opens wherever the workspace points.",
+            ? "Claude opens in the folder of the workspace you launch it from. Set that folder in the Dashboard."
+            : "This terminal opens in the folder of the workspace you launch it from. Set that folder in the Dashboard.",
         ));
-        if (pinned) {
-          const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
-          cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-          fields.append(this._field(
-            "Fixed folder",
-            folderPickerControl(cwd, { label: "Choose the fixed folder" }),
-            kind === "wsl"
-              ? "Enter a Linux path, or browse for an absolute Windows folder."
-              : "This profile always starts here, whichever workspace it is opened in.",
-          ));
-        } else {
-          const subpath = this._textInput(profile.subpath, "backend");
-          subpath.addEventListener("input", () => { profile.subpath = subpath.value || null; });
-          fields.append(this._field(
-            "Subfolder",
-            subpath,
-            "Optional, relative to the workspace folder. Empty opens the workspace root, and a subfolder that has gone missing falls back to it.",
-          ));
-        }
       }
       if (kind === "claude-code") {
         const launchMode = this._select([

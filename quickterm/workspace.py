@@ -1,8 +1,8 @@
 """Workspace models + JSON persistence in %APPDATA%/quickterm/workspaces.
 
 A workspace is a folder first and a layout second: `Workspace.path` is the
-root directory every session in that workspace starts in, and profiles only
-carry an optional `subpath` relative to it.
+root directory every session in that workspace starts in. Profiles carry no
+folder of their own, so the workspace is the only thing that places a terminal.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path, PurePath
+from pathlib import Path
 
 from .config import config_dir
 
@@ -26,8 +26,8 @@ class Workspace:
     name: str
     layout: dict
     logo: str | None = None  # per-workspace brand override (asset id)
-    # Root folder for every session in this workspace. None keeps the legacy
-    # behaviour (profile cwd, else the user's home directory).
+    # Root folder for every session in this workspace. None means the sessions
+    # fall back to default_cwd(), the user's home directory.
     path: str | None = None
     # Workspace ownership is wider than the visible layout: detaching a pane
     # removes it from `layout` but its live session remains here for reattach.
@@ -53,41 +53,11 @@ def normalize_root(value: object) -> str | None:
     return os.path.abspath(expanded)
 
 
-def validate_subpath(value: object) -> str | None:
-    """Validate a profile subfolder: relative, inside the workspace root."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("subfolder must be a string or null")
-    text = value.strip().strip("/\\")
-    if not text:
-        return None
-    if len(text) > MAX_PATH_CHARS:
-        raise ValueError("subfolder path is too long")
-    if any(ord(char) < 32 for char in text):
-        raise ValueError("subfolder path contains control characters")
-    candidate = PurePath(text)
-    if candidate.is_absolute() or candidate.anchor or candidate.drive:
-        raise ValueError("subfolder must be relative to the workspace folder")
-    if any(part == ".." for part in candidate.parts):
-        raise ValueError("subfolder cannot step outside the workspace folder")
-    return text
-
-
-def _contained(base: Path, child: Path) -> bool:
-    try:
-        base_real = base.resolve()
-        child_real = child.resolve()
-    except OSError:
-        return False
-    return child_real == base_real or base_real in child_real.parents
-
-
-def resolve_start_dir(root: str | None, subpath: str | None = None) -> str | None:
+def resolve_start_dir(root: str | None) -> str | None:
     """Existing directory a session should start in, or None if unusable.
 
-    A missing subfolder degrades to the workspace root rather than failing the
-    spawn; a missing root degrades to the caller's own fallback.
+    A missing root degrades to the caller's own fallback rather than failing
+    the spawn.
     """
     if not root:
         return None
@@ -97,18 +67,6 @@ def resolve_start_dir(root: str | None, subpath: str | None = None) -> str | Non
             return None
     except OSError:
         return None
-    try:
-        relative = validate_subpath(subpath)
-    except ValueError:
-        return str(base)
-    if not relative:
-        return str(base)
-    child = base / relative
-    try:
-        if child.is_dir() and _contained(base, child):
-            return str(child)
-    except OSError:
-        pass
     return str(base)
 
 

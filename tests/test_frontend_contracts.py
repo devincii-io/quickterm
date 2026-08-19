@@ -109,7 +109,9 @@ def test_claude_code_is_an_explicit_project_profile_type():
     assert 'value: "resume"' in source
     assert 'value: "agents"' in source
     assert 'value: "new"' in source
-    assert '"Project folder"' in source
+    # No folder field of any kind: the workspace places every Claude session.
+    assert 'profile.cwd' not in source
+    assert 'profile.subpath' not in source
 
 
 def test_every_folder_field_has_the_native_picker():
@@ -124,12 +126,12 @@ def test_every_folder_field_has_the_native_picker():
     assert "export function folderPickerControl" in shared
     assert "pickNativeFolder(input.value" in shared
     assert 'folder-picker-control' in shared
-    for source in (settings, dashboard):
-        assert "folderPickerControl(" in source
     # Both places a workspace folder is chosen: naming a new one, and
-    # repointing an existing card.
+    # repointing an existing card. Terminal settings has no folder field at all
+    # now, so the dashboard is the only picker left.
+    assert "folderPickerControl(" in dashboard
     assert dashboard.count("folderPickerControl(") >= 2
-    assert 'kind === "claude-code" ? "Project folder" : "Starting folder"' in settings
+    assert "folderPickerControl(" not in settings
 
 
 def test_workspace_folder_reaches_every_spawn_path():
@@ -138,10 +140,11 @@ def test_workspace_folder_reaches_every_spawn_path():
     # An absent "path" key preserves the stored folder; every layout autosave
     # relies on that, so the wrapper must not default it to null.
     assert "...(path === undefined ? {} : { path })" in api
-    assert "function contextCwd(explicit, profile)" in main
-    # A profile pinned to a fixed folder keeps it; everything else defers to
-    # the workspace root the backend resolves.
-    assert "if (profile && profile.cwd) return null;" in main
+    assert "function contextCwd(explicit)" in main
+    # Profiles carry no folder, so nothing local can pre-empt the workspace
+    # root the backend resolves. Scratch is the one exception: its throwaway
+    # root is only known to the viewer.
+    assert "profile.cwd" not in main
     assert "return scratchRoot || null;" in main
 
 

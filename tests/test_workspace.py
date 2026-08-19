@@ -13,7 +13,6 @@ from quickterm.workspace import (
     resolve_start_dir,
     root_exists,
     save_workspace,
-    validate_subpath,
 )
 
 LAYOUT = {
@@ -188,31 +187,14 @@ def test_normalize_root_is_absolute():
     assert Path(normalize_root("relative/folder")).is_absolute()
 
 
-def test_validate_subpath_rules():
-    assert validate_subpath(None) is None
-    assert validate_subpath("  ") is None
-    assert validate_subpath("/backend/") == "backend"
-    assert validate_subpath(r"apps\web") == r"apps\web"
-    with pytest.raises(ValueError):
-        validate_subpath("../secrets")
-    with pytest.raises(ValueError):
-        validate_subpath("apps/../../secrets")
-    with pytest.raises(ValueError):
-        validate_subpath("C:/windows")
-    with pytest.raises(ValueError):
-        validate_subpath(7)
-
-
-def test_resolve_start_dir_prefers_subfolder_then_root(tmp_path):
+def test_resolve_start_dir_is_the_workspace_root_or_nothing(tmp_path):
+    # Profiles carry no folder, so the root is the whole answer: there is no
+    # subfolder left to prefer and nothing to fall back to but the caller.
     root = tmp_path / "repo"
-    (root / "backend").mkdir(parents=True)
+    root.mkdir(parents=True)
     assert resolve_start_dir(str(root)) == str(root)
-    assert resolve_start_dir(str(root), "backend") == str(root / "backend")
-    # A subfolder that has been deleted degrades to the root; it never fails
-    # the spawn and never escapes.
-    assert resolve_start_dir(str(root), "gone") == str(root)
-    assert resolve_start_dir(str(root), "../..") == str(root)
-    assert resolve_start_dir(None, "backend") is None
+    assert resolve_start_dir(None) is None
+    assert resolve_start_dir("") is None
     assert resolve_start_dir(str(tmp_path / "missing")) is None
 
 

@@ -143,11 +143,10 @@ def create_app(
         workspace_name = (workspace_name or "").strip() or None
         # A workspace is a folder: every session it owns starts there unless
         # the request names a directory itself (Explorer handoff, or a split
-        # inheriting the source pane's cwd). Profiles contribute only a
-        # subfolder relative to that root.
+        # inheriting the source pane's cwd). Profiles contribute nothing here.
         request_cwd = cwd if isinstance(cwd, str) and cwd.strip() else None
 
-        async def workspace_cwd(subpath: object) -> str | None:
+        async def workspace_cwd() -> str | None:
             if not workspace_name:
                 return None
             workspace_mod = importlib.import_module("quickterm.workspace")
@@ -156,10 +155,7 @@ def create_app(
                 saved = workspace_mod.load_workspace(workspace_name)
                 if saved is None:
                     return None
-                return workspace_mod.resolve_start_dir(
-                    getattr(saved, "path", None),
-                    subpath if isinstance(subpath, str) else None,
-                )
+                return workspace_mod.resolve_start_dir(getattr(saved, "path", None))
 
             return await asyncio.to_thread(read)
 
@@ -180,13 +176,9 @@ def create_app(
                 if claude_mode not in {"new", "continue", "resume", "agents"}:
                     raise HTTPException(400, "claude_mode must be new, continue, resume, or agents")
                 prof = dataclasses.replace(prof, claude_mode=claude_mode)
-            # A profile carrying its own `cwd` is pinned on purpose ("Always
-            # this folder" in Settings) and opts out of the workspace root;
-            # only an explicit request directory overrides it.
-            pinned = isinstance(getattr(prof, "cwd", None), str) and prof.cwd.strip()
-            effective_cwd = request_cwd
-            if effective_cwd is None and not pinned:
-                effective_cwd = await workspace_cwd(getattr(prof, "subpath", None))
+            # Profiles carry no folder at all, so the order is short: an
+            # explicit request directory, else the workspace root.
+            effective_cwd = request_cwd or await workspace_cwd()
             try:
                 resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, effective_cwd)
             except ValueError as exc:
@@ -202,7 +194,7 @@ def create_app(
         else:
             # System shells carry no profile, so the workspace root is the only
             # thing that can place them.
-            cwd = request_cwd or await workspace_cwd(None)
+            cwd = request_cwd or await workspace_cwd()
         if not isinstance(cmd, str) or not cmd.strip():
             raise HTTPException(400, "either 'profile' or 'cmd' is required")
         cmd = cmd.strip()
@@ -509,23 +501,19 @@ def create_app(
         if isinstance(requested_workspace, str) and requested_workspace.strip():
             workspace_mod = importlib.import_module("quickterm.workspace")
 
-            def _elevated_cwd(name: str, subpath: object) -> str | None:
+            def _elevated_cwd(name: str) -> str | None:
                 saved = workspace_mod.load_workspace(name)
                 if saved is None:
                     return None
-                return workspace_mod.resolve_start_dir(
-                    getattr(saved, "path", None),
-                    subpath if isinstance(subpath, str) else None,
-                )
+                return workspace_mod.resolve_start_dir(getattr(saved, "path", None))
 
         if profile_name is not None:
             prof = next((p for p in cfg.profiles if p.name == profile_name), None)
             if prof is None:
                 raise HTTPException(404, f"unknown profile: {profile_name}")
-            pinned = isinstance(getattr(prof, "cwd", None), str) and prof.cwd.strip()
-            if not pinned and isinstance(requested_workspace, str) and requested_workspace.strip():
+            if isinstance(requested_workspace, str) and requested_workspace.strip():
                 workspace_cwd = await asyncio.to_thread(
-                    _elevated_cwd, requested_workspace.strip(), getattr(prof, "subpath", None)
+                    _elevated_cwd, requested_workspace.strip()
                 )
             try:
                 cmd, args, cwd = _resolve_profile(prof, workspace_cwd)
@@ -545,7 +533,7 @@ def create_app(
                 isinstance(requested_workspace, str) and requested_workspace.strip()
             ):
                 resolved = await asyncio.to_thread(
-                    _elevated_cwd, requested_workspace.strip(), None
+                    _elevated_cwd, requested_workspace.strip()
                 )
                 if resolved:
                     spec["cwd"] = resolved
@@ -862,7 +850,9 @@ def _scratch_dir(cfg: Any) -> str:
 def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, list[str], str | None]:
     terminal_type = getattr(prof, "terminal_type", None)
     start = (getattr(prof, "start_command", None) or "").strip()
-    cwd = cwd_override or getattr(prof, "cwd", None)
+    # The caller resolved this from the request or the workspace root. Profiles
+    # have no folder of their own to fall back to.
+    cwd = cwd_override
     existing_args = list(getattr(prof, "args", []) or [])
 
     if terminal_type == "claude-code":

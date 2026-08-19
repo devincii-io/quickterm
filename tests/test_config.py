@@ -51,7 +51,6 @@ def test_save_load_roundtrip(fake_appdata):
     cfg.profiles.append(Profile(
         name="ubuntu",
         cmd="wsl.exe",
-        cwd="~/dev",
         autostart=True,
         terminal_type="wsl",
         wsl_distro="Ubuntu",
@@ -62,7 +61,6 @@ def test_save_load_roundtrip(fake_appdata):
     assert loaded.port == 9999
     assert loaded.default_profile == "cmd"
     ubuntu = next(p for p in loaded.profiles if p.name == "ubuntu")
-    assert ubuntu.cwd == "~/dev"
     assert ubuntu.autostart is True
     assert ubuntu.terminal_type == "wsl"
     assert ubuntu.wsl_distro == "Ubuntu"
@@ -73,7 +71,6 @@ def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
     cfg = AppConfig(profiles=[Profile(
         name="project-agent",
         cmd="claude.exe",
-        cwd=str(fake_appdata),
         terminal_type="claude-code",
         claude_mode="resume",
     )])
@@ -87,16 +84,11 @@ def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
     with pytest.raises(ValueError, match="Claude launch mode"):
         save_config(AppConfig(profiles=[loaded]))
 
-    # A Claude profile no longer has to pin its own folder: the workspace root
-    # supplies it, and the spawn path refuses only when nothing resolves.
+    # A Claude profile carries no folder at all. The workspace root supplies
+    # one, and the spawn path refuses only when nothing resolves.
     loaded.claude_mode = "continue"
-    loaded.cwd = None
     save_config(AppConfig(profiles=[loaded]))
-    assert load_config().profiles[0].cwd is None
-
-    loaded.subpath = "../escape"
-    with pytest.raises(ValueError, match="outside the workspace folder"):
-        save_config(AppConfig(profiles=[loaded]))
+    assert not hasattr(load_config().profiles[0], "cwd")
 
 
 def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
@@ -141,27 +133,32 @@ def test_environment_validation_rejects_unsafe_values(env):
         validate_environment(env)
 
 
-def test_save_rejects_missing_local_profile_folder(fake_appdata):
-    missing = fake_appdata / "does-not-exist"
-    cfg = AppConfig(profiles=[
-        Profile(
-            name="Standard",
-            cmd="powershell.exe",
-            cwd=str(missing),
-            terminal_type="windows-powershell",
-        )
-    ])
-    with pytest.raises(ValueError, match="starting folder does not exist"):
-        save_config(cfg)
-    assert not (fake_appdata / "quickterm" / "config.json").exists()
+def test_a_stored_profile_folder_is_dropped_on_load(fake_appdata):
+    """Profiles lost their folder in 3.3.0; older configs must still load.
 
+    The keys are simply unknown now, so `_known()` drops them and the next
+    save writes them out. A config written by an older build must not become
+    unloadable, which would cost the user every profile they had.
+    """
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    legacy = {
+        "profiles": [{
+            "name": "Standard",
+            "cmd": "powershell.exe",
+            "terminal_type": "windows-powershell",
+            "cwd": str(fake_appdata / "does-not-exist"),
+            "subpath": "../escape",
+        }],
+    }
+    (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
-def test_save_allows_wsl_folder_without_local_match(fake_appdata):
-    cfg = AppConfig(profiles=[
-        Profile(name="Ubuntu", cmd="wsl.exe", cwd="~/missing", terminal_type="wsl")
-    ])
-    save_config(cfg)
-    assert (fake_appdata / "quickterm" / "config.json").exists()
+    loaded = load_config().profiles[0]
+    assert loaded.name == "Standard"
+    assert not hasattr(loaded, "cwd")
+    assert not hasattr(loaded, "subpath")
+    # A folder that no longer exists used to make the whole config invalid.
+    assert (path / "config.json").exists()
 
 
 def test_ssh_profile_roundtrip(fake_appdata):

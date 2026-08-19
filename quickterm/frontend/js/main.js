@@ -203,9 +203,11 @@ async function boot() {
   // own. Inside a named workspace the answer is "let the backend resolve the
   // workspace folder"; in scratch it is the disposable scratch folder; a
   // profile pinned to a fixed folder always keeps it.
-  function contextCwd(explicit, profile) {
+  // Profiles carry no folder, so there is nothing here to defer to: an
+  // explicit directory wins, scratch supplies its own throwaway root, and a
+  // named workspace is resolved by the backend from its stored path.
+  function contextCwd(explicit) {
     if (explicit) return explicit;
-    if (profile && profile.cwd) return null;
     if (!currentWorkspace || currentWorkspace === SCRATCH_WS) return scratchRoot || null;
     return null;
   }
@@ -325,20 +327,20 @@ async function boot() {
   function spawnDefaultInto(pane, cwdOverride) {
     if (selectedTerminal) {
       if (selectedTerminal.kind === "profile") {
-        return spawnInto(pane, selectedTerminal.profile.name, contextCwd(cwdOverride, selectedTerminal.profile));
+        return spawnInto(pane, selectedTerminal.profile.name, contextCwd(cwdOverride));
       }
       return spawnSpecInto(pane, {
         cmd: selectedTerminal.cmd,
         args: selectedTerminal.args || [],
-        cwd: contextCwd(cwdOverride, null),
+        cwd: contextCwd(cwdOverride),
         name: selectedTerminal.label,
         terminalType: selectedTerminal.id,
       });
     }
     const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride, profile));
+    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride));
     const system = defaultSystemSpec();
-    if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride, null) });
+    if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
     pane.showNotice("[no shell found, add one in settings]");
     return Promise.resolve(null);
   }
@@ -358,7 +360,7 @@ async function boot() {
       if (selectedTerminal.kind === "profile") {
         const profile = selectedTerminal.profile;
         const claudeMode = normalClaudeSplitMode(profile);
-        return spawnInto(pane, profile.name, contextCwd(cwd, profile), { claudeMode });
+        return spawnInto(pane, profile.name, contextCwd(cwd), { claudeMode });
       }
       return spawnSpecInto(pane, {
         cmd: selectedTerminal.cmd,
@@ -371,14 +373,14 @@ async function boot() {
     const profile = defaultProfile();
     if (profile) {
       const choice = { kind: "profile", profile };
-      return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice), profile), {
+      return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice)), {
         claudeMode: normalClaudeSplitMode(profile),
       });
     }
     const system = defaultSystemSpec();
     if (!system) return spawnDefaultInto(pane);
     const choice = { kind: "system", id: system.terminalType, ...system };
-    return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice), null) });
+    return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice)) });
   }
 
   async function runProfile(profile) {
@@ -386,7 +388,7 @@ async function boot() {
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null, profile));
+    await spawnInto(pane, profile.name, contextCwd(null));
   }
 
   async function runClaudeMode(profile, claudeMode) {
@@ -394,7 +396,7 @@ async function boot() {
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null, profile), { claudeMode });
+    await spawnInto(pane, profile.name, contextCwd(null), { claudeMode });
   }
 
   async function splitClaudeAgentView(profile) {
@@ -402,7 +404,7 @@ async function boot() {
     const pane = layout.splitPane(source, autoDir(source));
     if (!pane) return null;
     layout.focusPane(pane);
-    return spawnInto(pane, profile.name, contextCwd(null, profile), { claudeMode: "agents" });
+    return spawnInto(pane, profile.name, contextCwd(null), { claudeMode: "agents" });
   }
 
   async function runSystemTerminal(system) {
@@ -447,7 +449,7 @@ async function boot() {
       cmd: system.cmd,
       args: system.args || [],
       name: system.label,
-      cwd: contextCwd(null, null) || undefined,
+      cwd: contextCwd(null) || undefined,
       workspace: spawnWorkspaceTag(),
     }, system.label);
   }

@@ -59,11 +59,10 @@ terminal there. You can then save or move it deliberately.
 **A workspace is a folder.** Give a workspace the directory you work in and
 every terminal it opens starts there, so switching workspace switches project.
 Set or change the folder from the Dashboard, with a native folder picker.
-Terminal profiles keep only an optional subfolder relative to it, so one
-"Claude Code" or "PowerShell" profile is usable in every project. A profile
-that really belongs to one place can pin itself with **Always this folder**,
-and that pin wins. A folder that has been moved or deleted is reported in the
-Dashboard and sidebar rather than silently failing the next terminal.
+Terminal profiles carry no folder of their own, so one "Claude Code" or
+"PowerShell" profile is usable in every project and none of them can point
+somewhere you cannot see. A folder that has been moved or deleted is reported
+in the Dashboard and sidebar rather than silently failing the next terminal.
 
 The sidebar workspace list controls persistence. A named workspace autosaves
 its exact split arrangement and live session IDs for reattachment with
@@ -133,9 +132,9 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 Split actions open the currently selected terminal profile in the focused
 pane's best-known directory. QuickTerm tracks that directory from OSC 7 and
 OSC 9;9 shell-integration signals and otherwise falls back to the pane's launch
-folder. It never scrapes prompt text. Sidebar **Open** and `Alt+N` keep using
-the selected profile's configured folder instead. Claude splits stay bound to
-their profile's project and never implicitly open `claude agents`; use
+folder. It never scrapes prompt text. Sidebar **Open** and `Alt+N` open in the
+workspace folder instead. Claude splits stay bound to their workspace project
+and never implicitly open `claude agents`; use
 Alt+K → **Split Claude agent view** for an explicit project-scoped manager.
 
 The status bar's **View** drawer has `−` / `+` font controls with an explicit
@@ -180,18 +179,17 @@ window, including for sessions near the bottom of a scrolled dashboard.
 Terminal profiles can be managed from **Settings → Terminals**. Choose Claude
 Code, PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a
 detected distribution), SSH or SFTP (powered by bundled PuTTY plink/psftp), or
-a custom executable. Profiles can also set a starting folder, a command to run
-inside the shell, environment variables, a global shortcut and autostart. With
-no folder configured, Windows shells start in the Windows user home and WSL
-starts in the distro's Linux home. A WSL profile can use Linux paths such as
-`~/dev`; its startup command runs from that location. Every local profile
-folder field keeps direct path entry and adds a native **Browse** picker in the
-installed app. WSL can still use a manually entered Linux path, while Browse
-can select an absolute Windows folder accepted by `wsl.exe --cd`.
+a custom executable. A profile sets a command to run inside the shell,
+environment variables, a global shortcut and autostart. It has no folder: the
+workspace you launch it from supplies that, which is what makes one profile
+usable in every project. Set the workspace folder in the Dashboard, where the
+native **Browse** picker lives. With no workspace folder at all, Windows shells
+start in the Windows user home and WSL in the distro's Linux home.
 
-Claude Code is a real profile type rather than a name convention. Bind it to a
-project folder and choose **Continue latest**, Claude's native **session
-picker**, **new conversation**, or the **background-agent manager**. The
+Claude Code is a real profile type rather than a name convention. It opens in
+the folder of the workspace you launch it from, and you choose **Continue
+latest**, Claude's native **session picker**, **new conversation**, or the
+**background-agent manager**. The
 palette also exposes continue, choose-session, and agent-manager actions for
 each Claude profile. If its PTY has died, the restored pane stays blank and
 offers both explicit **Continue latest** and **Choose session** recovery. It

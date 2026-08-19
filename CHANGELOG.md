@@ -2,7 +2,22 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
-## QuickTerm 3.2.1
+## QuickTerm 3.3.0
+
+### Profiles no longer carry a folder
+
+- A terminal profile has no folder of any kind. The workspace you launch it
+  from places every session, so one "Claude Code" or "PowerShell" profile is
+  usable in every project and none of them can point somewhere you cannot see.
+- **Always this folder** and the profile subfolder are gone, from Settings and
+  from the config file. The spawn order is now short: an explicit request
+  folder, else the workspace root, else your home directory.
+- Existing configs keep working. The `cwd` and `subpath` keys are simply
+  unknown now, so they are dropped when the config loads and written out on the
+  next save. A profile pointing at a folder that has since been deleted used to
+  make the whole config invalid; it cannot any more.
+- Set the folder per workspace in the Dashboard, which is where the native
+  folder picker now lives.
 
 ### A pane whose session the backend forgot can be closed again
 

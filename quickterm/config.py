@@ -26,12 +26,10 @@ class Profile:
     name: str
     cmd: str
     args: list[str] = field(default_factory=list)
-    # Fixed absolute folder. Legacy/opt-out: when set it pins the profile to
-    # one directory regardless of the workspace it is launched in.
-    cwd: str | None = None
-    # Folder relative to the workspace root, used when `cwd` is unset. This is
-    # the workspace-first way to say "this terminal opens in ./backend".
-    subpath: str | None = None
+    # No folder of any kind. A workspace IS a folder and it is the only thing
+    # that places a terminal, so a profile is portable across every project.
+    # `cwd` and `subpath` used to live here; `_known()` drops both from older
+    # configs on load, and the next save writes them out for good.
     env: dict[str, str] = field(default_factory=dict)
     keybinding: str | None = None
     autostart: bool = False
@@ -282,9 +280,6 @@ def config_from_dict(raw: dict) -> AppConfig:
 
 def validate_config(cfg: AppConfig) -> None:
     from .hotkeys import parse_binding
-    # Imported here, not at module scope: workspace.py imports config_dir from
-    # this module, so a top-level import would be circular.
-    from .workspace import validate_subpath
 
     if cfg.host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Host must be loopback (127.0.0.1, localhost, or ::1)")
@@ -366,13 +361,8 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(
                 f'Terminal profile "{name}": Claude launch mode must be new, continue, resume, or agents'
             )
-        # Claude Code needs a project folder, but it no longer has to be pinned
-        # on the profile: the workspace root (plus any subfolder) supplies it,
-        # and _resolve_profile refuses the spawn if nothing resolves.
-        try:
-            validate_subpath(profile.subpath)
-        except ValueError as exc:
-            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
+        # Claude Code needs a project folder and the workspace root is the only
+        # source of one. _resolve_profile refuses the spawn if none resolves.
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
         if profile.terminal_type in ("ssh", "sftp"):
@@ -391,8 +381,6 @@ def validate_config(cfg: AppConfig) -> None:
             validate_environment(profile.env)
         except ValueError as exc:
             raise ValueError(f'Terminal profile "{name}": {exc}') from exc
-        if profile.cwd is not None and not isinstance(profile.cwd, str):
-            raise ValueError(f'Terminal profile "{name}": starting folder must be a string')
         if profile.keybinding is not None and not isinstance(profile.keybinding, str):
             raise ValueError(f'Terminal profile "{name}": shortcut must be a string')
         if profile.keybinding:
@@ -402,15 +390,8 @@ def validate_config(cfg: AppConfig) -> None:
                     f'Terminal profile "{name}": shortcut conflicts with {hotkey_owners[parsed]}'
                 )
             hotkey_owners[parsed] = f'terminal profile "{name}"'
-        cwd = (profile.cwd or "").strip()
-        if not cwd or profile.terminal_type == "wsl":
-            continue
-        resolved = Path(os.path.expandvars(os.path.expanduser(cwd)))
-        if not resolved.is_dir():
-            name = profile.name.strip() or "Untitled terminal"
-            raise ValueError(
-                f'Terminal profile "{name}": starting folder does not exist: {cwd}'
-            )
+        # No folder to validate: a profile has none, and the workspace root is
+        # checked when a session actually spawns.
     if not isinstance(cfg.snippets, list):
         raise ValueError("Snippets must be a list")
     snippet_names: set[str] = set()

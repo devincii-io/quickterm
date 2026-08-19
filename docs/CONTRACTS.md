@@ -23,8 +23,7 @@ class Profile:
     name: str
     cmd: str                    # executable, e.g. "powershell.exe" or "claude"
     args: list[str] = field(default_factory=list)
-    cwd: str | None = None       # fixed folder; pins the profile regardless of workspace
-    subpath: str | None = None   # folder RELATIVE to the workspace root; used when cwd is unset
+    # No folder field of any kind: the workspace root places every session.
     env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
     keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
     autostart: bool = False
@@ -80,11 +79,9 @@ def validate_environment(env: object) -> dict[str, str]
 Saving validates runtime-facing field types (including font family, update
 toggle, profile terminal type, startup command, autostart, and shortcut) so a
 malformed JSON config cannot reach launcher or spawn code and fail there.
-Every non-WSL profile's configured starting folder must be an existing local
-directory. WSL profiles accept Linux paths and are not checked against the
-Windows filesystem. `ssh`/`sftp` profiles require a non-empty
-`ssh_host`; the Settings UI keeps their `cwd` empty (a remote session has no
-local starting folder). Passphrases and passwords are never stored; plink and
+Profiles hold no folder, so there is none to validate here; the workspace root
+is checked when a session actually spawns. `ssh`/`sftp` profiles require a
+non-empty `ssh_host`. Passphrases and passwords are never stored; plink and
 psftp prompt interactively inside the terminal.
 
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
@@ -99,13 +96,12 @@ fixed and applies to every spawn path:
 
 1. an explicit `cwd` in the request (Explorer handoff, a split inheriting the
    source pane's directory), which always wins;
-2. the profile's own `cwd` when it has one. A pinned folder is an explicit
-   opt-out ("Always this folder" in Settings), so the workspace root does NOT
-   override it, otherwise the setting would be a lie;
-3. otherwise the workspace root (`Workspace.path`) joined with the profile's
-   `subpath`; a `subpath` that no longer exists degrades to the root, and a
-   root that no longer exists degrades to step 4, never to an error;
-4. `default_cwd()`.
+2. otherwise the workspace root (`Workspace.path`); a root that no longer
+   exists degrades to step 3, never to an error;
+3. `default_cwd()`.
+
+Profiles hold no folder, so there is no third source and no way for one to
+point somewhere the workspace does not.
 
 `default_cwd()` prefers the user's home directory, then the process cwd, never
 the install directory, which is where a frozen exe's `os.getcwd()` would
@@ -118,8 +114,8 @@ client can show where a terminal actually opened.
 created on demand, reused across runs, and its contents are never deleted by
 QuickTerm. Scratch terminals start there rather than in the user's home folder.
 
-Claude Code profiles need a project folder but no longer have to carry one: the
-workspace root supplies it. `_resolve_profile` raises only when nothing at all
+Claude Code profiles need a project folder and cannot carry one, so the
+workspace root is the only source. `_resolve_profile` raises when nothing
 resolves, which surfaces as a 400 on the spawn rather than a config-save error.
 
 ## quickterm/pty_session.py
@@ -231,8 +227,7 @@ def delete_workspace(name: str) -> None
 
 # folder helpers (also used by config validation and the spawn path)
 def normalize_root(value: object) -> str | None      # expands ~/env vars, absolutizes
-def validate_subpath(value: object) -> str | None    # relative only; rejects "..", drives
-def resolve_start_dir(root: str | None, subpath: str | None = None) -> str | None
+def resolve_start_dir(root: str | None) -> str | None # the root if it exists, else None
 def root_exists(root: str | None) -> bool
 ```
 

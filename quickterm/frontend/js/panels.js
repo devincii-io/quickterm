@@ -282,6 +282,14 @@ export class Panels {
     return field;
   }
 
+  // A standing explanation with no control of its own, for a setting that was
+  // removed rather than moved: the reader still needs to know where it went.
+  _note(text) {
+    const note = make("p", "settings-note");
+    note.textContent = text;
+    return note;
+  }
+
   _textInput(value = "", placeholder = "") {
     const input = make("input", "ui-input");
     input.value = value == null ? "" : value;

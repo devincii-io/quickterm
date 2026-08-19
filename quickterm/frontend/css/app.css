@@ -465,6 +465,7 @@ body.zoomed #sb-zoom { display: inline; }
 .settings-field { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .field-label { color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .field-hint { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.settings-note { margin: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--card); color: var(--muted); font-size: 10px; line-height: 1.45; }
 .folder-picker-control { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 .folder-picker-button { min-height: 40px; padding-inline: 11px; gap: 6px; display: inline-flex; align-items: center; justify-content: center; }
 .folder-picker-button.picker-failed { border-color: var(--danger); color: var(--danger); }

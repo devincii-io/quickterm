@@ -28,8 +28,6 @@ class FakeProfile:
     name: str
     cmd: str
     args: list = field(default_factory=list)
-    cwd: str | None = None
-    subpath: str | None = None
     env: dict = field(default_factory=dict)
     keybinding: str | None = None
     autostart: bool = False
@@ -208,13 +206,11 @@ def manager() -> FakeSessionManager:
 
 
 @pytest.fixture
-def cfg(tmp_path) -> FakeConfig:
-    profile_cwd = tmp_path / "dev"
-    profile_cwd.mkdir()
+def cfg() -> FakeConfig:
     return FakeConfig(
         profiles=[
             FakeProfile(name="powershell", cmd="powershell.exe", args=["-NoLogo"]),
-            FakeProfile(name="claude", cmd="claude", cwd=str(profile_cwd), env={"X": "1"}),
+            FakeProfile(name="claude", cmd="claude", env={"X": "1"}),
         ],
         snippets=[FakeSnippet(name="greet", text="echo hi\n")],
     )
@@ -275,7 +271,6 @@ def fake_workspace(monkeypatch):
     # Complete-interface fake: the folder helpers the server calls are the real
     # ones, so path handling is exercised rather than stubbed away.
     mod.normalize_root = real_workspace.normalize_root
-    mod.validate_subpath = real_workspace.validate_subpath
     mod.resolve_start_dir = real_workspace.resolve_start_dir
     mod.root_exists = real_workspace.root_exists
     monkeypatch.setitem(sys.modules, "quickterm.workspace", mod)
@@ -347,11 +342,14 @@ def test_spawn_with_explicit_cmd(client, manager):
     assert manager.last_spawn["args"] == ["/c", "echo hi"]
 
 
-def test_spawn_resolves_profile(client, manager, cfg):
-    r = client.post("/api/sessions", json={"profile": "claude"})
+def test_spawn_resolves_profile(client, manager, tmp_path):
+    project = tmp_path / "dev"
+    project.mkdir()
+    # The profile carries no folder, so the request supplies one.
+    r = client.post("/api/sessions", json={"profile": "claude", "cwd": str(project)})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "claude"
-    assert manager.last_spawn["cwd"] == cfg.profiles[1].cwd
+    assert manager.last_spawn["cwd"] == str(project)
     assert manager.last_spawn["env"] == {"X": "1"}
     assert r.json()["profile"] == "claude"
 
@@ -370,9 +368,8 @@ def test_spawn_profile_start_command(client, manager, cfg, tmp_path):
         cmd="pwsh.exe",
         terminal_type="powershell-core",
         start_command="uv run dev",
-        cwd=str(project_cwd),
     ))
-    r = client.post("/api/sessions", json={"profile": "project"})
+    r = client.post("/api/sessions", json={"profile": "project", "cwd": str(project_cwd)})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "pwsh.exe"
     assert manager.last_spawn["args"] == ["-NoLogo", "-NoExit", "-Command", "uv run dev"]
@@ -387,11 +384,14 @@ def test_spawn_profile_allows_explicit_recovery_command(client, manager, cfg, tm
         cmd="pwsh.exe",
         terminal_type="powershell-core",
         start_command="claude",
-        cwd=str(project_cwd),
     ))
     response = client.post(
         "/api/sessions",
-        json={"profile": "claude-shell", "start_command": "claude --continue"},
+        json={
+            "profile": "claude-shell",
+            "start_command": "claude --continue",
+            "cwd": str(project_cwd),
+        },
     )
     assert response.status_code == 200
     assert manager.last_spawn["args"] == [
@@ -409,23 +409,26 @@ def test_spawn_first_class_claude_profile_supports_continue_and_picker(
         cmd="claude.exe",
         terminal_type="claude-code",
         claude_mode="resume",
-        cwd=str(project_cwd),
     ))
 
-    response = client.post("/api/sessions", json={"profile": "project-agent"})
+    response = client.post(
+        "/api/sessions", json={"profile": "project-agent", "cwd": str(project_cwd)}
+    )
     assert response.status_code == 200
     assert manager.last_spawn["cmd"] == "claude.exe"
     assert manager.last_spawn["args"] == ["--resume"]
     assert manager.last_spawn["cwd"] == str(project_cwd)
 
     response = client.post(
-        "/api/sessions", json={"profile": "project-agent", "claude_mode": "continue"}
+        "/api/sessions",
+        json={"profile": "project-agent", "claude_mode": "continue", "cwd": str(project_cwd)},
     )
     assert response.status_code == 200
     assert manager.last_spawn["args"] == ["--continue"]
 
     response = client.post(
-        "/api/sessions", json={"profile": "project-agent", "claude_mode": "agents"}
+        "/api/sessions",
+        json={"profile": "project-agent", "claude_mode": "agents", "cwd": str(project_cwd)},
     )
     assert response.status_code == 200
     assert manager.last_spawn["args"] == ["agents", "--cwd", str(project_cwd)]
@@ -466,9 +469,8 @@ def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg
         terminal_type="wsl",
         wsl_distro="Ubuntu-24.04",
         start_command="source .venv/bin/activate",
-        cwd="~/dev/project",
     ))
-    r = client.post("/api/sessions", json={"profile": "ubuntu"})
+    r = client.post("/api/sessions", json={"profile": "ubuntu", "cwd": "~/dev/project"})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "wsl.exe"
     assert manager.last_spawn["args"] == [
@@ -496,7 +498,6 @@ def test_spawn_wsl_profile_request_folder_becomes_wsl_cd(client, manager, cfg):
         name="ubuntu-project",
         cmd="wsl.exe",
         terminal_type="wsl",
-        cwd="~/default",
     ))
     response = client.post(
         "/api/sessions",
@@ -1391,30 +1392,26 @@ def test_session_spawns_in_its_workspace_folder(client, manager, fake_workspace,
     assert manager.last_spawn["workspace"] == "dev"
 
 
-def test_profile_subpath_resolves_under_the_workspace_folder(
+def test_a_profile_opens_in_the_workspace_root(
     client, manager, fake_workspace, cfg, tmp_path
 ):
+    """A profile has no folder, so the workspace root is the whole answer."""
     root = tmp_path / "repo"
     (root / "backend").mkdir(parents=True)
     cfg.profiles.append(
-        FakeProfile(name="api", cmd="cmd.exe", subpath="backend", terminal_type="command-prompt")
+        FakeProfile(name="api", cmd="cmd.exe", terminal_type="command-prompt")
     )
     client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
     client.post("/api/sessions", json={"profile": "api", "workspace": "dev"})
-    assert manager.last_spawn["cwd"] == str(root / "backend")
-
-
-def test_profile_subpath_cannot_escape_the_workspace_folder(
-    client, manager, fake_workspace, cfg, tmp_path
-):
-    root = tmp_path / "repo"
-    root.mkdir()
-    cfg.profiles.append(
-        FakeProfile(name="bad", cmd="cmd.exe", subpath="../..", terminal_type="command-prompt")
-    )
-    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
-    client.post("/api/sessions", json={"profile": "bad", "workspace": "dev"})
     assert manager.last_spawn["cwd"] == str(root)
+
+    # The same profile in another workspace follows that one instead. This is
+    # the point of dropping profile folders: one profile, every project.
+    other = tmp_path / "other"
+    other.mkdir()
+    client.put("/api/workspaces/other", json={"layout": {"type": "pane"}, "path": str(other)})
+    client.post("/api/sessions", json={"profile": "api", "workspace": "other"})
+    assert manager.last_spawn["cwd"] == str(other)
 
 
 def test_explicit_cwd_beats_the_workspace_folder(client, manager, fake_workspace, tmp_path):
@@ -1430,33 +1427,28 @@ def test_explicit_cwd_beats_the_workspace_folder(client, manager, fake_workspace
     assert manager.last_spawn["cwd"] == str(elsewhere)
 
 
-def test_a_pinned_profile_keeps_its_folder_inside_a_workspace(
+def test_a_workspace_without_a_folder_leaves_the_spawn_unplaced(
     client, manager, fake_workspace, cfg, tmp_path
 ):
-    """"Always this folder" in Settings is an opt-out, not a suggestion."""
+    """Nothing else can place a terminal now that profiles carry no folder."""
     root = tmp_path / "repo"
     root.mkdir()
-    pinned = tmp_path / "pinned"
-    pinned.mkdir()
     cfg.profiles.append(
-        FakeProfile(name="pinned", cmd="cmd.exe", cwd=str(pinned), terminal_type="command-prompt")
+        FakeProfile(name="plainshell", cmd="cmd.exe", terminal_type="command-prompt")
     )
-    # No workspace folder at all.
     client.put("/api/workspaces/plain", json={"layout": {"type": "pane"}})
-    client.post("/api/sessions", json={"profile": "pinned", "workspace": "plain"})
-    assert manager.last_spawn["cwd"] == str(pinned)
+    client.post("/api/sessions", json={"profile": "plainshell", "workspace": "plain"})
+    assert manager.last_spawn["cwd"] is None
 
-    # And with one: the pin still wins, because the user asked for it.
+    # An explicit request directory still wins over the workspace root.
     client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
-    client.post("/api/sessions", json={"profile": "pinned", "workspace": "dev"})
-    assert manager.last_spawn["cwd"] == str(pinned)
-
-    # An explicit request directory still overrides everything.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
     client.post(
         "/api/sessions",
-        json={"profile": "pinned", "workspace": "dev", "cwd": str(root)},
+        json={"profile": "plainshell", "workspace": "dev", "cwd": str(elsewhere)},
     )
-    assert manager.last_spawn["cwd"] == str(root)
+    assert manager.last_spawn["cwd"] == str(elsewhere)
 
 
 def test_scratch_dir_is_exposed_to_the_ui(client):
@@ -1470,9 +1462,9 @@ def test_elevated_terminal_opens_in_the_workspace_folder(
     if os.name != "nt":
         pytest.skip("administrator terminals are Windows-only")
     root = tmp_path / "repo"
-    (root / "backend").mkdir(parents=True)
+    root.mkdir(parents=True)
     cfg.profiles.append(
-        FakeProfile(name="api", cmd="cmd.exe", subpath="backend", terminal_type="command-prompt")
+        FakeProfile(name="api", cmd="cmd.exe", terminal_type="command-prompt")
     )
     client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
 
@@ -1482,7 +1474,7 @@ def test_elevated_terminal_opens_in_the_workspace_folder(
     monkeypatch.setitem(sys.modules, "quickterm.elevation", elevation)
 
     assert client.post("/api/elevate", json={"profile": "api", "workspace": "dev"}).status_code == 200
-    assert launched[-1]["cwd"] == str(root / "backend")
+    assert launched[-1]["cwd"] == str(root)
 
     # A system shell carries no profile, so the workspace root is all it has.
     assert client.post(

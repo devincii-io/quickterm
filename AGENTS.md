@@ -100,12 +100,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   moment it exists (`_HandshakeBuffer`, bounded), an exited session still in the
   registry is served replay-only rather than refused, and the client reconnects
   after a 1013 overflow even if the session has since exited.
-- A workspace IS a folder. `Workspace.path` is the root every session it owns
-  starts in; profiles carry only an optional `subpath` relative to it. Spawn
-  order: explicit request `cwd` > a profile's own `cwd` (an explicit "Always
-  this folder" opt-out) > workspace root + `subpath` > `default_cwd()`. A
-  missing `subpath` degrades to the root and a missing root to the home folder
-  A folder that has been deleted must never fail the spawn. `PUT
+- A workspace IS a folder, and it is the ONLY folder. `Workspace.path` is the
+  root every session it owns starts in; profiles carry no folder at all, so one
+  profile is usable in every project. Spawn order: explicit request `cwd` >
+  workspace root > `default_cwd()`. A missing root degrades to the home folder,
+  and a folder that has been deleted must never fail the spawn. Profiles used to
+  carry `cwd` and `subpath`; `_known()` drops both from older configs on load. `PUT
   /api/workspaces/{name}` treats `path` as three-valued: **absent preserves**
   (every layout autosave takes that branch), `null` clears, a string sets.
 - Scratch is disposable, so it opens in a disposable folder:
@@ -115,8 +115,8 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   directory instead, so promoting a scratch you `cd`'d into your project names
   that project.
 - Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
-  (`new`, `continue`, `resume`, or `agents`) and a project folder that now
-  comes from the workspace unless the profile pins one. `_resolve_profile`
+  (`new`, `continue`, `resume`, or `agents`) and a project folder that always
+  comes from the workspace. `_resolve_profile`
   raises only when nothing resolves (a 400 on the spawn, not a config-save
   error). Recovery uses Claude's own CLI flags and must remain explicit when
   the old PTY is gone.
