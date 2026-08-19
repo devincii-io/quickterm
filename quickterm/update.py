@@ -157,9 +157,40 @@ def download_and_run() -> dict:
     # use", pointing at a window gone from the taskbar, or force-terminated the
     # process and took every terminal with it.
     _request_app_shutdown()
-    # Detached: the installer outlives us and closes QuickTerm to upgrade.
-    subprocess.Popen([str(path)], close_fds=True)
+    _launch_detached(path)
     return {"launched": True, "version": latest}
+
+
+def _launch_detached(path: Path) -> None:
+    """Start the installer so it outlives us and is not part of our tree.
+
+    A bare ``Popen`` leaves Setup a *child* of the process it is replacing. The
+    comment here used to claim it was detached and it was not. Two things go
+    wrong with a child: it dies with any process-tree cleanup aimed at
+    QuickTerm, and it shares our console and job object, so the moment the app
+    quits for the upgrade the installer can go with it.
+
+    ``DETACHED_PROCESS`` and ``CREATE_BREAKAWAY_FROM_JOB`` fix the console and
+    job membership but *not* the recorded parent, which is why the installer is
+    started through ``cmd /c start``: that intermediary exits immediately and
+    leaves Setup with no live ancestor, so a ``taskkill /T`` aimed at QuickTerm
+    can never reach it.
+    """
+    if os.name != "nt":
+        subprocess.Popen([str(path)], close_fds=True)  # noqa: S603
+        return
+    flags = 0
+    for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB"):
+        flags |= getattr(subprocess, name, 0)
+    # The empty "" is start's title argument; without it a quoted path is
+    # swallowed as the window title and nothing runs.
+    command = ["cmd.exe", "/c", "start", "", "/b", str(path)]
+    try:
+        subprocess.Popen(command, close_fds=True, creationflags=flags)  # noqa: S603
+    except OSError:
+        # A job object that forbids breakaway rejects the flag outright. A
+        # child installer still beats no installer.
+        subprocess.Popen([str(path)], close_fds=True)  # noqa: S603
 
 
 def _request_app_shutdown() -> None:
