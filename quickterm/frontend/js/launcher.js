@@ -104,11 +104,14 @@ function section(title, count) {
   return head;
 }
 
-function actionButton(iconName, label, onClick) {
+function actionButton(iconName, label, onClick, shortcut = null) {
   const button = make("button", "sidebar-action");
   button.type = "button";
-  button.title = label;
+  // The shortcut belongs in the tooltip too: the visible chip disappears with
+  // the labels once the sidebar is collapsed to icons.
+  button.title = shortcut ? `${label} (${shortcut})` : label;
   button.append(icon(iconName, 15), make("span", "sidebar-label", label));
+  if (shortcut) button.append(make("span", "sidebar-shortcut", shortcut));
   button.addEventListener("click", onClick);
   return button;
 }
@@ -304,8 +307,8 @@ export function initLauncher(el, options) {
   const footer = make("nav", "sidebar-footer");
   footer.setAttribute("aria-label", "Application");
   const navIcons = { dashboard: "dashboard", settings: "settings", help: "help", commands: "terminal" };
-  for (const [label, onClick] of options.chrome || []) {
-    const button = actionButton(navIcons[label] || "terminal", label, onClick);
+  for (const [label, onClick, shortcut] of options.chrome || []) {
+    const button = actionButton(navIcons[label] || "terminal", label, onClick, shortcut);
     button.classList.add("sidebar-nav-button");
     footer.append(button);
   }

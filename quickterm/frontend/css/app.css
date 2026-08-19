@@ -901,6 +901,12 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .sidebar-footer { flex: none; display: grid; gap: 1px; padding: 5px 6px 7px; border-top: 1px solid var(--line); }
 .sidebar-nav-button { min-height: 29px; }
 .sidebar-nav-button .sidebar-label { text-transform: lowercase; }
+/* Shortcut chip. Pushed to the trailing edge and dimmed: it teaches the key
+   once and then stays out of the way. It hides with the labels when the
+   sidebar collapses to icons, where the tooltip carries it instead. */
+.sidebar-shortcut { margin-left: auto; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 8.5px; line-height: 13px; letter-spacing: .04em; opacity: .75; }
+.sidebar-action:hover .sidebar-shortcut { border-color: var(--line-hover); opacity: 1; }
+body.sidebar-collapsed .sidebar-shortcut { display: none; }
 .sidebar-admin { min-height: 28px; display: flex; align-items: center; gap: 7px; padding: 5px 7px; color: var(--danger); font-size: 9px; }
 
 body.sidebar-collapsed #app { grid-template-columns: 42px minmax(0, 1fr); }

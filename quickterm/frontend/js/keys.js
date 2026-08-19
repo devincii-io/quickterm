@@ -56,8 +56,14 @@ export function initKeys(actions) {
       handler();
     };
 
-    // Alt+K toggles the palette even while it is already open.
+    // Alt+K toggles the palette even while it is already open. The panel keys
+    // sit here for the same reason: a shortcut that opens a panel but cannot
+    // close it again is not a toggle, and the user would have to reach for the
+    // mouse to undo their own keystroke.
     if (!e.shiftKey && key === "k") return done(actions.togglePalette);
+    if (!e.shiftKey && key === "g") return done(actions.toggleDashboard);
+    if (!e.shiftKey && key === "s") return done(actions.toggleSettings);
+    if (!e.shiftKey && key === "i") return done(actions.toggleHelp);
     if (actions.paletteOpen()) return; // palette/panel input owns the keyboard
 
     if (!e.shiftKey) {

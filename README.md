@@ -115,6 +115,7 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 | Key | Action |
 |---|---|
 | `Alt+K` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
+| `Alt+G` / `Alt+S` / `Alt+I` | Open or close the Dashboard / Settings / Help panel |
 | `Alt+N` | Open a new default terminal beside the focused pane |
 | `Alt+Shift+Left` / `Alt+Shift+Up` | Cycle previous / next profile used by new terminals |
 | `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |

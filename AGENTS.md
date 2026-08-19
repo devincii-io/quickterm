@@ -49,7 +49,8 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   decode for winpty is strict-UTF-8 with surrogateescape fallback, never
   `errors="replace"` (that mangles 8-bit input).
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
-  Alt+N new terminal, Alt+Z zoom, Alt+D detach, Alt+W confirmed kill, and
+  Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
+  detach, Alt+W confirmed kill, and
   Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
   (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; and
   Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass

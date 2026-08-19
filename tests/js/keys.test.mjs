@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-async function captureHandler() {
+async function captureHandler({ paletteOpen = false } = {}) {
   let handler = null;
   globalThis.window = {
     addEventListener(type, fn, capture) {
@@ -15,7 +15,10 @@ async function captureHandler() {
   const calls = [];
   initKeys({
     togglePalette: () => calls.push("togglePalette"),
-    paletteOpen: () => false,
+    paletteOpen: () => paletteOpen,
+    toggleDashboard: () => calls.push("toggleDashboard"),
+    toggleSettings: () => calls.push("toggleSettings"),
+    toggleHelp: () => calls.push("toggleHelp"),
     splitH: () => calls.push("splitH"),
     splitV: () => calls.push("splitV"),
     newTerminal: () => calls.push("newTerminal"),
@@ -96,4 +99,34 @@ test("the Alt layer claims only its documented combinations", async () => {
   }
 
   assert.deepEqual(calls, ["closePane", "killSession"]);
+});
+
+test("the panel keys open their panel and stay cold for the shell", async () => {
+  const { handler, calls } = await captureHandler();
+
+  for (const key of ["g", "s", "i"]) {
+    const event = keyEvent({ key, altKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, true, `Alt+${key} opens its panel`);
+  }
+  assert.deepEqual(calls, ["toggleDashboard", "toggleSettings", "toggleHelp"]);
+
+  // Claude Code binds Alt+M/T/O and readline binds Alt+B/F: a panel key must
+  // never be chosen from that set.
+  for (const key of ["m", "t", "o", "b", "f"]) {
+    const event = keyEvent({ key, altKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, false, `Alt+${key} must reach the shell`);
+  }
+});
+
+test("a panel key still closes its own panel", async () => {
+  // Everything else yields the keyboard once a panel owns it. A toggle that
+  // could only open would strand the user on the mouse to undo one keystroke.
+  const { handler, calls } = await captureHandler({ paletteOpen: true });
+
+  handler(keyEvent({ key: "s", altKey: true }));
+  handler(keyEvent({ key: "n", altKey: true })); // new terminal must stay blocked
+
+  assert.deepEqual(calls, ["toggleSettings"]);
 });

@@ -1481,6 +1481,9 @@ async function boot() {
     closePane: app.closePane,
     killSession: app.killFocusedSession,
     focusDir: (direction) => layout.focusDir(direction),
+    toggleDashboard: () => { closeQuickSettings(); palette.close(); panels.toggle("dashboard"); },
+    toggleSettings: () => { closeQuickSettings(); palette.close(); panels.toggle("settings"); },
+    toggleHelp: () => { closeQuickSettings(); palette.close(); panels.toggle("help"); },
     fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
     fontSmaller: () => setScopedFontSize(scopedFontSize() - 1),
     fontReset: resetScopedFontSize,
@@ -1520,9 +1523,9 @@ async function boot() {
       // sit here AND directly above as "Manage workspaces", pixel-identical
       // once the sidebar is collapsed.
       chrome: [
-        ["dashboard", () => panels.toggle("dashboard")],
-        ["settings", () => panels.toggle("settings")],
-        ["help", () => panels.toggle("help")],
+        ["dashboard", () => panels.toggle("dashboard"), "alt+g"],
+        ["settings", () => panels.toggle("settings"), "alt+s"],
+        ["help", () => panels.toggle("help"), "alt+i"],
       ],
     });
   }

@@ -16,6 +16,10 @@ Release history is also available on the [GitHub Releases page](https://github.c
 
 ### Small interface additions
 
+- Dashboard, Settings and Help have shortcuts: `Alt+G`, `Alt+S` and `Alt+I`.
+  Each one closes its own panel again, and the sidebar buttons now print the key
+  beside their label so it can be learned without hunting. The keys are cold by
+  design: readline, PSReadLine and Claude Code all leave G, S and I unbound.
 - `Alt+D` and `Alt+W` now mark the header control they stand for while their
   confirmation is open. The bar used to appear with nothing tying it to a
   button, which read as if it came from nowhere.
