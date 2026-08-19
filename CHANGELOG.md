@@ -4,6 +4,16 @@ Release history is also available on the [GitHub Releases page](https://github.c
 
 ## QuickTerm 3.2.1
 
+### A pane whose session the backend forgot can be closed again
+
+- A pane could get stuck with no way to remove it. Once the idle reaper drops
+  an exited terminal from the registry, the backend answers 404 for that id.
+  Kill treated the 404 as a failed kill and offered a **Retry** that could never
+  succeed; detach treated it as a failed retain and left the pane open with the
+  same result. Both now recognise a session that is already gone and close the
+  pane. A real failure, where the process survives, still keeps the pane visible
+  as before.
+
 ### Documentation and wording
 
 - Rewrote the README, agent guide, contracts and code comments to drop

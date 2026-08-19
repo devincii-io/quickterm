@@ -256,7 +256,7 @@ REST (JSON, under `/api`):
 | GET | /api/launches/next | Long-poll and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
-| DELETE | /api/sessions/{id} | kill tree → 204 |
+| DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id, 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |

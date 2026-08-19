@@ -4,8 +4,18 @@ import assert from "node:assert/strict";
 import {
   countPanes, displaySnippet, environmentError, formatBytes, inferTerminalType,
   layoutSessionIds, nativeFolderPickerAvailable, parseEnvLines, pickNativeFolder,
-  runnableSnippet,
+  runnableSnippet, sessionAlreadyGone,
 } from "../../quickterm/frontend/js/panel_shared.js";
+
+test("a forgotten session is told apart from a kill that failed", () => {
+  // 404: the backend no longer knows this session, so the pane must close.
+  assert.equal(sessionAlreadyGone({ status: 404, detail: "no such session" }), true);
+  // 500: the process may still be running, so the pane must stay visible.
+  assert.equal(sessionAlreadyGone({ status: 500, detail: "terminal process could not be stopped" }), false);
+  assert.equal(sessionAlreadyGone({ status: 409 }), false);
+  assert.equal(sessionAlreadyGone(new Error("network down")), false);
+  assert.equal(sessionAlreadyGone(undefined), false);
+});
 
 test("layout helpers count panes and collect bound sessions", () => {
   const layout = {

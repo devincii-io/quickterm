@@ -70,7 +70,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
 - Session termination is verified per process on both backends, and POSIX
-  `kill()` must not swallow EPERM. Bulk kills return successful and failed IDs
+  `kill()` must not swallow EPERM. "Remove only verified kills" guards against
+  hiding a terminal that is still running, so it applies to a 500. A 404 means
+  the registry has already dropped the id (the reaper does this to an exited
+  terminal) and there is nothing left to run, so kill and retain must both fall
+  through and close the pane. Treating that as a failure left panes that could
+  be neither killed nor detached. Bulk kills return successful and failed IDs
   separately; clients must remove only verified kills and leave failures
   visible. Destructive confirmation triggers must remain visible, their
   popovers must be clamped inside the viewport and follow a scrolling panel,

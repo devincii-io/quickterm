@@ -111,6 +111,15 @@ export function formatUptime(seconds) {
   return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
 }
 
+// The backend answers 404 once it has dropped a session from its registry,
+// which is what the idle reaper does to a terminal whose process already
+// exited. Kill and retain then have nothing left to act on, so the caller must
+// still close the pane. Treating that 404 as a failure stranded the pane with a
+// Retry that could never succeed and no other way to remove it.
+export function sessionAlreadyGone(error) {
+  return error?.status === 404;
+}
+
 export function layoutSessionIds(node, out = new Set()) {
   if (!node) return out;
   if (node.type === "split") {

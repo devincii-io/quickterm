@@ -6,7 +6,7 @@ import { initLauncher } from "./launcher.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
-import { displaySnippet } from "./panel_shared.js";
+import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
 
 document.title = "QuickTerm";
@@ -930,9 +930,13 @@ async function boot() {
     if (!info || !info.id) return false;
     try {
       await api.killSession(info.id);
-    } catch (_) {
-      showError("Could not stop that terminal. It is still running.");
-      return false;
+    } catch (error) {
+      // A session the backend has already forgotten is not a kill that failed.
+      // There is no process left to protect, so remove it like any verified stop.
+      if (!sessionAlreadyGone(error)) {
+        showError("Could not stop that terminal. It is still running.");
+        return false;
+      }
     }
     forgetSession(info.id);
     if (workspaceName) await removeWorkspaceOwnership(workspaceName, info.id);
@@ -977,13 +981,21 @@ async function boot() {
       if (!pane) return;
       const session = pane.session;
       if (session) {
+        let forgotten = false;
         try {
           await api.retainSession(session.id);
-        } catch (_) {
-          pane.flashNotice("[could not retain terminal, pane left open]");
-          return;
+        } catch (error) {
+          // Nothing to retain once the backend has dropped the session, and
+          // closing the view is then the whole job. Any other failure means the
+          // terminal may still be alive, so the pane stays visible.
+          if (!sessionAlreadyGone(error)) {
+            pane.flashNotice("[could not retain terminal, pane left open]");
+            return;
+          }
+          forgotten = true;
+          forgetSession(session.id);
         }
-        if (!currentWorkspace) {
+        if (!forgotten && !currentWorkspace) {
           const adopted = await ensureScratchWorkspace().catch(() => false);
           // Another window may already own Scratch. Retain still guarantees
           // this process lives; exclude it from this viewer's exit cleanup.
@@ -999,7 +1011,14 @@ async function boot() {
       if (pane && pane.session) {
         pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
           const sessionId = pane.session.id;
-          await api.killSession(sessionId);
+          try {
+            await api.killSession(sessionId);
+          } catch (error) {
+            // Rethrowing a real failure keeps it on the confirmation bar. A
+            // forgotten session must fall through and close, or the pane can
+            // never be removed at all.
+            if (!sessionAlreadyGone(error)) throw error;
+          }
           forgetSession(sessionId);
           layout.closePane(pane);
           scheduleWorkspaceSave();
