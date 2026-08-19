@@ -17,3 +17,7 @@ htmlcov/
 QuickTerm-v*.zip
 QuickTerm-v*-Setup.exe
 SHA256SUMS.txt
+# Local agent tool state
+.quickcode/
+# Windows device name: a redirect to NUL from a POSIX shell creates this file
+nul
