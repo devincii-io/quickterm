@@ -14,6 +14,15 @@ Release history is also available on the [GitHub Releases page](https://github.c
   pane. A real failure, where the process survives, still keeps the pane visible
   as before.
 
+### Small interface additions
+
+- `Alt+D` and `Alt+W` now mark the header control they stand for while their
+  confirmation is open. The bar used to appear with nothing tying it to a
+  button, which read as if it came from nowhere.
+- A Claude Code pane shows **working** or **idle** in its header. The signal is
+  the live output stream the pane already receives, so it costs no extra process
+  sampling and it stays honest while Claude thinks between tool calls.
+
 ### Documentation and wording
 
 - Rewrote the README, agent guide, contracts and code comments to drop

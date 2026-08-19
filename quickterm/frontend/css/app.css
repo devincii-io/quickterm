@@ -198,6 +198,10 @@ body.dragging .pane { pointer-events: none; }
 .pane-tab-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; opacity: .5; transition: opacity .14s ease; }
 .pane.focused .pane-tab-dot { opacity: 1; }
 .pane-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Claude activity badge. Muted while idle so a quiet pane stays quiet; the
+   accent only appears while output is actually arriving. */
+.pane-tab-activity { flex: none; padding: 0 5px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 8.5px; line-height: 13px; letter-spacing: .06em; }
+.pane-tab-activity.working { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .pane-tab-input { width: 160px; max-width: 60%; border: 1px solid var(--line-strong); border-radius: 4px; outline: 0; padding: 1px 6px; background: rgba(0, 0, 0, .35); color: var(--text); font-family: var(--mono); font-size: 9.5px; }
 .term-host { position: absolute; inset: 26px 3px 5px 9px; }
 /* xterm owns the scroll container. Keep its rail permanently visible instead
@@ -951,6 +955,18 @@ body.sidebar-collapsed .sidebar-sessions { min-height: 42px; }
 .pane-action.danger:hover {
   border-left-color: color-mix(in srgb, var(--danger) 50%, transparent);
   background: color-mix(in srgb, var(--danger) 14%, var(--surface-raised));
+  color: var(--danger);
+}
+/* Armed by Alt+D / Alt+W while the confirmation bar is open, so the keyboard
+   path points at the control it stands for. */
+.pane-action.armed {
+  border-left-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised));
+  color: var(--accent);
+}
+.pane-action.kill.armed {
+  border-left-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface-raised));
   color: var(--danger);
 }
 .pane.drop-target::after {

@@ -61,6 +61,9 @@ function makeFilePathProvider(term, activate) {
     },
   };
 }
+// Quiet for this long and a Claude pane reads as idle. Long enough that the
+// gaps inside one streamed answer do not flicker the badge.
+const ACTIVITY_IDLE_MS = 2500;
 const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
@@ -184,7 +187,7 @@ export class Pane {
     const el = document.createElement("div");
     el.className = "pane";
     el.innerHTML =
-      '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span></div>' +
+      '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span><span class="pane-tab-activity" hidden></span></div>' +
       '<div class="pane-actions" aria-label="Pane actions">' +
         '<button class="pane-action" type="button" data-action="split-h" title="Split right (Alt+Shift+Right)">|</button>' +
         '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">—</button>' +
@@ -208,6 +211,7 @@ export class Pane {
     this.tabEl = el.querySelector(".pane-tab");
     this.tabNameEl = el.querySelector(".pane-tab-name");
     this.tabDotEl = el.querySelector(".pane-tab-dot");
+    this.tabActivityEl = el.querySelector(".pane-tab-activity");
     this.tabEl.addEventListener("dblclick", (e) => { e.stopPropagation(); this._startRename(); });
     el.querySelector(".pane-actions").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-action]");
@@ -310,6 +314,41 @@ export class Pane {
     const name = this.displayName();
     this.tabNameEl.textContent = name;
     this.el.dataset.state = this.state;
+    this._renderActivity();
+  }
+
+  // Claude panes say whether Claude is still producing output. The signal is
+  // the live byte stream this pane already receives, never an OS process
+  // snapshot: the status poll runs with metrics off on purpose, and the app
+  // promises it does not sample processes continuously. Child-process presence
+  // would also read wrong here, because Claude thinking between tool calls has
+  // no child and is still working.
+  _renderActivity() {
+    const el = this.tabActivityEl;
+    if (!el) return;
+    if (this.terminalType !== "claude-code" || this.state !== "attached") {
+      el.hidden = true;
+      this._stopActivityTicker();
+      return;
+    }
+    const working = Date.now() - (this._lastOutputAt || 0) < ACTIVITY_IDLE_MS;
+    el.hidden = false;
+    el.textContent = working ? "working" : "idle";
+    el.classList.toggle("working", working);
+    el.title = working
+      ? "Claude produced output in the last few seconds"
+      : "No output from Claude recently";
+    this._startActivityTicker();
+  }
+
+  _startActivityTicker() {
+    if (this._activityTimer) return;
+    this._activityTimer = setInterval(() => this._renderActivity(), 1000);
+  }
+
+  _stopActivityTicker() {
+    clearInterval(this._activityTimer);
+    this._activityTimer = null;
   }
 
   _startRename() {
@@ -504,6 +543,12 @@ export class Pane {
   confirmAction(message, action, confirmLabel = "Kill") {
     this.cancelConfirmation();
     clearTimeout(this._noticeTimer);
+    // Alt+W arms this bar without the pointer ever touching the header, so mark
+    // the control the shortcut stands for. The user has already decided to
+    // kill; showing which button that was makes the confirmation legible
+    // instead of a bar appearing from nowhere.
+    this._armedAction = this.el.querySelector(`.pane-action[data-action="${confirmLabel === "Kill" ? "kill" : "detach"}"]`);
+    if (this._armedAction) this._armedAction.classList.add("armed");
     const text = document.createElement("span");
     text.className = "pane-confirm-copy";
     text.textContent = message;
@@ -555,6 +600,10 @@ export class Pane {
   }
 
   cancelConfirmation(refocus = false) {
+    if (this._armedAction) {
+      this._armedAction.classList.remove("armed");
+      this._armedAction = null;
+    }
     if (!this._confirmation) return;
     this.exitBar.removeEventListener("keydown", this._confirmation.keyHandler);
     this._confirmation = null;
@@ -702,6 +751,7 @@ export class Pane {
 
   dispose() {
     this._disposed = true;
+    this._stopActivityTicker();
     this.detach();
     clearTimeout(this._fitTimer);
     clearTimeout(this._closeArmTimer);
@@ -934,7 +984,12 @@ export class Pane {
         return;
       }
       this._queue.push(data);
-      if (this._phase === "live") this._pump();
+      // Live output is the activity signal for the header badge. Replayed
+      // scrollback is history, so it must not make a quiet pane look busy.
+      if (this._phase === "live") {
+        this._lastOutputAt = Date.now();
+        this._pump();
+      }
     }
   }
 
