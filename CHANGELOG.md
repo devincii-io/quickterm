@@ -2,6 +2,20 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.2.1
+
+### Documentation and wording
+
+- Rewrote the README, agent guide, contracts and code comments to drop
+  marketing wording and machine-sounding punctuation. No behaviour changed.
+- Corrected the README: the pane's `×` button detaches and keeps the terminal
+  running. The separate **Kill** button and `Alt+W` are the destructive path.
+  The old text described `×` as destructive, which was wrong and dangerous.
+- `docs/CONTRACTS.md` pointed readers at a `plan.md` that does not exist. It
+  now points at `AGENTS.md`.
+- Settings → About and a few status messages lost their promotional phrasing
+  and now say what the app does.
+
 ## QuickTerm 3.2.0
 
 ### Workspaces are folders
