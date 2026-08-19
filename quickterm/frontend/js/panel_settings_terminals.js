@@ -24,13 +24,13 @@ export function renderTerminalSettings(host, rerender) {
     host.append(heading);
     if (!cfg.profiles.length) {
       const empty = make("div", "profiles-empty");
-      empty.append(make("p", "", "No personal terminals yet. The launcher already offers every shell installed on this computer — add a profile when you want a preset folder, start command or global shortcut."));
+      empty.append(make("p", "", "No personal terminals yet. The launcher already offers every shell installed on this computer. Add a profile when you want a preset folder, start command or global shortcut."));
       host.append(empty);
     }
 
     const inventoryTypes = (this.terminalInventory.types || TERMINAL_TYPES).map((type) => ({
       value: type.id,
-      label: `${type.label}${type.available === false ? " — not found" : ""}`,
+      label: `${type.label}${type.available === false ? " (not found)" : ""}`,
     }));
     const distros = this.terminalInventory.wsl_distributions || [];
     for (const [index, profile] of cfg.profiles.entries()) {
@@ -68,7 +68,7 @@ export function renderTerminalSettings(host, rerender) {
         // accidentally be launched with Claude's `--continue` arguments.
         profile.cmd = known?.executable || "";
         // A remote profile has no local working directory, and the field that
-        // would show it is not rendered for ssh/sftp — so a leftover local cwd
+        // would show it is not rendered for ssh/sftp, so a leftover local cwd
         // stayed invisible while the backend kept validating it, and the
         // profile stopped launching once that folder was deleted.
         if (type.value === "ssh" || type.value === "sftp") { profile.cwd = null; profile.subpath = null; }
@@ -121,7 +121,7 @@ export function renderTerminalSettings(host, rerender) {
       } else {
         // Workspaces own the folder now. A profile either follows the
         // workspace it is opened in (optionally into a subfolder) or pins
-        // itself to one fixed directory — never both, so switching leaves
+        // itself to one fixed directory, never both, so switching leaves
         // nothing invisible behind.
         const pinned = Boolean(profile.cwd);
         const mode = this._select([

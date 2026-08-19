@@ -16,7 +16,7 @@
 // Everything on plain Alt that shells and TUIs actually bind passes through:
 // Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
 // switch), Alt+H (PSReadLine parameter help), Alt+0..9/Alt+- (readline digit
-// arguments), Alt+B/F/. word motions — none of these are claimed here.
+// arguments), Alt+B/F/. word motions. None of these are claimed here.
 // Selection-aware Ctrl+C and native Ctrl+V are handled in pane.js. With no
 // selection Ctrl+C still reaches the PTY as the terminal interrupt. The
 // Ctrl+Shift+C/V aliases remain available too.

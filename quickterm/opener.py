@@ -2,7 +2,7 @@
 
 Only two shapes are accepted: http(s) URLs and existing local paths. Anything
 else raises ValueError (the server maps it to 400). Executable-ish files are
-revealed in the file manager instead of run — a program printing a path to a
+revealed in the file manager instead of run: a program printing a path to a
 .exe must not be able to lure a click into executing it.
 """
 
@@ -51,7 +51,7 @@ def open_target(target: str) -> dict:
             # lpApplicationName NULL, so CreateProcess searches the current
             # directory before System32 (SafeProcessSearchMode is off by
             # default). QuickTerm never chdirs, and the Explorer "Open
-            # QuickTerm here" verb starts it in the folder the user clicked —
+            # QuickTerm here" verb starts it in the folder the user clicked,
             # which an elevated instance then inherits.
             explorer = os.path.join(
                 os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe"

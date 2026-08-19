@@ -149,8 +149,8 @@ async def test_kill_terminates_tree():
 async def test_kill_reports_verified_termination():
     """kill() must report VERIFIED termination, per CONTRACTS.md.
 
-    The POSIX backend used to `return True` unconditionally, swallowing EPERM
-    — a surviving process then disappeared from the UI while it kept running.
+    The POSIX backend used to `return True` unconditionally, swallowing EPERM.
+    A surviving process then disappeared from the UI while it kept running.
     """
     if os.name == "nt":
         return  # the Windows backend has its own verification tests

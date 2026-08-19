@@ -57,7 +57,7 @@ for _name, _expected in PUTTY_SHA256.items():
 if _putty_problems:
     raise RuntimeError(
         "PuTTY tools not ready for release build "
-        f"({'; '.join(_putty_problems)}) — run: python scripts/fetch_putty.py"
+        f"({'; '.join(_putty_problems)}). Run: python scripts/fetch_putty.py"
     )
 putty_binaries = [(str(VENDOR_DIR / name), "putty") for name in PUTTY_SHA256]
 

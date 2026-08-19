@@ -1,4 +1,4 @@
-# QuickTerm — agent guide
+# QuickTerm agent guide
 
 Local terminal workspace for Windows (ConPTY) with a POSIX fallback: FastAPI
 backend owns all PTYs, views attach over a binary WebSocket, frontend is plain
@@ -7,8 +7,8 @@ windows are just viewers.
 
 ## Commands
 
-Everything runs through uv. In agent shells the PATH may miss it — use the full
-path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test env
+Everything runs through uv. In agent shells the PATH may miss it, so use the
+full path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test env
 (it is pre-synced); `uv lock` is only legitimate after editing `pyproject.toml`.
 
 ```
@@ -23,21 +23,21 @@ python scripts/bench_throughput.py 20                             # output throu
 
 ## Architecture (hot path)
 
-`pty_session.py` (win32; `pty_posix.py` elsewhere) — one ConPTY, three daemon
-threads: reader (coalesces all immediately-available output into one callback,
-≤128 KB), watcher (waits on the real process handle; winpty EOF lags ~8 s),
-writer (queue-drained; PTY writes must NEVER run on the event loop — a full
-stdin pipe blocks). → `session_manager.py` — registry, scrollback ring as a
-deque of chunks (O(chunk) trim; do not go back to a flat bytearray), bounded
-per-subscriber fan-out queues (overflow triggers a clean replay/resync). →
-`server.py` — REST + WS attach (`replay_size` → scrollback frame →
-`replay_done` → live); the output pump coalesces queued chunks into one WS
-frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js` — one
+`pty_session.py` (win32; `pty_posix.py` elsewhere) runs one ConPTY and three
+daemon threads: reader (coalesces all immediately-available output into one
+callback, ≤128 KB), watcher (waits on the real process handle; winpty EOF lags
+~8 s), writer (queue-drained; PTY writes must NEVER run on the event loop,
+because a full stdin pipe blocks). → `session_manager.py`: registry, scrollback
+ring as a deque of chunks (O(chunk) trim; do not go back to a flat bytearray),
+bounded per-subscriber fan-out queues (overflow triggers a clean
+replay/resync). → `server.py`: REST + WS attach (`replay_size` → scrollback
+frame → `replay_done` → live); the output pump coalesces queued chunks into one
+WS frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js`: one
 xterm.js + one WS per pane; write-callback backpressure; input only forwarded
 in phase "live".
 
-`docs/CONTRACTS.md` is the binding surface spec — update it when changing any
-public surface. `app.py` boots backend + pywebview window; close-to-tray
+`docs/CONTRACTS.md` is the binding interface spec. Update it when changing any
+public interface. `app.py` boots backend + pywebview window; close-to-tray
 (`tray.py`, ctypes) only when a live session is touched, explicitly retained,
 or busy, else quit.
 `update.py` probes the pinned GitHub repo's latest release; install downloads
@@ -46,30 +46,31 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 ## Conventions
 
 - Backend I/O is bytes in / bytes out; no decoding on the hot path. Input
-  decode for winpty is strict-UTF-8 with surrogateescape fallback — never
-  `errors="replace"` (mangles 8-bit input).
+  decode for winpty is strict-UTF-8 with surrogateescape fallback, never
+  `errors="replace"` (that mangles 8-bit input).
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
   Alt+N new terminal, Alt+Z zoom, Alt+D detach, Alt+W confirmed kill, and
   Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
   (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; and
   Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
-  bindings) — never re-claim them. The zoom layer matches only keys that really
+  bindings). Never re-claim them. The zoom layer matches only keys that really
   produce `+`/`-`/`0`; never match a physical `code` alone (`Slash` and
   `BracketRight` are the QWERTZ `-`/`+` positions but Ctrl+/ and Ctrl+] on
   ANSI, where readline undo and the vim tag jump must reach the shell). Ctrl+C copies only with a selection and
   otherwise passes through as interrupt; Ctrl+Shift+C remains an alias. Ctrl+V
   and Ctrl+Shift+V use native paste: the handler must NOT preventDefault (WebView2
-  denies `clipboard.readText` silently — let the paste event reach xterm's textarea).
+  denies `clipboard.readText` silently, so let the paste event reach xterm's
+  textarea).
 - Server handlers import stubbable modules via
-  `importlib.import_module("quickterm.X")` — a plain `import` bypasses test
+  `importlib.import_module("quickterm.X")`. A plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.
 - Session activity tracking uses `touched` (set on user input via `onKey`, not
-  `onData` — xterm auto-replies to DA/DSR must not count). Explicit detach also
+  `onData`, because xterm auto-replies to DA/DSR must not count). Explicit detach also
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
-- Session termination is verified per process (both backends — POSIX `kill()`
-  must not swallow EPERM). Bulk kills return successful and failed IDs
+- Session termination is verified per process on both backends, and POSIX
+  `kill()` must not swallow EPERM. Bulk kills return successful and failed IDs
   separately; clients must remove only verified kills and leave failures
   visible. Destructive confirmation triggers must remain visible, their
   popovers must be clamped inside the viewport and follow a scrolling panel,
@@ -82,7 +83,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   pane detaches, never kills; kill is a separate labelled `.danger` control.
   Clicking the workspace row you are already on is a no-op, scratch included.
   There is no free-text workspace prompt. Errors go to the `#app-error` banner
-  or the pane notice — `#sb-save` is the saving/saved lifecycle only.
+  or the pane notice. `#sb-save` is the saving/saved lifecycle only.
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),
@@ -98,13 +99,13 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   order: explicit request `cwd` > a profile's own `cwd` (an explicit "Always
   this folder" opt-out) > workspace root + `subpath` > `default_cwd()`. A
   missing `subpath` degrades to the root and a missing root to the home folder
-  — a folder that has been deleted must never fail the spawn. `PUT
+  A folder that has been deleted must never fail the spawn. `PUT
   /api/workspaces/{name}` treats `path` as three-valued: **absent preserves**
   (every layout autosave takes that branch), `null` clears, a string sets.
 - Scratch is disposable, so it opens in a disposable folder:
   `config.scratch_root()` (`AppConfig.scratch_dir`, else
   `<temp>/QuickTerm/scratch`). Never suggest that folder when naming a
-  workspace — `suggestedWorkspaceFolder()` offers the focused pane's real
+  workspace: `suggestedWorkspaceFolder()` offers the focused pane's real
   directory instead, so promoting a scratch you `cd`'d into your project names
   that project.
 - Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
@@ -144,12 +145,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   from `%APPDATA%/quickterm/runtime.token`) shows `alive: true`. Smoke-test the
   importlib routes too: `POST /api/open {"target":"ftp://x"}` -> 400 (not 500)
   proves `opener` is bundled; `GET /api/update` answers (not 500) proves
-  `update` is. Use a FREE port — never the user's live 8642/8620.
-- Frontend is served with `Cache-Control: no-cache` — required, WebView2
+  `update` is. Use a FREE port, never the user's live 8642/8620.
+- Frontend is served with `Cache-Control: no-cache`. This is required: WebView2
   otherwise serves stale JS/CSS after updates.
-- Bundled PuTTY tools (`plink/pscp/psftp` — ssh/sftp terminal types + on-PATH
+- Bundled PuTTY tools (`plink/pscp/psftp`, the ssh/sftp terminal types, on-PATH
   in every session): `python scripts/fetch_putty.py` populates the gitignored
-  `vendor/putty/` and is a build prerequisite — `quickterm.spec` re-verifies
+  `vendor/putty/` and is a build prerequisite. `quickterm.spec` re-verifies
   the pinned SHA-256s and hard-fails without it (dest "putty", covered by the
   existing `upx=False`). Bumping PuTTY = update version + hashes in
   `scripts/fetch_putty.py` from the official `sha256sums` (plain `w64/` lines,
@@ -159,7 +160,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 ## Local release workflow
 
 Version lives in THREE places that must agree: `quickterm/__init__.py`,
-`pyproject.toml`, and (derived) `uv.lock` — bump the first two, then
+`pyproject.toml`, and (derived) `uv.lock`. Bump the first two, then run
 `uv lock`. The tag must be exactly `v<__version__>`. Build releases locally;
 artifact names must match exactly because README and installer links depend on
 them:
@@ -184,10 +185,10 @@ keep shipping `QuickTerm-v*-Setup.exe` and `SHA256SUMS.txt` under those names.
 
 Server binds 127.0.0.1. Three-layer guard in `server.py`: Host allowlist
 (DNS rebinding), Origin allowlist (cross-origin/WS), and a per-install token
-(`auth.py`) — delivered via URL fragment `#t=`, sent as `X-QuickTerm-Token` on
+(`auth.py`), delivered via URL fragment `#t=`, sent as `X-QuickTerm-Token` on
 /api and as WS subprotocol `qtauth.<token>`. Exempt: `/api/health`,
 `GET /api/assets/*`, static files. The Host/Origin guard alone does NOT stop
-native local programs — the token does. Keep new /api routes token-gated by
+native local programs. The token does. Keep new /api routes token-gated by
 default. `update.py` only fetches https URLs from the pinned repo's release
 payload and hash-verifies installers.
 

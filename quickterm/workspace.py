@@ -48,7 +48,7 @@ def normalize_root(value: object) -> str | None:
     if any(ord(char) < 32 for char in text):
         raise ValueError("workspace folder path contains control characters")
     expanded = os.path.expandvars(os.path.expanduser(text))
-    # A relative root would resolve against the server process cwd — which for
+    # A relative root would resolve against the server process cwd, which for
     # a frozen build is the install directory. Anchor it once, at the edge.
     return os.path.abspath(expanded)
 

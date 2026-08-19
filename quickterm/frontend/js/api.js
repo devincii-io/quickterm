@@ -1,4 +1,4 @@
-// Thin fetch wrappers over the REST surface in docs/CONTRACTS.md.
+// Thin fetch wrappers over the REST routes in docs/CONTRACTS.md.
 
 // Loopback auth token, handed to the window through its launch URL fragment
 // (see quickterm/auth.py). Every /api call carries it; WS connections pass it

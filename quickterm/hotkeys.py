@@ -185,7 +185,7 @@ class HotkeyManager:
             if ok:
                 self._callbacks[item.hotkey_id] = item.callback
             else:
-                log.warning("RegisterHotKey failed for %r (err=%d) — already taken?",
+                log.warning("RegisterHotKey failed for %r (err=%d); already taken?",
                             item.binding, ctypes.get_last_error() or ctypes.windll.kernel32.GetLastError())
             item.ok = ok
             item.done.set()

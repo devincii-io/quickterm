@@ -1,6 +1,6 @@
 // Pane output-queue draining. The pump stops at PENDING_LIMIT and only resumes
 // from an xterm write callback, which used to re-arm solely while the phase was
-// "live" — so an exit arriving before xterm finished parsing stranded every
+// "live", so an exit arriving before xterm finished parsing stranded every
 // queued byte (and retained it for the pane's lifetime).
 //
 // These call the queue methods against a minimal stand-in rather than a real

@@ -1,6 +1,6 @@
 """Download the pinned PuTTY console tools into vendor/putty/.
 
-Build/dev-time only — QuickTerm never downloads these at runtime. The version
+Build and dev time only; QuickTerm never downloads these at runtime. The version
 and per-file SHA-256 hashes are pinned here; bumping PuTTY means updating this
 manifest from https://the.earth.li/~sgtatham/putty/<version>/sha256sums (the
 plain `w64/<name>` lines, not the "installer version" ones) and re-running the
@@ -54,7 +54,7 @@ def main() -> int:
         blob = _download(name)
         if not verify_sha256(blob, expected):
             target.unlink(missing_ok=True)
-            print(f"{name}: SHA-256 mismatch — refusing to keep the file", file=sys.stderr)
+            print(f"{name}: SHA-256 mismatch, refusing to keep the file", file=sys.stderr)
             return 1
         target.write_bytes(blob)
         print(f"{name}: verified and written to {target}")

@@ -193,7 +193,7 @@ else:
         """Read Linux /proc counters; return unavailable on other POSIX systems.
 
         With ``roots``, only the processes in those trees are returned (the
-        parse still touches every /proc entry — that read is the cheap part).
+        parse still touches every /proc entry; that read is the cheap part).
         """
         try:
             entries = os.listdir("/proc")

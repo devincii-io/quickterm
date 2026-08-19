@@ -103,7 +103,7 @@ class AppConfig:
 def default_cwd() -> str:
     """Starting folder for terminals that don't specify one.
 
-    A frozen exe's process cwd is the install directory — a poor place to drop
+    A frozen exe's process cwd is the install directory, a poor place to drop
     the user. Prefer the user's home directory, then fall back to the process
     cwd. WSL profiles separately request their Linux home via ``wsl --cd ~``.
     Never let a stat error leak out of a spawn path.
@@ -124,7 +124,7 @@ def scratch_root(configured: str = "") -> str:
     """Root folder for the disposable scratch workspace.
 
     Scratch is throwaway by design, so its terminals start in a throwaway
-    folder rather than the user's home — nothing typed there lands somewhere
+    folder rather than the user's home, so nothing typed there lands somewhere
     that matters by accident. The directory is created on demand and reused
     across runs; QuickTerm never deletes its contents.
     """

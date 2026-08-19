@@ -43,7 +43,7 @@ def pids_with_children() -> set[int]:
                 stat = f.read()
         except OSError:
             continue  # process vanished mid-scan
-        # pid (comm) state ppid ... — comm may contain spaces, split after ')'
+        # pid (comm) state ppid ...; comm may contain spaces, so split after ')'
         tail = stat[stat.rfind(b")") + 2 :].split()
         if len(tail) >= 2:
             try:
@@ -145,8 +145,8 @@ class PtySession:
 
     def resize(self, cols: int, rows: int) -> None:
         # Read once: _read_loop can close and clear the descriptor concurrently,
-        # and the number is recyclable the moment it is closed — resizing a
-        # stale fd would resize whatever inherited it.
+        # and the number is recyclable the moment it is closed:
+        # resizing a stale fd would resize whatever inherited it.
         try:
             with self._fd_lock:
                 if self._fd < 0:
@@ -180,8 +180,8 @@ class PtySession:
             except OSError:
                 pass  # EPERM and friends: verified below
         self._stop_writer()
-        # CONTRACTS.md requires kill() to report VERIFIED termination — clients
-        # remove only what the backend confirms stopped. Returning True
+        # CONTRACTS.md requires kill() to report VERIFIED termination:
+        # clients remove only what the backend confirms stopped. Returning True
         # unconditionally swallowed EPERM and made a surviving process
         # disappear from the UI while it kept running. The reader thread does
         # the exit bookkeeping; wait briefly for it, then probe the process.

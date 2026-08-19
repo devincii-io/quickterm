@@ -7,12 +7,12 @@ Release history is also available on the [GitHub Releases page](https://github.c
 ### Workspaces are folders
 
 - A workspace now has a **folder**, and every terminal it owns starts there.
-  Switching workspace switches project. Set or change it from the Dashboard —
+  Switching workspace switches project. Set or change it from the Dashboard:
   each workspace row shows its folder and has a **Folder** button with a native
   picker, and naming a new workspace asks for the folder in the same form.
 - Terminal profiles no longer carry a project path. A profile either **follows
   the workspace folder** (optionally into a **subfolder** such as `backend`) or
-  pins itself to one fixed directory with **Always this folder** — never both,
+  pins itself to one fixed directory with **Always this folder**, never both,
   so switching one off leaves nothing invisible behind. Existing profiles with
   a folder keep it and are shown as pinned; nothing needs migrating.
 - Claude Code profiles no longer require their own project folder. One Claude
@@ -38,7 +38,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
   back, rows stop stretching to the full width of a wide monitor, and a dialog
   reads as a dialog rather than a second application.
 - A profile pinned to a fixed folder is no longer overridden by the workspace
-  root — the Settings choice is honoured exactly as written.
+  root. The Settings choice is honoured exactly as written.
 - Saving a workspace layout no longer fsyncs on the event loop. The layout
   autosaves on every pane change, so that write briefly stalled every terminal's
   output pump.
@@ -58,7 +58,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
   confirmation now opens with **Cancel** focused so a reflexive Enter cannot
   complete it.
 - Clicking the workspace row you are already on is a no-op for every workspace,
-  scratch included. Previously the row drawn as “current” discarded every live
+  scratch included. Previously the row drawn as "current" discarded every live
   scratch terminal without asking; replacing scratch is now the explicit,
   confirmed **new scratch** action.
 - Removed the palette's free-text workspace prompts, where a typo silently tore
@@ -66,7 +66,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
   rows, and saving is handled by the Dashboard, which validates the name.
 - The in-app updater now stands the window down before starting Setup. It used
   to launch the installer while close-to-tray was actively refusing to close,
-  leaving Setup stalled on a window missing from the taskbar — or
+  leaving Setup stalled on a window missing from the taskbar, or
   force-terminating the app and every terminal in it.
 
 ### Nothing fails silently
@@ -93,7 +93,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
   mode instead of being refused, so its final output stays reachable.
 - A fresh attachment is drained from the moment it exists. A busy session could
   previously overflow its queue during the replay handshake and be disconnected
-  the instant it went live, looping on “output busy · resynchronizing” forever.
+  the instant it went live, looping on "output busy · resynchronizing" forever.
 - Output still queued in the browser when a session exits is flushed to the
   terminal instead of being dropped mid-stream and then retained.
 
@@ -102,7 +102,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
 - Saving Settings no longer writes the runtime port into `config.json`. An
   Administrator window or any `--port` launch used to overwrite the configured
   port with an ephemeral one for every later launch.
-- `Ctrl+]` and `Ctrl+/` reach the shell again on US/UK layouts — the vim tag
+- `Ctrl+]` and `Ctrl+/` reach the shell again on US/UK layouts. The vim tag
   jump and the readline/PSReadLine undo were being swallowed as font zoom.
 - Moved the idle reaper, bulk session cleanup and the UAC handshake off the
   event loop; a reaper pass that killed a live shell froze every pane for
@@ -309,7 +309,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
 
 - **New terminal types: SSH and SFTP.** Create a profile in Settings →
   Terminals with a host, optional port, username and PuTTY `.ppk` private
-  key. Sessions run through the bundled PuTTY `plink`/`psftp` — no separate
+  key. Sessions run through the bundled PuTTY `plink`/`psftp`, with no separate
   install needed. Passphrases and passwords are never stored; you are
   prompted inside the terminal.
 - **`pscp`, `plink` and `psftp` work in every terminal.** The bundled tools
@@ -433,6 +433,6 @@ Highlights:
 - Hardened long-running sessions: touched or busy terminals are never idle-reaped, slow viewers resync instead of losing terminal control bytes, reconnect replay has no output race, resize geometry stays current, and stale workspace session references are pruned.
 - Improved responsiveness through bounded WebSocket queues, capped frames, disabled terminal compression, byte-accurate PTY batching, frontend write backpressure, and duplicate-spawn protection.
 - Made destructive session/workspace actions confirm intent, paused dashboard refresh while editing, fixed default-profile launching and the zero idle-timeout setting, and made JSON saves atomic.
-- Removed MCP completely: bridge executable, server module, REST surfaces, discovery environment variables, configuration, UI, documentation, tests, and packaging hooks are gone.
+- Removed MCP completely: bridge executable, server module, REST routes, discovery environment variables, configuration, UI, documentation, tests, and packaging hooks are gone.
 
 This is a breaking major release for anyone who used `quickterm-mcp` or the removed terminal-control REST endpoints.

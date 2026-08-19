@@ -226,7 +226,7 @@ export class Palette {
       }
     }
     // Snippets type straight into the focused terminal, so the row has to show
-    // both what is sent and where it lands — two similarly named snippets are
+    // both what is sent and where it lands: two similarly named snippets are
     // otherwise indistinguishable in the list.
     const target = a.focusedPaneName?.();
     for (const s of a.snippets) {
@@ -255,7 +255,7 @@ export class Palette {
     this.foreignMode = true;
     this.prompt = null;
     this.input.value = "";
-    this.input.placeholder = "Other workspaces — choosing one moves the session here";
+    this.input.placeholder = "Other workspaces; choosing one moves the session here";
     this.items = [
       { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
       ...this.foreignSessions.map(({ info, workspace }) => ({

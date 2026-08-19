@@ -11,7 +11,7 @@ import { renderAboutSettings, renderVoiceSettings, renderAdvancedSettings } from
 import { renderHelp } from "./panel_help.js";
 
 // The Advanced tab hands back arbitrary JSON. "null", "42" and "[]" all parse
-// happily and then throw on the first property access, past the parse guard —
+// happily and then throw on the first property access, past the parse guard,
 // so the shape is checked here, not later.
 function parseSettingsJson(text) {
   let value;
@@ -65,7 +65,7 @@ export class Panels {
         event.stopPropagation();
         // Escape cancels the destructive confirmation first. This listener runs
         // in the capture phase, so the box's own Escape handler never sees the
-        // event — without this, "are you sure?" closed the whole panel.
+        // event. Without this, "are you sure?" closed the whole panel.
         if (this._inlineConfirmation) {
           this._clearInlineConfirmation();
           return;
@@ -466,7 +466,7 @@ export class Panels {
       try {
         await api.putConfig(this.settingsDraft);
         await this.app.onConfigSaved();
-        this._themePreviewDirty = false; // committed — nothing to revert on close
+        this._themePreviewDirty = false; // committed, so nothing to revert on close
         message.textContent = "Saved. New terminals will use these settings.";
       } catch (error) {
         message.textContent = error.detail || `Could not save (${error.status || "connection error"}).`;

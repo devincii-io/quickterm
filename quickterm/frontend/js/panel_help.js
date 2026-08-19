@@ -27,12 +27,12 @@ export function renderHelp() {
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
       ["Your keys stay yours", "Ctrl+C copies only when text is selected; otherwise it interrupts the terminal. Plain Alt+V (Claude Code image paste), Alt+P (model switch), Ctrl+P, the Alt+B/F word motions and other shell keys pass through untouched."],
-      ["Profiles", "Reusable terminal types, start commands and shortcuts. A profile follows the folder of whatever workspace you open it in — optionally into a subfolder — unless you pin it to one fixed folder."],
+      ["Profiles", "Reusable terminal types, start commands and shortcuts. A profile follows the folder of whatever workspace you open it in, optionally into a subfolder, unless you pin it to one fixed folder."],
       ["Split folders", "Splits use OSC 7 or OSC 9;9 shell directory signals, falling back to the pane launch folder. Open and Alt+N start in the workspace folder."],
       ["Claude agent view", "Normal Claude splits stay in the profile project and never surprise-open the agent manager. Use the explicit Split Claude agent view command in Alt+K."],
       ["Workspaces", "A workspace is a folder plus a saved split layout. Every terminal you open in it starts in that folder, so switching workspace switches project. Set or change the folder from the Dashboard."],
       ["Sessions live in workspaces", "Detached sessions stay with their workspace and do not expire. The palette only shows the current workspace; moving a session from another workspace requires the explicit menu."],
-      ["Scratch is temporary", "Scratch opens in a throwaway folder under your system temp directory, keeps its detached sessions for this run, and is deleted when QuickTerm quits. Name it in the Dashboard to keep it — you choose the real folder then."],
+      ["Scratch is temporary", "Scratch opens in a throwaway folder under your system temp directory, keeps its detached sessions for this run, and is deleted when QuickTerm quits. Name it in the Dashboard to keep it; you choose the real folder then."],
       ["Snippets", "Small reusable commands available in the palette."],
     ]) {
       const item = make("div", "concept-row");

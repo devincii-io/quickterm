@@ -121,7 +121,7 @@ function workspaceButton(name, currentWorkspace, onOpen) {
   const button = make("button", `sidebar-row workspace-row${active ? " active" : ""}`);
   button.type = "button";
   // Clicking the row you are already on is a no-op for every workspace,
-  // scratch included — replacing scratch is the separate "New scratch" action.
+  // scratch included. Replacing scratch is the separate "New scratch" action.
   button.title = active
     ? `${scratch ? "Scratch" : name} is already open`
     : scratch ? "Open the disposable scratch workspace" : `Open workspace ${name}`;

@@ -1,8 +1,8 @@
-# QuickTerm — Module & Protocol Contracts
+# QuickTerm module and protocol contracts
 
 Binding interface contract for all components. If you need to deviate, keep the
-public surface below intact and extend, don't rename. Read plan.md first for
-goals, quirks, and design tokens.
+public interface below intact and extend it, don't rename. Read `AGENTS.md`
+first for the architecture, conventions, and packaging rules.
 
 ## Paths & config
 
@@ -84,7 +84,7 @@ Every non-WSL profile's configured starting folder must be an existing local
 directory. WSL profiles accept Linux paths and are not checked against the
 Windows filesystem. `ssh`/`sftp` profiles require a non-empty
 `ssh_host`; the Settings UI keeps their `cwd` empty (a remote session has no
-local starting folder). Passphrases and passwords are never stored — plink and
+local starting folder). Passphrases and passwords are never stored; plink and
 psftp prompt interactively inside the terminal.
 
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
@@ -98,16 +98,16 @@ A workspace IS a folder. The resolution order for a new session's directory is
 fixed and applies to every spawn path:
 
 1. an explicit `cwd` in the request (Explorer handoff, a split inheriting the
-   source pane's directory) — always wins;
+   source pane's directory), which always wins;
 2. the profile's own `cwd` when it has one. A pinned folder is an explicit
    opt-out ("Always this folder" in Settings), so the workspace root does NOT
-   override it — otherwise the setting would be a lie;
+   override it, otherwise the setting would be a lie;
 3. otherwise the workspace root (`Workspace.path`) joined with the profile's
    `subpath`; a `subpath` that no longer exists degrades to the root, and a
-   root that no longer exists degrades to step 4 — never to an error;
+   root that no longer exists degrades to step 4, never to an error;
 4. `default_cwd()`.
 
-`default_cwd()` prefers the user's home directory, then the process cwd — never
+`default_cwd()` prefers the user's home directory, then the process cwd, never
 the install directory, which is where a frozen exe's `os.getcwd()` would
 otherwise land. `SessionManager.spawn` applies it and records the result on
 `SessionInfo.cwd`, so every PTY backend receives a concrete folder and every
@@ -125,7 +125,7 @@ resolves, which surfaces as a 400 on the spawn rather than a config-save error.
 ## quickterm/pty_session.py
 
 One ConPTY. Reader thread pushes bytes into the owner's callback via
-`loop.call_soon_threadsafe` — never blocks the event loop. The reader coalesces
+`loop.call_soon_threadsafe`, which never blocks the event loop. The reader coalesces
 all immediately-available output into one callback (bounded). `write()` only
 enqueues; a dedicated writer thread performs the (possibly blocking) PTY write,
 so a full stdin pipe never stalls the loop. Set `QUICKTERM_DEBUG_IO=1` to log
@@ -203,7 +203,7 @@ class Attachment:
 
 ## quickterm/workspace.py
 
-Layout tree (JSON-serializable, shared with the frontend — SAME schema):
+Layout tree (JSON-serializable, shared with the frontend, SAME schema):
 
 ```json
 {"type": "split", "dir": "h", "ratio": 0.5, "children": [node, node]}
@@ -263,26 +263,26 @@ REST (JSON, under `/api`):
 | GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool` |
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path` is three-valued: **absent preserves** the stored folder (every layout autosave relies on this), `null` clears it, a string sets it (normalized; existence is NOT required so a temporarily missing folder cannot break autosave). 400 on a non-string/oversized/control-character path |
 | DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204 |
-| GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool, hotkey_error: str\|null}` — `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. |
+| GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool, hotkey_error: str\|null}`. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. |
 | PUT | /api/config | complete `AppConfig` → 204. `port`, `host` and `summon_hotkey` need a restart and are not applied live; a submitted value identical to the running one is treated as unedited and the persisted value is kept, so a stale page can never write an ephemeral port to disk. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
-| GET | /api/file?path=... | → `{path, size, truncated, text}` — read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
-| GET | /api/update | → `{current, latest, update_available, url, notes, installable}` — probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
+| GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
+| GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
-| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}` — terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
+| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
 
 JSON bodies for session creation, elevation, and full-config updates are capped
 at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
 immutable asset responses retain their explicit long-lived cache policy.
 
-WebSocket `/ws/session/{id}` — attach protocol, in order. Unknown IDs are
+WebSocket `/ws/session/{id}`, the attach protocol, in order. Unknown IDs are
 rejected with close code `4404`. An **exited** session that is still in the
-registry is served in replay-only mode — steps 1-3 below, then
-`{"type":"exit","code":N}` and close — and accepts no input. (It used to be
+registry is served in replay-only mode (steps 1-3 below, then
+`{"type":"exit","code":N}` and close) and accepts no input. (It used to be
 refused with `4410`, which made overflow permanently lossy: the client is told
 to reconnect and replay the ring, and if the PTY died around the overflow that
 replay could never happen, so the session's final output was unreachable while
@@ -309,7 +309,7 @@ Client is responsible for replay-then-resize: set xterm to replay size, write
 scrollback, THEN resize to real size and send resize message.
 
 Server binds 127.0.0.1 by default. Host and Origin allowlists protect the local
-HTTP and WebSocket surface against DNS rebinding and cross-origin browser use.
+HTTP and WebSocket routes against DNS rebinding and cross-origin browser use.
 
 ## quickterm/app.py
 
@@ -333,8 +333,8 @@ class _DesktopApi:
 - Clean shutdown: manager.shutdown() on exit.
 - Close-to-tray (win32, non-elevated): closing the primary window hides to the
   system tray (quickterm/tray.py, ctypes Shell_NotifyIcon) iff any live session
-  has `touched=True`, `retained=True`, or its shell has a child process —
-  otherwise the app quits.
+  has `touched=True`, `retained=True`, or its shell has a child process.
+  Otherwise the app quits.
   Tray menu: Open / Quit. The summon hotkey also restores a tray-hidden window.
 
 ## quickterm/hotkeys.py
@@ -363,8 +363,8 @@ Settings tab is hidden, because the hotkey had no capture overlay/feedback and
 read as broken. The modules below remain and keep this contract for when a
 real overlay exists.
 
-`capture.py`: `Recorder` — start()/stop() -> numpy float32 mono 16 kHz via
-sounddevice. `transcribe.py`: `Transcriber(model_size)` — lazy
+`capture.py`: `Recorder`, start()/stop() -> numpy float32 mono 16 kHz via
+sounddevice. `transcribe.py`: `Transcriber(model_size)`, with lazy
 `WhisperModel` load on first use, `transcribe(audio) -> str`, language
 auto-detect (de/en), VAD filter on.
 
@@ -434,7 +434,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   not disclose an arbitrary host directory path.
 - Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v,
   zoom, detach, kill, open file viewer) / snippets / recent sessions. Workspaces
-  are offered ONLY as enumerated `load workspace: <name>` rows — there is no
+  are offered ONLY as enumerated `load workspace: <name>` rows. There is no
   free-text workspace prompt, because a typo used to tear the whole layout down
   silently; saving is owned by the Dashboard, which validates the name and shows
   the error. Snippet rows carry the command text and the destination pane, and a
@@ -477,9 +477,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   never be adjacent unlabelled glyphs.
 - Sidebar workspace rows are idempotent: clicking the row you are already on is
   a no-op for every workspace, **scratch included**. Replacing the live scratch
-  layout is the separate, confirmed "new scratch" action — no click on a row
+  layout is the separate, confirmed "new scratch" action. No click on a row
   drawn as "current" may kill a running terminal.
-- One visible failure surface: every gesture-triggered error goes to the
+- One visible failure path: every gesture-triggered error goes to the
   dismissible `#app-error` banner (drawn above `.panel-overlay`) or to the
   focused pane's notice. `#sb-save` is reserved for the saving/saved lifecycle;
   it collapses when empty and sits under the panel overlay, so it must never
@@ -525,10 +525,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   and modern TUIs don't drift the cursor; falls back to xterm's built-in v6.
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
-- File viewer: `viewer.html?path=...` — separate minimal page, fetches
+- File viewer: `viewer.html?path=...`, a separate minimal page. It fetches
   `/api/file`, renders read-only monospace text, same design tokens. Opened
   via palette action ("view file: <path>") with `window.open(..., "_blank",
-  "popup,width=900,height=700")`. Hidden by default — no button in main chrome.
+  "popup,width=900,height=700")`. Hidden by default, with no button in the main
+  chrome.
 - Design tokens: compact, flat workbench chrome derives restrained semantic
   surfaces and focus colors from the selected palette; terminal ANSI colors
   remain separate. Reduced-motion and forced-colors modes are supported.

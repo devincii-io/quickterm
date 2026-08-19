@@ -4,7 +4,7 @@ The binaries are pinned and hash-verified at fetch/build time (see
 scripts/fetch_putty.py and quickterm.spec), never downloaded at runtime.
 Frozen builds carry them in <_internal>/putty; dev runs use the repo-root
 vendor/putty/ populated by the fetch script. Everything degrades to None when
-the tools are absent (e.g. a pip install) — callers surface "not found".
+the tools are absent (e.g. a pip install), and callers report "not found".
 """
 
 from __future__ import annotations

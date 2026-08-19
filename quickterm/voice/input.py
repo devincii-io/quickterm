@@ -48,7 +48,7 @@ class VoiceInput:
                 log.info("voice recording started")
         else:
             self._recording = False
-            # transcription is CPU-heavy — never on the event loop
+            # transcription is CPU-heavy, never on the event loop
             threading.Thread(target=self._finish, name="voice-transcribe",
                              daemon=True).start()
 

@@ -191,8 +191,8 @@ export class Pane {
         '<button class="pane-action" type="button" data-action="zoom" title="Zoom pane (Alt+Z)">□</button>' +
         // "×" means "close this view" everywhere else, so it detaches: the
         // terminal keeps running. Killing is a separate, labelled danger
-        // control — never the glyph a user reaches for to tidy up a pane.
-        '<button class="pane-action detach" type="button" data-action="detach" title="Close view — the terminal keeps running (Alt+D)">×</button>' +
+        // control, never the glyph a user reaches for to tidy up a pane.
+        '<button class="pane-action detach" type="button" data-action="detach" title="Close view; the terminal keeps running (Alt+D)">×</button>' +
         '<span class="pane-action-sep" aria-hidden="true"></span>' +
         '<button class="pane-action kill danger" type="button" data-action="kill" title="Kill the terminal and everything running in it (Alt+W)">Kill</button>' +
       '</div>' +
@@ -359,7 +359,7 @@ export class Pane {
   }
 
   // Every recovery action runs through spawnInto(), which begins with
-  // _clearRecovery() and, on failure, showNotice() — both detach these nodes.
+  // _clearRecovery() and, on failure, showNotice(). Both detach these nodes.
   // So a failed attempt re-renders the whole bar from the same descriptor
   // instead of writing into detached DOM and leaving a bare empty pane.
   _renderRecovery({ exitCode = null, onRestart, onResumeClaude, onPickClaude } = {}, errorText = null) {
@@ -374,8 +374,8 @@ export class Pane {
     const copy = document.createElement("span");
     copy.className = "pane-confirm-copy";
     copy.textContent = errorText || (exitCode === null
-      ? "Live session unavailable — nothing was silently restarted."
-      : `Session exited with code ${exitCode} — nothing was silently restarted.`);
+      ? "Live session unavailable. Nothing was silently restarted."
+      : `Session exited with code ${exitCode}. Nothing was silently restarted.`);
     const actions = document.createElement("span");
     actions.className = "pane-recovery-actions";
     const makeAction = (label, action, primary = false) => {
@@ -471,8 +471,8 @@ export class Pane {
     this._lastDropAt = now;
     const hint = [this.terminalType, this.displayName(), this.profileName, this.launchSpec?.cmd]
       .filter(Boolean).join(" ");
-    // Only claim the paste happened if the bytes actually reached the PTY —
-    // an empty, exited or reconnecting pane silently drops them, and the
+    // Only claim the paste happened if the bytes actually reached the PTY.
+    // An empty, exited or reconnecting pane silently drops them, and the
     // dedupe window below would then swallow the user's retry.
     if (!this.sendText(mapped.map((path) => quoteDroppedPath(path, hint)).join(" "))) {
       this._lastDropSignature = null;
@@ -566,7 +566,7 @@ export class Pane {
   // Copy text (default: the terminal's current selection) to the clipboard,
   // with a visible confirmation and a legacy fallback for WebView2, where the
   // async clipboard API is sometimes denied and otherwise fails silently.
-  // Read-only — never counts as user input. Returns whether there was anything
+  // Read-only, and never counts as user input. Returns whether there was anything
   // to copy.
   copySelection(selection = this.term.getSelection()) {
     if (!selection) return false;
@@ -578,8 +578,8 @@ export class Pane {
   // legacy execCommand path when it is unavailable or denied (WebView2 denies
   // navigator.clipboard.writeText silently). onOk/onFail are optional feedback
   // callbacks. Shared by the Ctrl+C / right-click selection copy and by
-  // the OSC 52 handler (apps inside the terminal — Claude Code, tmux, vim —
-  // that copy programmatically). Read-only; never counts as user input.
+  // the OSC 52 handler (apps inside the terminal, such as Claude Code, tmux or
+  // vim, that copy programmatically). Read-only; never counts as user input.
   _writeClipboard(text, onOk, onFail) {
     const ok = () => { if (onOk) onOk(); };
     const fallback = () => {
@@ -647,7 +647,7 @@ export class Pane {
   // close press only warns; a second press within the window proceeds.
   armClose() {
     this.closeArmed = true;
-    this.showNotice("[running — close again to detach]");
+    this.showNotice("[running: close again to detach]");
     clearTimeout(this._closeArmTimer);
     this._closeArmTimer = setTimeout(() => {
       this.closeArmed = false;
@@ -742,7 +742,7 @@ export class Pane {
     });
     // Unicode 11 width tables. Without this xterm uses its built-in v6 widths,
     // which miscount many emoji and wide glyphs and drift the cursor / corrupt
-    // redraws in modern TUIs (Claude Code, etc.). Optional — falls back to v6
+    // redraws in modern TUIs (Claude Code, etc.). Optional: it falls back to v6
     // if the addon global failed to load.
     try {
       if (window.Unicode11Addon) {
@@ -783,7 +783,7 @@ export class Pane {
     // no built-in OSC 52 handler, so without this the copy is silently dropped
     // even though the app reports success ("copied N chars to clipboard").
     // Reuses the fallback-capable write so it works under WebView2. Read
-    // requests (…;?) are declined — WebView2 blocks clipboard reads anyway, and
+    // requests (…;?) are declined. WebView2 blocks clipboard reads anyway, and
     // echoing clipboard contents back to the PTY on demand is a footgun.
     try {
       this.term.parser.registerOscHandler(52, (data) => {
@@ -821,7 +821,7 @@ export class Pane {
       this.term.parser.registerOscHandler(9, (data) => trackCwd(9, data));
     } catch (e) { /* shell integration is optional */ }
     // Right-click copies the current selection (the Windows Terminal
-    // convention) with a visible confirmation. Paste stays native on Ctrl+V —
+    // convention) with a visible confirmation. Paste stays native on Ctrl+V.
     // WebView2 silently denies programmatic clipboard reads, so there is no
     // reliable right-click paste to offer here.
     this.termHost.addEventListener("contextmenu", (e) => {
@@ -850,7 +850,7 @@ export class Pane {
       this._linkProvider = this.term.registerLinkProvider(makeFilePathProvider(this.term, activateLink));
     } catch (e) { this._linkProvider = null; }
     // Only forward while live: replayed scrollback contains terminal queries
-    // (DA/DSR) that xterm auto-answers during the async replay parse — those
+    // (DA/DSR) that xterm auto-answers during the async replay parse, and those
     // answers must never reach the PTY as typed input.
     this.term.onData((d) => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited && this._protocol.canSendInput()) {
@@ -953,7 +953,7 @@ export class Pane {
 
   // Write queued output; when >PENDING_LIMIT bytes are unacknowledged by
   // xterm's write callbacks, stop and resume as callbacks drain the count.
-  // Queued chunks are merged into one write per tick — fewer parser calls and
+  // Queued chunks are merged into one write per tick: fewer parser calls and
   // callbacks than writing each frame separately.
   _pump() {
     while (this._queue.length && this._pending < PENDING_LIMIT) {
@@ -1008,7 +1008,7 @@ export class Pane {
 
   _onExit(code) {
     this._exited = true;
-    // Drain before the phase flips to "idle" — the session's final output is
+    // Drain before the phase flips to "idle". The session's final output is
     // usually the part the user actually wants (build result, exit message).
     this._flushQueue();
     this._protocol.exit();
@@ -1032,7 +1032,7 @@ export class Pane {
       this._connect();
       return;
     }
-    // Only alive/exit_code are read here — never ask for the full-machine
+    // Only alive/exit_code are read here. Never ask for the full-machine
     // metrics scan on a socket close.
     api.getSessions({ metrics: false }).then((list) => {
       if (this._disposed || this._detached || this._exited) return;

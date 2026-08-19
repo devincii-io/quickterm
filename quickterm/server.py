@@ -52,7 +52,7 @@ def create_app(
     allowed_hosts, allowed_origins = _allowed_origins(cfg)
 
     def _token_required(request: Request) -> bool:
-        # Sensitive surface = everything under /api that isn't a public probe or a
+        # Sensitive routes = everything under /api that isn't a public probe or a
         # logo loaded by <img> (which can't send headers). Static frontend files
         # carry no secrets and stay open so the shell can bootstrap.
         path = request.url.path
@@ -63,7 +63,7 @@ def create_app(
     # Local-only trust boundary: the API answers the QuickTerm window and
     # nothing else. The Host allowlist defeats DNS-rebinding (a hostile page
     # pointing its own domain at 127.0.0.1), and the Origin allowlist defeats
-    # cross-origin requests from other sites in the same browser — including
+    # cross-origin requests from other sites in the same browser, including
     # WebSocket connections, which browsers allow cross-origin by default.
     @app.middleware("http")
     async def _local_guard(request: Request, call_next):
@@ -429,7 +429,7 @@ def create_app(
         saved = workspace.load_workspace(name)
         if saved is not None:
             # Reap the workspace's background sessions, but never one a client
-            # is attached to right now — deleting a workspace must not kill
+            # is attached to right now. Deleting a workspace must not kill
             # terminals that are open in someone's current layout.
             owned = set(getattr(saved, "session_ids", []) or [])
             owned.update(_layout_session_ids(saved.layout))
@@ -481,7 +481,7 @@ def create_app(
     def get_full_config() -> dict:
         # Serve the PERSISTED config, not the live one. app.py overwrites
         # cfg.port at startup (--port 0, and unconditionally for an elevated
-        # instance), and Settings PUTs this whole object straight back — which
+        # instance), and Settings PUTs this whole object straight back, which
         # wrote the ephemeral port into config.json and destroyed the
         # configured one for every later launch.
         config_mod = importlib.import_module("quickterm.config")
@@ -553,7 +553,7 @@ def create_app(
             from quickterm.elevation import launch
 
             # ShellExecuteW(..., "runas", ...) does not return until the UAC
-            # consent dialog is resolved — up to minutes if the user walks
+            # consent dialog is resolved, up to minutes if the user walks
             # away. On the event loop that parks every PTY pump long enough to
             # overflow the fan-out queues and force every pane to resync.
             await asyncio.to_thread(launch, spec)
@@ -702,7 +702,7 @@ def create_app(
             # Replay-only reattach. Refusing an exited session outright made
             # overflow permanently lossy: the client is told to reconnect and
             # replay the ring, and if the PTY died around the overflow that
-            # replay could never happen — so the session's final output (the
+            # replay could never happen, so the session's final output (the
             # build result, the error) was unreachable while still sitting in
             # the ring. Serve the scrollback, report the exit, accept no input.
             try:
@@ -718,7 +718,7 @@ def create_app(
         # ...and start draining that subscription immediately: nothing consumed
         # the queue until the live phase began, so a busy session could fill
         # its 8-item queue during the (multi-round-trip) handshake and be
-        # closed 1013 the instant it went live — the client then reconnected
+        # closed 1013 the instant it went live, and the client then reconnected
         # into exactly the same trap, forever.
         buffer = _HandshakeBuffer(attachment)
         try:
@@ -744,7 +744,7 @@ class _HandshakeBuffer:
     The fan-out queue counts items, not bytes, so eight PTY reader callbacks
     are enough to mark an attachment overflowed. The handshake is several
     round trips (one per 128 KiB replay frame, each awaiting an ack), which is
-    ample time for a verbose build to produce them — and the reconnect landed
+    ample time for a verbose build to produce them, and the reconnect landed
     in the same window every time. Draining here keeps the subscription alive;
     everything collected is handed to the live pump in order.
     """
@@ -796,7 +796,7 @@ async def _send_replay(ws: WebSocket, session: Any) -> bool:
     chunks_fn = getattr(session, "scrollback_chunks", None)
     if chunks_fn is not None:
         replay_chunks, cols, rows = chunks_fn()
-    else:  # test fakes and third-party managers implementing the old surface
+    else:  # test fakes and third-party managers implementing the old interface
         data, cols, rows = session.scrollback()
         replay_chunks = (data,) if data else ()
     await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))

@@ -88,7 +88,7 @@ export function renderGeneralSettings(host) {
     });
     // summon_hotkey and port are deliberately excluded from the live-update
     // whitelist in server.py, and Windows can refuse a shortcut another program
-    // already owns — say both here instead of letting "Saved." imply it worked.
+    // already owns, so say both here instead of letting "Saved." imply it worked.
     const hotkeyHint = this.app.hotkeyError && this.app.hotkeyError()
       ? `Could not be registered: ${this.app.hotkeyError()}. Applies after restart.`
       : "Show or hide QuickTerm globally. Applies after restart.";

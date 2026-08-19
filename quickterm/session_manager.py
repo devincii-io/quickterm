@@ -65,7 +65,7 @@ class Session:
         self.pty: PtySession | None = None
         self._cap = cap
         # Scrollback ring as a deque of chunks + running byte count: appending
-        # and trimming cost O(chunk), not O(cap) — the old bytearray slice
+        # and trimming cost O(chunk), not O(cap). The old bytearray slice
         # memmoved up to `cap` bytes on every write under sustained output.
         self._chunks: deque[bytes] = deque()
         self._ring_bytes = 0
@@ -86,7 +86,7 @@ class Session:
         self.background_output_at: float | None = None
 
     def scrollback(self) -> tuple[bytes, int, int]:
-        # Joined only here, at attach time (rare) — not on the hot output path.
+        # Joined only here, at attach time (rare), not on the hot output path.
         return b"".join(self._chunks), self._ring_cols, self._ring_rows
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
@@ -243,7 +243,7 @@ class SessionManager:
         """Sessions whose shell has a child process right now (ssh, a build,
         an editor, ...). One process snapshot for all sessions; used by the UI
         to guard close actions that would lose running work. WSL in-VM
-        processes are invisible to the snapshot — a known blind spot.
+        processes are invisible to the snapshot, a known blind spot.
         """
         try:
             parents = pids_with_children()

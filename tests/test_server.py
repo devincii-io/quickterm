@@ -1,4 +1,4 @@
-"""Server tests against fake manager/config implementing the CONTRACTS.md surface."""
+"""Server tests against fake manager/config implementing the CONTRACTS.md interface."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from quickterm import workspace as real_workspace
 from quickterm.server import create_app
 
-# --- fakes implementing the contract surface -------------------------------
+# --- fakes implementing the contract interface -----------------------------
 
 
 @dataclass
@@ -1089,7 +1089,7 @@ def test_ws_attach_protocol(client, manager):
         ws.send_text(json.dumps({"type": "replay_ack"}))
         # 3. replay_done
         assert json.loads(ws.receive_text()) == {"type": "replay_done"}
-        # 4. live binary output — raw bytes, which the pump may coalesce into a
+        # 4. live binary output: raw bytes, which the pump may coalesce into a
         # single frame (wire-compatible: the client treats it as a byte stream).
         live = ws.receive_bytes()
         while live != b"live-1live-2":
@@ -1124,7 +1124,7 @@ def test_ws_exited_session_serves_replay_only(client, manager):
 
     Refusing it outright (close 4410) made overflow permanently lossy: the
     client is told to reconnect and replay the ring, and if the PTY died around
-    the overflow that replay could never happen — so the session's final output
+    the overflow that replay could never happen, so the session's final output
     was unreachable while still sitting in the ring.
     """
     info = manager.add_session(alive=False, exit_code=0, scrollback=b"build done\r\n")
@@ -1147,7 +1147,7 @@ def test_ws_detach_on_client_disconnect(client, manager):
     # TestClient's portal may cancel the app task while the handler is still
     # unwinding from the disconnect; detach (in `finally`) runs regardless, so
     # the CancelledError at __exit__ is a test-client artifact, not a server bug.
-    # 3.14 de-aliased concurrent.futures.CancelledError from asyncio's — catch both.
+    # 3.14 de-aliased concurrent.futures.CancelledError from asyncio's, so catch both.
     with contextlib.suppress(asyncio.CancelledError, concurrent.futures.CancelledError):
         with client.websocket_connect(f"/ws/session/{info.id}", headers={"host": "127.0.0.1:8620"}) as ws:
             ws.receive_text()   # replay_size
@@ -1277,8 +1277,8 @@ async def test_handshake_buffer_drains_a_bounded_queue():
     """Nothing consumed the subscriber queue until the live phase started.
 
     The fan-out queue counts items, so eight PTY reader callbacks during the
-    (multi-round-trip) handshake were enough to mark the attachment overflowed
-    — and the client reconnected into exactly the same window every time.
+    (multi-round-trip) handshake were enough to mark the attachment overflowed,
+    and the client reconnected into exactly the same window every time.
     """
     from quickterm.server import _HandshakeBuffer
 

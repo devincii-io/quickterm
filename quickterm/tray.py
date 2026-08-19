@@ -149,7 +149,7 @@ class TrayIcon:
         """Start the tray thread. Returns whether an icon is actually there.
 
         Reporting success unconditionally let on_closing hide the window behind
-        a tray icon that had never been created — no way back and no balloon.
+        a tray icon that had never been created, leaving no way back and no balloon.
         """
         self._thread = threading.Thread(target=self._run, name="tray", daemon=True)
         self._thread.start()

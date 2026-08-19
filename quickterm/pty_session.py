@@ -1,7 +1,7 @@
 """One ConPTY: spawn, reader thread -> loop callbacks, write, resize, tree kill.
 
 Bytes path: low-level winpty.PTY only exposes str reads (decoded from ConPTY's
-UTF-8 stream), so we re-encode to UTF-8 — a lossless round-trip here.
+UTF-8 stream), so we re-encode to UTF-8, a lossless round-trip here.
 
 Throughput: the reader coalesces every chunk immediately available into a single
 callback (one thread-hop / ring edit / WS frame per burst instead of per read),
@@ -196,7 +196,7 @@ class PtySession:
         self._writer.start()
 
     def write(self, data: bytes) -> None:
-        # Enqueue only — the writer thread does the (possibly blocking) PTY write.
+        # Enqueue only: the writer thread does the (possibly blocking) PTY write.
         try:
             self._write_q.put_nowait(data)
         except queue.Full:
@@ -273,7 +273,7 @@ class PtySession:
         ``taskkill`` can fail (or only partially complete) without raising, so
         treating invocation as success made the REST endpoint hide a still-live
         terminal.  Verify through a fresh process handle and use the Win32
-        terminate primitive as a final root-process fallback.  ``taskkill /T``
+        terminate call as a final root-process fallback.  ``taskkill /T``
         remains the primary path because it also handles descendants.
         """
         if not self._pid or self._proc_dead.is_set():

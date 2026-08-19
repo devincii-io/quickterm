@@ -138,7 +138,7 @@ export function renderLogoPicker({ title, value, hint, onChange }) {
     remove.disabled = !value;
     // Superseded uploads were never reclaimed: every replaced logo stayed in
     // %APPDATA%/quickterm/assets forever (up to 1 MB each) and api.deleteAsset
-    // had no callers at all. Best effort — the config change is what matters.
+    // had no callers at all. Best effort; the config change is what matters.
     const discard = (assetId) => {
       if (assetId) api.deleteAsset(assetId).catch(() => {});
     };

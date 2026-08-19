@@ -3,7 +3,7 @@
 check() asks the pinned repo's latest-release endpoint whether a newer version
 exists (cached; at most one network call per _CACHE_TTL_S unless forced).
 download_and_run() fetches the Windows Setup asset from that release, verifies
-it against the release's SHA256SUMS.txt, and launches it — the Inno Setup
+it against the release's SHA256SUMS.txt, and launches it. The Inno Setup
 installer closes the running app and upgrades in place.
 
 Trust model: only https URLs from the pinned REPO's release payload are ever
@@ -151,13 +151,13 @@ def download_and_run() -> dict:
     path.write_bytes(blob)
     # Tell the desktop shell to stand down BEFORE the installer starts. Inno's
     # CloseApplications asks the top-level window to close, which lands in
-    # app.on_closing — and with any touched/retained/busy session (exactly the
+    # app.on_closing, and with any touched/retained/busy session (exactly the
     # state of someone who has been working) that hid to tray and cancelled the
     # close. Setup then either stalled on "the following applications are in
     # use", pointing at a window gone from the taskbar, or force-terminated the
     # process and took every terminal with it.
     _request_app_shutdown()
-    # Detached: the installer outlives us — it closes QuickTerm and upgrades.
+    # Detached: the installer outlives us and closes QuickTerm to upgrade.
     subprocess.Popen([str(path)], close_fds=True)
     return {"launched": True, "version": latest}
 

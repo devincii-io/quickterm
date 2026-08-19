@@ -386,10 +386,10 @@ def _run_desktop(
 
     # Hide-to-tray: closing the primary window keeps terminals alive in the
     # background when they hold real work; otherwise it quits. Elevated windows
-    # always quit on close — a resident admin backend would be a foot-gun.
+    # always quit on close: a resident admin backend would be a foot-gun.
     quitting = threading.Event()
     global _shutdown_hook
-    _shutdown_hook = lambda: _quit_window(window, quitting)  # noqa: E731 — updater hand-off
+    _shutdown_hook = lambda: _quit_window(window, quitting)  # noqa: E731 (updater hand-off)
     tray = None
     if not elevated:
         try:
@@ -551,7 +551,7 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
             # globs and parses every workspace file, busy_ids() takes a full
             # Toolhelp snapshot, and killing a live shell spawns taskkill /T /F
             # and waits on process handles (hundreds of ms). On the event loop
-            # that froze every pane and every keystroke for the duration — and
+            # that froze every pane and every keystroke for the duration, and
             # the freeze then overflowed the fan-out queues it had stalled.
             # kill()/_finish_kill already marshal their registry and queue
             # mutations back with call_soon_threadsafe.
@@ -568,7 +568,7 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
 
 
 def _reap_pass(manager: "SessionManager", idle_timeout_s: int) -> list:
-    """One reaper pass. Runs in a worker thread — never on the event loop."""
+    """One reaper pass. Runs in a worker thread, never on the event loop."""
     return manager.reap_idle(idle_timeout_s, _workspace_session_ids())
 
 
@@ -642,7 +642,7 @@ def _start_hotkeys(
 
         hk = hotkeys_mod.HotkeyManager(loop)
         # register() returns False when the combination parses but Windows
-        # refuses it — almost always because another program already owns it.
+        # refuses it, almost always because another program already owns it.
         # Discarding that made the documented escape hatch for a tray-hidden
         # window fail silently; Settings renders cfg.hotkey_error next to the
         # field instead.
@@ -682,7 +682,7 @@ def _profile_callback(
 def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> None:
     # Voice is parked: without a capture overlay the hotkey gives no feedback
     # at all, which reads as "broken". The capture/transcribe modules stay in
-    # quickterm/voice/ — re-wire here (see git history) once the UI exists.
+    # quickterm/voice/. Re-wire here (see git history) once the UI exists.
     del hotkeys, manager, cfg
 
 

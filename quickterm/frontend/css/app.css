@@ -571,8 +571,8 @@ body.zoomed #sb-zoom { display: inline; }
 @keyframes dropdown-in { from { opacity: 0; transform: translateY(-5px) scale(.99); } to { opacity: 1; transform: none; } }
 
 /* The full launcher (brand text + labelled nav + Admin button) needs ~1000px.
-   Below that, collapse to the compact chrome — icon-only nav, no brand text,
-   no shell descriptor — so nothing can overlap at any width. */
+   Below that, collapse to the compact chrome: icon-only nav, no brand text
+   and no shell descriptor, so nothing can overlap at any width. */
 /* Give the shell name the full launch control before the layout is roomy
    enough to also show its descriptor ("Built into Windows"). */
 @media (max-width: 1180px) {

@@ -37,7 +37,7 @@ export async function renderDashboard(refreshing = false) {
     const folderMissing = currentFolder && this.app.workspacePathExists
       && this.app.workspacePathExists() === false;
     const heroText = currentFolder
-      ? `Every terminal here opens in ${currentFolder}${folderMissing ? " — that folder is missing" : ""}.`
+      ? `Every terminal here opens in ${currentFolder}${folderMissing ? ", but that folder is missing" : ""}.`
       : "Open layouts, reattach background terminals, or clean up sessions from one place.";
     heroCopy.append(
       make("span", "hero-kicker", "Workspace overview"),
@@ -139,12 +139,12 @@ export async function renderDashboard(refreshing = false) {
         saveInput.focus();
         return;
       }
-      // Overwriting a different existing workspace loses its layout — ask once.
+      // Overwriting a different existing workspace loses its layout, so ask once.
       const current = this.app.currentWorkspace && this.app.currentWorkspace();
       if (existing.has(name) && name !== current && confirmOverwrite !== name) {
         confirmOverwrite = name;
         saveButton.textContent = "Overwrite?";
-        saveNote.textContent = `“${name}” already exists — save again to replace it.`;
+        saveNote.textContent = `“${name}” already exists. Save again to replace it.`;
         return;
       }
       saveButton.disabled = true;
@@ -211,7 +211,7 @@ export async function renderDashboard(refreshing = false) {
       const missing = Boolean(folder) && workspace.data.path_exists === false;
       const subtitle = make("p", `workspace-card-folder${missing ? " warning" : ""}`,
         folder
-          ? (missing ? `${shortPath(folder)} — folder missing` : shortPath(folder))
+          ? (missing ? `${shortPath(folder)} · folder missing` : shortPath(folder))
           : workspace.name === "scratch"
             ? "Disposable · gone when the app quits"
             : "No folder yet · terminals open in your home folder");
@@ -348,7 +348,7 @@ export async function renderDashboard(refreshing = false) {
     if (otherGroups.length) {
       const other = make("details", "other-workspace-sessions");
       const count = otherGroups.reduce((sum, group) => sum + group.sessions.length, 0);
-      other.append(make("summary", "", `Other workspaces · ${count} — explicit move required`));
+      other.append(make("summary", "", `Other workspaces · ${count} · explicit move required`));
       for (const item of otherGroups) {
         const group = make("section", "detached-group");
         group.append(make("h3", "", item.name));
@@ -367,7 +367,7 @@ export async function renderDashboard(refreshing = false) {
     const profiles = make("section", "dashboard-list-card");
     profiles.append(this._sectionHeading("Quick launch", "Your terminal profiles"));
     const profileList = make("div", "quick-profile-list");
-    if (!this.app.profiles.length) profileList.append(make("p", "quiet-empty", "No personal terminals yet. Create one in Settings — system shells are always available in the launcher."));
+    if (!this.app.profiles.length) profileList.append(make("p", "quiet-empty", "No personal terminals yet. Create one in Settings; system shells are always available in the launcher."));
     for (const profile of this.app.profiles.slice(0, 6)) {
       const row = make("button", "quick-profile");
       row.type = "button";

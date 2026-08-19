@@ -14,7 +14,7 @@ export function renderAboutSettings(host) {
     hero.append(
       identity,
       make("p", "about-tagline",
-        "A calm, local terminal workspace — split panes, named workspaces, "
+        "A local terminal workspace: split panes, named workspaces, "
         + "persistent sessions and quick-launch profiles. Everything stays on this computer."),
       make("p", "about-credit", "Made by Devin Isaac Worbis · Released under the MIT license"),
     );
