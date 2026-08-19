@@ -1,28 +1,54 @@
+/* Chrome palette: warm amber on near-black, shared with the sibling QuickCode
+   UI so the two apps read as one toolchain.
+
+   Only five colours are chosen here; everything else is mixed from them.
+   applyChromeTheme() in js/themes.js recomputes the identical mixes at runtime
+   from whichever terminal theme is selected, so this block is the pre-boot
+   default and nothing more. The numbers below are exactly what that function
+   produces for "graphite", which is why the window does not flash a different
+   palette before the config arrives. Edit a base here and you MUST edit the
+   matching graphite chrome entry in themes.js, or the flash comes back. */
 :root {
-  --bg: #141817;
-  --surface: #1b201f;
-  --surface-raised: #222826;
-  --surface-soft: #282f2c;
-  --well: #151918;
-  --card: #1e2422;
-  --field: #191e1d;
-  --text: #ecebe5;
-  --text-soft: #c3c7c1;
-  --muted: #858e88;
-  --accent: #e6a94b;
-  --accent-soft: #3b3020;
-  --accent-hover: #f0b85f;
-  --accent-press: #d89a3e;
-  --accent-border: #74674e;
-  --accent-ring: rgba(230, 169, 75, .12);
-  --on-accent: #1b1206;
-  --sage: #8da895;
-  --danger: #d47c73;
-  --line: #303735;
-  --line-strong: #414a46;
-  --line-hover: #59625e;
+  --bg: #15140f;
+  --surface: #24221b;
+  --text: #e9e3d5;
+  --accent: #c8973f;
+  --danger: #d76c53;
+
+  --surface-raised: color-mix(in srgb, #ffffff 4%, var(--surface));
+  --surface-soft: color-mix(in srgb, #ffffff 7.5%, var(--surface));
+  --well: var(--bg);
+  --card: color-mix(in srgb, var(--surface) 62%, var(--bg));
+  --field: color-mix(in srgb, var(--surface) 40%, var(--bg));
+
+  /* The ink ladder. --muted is ink at 62%, not the 55% the sibling palette
+     uses for the same role: a percentage of ink on paper is not the mirror of
+     a percentage of paper on ink, and 55% measures 4.38:1 on --surface here,
+     under the 4.5:1 floor for body text. --fg-dim and --fg-faint keep the
+     softer steps available for decoration, which owes no contrast floor. */
+  --text-soft: color-mix(in srgb, var(--bg) 16%, var(--text));
+  --muted: color-mix(in srgb, var(--text) 62%, var(--bg));
+  --fg-dim: color-mix(in srgb, var(--text) 55%, transparent);
+  --fg-faint: color-mix(in srgb, var(--text) 32%, transparent);
+
+  --accent-soft: color-mix(in srgb, var(--accent) 17%, var(--bg));
+  --accent-hover: color-mix(in srgb, #ffffff 16%, var(--accent));
+  --accent-press: color-mix(in srgb, #000000 12%, var(--accent));
+  --accent-border: color-mix(in srgb, var(--accent) 50%, var(--bg));
+  --accent-ring: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Amber is bright enough that dark type wins on it, 7.04:1 against 2.35:1. */
+  --on-accent: #111318;
+  --sage: color-mix(in srgb, #a7d5b3 36%, var(--muted));
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, transparent);
+
+  --line: color-mix(in srgb, var(--text) 9%, var(--surface));
+  --line-strong: color-mix(in srgb, var(--text) 16%, var(--surface));
+  --line-hover: color-mix(in srgb, var(--text) 30%, var(--surface));
+
   --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  /* Stays black rather than a mix of --bg: four shipped themes are light, and
+     there --bg is paper while a drop shadow is still ink. */
   --shadow: 0 24px 80px rgba(0, 0, 0, .4);
 }
 
@@ -59,7 +85,7 @@ button .icon { pointer-events: none; }
 .no-entrance .workspace-card, .no-entrance .panel, .no-entrance .dashboard-hero { animation: none !important; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #3b4340; border: 3px solid var(--surface); border-radius: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border: 3px solid var(--surface); border-radius: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 #app { display: flex; flex-direction: column; height: 100vh; }
@@ -145,7 +171,11 @@ body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid
 .dropdown-section-label { padding: 9px 10px 6px; color: #78817c; font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
 .dropdown-section-label:not(:first-child) { margin-top: 6px; border-top: 1px solid var(--line); }
 .dropdown-item { position: relative; width: 100%; min-height: 48px; display: flex; align-items: center; gap: 10px; padding: 7px 9px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-.dropdown-item:hover, .dropdown-item:focus-visible { outline: 0; background: var(--surface-soft); }
+.dropdown-item:hover { background: var(--surface-soft); }
+/* The fill alone cannot say focus here: it is the same fill hover uses, so a
+   keyboard user and a hovering mouse look identical. Inset, because the menu
+   scrolls and an outward ring is clipped at the first and last row. */
+.dropdown-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; background: var(--surface-soft); }
 .dropdown-item.selected { background: rgba(141, 168, 149, .08); }
 .dropdown-selected-mark { margin-left: auto; color: var(--sage); display: flex; }
 .dropdown-item:disabled { opacity: .45; cursor: default; }
@@ -504,8 +534,6 @@ body.zoomed #sb-zoom { display: inline; }
 .logo-picker-status.error { color: var(--danger); }
 .logo-picker-actions { display: flex; align-items: center; gap: 5px; }
 .branding-scratch-note { margin: 5px 0 0; padding: 11px 12px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); font-size: 10px; }
-.profiles-empty { margin-top: 15px; padding: 16px 18px; border: 1px dashed var(--line-strong); border-radius: 11px; color: var(--muted); }
-.profiles-empty p { margin: 0; line-height: 1.5; max-width: 560px; }
 
 .terminal-profile-card { margin-top: 13px; padding: 17px 18px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
 .terminal-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
@@ -514,7 +542,16 @@ body.zoomed #sb-zoom { display: inline; }
 .terminal-identity p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
 .toggle-row { display: flex; align-items: center; gap: 9px; margin-top: 17px; color: var(--text-soft); cursor: pointer; font-size: 11px; }
 .toggle-row.standalone { margin: 0 0 18px; }
-.toggle-row input { position: absolute; opacity: 0; pointer-events: none; }
+/* The checkbox is hidden but must stay focusable and hit-testable by the label,
+   so it is clipped by .sr-only (which the JS puts on it) rather than made
+   transparent here. `opacity: 0` painted the browser's focus ring on an
+   invisible element, which is the same as having no focus ring at all: keyboard
+   users could not see which toggle they were on. Only pointer-events stays,
+   because the visible .toggle-control is what the pointer should hit.
+   The ring now lives on that sibling (:focus-visible + .toggle-control in
+   panels.css), which is required rather than a workaround: .sr-only clips with
+   clip-path, and a clipped element clips its outline too. */
+.toggle-row input { pointer-events: none; }
 .toggle-control { position: relative; width: 32px; height: 18px; border-radius: 10px; background: #414946; transition: background .18s ease; }
 .toggle-control::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--text-soft); transition: transform .18s ease, background .18s ease; }
 .toggle-row input:checked + .toggle-control { background: #6a5732; }
@@ -637,7 +674,16 @@ body.zoomed #sb-zoom { display: inline; }
 
 .sr-only { position: fixed; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 
-:focus-visible { outline: 2px solid var(--accent) !important; outline-offset: 2px; }
+/* The app-wide focus backstop. It used to carry !important, which guaranteed a
+   ring everywhere and, in doing so, stopped any surface from choosing its own.
+   The sidebar and the panels both draw a 1px ring inset by 1px, because a 2px
+   ring offset outward is clipped by the scrollers they live in; with the
+   !important those rules were silently overridden and the ring was cut off.
+   Dropped, so a more specific rule wins normally. Every surface that sets
+   `outline: 0` after this line now states its own :focus-visible ring, and the
+   one place that deliberately indicates focus with a fill instead is given an
+   inset ring below rather than left with nothing. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:not(:focus-visible), textarea:focus:not(:focus-visible) { outline: 0; }
 
 .launcher {
@@ -708,7 +754,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .workspace-grid { gap: 8px; }
 .workspace-card, .detached-group, .other-workspace-sessions, .dashboard-list-card, .settings-group, .terminal-profile-card, .snippet-card, .help-card, .about-hero, .about-update { border-radius: 4px; animation: none; box-shadow: none; }
 .workspace-card:hover { transform: none; border-color: var(--line-hover); box-shadow: none; }
-.workspace-preview, .workspace-preview-pane, .workspace-empty-card, .detached-empty, .profiles-empty { border-radius: 3px; }
+.workspace-preview, .workspace-preview-pane, .workspace-empty-card, .detached-empty { border-radius: 3px; }
 .workspace-preview-pane::before, .workspace-preview-pane::after, .empty-orbit { display: none; }
 .workspace-preview-pane { background: var(--surface); }
 .card-open-button, .quick-profile, .settings-tab, .theme-card, .logo-preview, .branding-scratch-note { border-radius: 3px; }
@@ -1039,7 +1085,10 @@ body.sidebar-collapsed .sidebar-sessions { min-height: 42px; }
 .settings-group-title { font-family: var(--mono); }
 
 @media (max-width: 760px) {
-  .panel-overlay { padding: 0; }
+  /* No `.panel-overlay { padding: 0 }` here. AGENTS.md: a panel is a centred,
+     bounded sheet, never full-bleed. Zero padding removes the click-outside
+     target that closes it and makes the dialog read as a second application,
+     which is exactly the rule this media query used to break below 760px. */
   .settings-main { grid-template-columns: 150px 1fr; }
 }
 

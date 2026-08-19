@@ -1,0 +1,160 @@
+/* The sidebar: its resize grip, and the refinement pass over the base rules in
+   app.css. Loaded after app.css, so plain overrides win on order alone.
+   Everything here reads the theme variables; no colour is written literally. */
+
+/* ---------- width ---------- */
+
+:root {
+  /* The icon rail is a fixed size, not a resizable one: below the labels there
+     is nothing left to give. */
+  --sidebar-rail: 42px;
+}
+
+#app { grid-template-columns: var(--sidebar-w, 244px) minmax(0, 1fr); }
+
+/* Collapsed wins over any stored width. A rail that remembered 380px would be
+   a very wide column of centred icons. */
+body.sidebar-collapsed #app { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+
+/* The grid column animates on collapse, which is exactly wrong while a pointer
+   is dragging the edge: the sidebar would arrive .14s behind the cursor. The
+   class also covers the first paint, where the stored width is applied. */
+body.sidebar-sizing #app { transition: none; }
+body.sidebar-resizing { cursor: col-resize; user-select: none; }
+
+/* ---------- resize grip ---------- */
+
+/* Selector weight is load-bearing here. app.css stretches every direct child of
+   the sidebar with `.launcher.sidebar > * { width: 100% }`, which outranks a
+   bare `.sidebar-grip` on specificity no matter which file loads last. Without
+   matching that weight the grip computed to the full 244px width and, being
+   absolutely positioned at z-index 30, covered the whole sidebar: workspaces,
+   the terminal picker and the footer buttons were all unclickable. */
+.launcher.sidebar > .sidebar-grip {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: 3px;
+  background: transparent;
+  cursor: col-resize;
+  transition: background .12s ease;
+}
+/* The visible grip stays a hairline while the grab target is widened by a
+   pseudo-element. It grows inward only: the sidebar clips its overflow, so a
+   target hanging past the right edge would be clipped away with it. */
+.sidebar-grip::after { content: ""; position: absolute; inset: 0 0 0 -6px; }
+.sidebar-grip:hover, .sidebar-grip.dragging { background: var(--accent); }
+.sidebar-grip:focus-visible {
+  background: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+body.sidebar-collapsed .sidebar-grip { display: none; }
+
+/* ---------- head ---------- */
+
+.sidebar-head { padding: 5px 7px 5px 10px; }
+.sidebar-brand-copy strong { letter-spacing: .07em; }
+/* The workspace line is a folder, so it reads as one. */
+.sidebar-brand-copy small { font-family: var(--mono); font-size: 9px; letter-spacing: .01em; }
+.sidebar-collapse:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- sections ---------- */
+
+.sidebar-section { padding: 8px 7px; }
+.sidebar-section-head {
+  padding: 0 6px 5px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .12em;
+}
+/* The count is a fact about the list, so it gets the pill and the figures get
+   the monospace: two workspaces and twelve must line up in the same slot. */
+.sidebar-count {
+  padding: 0 6px;
+  border-radius: 20px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 15px;
+}
+
+.sidebar-list { gap: 2px; }
+
+/* ---------- rows ---------- */
+
+.sidebar-row, .sidebar-action { border-radius: 3px; }
+.sidebar-row { padding: 4px 6px; }
+.sidebar-row:focus-visible, .sidebar-action:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+/* Hover is a hint, the current row is a statement: the fill steps up and the
+   accent bar is solid, so the two never read as the same state. */
+.sidebar-row.active {
+  background: var(--surface-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.sidebar-row.active .sidebar-row-copy strong { color: var(--text); font-weight: 650; }
+
+.sidebar-row-copy strong { font-size: 10.5px; }
+/* Session names come from the shell and are compared character by character,
+   so they stay monospace even where the workspace names do not. */
+.session-row .sidebar-row-copy strong { font-family: var(--mono); }
+.sidebar-row-copy small {
+  margin-top: 3px;
+  font-size: 8px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+/* Only the two states worth interrupting for become chips. Everything else
+   stays a caption, or the list turns into a wall of badges. */
+.sidebar-row.active .sidebar-row-copy small,
+.session-row.unread .sidebar-row-copy small {
+  align-self: flex-start;
+  margin-top: 3px;
+  padding: 0 5px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  line-height: 13px;
+}
+.session-row.unread .sidebar-row-copy small {
+  background: color-mix(in srgb, var(--sage) 16%, transparent);
+  color: var(--sage);
+}
+
+/* ---------- launch ---------- */
+
+.sidebar-terminal-select { border-radius: 3px; }
+.sidebar-terminal-select:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.sidebar-launch-actions .sidebar-action { border-radius: 3px; letter-spacing: .06em; }
+/* Opening a terminal is what this sidebar is for; the admin button beside it
+   is the exception. Only one of them carries a fill. */
+.sidebar-launch-actions .sidebar-action.primary {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.sidebar-launch-actions .sidebar-action.primary:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+/* ---------- lists and footer ---------- */
+
+.sidebar-empty {
+  padding: 8px 6px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+/* The scrollbar thumb is drawn with a 3px inset in the surface colour; inside
+   the sidebar the ground is --bg, and the inherited ring shows as a seam. */
+.sidebar-workspaces::-webkit-scrollbar-thumb,
+.sidebar-sessions::-webkit-scrollbar-thumb { border-color: var(--bg); }
+
+.sidebar-footer { padding: 6px 7px 8px; }
+.sidebar-shortcut { font-family: var(--mono); border-radius: 3px; }

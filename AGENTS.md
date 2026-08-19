@@ -85,6 +85,46 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   full-bleed: the dense styling is about the rows inside, not the frame.
   Stretching `.panel-overlay` edge to edge removes the click-outside-to-close
   target and makes a dialog read as a second application.
+- One module decides who owns the keyboard (`focus.js`). A pane re-asserts
+  `term.focus()` immediately, on a frame, and on a zero timeout, so any overlay
+  that focuses its own control must `claimFocus` before focusing and
+  `releaseFocus` before handing back, or the terminal takes it again a frame
+  later. That is exactly how Alt+K opened a palette you could not type into:
+  `togglePalette` closes the open panel first, panel close calls
+  `refocusTerm()`, and the three deferred calls landed after the palette had
+  focused its input. Dismissing any overlay returns focus to the focused
+  terminal; the trigger is only the fallback when there is no pane.
+- Live panels patch, they never rebuild (`render.js`). The dashboard refreshes
+  every 5 s; emptying `.panel-body` and recreating it threw away half-typed
+  input, an armed "Overwrite?", an open folder editor, and the very `<input>`
+  the folder picker had captured, so choosing a folder silently did nothing.
+  `buildDashboard()` creates the skeleton and wires listeners once;
+  `applyDashboard()` only writes data. Listeners must not close over the data
+  they were built from: they read `itemFor(node)` or the live view object.
+  `patchList` reuses the node for a key rather than recreating it, and never
+  `insertBefore`s a node already in place, because moving a node detaches it and
+  a detached focused control loses focus.
+- Scratch is disposable, its terminals are not. `/api/sessions/cleanup` kills
+  every id it is handed; the "never expire a shell the user typed into" rule
+  lives only in `reap_idle`. So the caller decides: replacing scratch goes
+  through silently when every terminal is idle and untouched, and otherwise
+  names them in a confirmation. Merely *leaving* scratch was never confirmed by
+  anyone, so it spares anything `busy` or `touched` and leaves it running as an
+  unassigned background session. An unknown session counts as at risk.
+- `app.css` carries the tokens and the base shell; `sidebar.css`, `panels.css`,
+  `dashboard.css` and `browser.css` load after it and win on order, not on
+  `!important`. Order is not enough against a *more specific* base rule though:
+  `.launcher.sidebar > * { width: 100% }` silently beat `.sidebar-grip`, which
+  stretched the absolutely positioned resize grip across the whole sidebar and
+  made every control in it unclickable. Match the weight when overriding a
+  descendant selector. `--line` is 1.26:1 on `--surface`, so a hairline is
+  decoration: carry a boundary that must be seen with `--accent`,
+  `--line-hover`, or a surface change.
+- `applyChromeTheme()` derives the entire chrome palette from the selected
+  terminal theme at runtime, so the `:root` block in `app.css` is only the
+  pre-boot default and must stay numerically identical to what that function
+  computes for `graphite`, or the window flashes a different palette at boot.
+  Changing the default palette means changing both.
 - No destructive action may be reachable without consent or feedback. `×` on a
   pane detaches, never kills; kill is a separate labelled `.danger` control.
   Clicking the workspace row you are already on is a no-op, scratch included.

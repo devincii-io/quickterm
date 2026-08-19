@@ -1,0 +1,915 @@
+/* The modal sheet (Dashboard / Settings / Help), the Settings screens, the
+ * Help screen, the command palette, the shared form controls, the error
+ * banner and the status bar.
+ *
+ * Loaded after app.css, so every rule here wins on source order and none of
+ * them needs !important. app.css keeps the tokens and the base shell; this
+ * file replaces the "Dense panels" appearance on the surfaces listed above.
+ *
+ * The language, carried over from the sibling project QuickCode:
+ *
+ *   A row, not a card.      Presentation cards spend ~40 px of chrome to say
+ *                           "this is a thing". A hairline separator says the
+ *                           same for 1 px, and twice as many rows fit.
+ *   One boundary weight.    Every border is 1 px. Emphasis is carried by a
+ *                           surface fill, never by a heavier border, so
+ *                           nothing shifts by a pixel on hover.
+ *   Faint uppercase labels. 11 px, letter-spaced, --muted. A heading is a
+ *                           signpost; it must not compete with the content.
+ *   Monospace means data.   Paths, ids, counts, versions and keyboard hints
+ *                           are mono; everything a human wrote is not. The
+ *                           font is the type signature.
+ *   Pills carry status.     A rounded chip in a colour mixed from the token it
+ *                           reports, never a full-strength block of colour.
+ *
+ * Nothing below hardcodes a colour except the two dialog scrims, which say at
+ * the point of use why they cannot be a token mix. Everything else is one of
+ * app.css's tokens or a color-mix of one, because the palette is re-aimed as a
+ * unit and a literal hex would be the one pixel that did not follow.
+ *
+ * Which token draws that 1 px is not a free choice. --line measures about
+ * 1.26:1 on --surface and --line-strong about 1.55:1, so a hairline in either
+ * is decoration. Separators between rows use them anyway, because that is all
+ * a separator has to be. Anything a user has to actually find, meaning the
+ * edge of a field, a pill or a switch, is drawn in --fg-faint: it is a
+ * percentage of --text rather than a mix into --surface, so it is the faintest
+ * ink that is still ink, and it survives the four light themes.
+ *
+ * The frame stays a centred, bounded sheet (AGENTS.md): dense is about the
+ * rows inside it. An edge-to-edge overlay would delete the click-outside-to-
+ * close target and make a dialog read as a second application.
+ */
+
+/* ========================= the sheet ========================= */
+
+/* The one literal colour in this file, and the same one app.css already used.
+   A scrim mixed from --bg would be a white wash under a white sheet on the
+   four light themes QuickTerm ships, because applyChromeTheme swaps --bg to
+   the theme's own background and there is no light/dark block to flip the mix
+   in. Ink over paper is a scrim in both directions; paper over paper is not. */
+.panel-overlay {
+  background: rgba(1, 4, 9, .72);
+  padding: clamp(16px, 4vh, 44px);
+}
+
+.panel {
+  width: min(1120px, 94vw);
+  height: min(860px, 88vh);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+/* One dense row: name, then what the view is for, then the way out. */
+.panel-head {
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.panel-head > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+.panel-title {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+/* The subtitle rides beside the title, not under it: it is a gloss on the
+   name, and stacking it cost a whole line of the sheet on every view. */
+.panel-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-close {
+  flex: none;
+  min-height: 28px;
+  gap: 8px;
+  padding: 0 8px 0 10px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.panel-close:hover { background: var(--surface-raised); color: var(--text); }
+.panel-close kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 4px;
+  background: var(--well);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-transform: none;
+}
+
+/* .panel-eyebrow stays hidden (app.css does it). Its text is the literal word
+   "QuickTerm", set from panels.js innerHTML, so as a kicker over the title it
+   would tell a QuickTerm user they are in QuickTerm. Restoring it needs a JS
+   change that gives it something to say, not a CSS one. */
+
+.panel[data-view="dashboard"] .panel-body,
+.panel[data-view="help"] .panel-body { padding: 14px 16px 24px; }
+
+.panel-loading {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* A signpost over a block of rows: the same shape as a QuickCode section
+   head, so the eye learns one heading and reads every screen with it. */
+.section-heading {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+.section-title {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.section-subtitle {
+  max-width: 82ch;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+  text-transform: none;
+}
+
+/* ===================== shared form controls ===================== */
+
+.primary-button, .secondary-button {
+  min-height: 30px;
+  padding: 0 13px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.primary-button { background: var(--accent); color: var(--on-accent); }
+.primary-button:hover { background: var(--accent-hover); }
+.primary-button:active { background: var(--accent-press); }
+.secondary-button {
+  border: 1px solid var(--fg-faint);
+  background: var(--surface-raised);
+  color: var(--text-soft);
+}
+/* Hover fills the surface instead of brightening the border. A border that
+   changes weight makes the row twitch; a fill does not move anything. */
+.secondary-button:hover { background: var(--surface-soft); color: var(--text); }
+.primary-button.compact, .secondary-button.compact {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.text-button {
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sage);
+  font-size: 11.5px;
+}
+.text-button:hover { background: var(--surface-raised); color: var(--text); }
+.text-button.compact { min-height: 28px; padding: 0 7px; font-size: 11px; }
+.text-button, .secondary-button, .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+
+.danger-text { color: var(--danger); }
+.danger-text:hover { background: var(--danger-soft); color: var(--danger); }
+
+.icon-button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+}
+.icon-button:hover { background: var(--surface-raised); color: var(--text); }
+
+/* A chip, not a button: it opens something and should read as a label with an
+   affordance, which is why it is mono and pill-shaped. */
+.card-open-button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.card-open-button:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.ui-input, .ui-select {
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.ui-input::placeholder { color: var(--muted); }
+.ui-input:focus, .ui-select:focus {
+  border-color: var(--accent-border);
+  box-shadow: none;
+}
+/* background-color, never the shorthand: the chevron below is a pair of
+   background-images and `background:` would erase it. */
+.ui-select {
+  padding-right: 28px;
+  background-color: var(--field);
+  background-position: calc(100% - 17px) 13px, calc(100% - 12px) 13px;
+}
+
+/* A textarea is not 32 px tall. Re-state the box these share with .ui-input so
+   the shorter field height above cannot squash them. */
+.snippet-text, .env-input, textarea.ui-input {
+  height: auto;
+  min-height: 60px;
+  padding: 8px 9px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* Kept position:fixed with its width and padding untouched: panels.js places
+   this box from its own getBoundingClientRect(), so changing the box model
+   changes where destructive confirmations land. Only the skin moves. */
+.inline-confirmation {
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--line));
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+.inline-confirmation-copy {
+  color: var(--text-soft);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* ======================= command palette ======================= */
+
+/* Same scrim, same reason as .panel-overlay above. */
+.palette-overlay {
+  padding-top: 11vh;
+  background: rgba(1, 4, 9, .72);
+}
+.palette {
+  width: 620px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+/* The query is a command, so it is typed in the font commands are printed in. */
+.palette input {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--well);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+/* The sheet clips its own overflow, so an outward focus ring on the flush
+   input would be sliced off; draw it inside the edge instead. */
+.palette input:focus-visible { outline-offset: -2px; }
+.palette-list { max-height: 52vh; padding: 4px; }
+
+.palette-item {
+  align-items: baseline;
+  gap: 10px;
+  min-height: 28px;
+  padding: 5px 8px;
+  border-radius: 5px;
+}
+.palette-item:hover { background: var(--surface-raised); }
+.palette-item.sel { background: var(--surface-soft); }
+/* The kind is a fixed-width mono gutter: five rows of different kinds line up
+   into a column you can read down without reading across. */
+.palette-item .kind {
+  min-width: 74px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.palette-item.sel .kind { color: var(--accent); }
+.palette-item .label { font-size: 12.5px; }
+.palette-item .hint {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.palette-none {
+  padding: 12px 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* =========================== settings =========================== */
+
+.settings-main { grid-template-columns: 204px minmax(0, 1fr); }
+
+/* The rail. It scrolls without a scrollbar in both orientations: five tabs
+   never need a rail-width gutter, and the horizontal form at narrow widths
+   would otherwise carry a 10 px bar under every label. */
+.settings-tabs {
+  gap: 1px;
+  padding: 8px 6px;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  scrollbar-width: none;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+
+.settings-tab {
+  min-height: 34px;
+  gap: 2px;
+  padding: 6px 9px;
+  border-radius: 5px;
+  border-left: 2px solid transparent;
+  color: var(--muted);
+}
+.settings-tab strong { color: var(--text-soft); font-size: 12px; font-weight: 600; }
+.settings-tab small { color: var(--muted); font-size: 9.5px; }
+.settings-tab:hover { background: var(--surface-raised); }
+.settings-tab:hover strong { color: var(--text); }
+/* The active tab is raised, not tinted: a coloured tab competes with the
+   accent that marks the focused pane behind the sheet. */
+.settings-tab.active {
+  border-left-color: var(--accent);
+  background: var(--surface-raised);
+  box-shadow: none;
+}
+.settings-tab.active strong { color: var(--text); }
+.settings-tab.active small { color: var(--text-soft); }
+/* The rail clips, so the ring is drawn inside the tab. */
+.settings-tab:focus-visible { outline-offset: -2px; }
+
+.settings-content { padding: 16px 18px 28px; }
+
+.settings-footer {
+  min-height: 46px;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+.settings-message { color: var(--muted); font-size: 11.5px; }
+.settings-message.error {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.settings-error {
+  padding: 14px 16px;
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+/* A group is a rule and a label, not a box: five bordered panels down one
+   column is five frames and no hierarchy. */
+.settings-group {
+  margin-top: 18px;
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.settings-group + .settings-group { margin-top: 18px; }
+/* The section heading already ends in a rule. A block that follows it
+   directly does not need a second one 14 px below the first. */
+.section-heading + .settings-group,
+.section-heading + .terminal-profile-card,
+.section-heading + .snippet-card {
+  margin-top: 0;
+  padding-top: 2px;
+  border-top: 0;
+}
+.settings-group-title {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.settings-grid { gap: 12px 14px; }
+.settings-field { gap: 5px; }
+.field-label { color: var(--text-soft); font-size: 11.5px; font-weight: 600; }
+.field-hint {
+  max-width: 74ch;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* Explanation with no control of its own. A left rule marks it as an aside;
+   a full bordered box made it look like a field the reader had to fill in. */
+.settings-note {
+  padding: 2px 0 2px 10px;
+  border: 0;
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.advanced-notice {
+  margin: 12px 0 10px;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--sage) 55%, transparent);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+/* Raw JSON is the one place in Settings that is genuinely a text editor, so
+   it gets the well surface the terminal sits on. */
+.settings-json {
+  min-height: 300px;
+  height: 54vh;
+  padding: 11px 12px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 6px;
+  background: var(--well);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.settings-json:focus { border-color: var(--accent-border); }
+
+/* The folder picker sits beside a .ui-input and has to match its new height,
+   or the pair reads as a field with a taller button bolted to it. */
+.folder-picker-button { min-height: 32px; padding-inline: 10px; }
+
+/* ---- toggles ---- */
+
+.toggle-row { gap: 8px; min-height: 28px; margin-top: 12px; font-size: 11.5px; }
+.toggle-row.standalone { margin: 0 0 12px; }
+.toggle-control {
+  width: 30px;
+  height: 17px;
+  border: 1px solid var(--fg-faint);
+  background: var(--surface-soft);
+}
+.toggle-control::after {
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  background: var(--muted);
+}
+.toggle-row input:checked + .toggle-control {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.toggle-row input:checked + .toggle-control::after { transform: translateX(13px); background: var(--text); }
+/* The real checkbox is opacity:0 and absolutely positioned, so its own focus
+   ring is painted on nothing. Put the ring on the thing the eye is looking
+   at, or this control is unreachable by keyboard in practice. */
+.toggle-row input:focus-visible + .toggle-control {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- themes ---- */
+
+.theme-picker { margin-top: 16px; }
+.theme-picker-title {
+  margin: 0 0 3px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.theme-grid { grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 7px; }
+
+.theme-card {
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.theme-card:hover { background: var(--surface-raised); }
+/* Inset, so the selected card does not grow by two pixels and reflow the grid. */
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.theme-card strong { margin-top: 5px; font-size: 11px; font-weight: 600; }
+.theme-card small { color: var(--muted); font-size: 9.5px; }
+.theme-strip {
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  border-radius: 4px;
+}
+.theme-strip-prompt { font-size: 9.5px; }
+
+.theme-catalog {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+/* The native disclosure triangle is a different glyph on every platform and
+   sits at a different baseline; draw the caret so the row is stable. */
+.theme-catalog-trigger {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  list-style: none;
+}
+.theme-catalog-trigger::-webkit-details-marker { display: none; }
+.theme-catalog-trigger::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--muted);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .12s ease;
+}
+.theme-catalog[open] > .theme-catalog-trigger::before { transform: rotate(90deg); }
+.theme-catalog-trigger:hover { color: var(--text); background: var(--surface-raised); }
+.theme-catalog-body { padding: 0 9px 9px; }
+.theme-category { padding: 8px 0; }
+.theme-category-title {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.custom-theme-editor {
+  gap: 7px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.custom-color-field { font-size: 10px; }
+.custom-color-field input {
+  width: 30px;
+  height: 26px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 4px;
+}
+
+/* ---- branding ---- */
+
+.logo-picker {
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 11px;
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
+}
+.logo-preview {
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--well);
+}
+.logo-preview-fallback { font-size: 12px; }
+.logo-picker-copy > strong { font-size: 11.5px; }
+.branding-scratch-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--fg-faint);
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+/* ---- terminal profiles and snippets ---- */
+
+
+/* An editor is a block of fields under a header rule, not a raised card:
+   eight profiles as eight cards is eight frames and no hierarchy. */
+.terminal-profile-card, .snippet-card {
+  margin-top: 0;
+  padding: 13px 0 15px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.terminal-card-head {
+  margin-bottom: 12px;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.terminal-identity { gap: 9px; }
+.terminal-identity h3 { font-size: 12.5px; font-weight: 600; }
+.terminal-identity p { margin-top: 2px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
+/* Scoped to the editor: the same class marks a profile in the dashboard, and
+   that surface belongs to another file. */
+.terminal-identity .profile-mark,
+.terminal-identity .profile-mark.large {
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.snippet-card-head { gap: 8px; margin-bottom: 10px; }
+
+/* ---- about ---- */
+
+.about-hero {
+  padding: 0 0 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.about-identity { gap: 9px; }
+.about-name { font-family: var(--mono); font-size: 15px; font-weight: 600; letter-spacing: 0; }
+/* The version is data, so it is a mono chip rather than a sentence. It is
+   empty until the bootstrap answers, and an empty chip is a stray blob. */
+.about-version {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.about-version:empty { display: none; }
+.about-tagline { margin-top: 8px; max-width: 74ch; font-size: 12px; line-height: 1.6; }
+.about-credit { margin-top: 8px; font-size: 11px; }
+
+.about-links { gap: 6px; margin-top: 12px; }
+.about-link {
+  min-height: 28px;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11.5px;
+}
+.about-link:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.about-update {
+  margin-top: 16px;
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.about-update h4 {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.about-update-status { margin-bottom: 10px; max-width: 74ch; font-size: 11.5px; line-height: 1.55; }
+.about-update-row { gap: 7px; }
+
+.voice-callout {
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.voice-callout h3 { font-size: 12.5px; font-weight: 600; }
+.voice-callout p { margin-top: 4px; font-size: 11.5px; }
+.voice-wave { font-size: 16px; }
+
+/* ============================= help ============================= */
+
+.help-intro { max-width: 74ch; padding: 0 0 16px; }
+.help-intro h2 { font-size: 15px; font-weight: 600; letter-spacing: 0; }
+.help-intro p { margin-top: 6px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
+
+/* auto-fit rather than a fixed pair: the sheet is 94 vw and the two cards
+   collapse to one column on their own, with no width to keep in sync. */
+.help-grid { grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 0 26px; }
+
+.help-card {
+  padding: 12px 0 4px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.help-card h3 {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+/* A shortcut table: the key column is fixed and mono so the chips form a
+   column you can scan, and the separator is the faintest thing on screen. */
+.shortcut-row {
+  justify-content: flex-start;
+  gap: 12px;
+  min-height: 28px;
+  padding: 3px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  color: var(--text-soft);
+  font-size: 11.5px;
+}
+.shortcut-row kbd {
+  flex: none;
+  min-width: 96px;
+  padding: 2px 6px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 4px;
+  background: var(--well);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: left;
+}
+
+.concept-row {
+  padding: 7px 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.concept-row strong { color: var(--text); font-size: 11.5px; font-weight: 600; }
+.concept-row p { margin-top: 3px; max-width: 74ch; color: var(--muted); font-size: 11px; line-height: 1.55; }
+
+/* ================ error banner and status bar ================ */
+
+.app-error {
+  gap: 10px;
+  padding: 5px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger) 11%, var(--surface));
+  font-size: 11px;
+}
+#app-error-close {
+  min-height: 28px;
+  padding: 1px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 10.5px;
+}
+#app-error-close:hover { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--text); }
+
+/* 28 px, because the two controls in here are real click targets and a 24 px
+   bar cannot hold one. The bar has no vertical padding, so the buttons fill
+   it exactly rather than making it taller still. */
+.statusbar {
+  min-height: 28px;
+  gap: 8px;
+  padding: 0 9px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.sb-sep { color: var(--fg-faint); }
+#sb-shortcuts, #sb-quick {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+}
+#sb-shortcuts:hover, #sb-quick:hover, #sb-quick[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+#sb-shortcuts kbd {
+  padding: 0 4px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 4px;
+  color: var(--text-soft);
+  font: inherit;
+  line-height: 15px;
+}
+#sb-font-size { color: var(--text-soft); }
+
+/* ======================= narrow windows =======================
+   These re-state the narrow behaviour rather than leaving it to app.css:
+   media queries add no specificity, so an unqualified rule in this file would
+   otherwise beat app.css's @media rule at every width. */
+
+@media (max-width: 1040px) {
+  .settings-main { grid-template-columns: 176px minmax(0, 1fr); }
+}
+
+@media (max-width: 760px) {
+  /* app.css drops the overlay padding to 0 here, which is exactly the
+     full-bleed sheet AGENTS.md forbids: with no padding there is no
+     click-outside-to-close target left. Keep a real margin at every width. */
+  .panel-overlay { padding: clamp(8px, 2.5vh, 18px); }
+  .panel { width: 100%; height: 100%; }
+}
+
+@media (max-width: 680px) {
+  .section-heading { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .settings-main { display: flex; flex-direction: column; }
+  /* The rail becomes a tab strip that scrolls sideways; the scrollbar is
+     already suppressed above, so the strip stays exactly one row tall. */
+  .settings-tabs {
+    flex: none;
+    flex-direction: row;
+    gap: 2px;
+    overflow-x: auto;
+    padding: 6px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .settings-tab {
+    min-width: 104px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+  .settings-tab.active { border-left-color: transparent; border-bottom-color: var(--accent); }
+  .settings-tab small { display: none; }
+  .settings-content { padding: 14px 13px 24px; }
+  .settings-grid.two-column { grid-template-columns: minmax(0, 1fr); }
+  .settings-footer { flex-wrap: wrap; }
+  .settings-message { display: block; order: -1; flex-basis: 100%; }
+  .custom-theme-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .logo-picker { grid-template-columns: 46px minmax(0, 1fr); }
+  .logo-picker-actions { grid-column: 1 / -1; }
+  .panel-subtitle { display: none; }
+  .panel[data-view="dashboard"] .panel-body,
+  .panel[data-view="help"] .panel-body { padding: 12px 13px 22px; }
+}

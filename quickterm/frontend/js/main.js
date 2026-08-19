@@ -8,6 +8,7 @@ import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
+import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
 
 document.title = "QuickTerm";
 
@@ -566,7 +567,17 @@ async function boot() {
   // disposable, so its sessions are killed and its file dropped. Handles both
   // pre-adoption scratch (tracked in scratchSessionIds) and the adopted
   // "scratch" workspace (whose sessions are the live layout's).
-  async function discardScratch() {
+  //
+  // `force` separates the two callers. Replacing scratch on purpose is
+  // confirmed by the user first (newScratchWorkspace names what will die), so
+  // it kills everything. Merely LEAVING scratch for another workspace was never
+  // confirmed by anyone, and /api/sessions/cleanup kills whatever it is handed,
+  // so a busy or already-used terminal is spared and left running in the
+  // background instead. It shows up under "Unassigned" on the dashboard, where
+  // it can be reattached or stopped deliberately. The rule is the backend's own
+  // ("never expire a shell the user typed into", reap_idle), applied at the one
+  // call site that was bypassing it.
+  async function discardScratch({ force = false } = {}) {
     const ids = new Set(scratchSessionIds);
     scratchSessionIds.clear();
     if (currentWorkspace === SCRATCH_WS) {
@@ -574,7 +585,21 @@ async function boot() {
       workspaceSessionIds.clear();
       await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
     }
-    if (ids.size) await api.cleanupSessions([...ids]).catch(() => {});
+    if (!ids.size) return;
+    let doomed = [...ids];
+    if (!force) {
+      const sessions = await api.getSessions().catch(() => null);
+      // No answer means no proof of idleness, and an unprovable kill is the one
+      // we do not make: keep them all rather than guess.
+      if (!sessions) return;
+      const byId = new Map(sessions.map((session) => [session.id, session]));
+      doomed = doomed.filter((sid) => {
+        const session = byId.get(sid);
+        if (!session) return false;
+        return session.busy === false && !session.touched;
+      });
+    }
+    if (doomed.length) await api.cleanupSessions(doomed).catch(() => {});
   }
 
   // Ephemeral scratch: the first real keystroke in an unsaved scratch layout
@@ -774,7 +799,7 @@ async function boot() {
     } else {
       // "New scratch" is explicit replacement. Ordinary workspace switching
       // preserves the adopted Scratch workspace for the rest of this run.
-      if (leavingWorkspace === SCRATCH_WS) await discardScratch();
+      if (leavingWorkspace === SCRATCH_WS) await discardScratch({ force: true });
       else if (workspaceNames.includes(SCRATCH_WS)) await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
       opened = await startScratch(scratchCwd);
@@ -787,20 +812,63 @@ async function boot() {
     return opened;
   }
 
-  // Explicit replacement of the live scratch layout. Confirmed in place when
-  // there is anything running to lose, because it kills those terminals.
+  // Which scratch terminals would lose real work if scratch were replaced.
+  //
+  // The backend is no help here: POST /api/sessions/cleanup kills every id it
+  // is handed without asking, because the "never expire a shell the user typed
+  // into" rule lives in reap_idle and nowhere else. So the judgement is made
+  // here, and it is made from the backend's own two facts about a session:
+  // `busy` (a foreground process beyond the shell, so an ssh login, a dev
+  // server or a build) and `touched` (the user has written to it at least
+  // once). A pane's local `userWrote` is checked too, because a keystroke this
+  // window has seen may not have reached a /api/sessions poll yet.
+  //
+  // Every unknown counts as at risk. A wrong "ask" costs one click; a wrong
+  // kill costs whatever was running.
+  async function scratchTerminalsAtRisk() {
+    const panes = layout.panes().filter((pane) => pane.session && pane.state === "attached");
+    if (!panes.length) return [];
+    const sessions = await api.getSessions().catch(() => null);
+    const byId = new Map((sessions || []).map((session) => [session.id, session]));
+    const atRisk = [];
+    for (const pane of panes) {
+      const session = byId.get(pane.session.id);
+      const busy = session ? session.busy !== false : true;
+      const used = session ? Boolean(session.touched) : true;
+      if (!busy && !used && !pane.userWrote) continue;
+      atRisk.push({ name: pane.title || pane.session.name || pane.session.id, busy });
+    }
+    return atRisk;
+  }
+
+  function discardScratchWarning(atRisk) {
+    const names = atRisk.slice(0, 3).map((item) => item.name).join(", ");
+    const rest = atRisk.length > 3 ? ` and ${atRisk.length - 3} more` : "";
+    const busy = atRisk.filter((item) => item.busy).length;
+    const what = busy
+      ? `${busy} of them ${busy === 1 ? "is" : "are"} still running something`
+      : "you have typed in them";
+    return `Discard scratch and stop ${atRisk.length} terminal${atRisk.length === 1 ? "" : "s"} (${names}${rest})? ${what[0].toUpperCase()}${what.slice(1)}.`;
+  }
+
+  // Explicit replacement of the live scratch layout. A scratch full of
+  // untouched, idle shells is exactly what scratch is for, so replacing it goes
+  // through without a prompt. The moment one terminal is busy or has been used,
+  // the confirmation names what would be lost instead of counting panes.
   async function newScratchWorkspace() {
     if (currentWorkspace && currentWorkspace !== SCRATCH_WS) return switchWorkspace(null);
-    const live = layout.panes().filter((pane) => pane.session && pane.state === "attached").length;
-    const replace = () => switchWorkspace(null, null, { replaceScratch: true });
-    if (!live) return replace();
+    const replace = async () => {
+      // A never-adopted scratch has no workspace file, so switchWorkspace has
+      // no discard branch for it and its terminals would quietly survive as
+      // background shells although this action just said it would stop them.
+      if (!currentWorkspace) await discardScratch({ force: true });
+      return switchWorkspace(null, null, { replaceScratch: true });
+    };
+    const atRisk = await scratchTerminalsAtRisk();
+    if (!atRisk.length) return replace();
     const pane = layout.focused || layout.panes()[0];
     if (!pane) return replace();
-    pane.confirmAction(
-      `Discard scratch and stop ${live} running terminal${live === 1 ? "" : "s"}?`,
-      replace,
-      "Discard",
-    );
+    pane.confirmAction(discardScratchWarning(atRisk), replace, "Discard");
     return false;
   }
 
@@ -1252,9 +1320,15 @@ async function boot() {
     ownedSessionIds: () => [...ownedSessionIds()],
     refocusTerm: () => {
       if (!layout.focused) return false;
+      // Report success even while an overlay holds the keyboard: the caller
+      // only wants to know whether there *is* a pane to hand back to, and
+      // saying "no" would send it to the fallback branch and park focus on a
+      // sidebar button instead. focus.js decides when the pane actually takes
+      // it; the class is set either way so the pane still reads as focused.
       layout.focused.setFocused(true);
       return true;
     },
+    focusHeldByOverlay: () => !terminalMayFocus(),
     onConfigSaved: async () => {
       const [fresh, freshInventory] = await Promise.all([
         api.getConfig().catch(() => null),
@@ -1384,10 +1458,19 @@ async function boot() {
   app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
   app.balanceFocused = () => layout.balanceFocusedSplit();
 
-  function closeQuickSettings(restoreButton = false) {
+  // One rule for every overlay in the app: dismissing it makes the focused
+  // terminal typeable again, and the trigger is only the fallback when there is
+  // no pane to go back to. Panels already worked this way; quick settings
+  // parked focus on the status-bar button instead, so the next keystroke went
+  // nowhere. `handBack` is false only when the caller is opening something else
+  // that will claim focus for itself.
+  function closeQuickSettings(handBack = false) {
+    const wasOpen = !quickSettings.hidden;
     quickSettings.hidden = true;
     quickButton.setAttribute("aria-expanded", "false");
-    if (restoreButton) quickButton.focus();
+    if (wasOpen) releaseFocus("quick-settings");
+    if (!handBack) return;
+    if (!app.refocusTerm()) quickButton.focus();
   }
 
   function toggleQuickSettings() {
@@ -1398,6 +1481,9 @@ async function boot() {
     document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns"));
     quickSettings.hidden = false;
     quickButton.setAttribute("aria-expanded", "true");
+    // Claimed before focusing, because panels.close() above just asked the
+    // focused pane to take the keyboard back on the next frame (focus.js).
+    claimFocus("quick-settings");
     updateQuickSettings();
     $("quick-font-smaller").focus();
   }

@@ -1,0 +1,363 @@
+/* Dashboard: dense and informational, in the idiom of QuickCode's home view.
+ *
+ * The first dashboard was presentational: a tall hero with a glowing orbit, big
+ * rounded cards, floating action buttons. It looked like a landing page for an
+ * app you had not opened yet. This one is a working surface for someone who
+ * already has eleven terminals running: hairline cards, an 11px uppercase
+ * heading per section, monospace for every path and every measured number,
+ * status as a small pill, and a card's actions in a bordered row along its
+ * bottom edge instead of floating inside the content.
+ *
+ * Loaded after app.css on purpose (see index.html), so plain class selectors
+ * here win on order and nothing needs !important. Everything is scoped under
+ * .dashboard, the wrapper panel_dashboard.js builds, so the shared controls
+ * (.section-heading, .ui-input, the button set) keep their app-wide look
+ * everywhere else. Colours are tokens only: the palette is being re-aimed in
+ * app.css and this file must follow it, not fight it.
+ */
+
+.panel[data-view="dashboard"] .panel-body { padding: 16px 18px 28px; }
+
+.dashboard { display: flex; flex-direction: column; gap: 22px; }
+
+/* ---------- section headings ---------- */
+
+.dashboard .section-heading {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+/* The heading's own copy block; trailing controls (Kill all, the save form)
+   are siblings of it and keep their own sizing. */
+.dashboard .section-heading > div:first-child { flex: 1; min-width: 180px; }
+.dashboard .section-title {
+  margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .8px;
+  text-transform: uppercase; color: var(--muted);
+}
+.dashboard .section-subtitle {
+  margin: 3px 0 0; font-size: 11.5px; line-height: 1.4; color: var(--muted);
+}
+
+.dashboard .dashboard-section { margin: 0; }
+
+/* ---------- hero ---------- */
+
+/* Still the first thing on the page, but it is a status line now, not a
+   banner: which workspace is open and which folder its terminals start in. */
+.dashboard .dashboard-hero {
+  min-height: 0; display: flex; align-items: center; justify-content: space-between;
+  gap: 18px; flex-wrap: wrap; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  overflow: visible; animation: none;
+}
+.dashboard .dashboard-hero::after { content: none; }
+.dashboard .hero-copy { flex: 1; min-width: 220px; max-width: none; }
+.dashboard .hero-kicker {
+  display: block; margin: 0 0 3px; color: var(--muted);
+  font-size: 10px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase;
+}
+.dashboard .hero-title {
+  margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The folder is a path, so it is set in the path typeface. */
+.dashboard .hero-text {
+  margin: 4px 0 0; max-width: none; color: var(--text-soft);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.45; word-break: break-all;
+}
+.dashboard .hero-text.warning { color: var(--danger); }
+
+.dashboard .dashboard-stats { flex: none; display: flex; gap: 6px; }
+.dashboard .dashboard-stat {
+  min-width: 76px; padding: 6px 9px 7px; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--bg);
+}
+.dashboard .dashboard-stat strong {
+  display: block; font-family: var(--mono); font-size: 15px; font-weight: 500;
+  color: var(--text);
+}
+.dashboard .dashboard-stat span {
+  display: block; margin-top: 2px; color: var(--muted);
+  font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
+}
+
+/* ---------- terminal usage ---------- */
+
+.dashboard .usage-table {
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  overflow: hidden;
+}
+.dashboard .usage-row {
+  min-height: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 6px 12px; border-bottom: 1px solid var(--line);
+}
+.dashboard .usage-row:last-child { border-bottom: 0; }
+.dashboard .usage-row:hover { background: var(--surface-raised); }
+.dashboard .usage-identity {
+  flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 1px;
+}
+.dashboard .usage-identity strong { font-size: 12.5px; font-weight: 600; }
+.dashboard .usage-identity small {
+  color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+}
+.dashboard .usage-values {
+  flex: none; display: grid; grid-template-columns: repeat(4, minmax(62px, auto)); gap: 0;
+}
+.dashboard .usage-value {
+  min-width: 62px; display: flex; flex-direction: column; gap: 0;
+  padding: 0 0 0 12px; border-left: 1px solid var(--line);
+}
+.dashboard .usage-value strong {
+  color: var(--text-soft); font-family: var(--mono); font-size: 11.5px; font-weight: 500;
+}
+.dashboard .usage-value small {
+  color: var(--muted); font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+}
+
+/* ---------- the save-a-workspace form ---------- */
+
+/* Sits in the Workspaces heading row. Its two inputs live for as long as the
+   panel is open; nothing here may make them look transient. */
+/* Four controls share this row: name, folder, Browse, Save. At 520px the name
+   field was the only one without a flex-basis, so it collected the leftover and
+   collapsed to 73px, showing "Name th:". Both fields get a basis and a floor,
+   and the row is wide enough for the pair to be typeable. The folder keeps the
+   larger share because it holds an absolute path. */
+.dashboard .save-workspace-form {
+  flex: none; width: min(760px, 100%); display: flex; align-items: center;
+  flex-wrap: wrap; gap: 6px;
+}
+.dashboard .save-workspace-form > .ui-input { flex: 2 1 170px; min-width: 140px; }
+.dashboard .save-workspace-form .folder-picker-control { flex: 3 1 260px; min-width: 200px; }
+.dashboard .save-workspace-note {
+  flex-basis: 100%; margin: 0; color: var(--muted); font-size: 11px; text-align: right;
+}
+.dashboard .save-workspace-note:empty { display: none; }
+
+.dashboard .ui-input {
+  height: 30px; padding: 0 9px; border-radius: 4px;
+  border: 1px solid var(--line-strong); background: var(--bg);
+  font-family: var(--mono); font-size: 12px;
+}
+.dashboard .ui-input:focus {
+  outline: 1px solid var(--accent); outline-offset: -1px;
+  border-color: var(--accent); box-shadow: none;
+}
+.dashboard .folder-picker-control { gap: 4px; }
+.dashboard .folder-picker-button { min-height: 30px; padding-inline: 9px; }
+
+/* ---------- workspace cards ---------- */
+
+.dashboard .workspace-grid {
+  display: grid; gap: 8px; align-items: start; border-top: 0;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+.dashboard .workspace-card {
+  display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  animation: none; box-shadow: none;
+  transition: border-color .12s ease, background .12s ease;
+}
+.dashboard .workspace-card:hover {
+  transform: none; box-shadow: none; border-color: var(--line-strong);
+}
+.dashboard .workspace-card.current {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  box-shadow: none;
+}
+
+.dashboard .workspace-card-top {
+  min-height: 0; display: flex; align-items: center; gap: 8px; border: 0;
+  padding: 8px 11px 2px; justify-content: flex-start;
+}
+.dashboard .workspace-card-logo {
+  width: 16px; height: 16px; flex: none; padding: 0; border: 0;
+  border-radius: 3px; background: none; object-fit: contain;
+}
+.dashboard .workspace-card-title {
+  flex: 1; min-width: 0; margin: 0; font-size: 13.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Status as a pill, the way every other state in this app reads. */
+.dashboard .workspace-badge {
+  flex: none; padding: 0 7px; border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .4px; text-transform: uppercase; line-height: 16px;
+}
+.dashboard .workspace-card.current .workspace-badge {
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* A workspace IS a folder, so the folder is the card's subtitle. */
+.dashboard .workspace-card-folder {
+  margin: 0; padding: 0 11px 8px; color: var(--muted);
+  font-family: var(--mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dashboard .workspace-card-folder.warning { color: var(--danger); }
+
+.dashboard .workspace-preview {
+  margin: 0 11px 9px; height: 46px; gap: 2px; padding: 3px;
+  border: 1px solid var(--line); border-radius: 3px; background: var(--bg);
+}
+.dashboard .workspace-preview-pane { border-radius: 2px; background: var(--surface-raised); }
+.dashboard .workspace-preview-pane::before,
+.dashboard .workspace-preview-pane::after { display: none; }
+
+/* Actions along the bottom edge, divided by the same hairline as the card. */
+.dashboard .workspace-card-actions {
+  display: flex; align-items: stretch; margin-top: auto;
+  border-top: 1px solid var(--line);
+}
+.dashboard .workspace-card-actions > button {
+  flex: none; min-height: 0; padding: 5px 11px 6px; border-radius: 0;
+  border-right: 1px solid var(--line); background: none;
+  color: var(--muted); font-family: var(--mono); font-size: 11px; font-weight: 400;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.dashboard .workspace-card-actions > button:last-child {
+  border-right: 0; margin-left: auto;
+}
+.dashboard .workspace-card-actions > button:hover {
+  background: var(--surface-raised); color: var(--text);
+}
+.dashboard .workspace-card-actions > .card-open-button { color: var(--text-soft); }
+.dashboard .workspace-card-actions > .card-open-button:hover { color: var(--accent); }
+/* .danger-text is already forced to var(--danger) app-wide, which is right:
+   the one destructive control on a card should read destructive at rest. */
+.dashboard .workspace-card-actions > .danger-text:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.dashboard .workspace-card-actions > button:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: -1px;
+}
+
+/* The in-place folder editor. It opens under the actions row and the refresh
+   leaves the whole card alone while it is there (data-editing, render.js). */
+.dashboard .workspace-folder-editor {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  padding: 8px 11px; border-top: 1px solid var(--line); background: var(--bg);
+}
+.dashboard .workspace-folder-editor .folder-picker-control { flex: 1 1 100%; }
+.dashboard .workspace-card[data-editing] {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+}
+
+.dashboard .workspace-empty-card {
+  display: block; min-height: 0; padding: 14px; border-radius: 6px;
+  border: 1px dashed var(--line-strong); background: none; text-align: left;
+}
+.dashboard .workspace-empty-card h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.dashboard .workspace-empty-card p { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; }
+
+/* ---------- detached sessions ---------- */
+
+.dashboard .detached-groups { display: flex; flex-direction: column; gap: 8px; border-top: 0; }
+.dashboard .detached-group,
+.dashboard .other-workspace-sessions {
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  overflow: hidden;
+}
+.dashboard .detached-group.current {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+.dashboard .detached-group h3 {
+  margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-size: 10px; font-weight: 600;
+  letter-spacing: .8px; text-transform: uppercase;
+}
+.dashboard .other-workspace-sessions > summary {
+  padding: 6px 12px; cursor: pointer; color: var(--muted);
+  font-family: var(--mono); font-size: 11px; list-style: none;
+}
+.dashboard .other-workspace-sessions > summary::-webkit-details-marker { display: none; }
+.dashboard .other-workspace-sessions > summary::before { content: "▸ "; }
+.dashboard .other-workspace-sessions[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+.dashboard .other-workspace-sessions[open] > summary::before { content: "▾ "; }
+.dashboard .other-workspace-sessions > summary:hover { color: var(--text); }
+.dashboard .other-workspace-sessions .detached-group {
+  margin: 8px; background: var(--bg);
+}
+
+.dashboard .detached-session-row {
+  min-height: 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 5px 12px; border-bottom: 1px solid var(--line);
+}
+.dashboard .detached-session-row:last-child { border-bottom: 0; }
+.dashboard .detached-session-row:hover { background: var(--surface-raised); }
+.dashboard .detached-session-copy {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.dashboard .detached-session-copy strong { font-size: 12.5px; font-weight: 600; }
+.dashboard .detached-session-copy small {
+  color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+}
+.dashboard .detached-session-actions { flex: none; display: flex; align-items: center; gap: 4px; }
+
+.dashboard .detached-empty {
+  margin: 0; padding: 12px; border: 0; border-radius: 0;
+  color: var(--muted); font-size: 11.5px; text-align: left;
+}
+.dashboard .usage-table .detached-empty { border-top: 0; }
+.dashboard .detached-groups > .detached-empty {
+  border: 1px dashed var(--line-strong); border-radius: 6px;
+}
+
+/* ---------- quick launch ---------- */
+
+.dashboard .dashboard-lower { display: block; margin: 0; }
+.dashboard .dashboard-list-card {
+  min-width: 0; padding: 0; border: 0; border-radius: 0; background: none;
+}
+.dashboard .quick-profile-list {
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+  overflow: hidden;
+}
+.dashboard .quick-profile-list:empty { display: none; }
+.dashboard .quick-profile {
+  width: 100%; display: flex; align-items: center; gap: 9px;
+  padding: 6px 12px; border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0; background: none; text-align: left;
+}
+.dashboard .quick-profile:last-child { border-bottom: 0; }
+.dashboard .quick-profile:hover { background: var(--surface-raised); }
+.dashboard .quick-profile:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.dashboard .profile-mark {
+  flex: none; width: 22px; height: 22px; display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 3px; background: var(--bg);
+  color: var(--muted); font-family: var(--mono); font-size: 10px;
+}
+.dashboard .quick-profile-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.dashboard .quick-profile-copy strong { font-size: 12.5px; font-weight: 600; }
+.dashboard .quick-profile-copy small {
+  margin-top: 1px; color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+}
+.dashboard .profile-arrow { flex: none; color: var(--muted); }
+.dashboard .quick-profile:hover .profile-arrow { color: var(--accent); }
+.dashboard .quiet-empty {
+  margin: 0; padding: 12px; border: 1px dashed var(--line-strong); border-radius: 6px;
+  color: var(--muted); font-size: 11.5px;
+}
+
+/* ---------- shared controls, dashboard-sized ---------- */
+
+.dashboard .primary-button,
+.dashboard .secondary-button { min-height: 30px; padding: 0 11px; border-radius: 4px; font-size: 12px; }
+.dashboard .secondary-button.compact { min-height: 26px; padding: 0 9px; font-size: 11px; }
+.dashboard .text-button.compact { padding: 3px 7px; font-size: 11px; }
+.dashboard .primary-button:focus-visible,
+.dashboard .secondary-button:focus-visible,
+.dashboard .text-button:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: 1px;
+}
+
+@media (max-width: 720px) {
+  .dashboard .dashboard-stats { display: none; }
+  .dashboard .save-workspace-form { width: 100%; flex-wrap: wrap; }
+  .dashboard .usage-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .dashboard .usage-values { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard .usage-value:nth-child(odd) { padding-left: 0; border-left: 0; }
+}

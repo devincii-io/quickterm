@@ -7,6 +7,7 @@
 import * as api from "./api.js";
 import { getTheme, DEFAULT_THEME } from "./themes.js";
 import { PaneAttachProtocol } from "./pane_protocol.js";
+import { terminalMayFocus } from "./focus.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
@@ -272,6 +273,11 @@ export class Pane {
       // Async spawn/replay callbacks from an older pane must never steal focus
       // after the user has already moved elsewhere.
       if (this._disposed || !this.term || !this.el.classList.contains("focused")) return;
+      // …nor after an overlay opened. These calls are deliberately deferred to
+      // a frame and a timeout, which puts them *after* whatever the palette or
+      // a panel focused, so the guard has to be re-checked here and not only
+      // at the call site.
+      if (!terminalMayFocus()) return;
       try { this.term.focus(); } catch (_) { /* terminal is being recreated */ }
     };
     focus();

@@ -1,9 +1,13 @@
 import { make } from "./panel_shared.js";
+import { configPurpose } from "./panel_settings_kit.js";
 export function renderGeneralSettings(host) {
     const cfg = this.settingsDraft;
     host.append(this._sectionHeading("General", "A few comfortable defaults. Changes to the server port apply after restart."));
     const group = make("div", "settings-group");
-    group.append(make("h3", "settings-group-title", "Appearance"));
+    group.append(
+      make("h3", "settings-group-title", "Appearance"),
+      configPurpose("How terminal text and the app around it look. Every change previews immediately and applies to panes that are already open."),
+    );
     const font = this._textInput(cfg.font_family, "JetBrains Mono");
     font.addEventListener("input", () => { cfg.font_family = font.value; });
     const fontSize = this._select(
@@ -30,7 +34,10 @@ export function renderGeneralSettings(host) {
     group.append(this._themePicker(cfg));
 
     const branding = make("div", "settings-group");
-    branding.append(make("h3", "settings-group-title", "Branding"));
+    branding.append(
+      make("h3", "settings-group-title", "Branding"),
+      configPurpose("The mark shown top-left. A workspace can carry its own, so you can tell one project's window from another at a glance."),
+    );
     branding.append(this._logoPicker({
       title: "App logo",
       value: cfg.logo,
@@ -50,7 +57,10 @@ export function renderGeneralSettings(host) {
     }
 
     const behavior = make("div", "settings-group");
-    behavior.append(make("h3", "settings-group-title", "Application"));
+    behavior.append(
+      make("h3", "settings-group-title", "Application"),
+      configPurpose("How QuickTerm itself runs: the shortcut that summons it, the local port it serves on, and how much it keeps in memory. The port and the summon shortcut apply after a restart."),
+    );
     const hotkey = this._textInput(cfg.summon_hotkey, "ctrl+alt+grave");
     hotkey.addEventListener("input", () => { cfg.summon_hotkey = hotkey.value; });
     const port = this._textInput(cfg.port, "8620");

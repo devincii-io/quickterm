@@ -18,25 +18,36 @@ function theme(label, note, chrome, base, accent) {
 
 export const DEFAULT_THEME = "graphite";
 export const CUSTOM_THEME = "custom";
+// Six colours are the whole chrome contract: applyChromeTheme() mixes every
+// other surface, line and state out of them. They double as the fallback when
+// a custom theme omits a field, so they must stay a coherent palette on their
+// own. Warm amber on near-black, matched to the sibling QuickCode UI.
 export const CUSTOM_THEME_DEFAULTS = {
-  background: "#171b1a",
-  surface: "#222826",
-  text: "#ecebe5",
-  muted: "#858e88",
-  accent: "#e6a94b",
-  danger: "#d47c73",
+  background: "#15140f",
+  surface: "#24221b",
+  text: "#e9e3d5",
+  // Ink at 62% over the background. 55% reads as the right weight but measures
+  // 4.38:1 on --surface, so readableColor() would drag it back up anyway.
+  muted: "#98948a",
+  accent: "#c8973f",
+  danger: "#d76c53",
 };
 
 export const TERMINAL_THEMES = {
+  // The default. Its chrome is CUSTOM_THEME_DEFAULTS, and css/app.css hardcodes
+  // what applyChromeTheme() derives from it, so the pre-boot paint matches.
+  // The terminal sits one step under the chrome surface instead of on its own
+  // cool grey, and the ANSI ramp keeps its hues: only the neutrals warm up and
+  // yellow/red/green land on the palette's own amber, coral and moss.
   graphite: theme("Graphite", "QuickTerm's warm default",
-    { background: "#171B1A", surface: "#222826", text: "#ECEBE5", muted: "#858E88", accent: "#E6A94B", danger: "#D47C73" }, {
-    background: "#1E2124", foreground: "#D6D3C9", cursor: "#E0A030",
-    selectionBackground: "#3A4046",
-    black: "#22262A", red: "#B4544B", green: "#7C9B6E", yellow: "#C89543",
-    blue: "#6E8898", magenta: "#9A7F9E", cyan: "#6FA090", white: "#B9B6AD",
-    brightBlack: "#4C545C", brightRed: "#C97B70", brightGreen: "#98B58B",
-    brightYellow: "#E0A030", brightBlue: "#8FA9BA", brightMagenta: "#B49CB8",
-    brightCyan: "#8FBCAC", brightWhite: "#D6D3C9",
+    { background: "#15140F", surface: "#24221B", text: "#E9E3D5", muted: "#98948A", accent: "#C8973F", danger: "#D76C53" }, {
+    background: "#1B1A15", foreground: "#D9D3C5", cursor: "#D9A441",
+    selectionBackground: "#3D3A2E",
+    black: "#24221B", red: "#B25843", green: "#7C9B63", yellow: "#C8973F",
+    blue: "#6E8898", magenta: "#9A7F9E", cyan: "#6FA090", white: "#B8B2A3",
+    brightBlack: "#5A5343", brightRed: "#D76C53", brightGreen: "#8FB56A",
+    brightYellow: "#D9A441", brightBlue: "#8FA9BA", brightMagenta: "#B49CB8",
+    brightCyan: "#8FBCAC", brightWhite: "#E9E3D5",
   }),
   "one-dark": theme("One Dark", "The Atom classic",
     { background: "#21252B", surface: "#2C313C", text: "#ABB2BF", muted: "#7F848E", accent: "#61AFEF", danger: "#E06C75" }, {

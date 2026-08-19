@@ -77,9 +77,17 @@ class _PrivacyFormatter(logging.Formatter):
 class _DesktopApi:
     """Small, local-only bridge for native desktop capabilities.
 
-    The browser frontend deliberately cannot learn arbitrary host paths. The
-    installed pywebview shell can expose a folder selected by the user through
-    an operating-system dialog, which is the only path this bridge returns.
+    This used to claim the browser frontend deliberately cannot learn arbitrary
+    host paths, and that stopped being true when ``GET /api/fs/dirs`` gave the
+    frontend its own directory browser. The claim was decorative even before
+    that: the real boundary is the loopback bind plus the per-install token, and
+    behind that token ``GET /api/file`` reads any file on the host while
+    ``POST /api/sessions`` spawns arbitrary processes.
+
+    What this bridge still is: the route to the operating system's own folder
+    dialog, offered as a secondary choice inside the in-app browser for people
+    who prefer it. It exists only in the installed pywebview shell, so nothing
+    may depend on it being there.
     """
 
     def __init__(self) -> None:

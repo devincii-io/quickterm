@@ -22,6 +22,9 @@ first for the architecture, conventions, and packaging rules.
 class Profile:
     name: str
     cmd: str                    # executable, e.g. "powershell.exe" or "claude"
+    description: str = ""       # one line: what this terminal is for. Optional and
+                                # defaulted, so a config written by an older
+                                # build still loads.
     args: list[str] = field(default_factory=list)
     # No folder field of any kind: the workspace root places every session.
     env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
@@ -42,7 +45,9 @@ class Profile:
 @dataclass
 class Snippet:
     name: str
-    text: str
+    text: str                   # exact keystrokes, ending in the "\r" that runs the command
+    description: str = ""       # one line: what it does and when to reach for it.
+                                # Optional and defaulted, as on Profile.
 
 @dataclass
 class VoiceConfig:
@@ -231,6 +236,24 @@ def resolve_start_dir(root: str | None) -> str | None # the root if it exists, e
 def root_exists(root: str | None) -> bool
 ```
 
+## quickterm/browse.py
+
+```python
+MAX_ENTRIES: int = 2000
+
+class BrowseError(Exception):
+    missing: bool
+
+def roots() -> list[dict]                       # [{name, path}]
+def list_dirs(path: str | None = None) -> dict  # {path, name, parent, dirs, roots, truncated}
+```
+
+Directory-only listing behind `GET /api/fs/dirs`. Files are never reported: a
+folder picker is not a file browser. Raises `BrowseError` and nothing else, so
+a typed path bar cannot produce a traceback; `missing` separates "no such
+folder" (→ 404) from "not a folder / cannot be read" (→ 400). Statically
+imported by `server.py`, so it needs no `hiddenimports` entry.
+
 ## quickterm/server.py
 
 ```python
@@ -266,6 +289,7 @@ REST (JSON, under `/api`):
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
 | GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
+| GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
 | POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
@@ -323,7 +347,14 @@ class _DesktopApi:
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
   native Edge WebView2 viewer. The viewer receives `_DesktopApi` as its
   pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
-  one existing selected directory or `None` on Cancel/failure.
+  one existing selected directory or `None` on Cancel/failure. It is the
+  secondary picker now, offered from inside the in-app folder browser; its
+  docstring's claim that "the browser frontend deliberately cannot learn
+  arbitrary host paths" no longer holds, because `GET /api/fs/dirs` lists
+  directories to any token-holding client. That is a narrowing of what the
+  bridge is for, not a new trust boundary: behind the same token
+  `GET /api/file` already reads any file and `POST /api/sessions` already
+  spawns arbitrary processes.
 - Spawn autostart profiles on startup.
 - Clean shutdown: manager.shutdown() on exit.
 - Close-to-tray (win32, non-elevated): closing the primary window hides to the
@@ -402,11 +433,19 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   when different the sidebar uses `workspace/global`, the status names the total,
   and Dashboard has separate **this workspace** / **all live** statistics plus
   explicit Unassigned ownership.
-- Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Terminal profiles expose shell type,
-  detected WSL distributions, starting folder, start command, shortcut, and autostart without requiring JSON.
-  `ssh`/`sftp` profiles swap the starting-folder field for Host/Port/Username/Private key (`.ppk`);
+- Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Nothing configurable is a bare
+  name plus a value: profiles and snippets each carry a `description`, and every row shows name,
+  description and a compact line of what it actually runs. Terminal profiles are grouped by
+  `terminal_type`; both lists gain a filter box over name/description/command at six items or more.
+  Each editor opens with a sentence about what that kind of thing is. Per-item problems (no name,
+  duplicate name, no command, no executable, no SSH host, bad environment) are marked at the item;
+  the footer validation in `panels.js` `_settings()` remains the backstop that refuses the save.
+  Empty states name a thing worth making rather than reporting that the list is empty.
+  Terminal profiles expose shell type,
+  detected WSL distributions, start command, shortcut, and autostart without requiring JSON.
+  `ssh`/`sftp` profiles add Host/Port/Username/Private key (`.ppk`);
   `ssh` relabels start command as a remote command; `sftp` hides it.
-  `claude-code` exposes a project folder and native launch modes: new,
+  `claude-code` exposes native launch modes: new,
   continue latest (`--continue`), choose a session (`--resume`), or open the
   background-agent manager (`claude agents`). Its executable is detected in the
   terminal inventory but is profile-only rather than a generic system shell.
@@ -422,11 +461,34 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
-  startup command runs after that location is selected. Every local profile's
-  Starting folder / Project folder control includes a native pywebview folder
-  picker while retaining manual entry. Cancel preserves the prior value; the
-  picker is visibly unavailable in a standalone browser because browsers may
-  not disclose an arbitrary host directory path.
+  startup command runs after that location is selected. Every folder field is
+  built by the one shared `folderPickerControl(input, options)` in
+  `panel_shared.js`, which keeps manual entry and dispatches a bubbling `input`
+  event on the field when a folder is picked, so callers need no second
+  listener. Cancel preserves the prior value.
+- Browse opens the in-app directory browser (`folder_browser.js`, backed by
+  `GET /api/fs/dirs`), starting from whatever the field already holds. It works
+  in every viewer, including a plain browser tab, so Browse is never disabled.
+  The native pywebview dialog is a **secondary** action offered from inside
+  that modal, and only where the bridge exists. It stopped being the mechanism
+  because it exists only in the installed app and moves focus out of the
+  document while it is open.
+  Modal contract: it resolves to an absolute path or `null`, claims the
+  keyboard through `focus.js` for as long as it is open (a focused pane
+  re-asserts `term.focus()` on a rAF *and* a timeout, so an overlay that does
+  not claim loses its own input a frame later), and releases on close.
+  Keyboard (`folderBrowserAction(key, {ctrl, where})`, pure and unit-tested,
+  where `where` is `"path"` / `"row"` / `"other"`): Escape cancels; Ctrl+Enter
+  uses the folder you are currently in; Enter in the path bar goes to the typed
+  path; Enter or Right descends into the focused row; Left or Backspace goes to
+  the parent; Up/Down move between rows and step out of the path bar into the
+  list; Home/End jump to the first and last row. Enter on a footer button is
+  left to that button, and Left/Right/Backspace stay editing keys in the path
+  bar. Rows carry `tabindex="-1"` (roving focus), so Tab cycles the modal's
+  controls rather than every folder, and the modal traps Tab itself because the
+  panel behind it traps Tab into its own element. "Use this folder" resolves a
+  path that was typed but never listed, so a typo shows an error in the modal
+  instead of becoming a workspace folder that does not exist.
 - Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v,
   zoom, detach, kill, open file viewer) / snippets / recent sessions. Workspaces
   are offered ONLY as enumerated `load workspace: <name>` rows. There is no

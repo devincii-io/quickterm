@@ -8,7 +8,14 @@
 <link rel="icon" type="image/png" sizes="16x16" href="/assets/icon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/assets/icon-180.png">
 <link rel="stylesheet" href="/vendor/xterm.css">
+<!-- app.css carries the tokens and the base shell. The four below are the
+     overhaul layers and load after it on purpose: later wins, so each one
+     can restyle its own surface without fighting app.css on specificity. -->
 <link rel="stylesheet" href="/css/app.css">
+<link rel="stylesheet" href="/css/sidebar.css">
+<link rel="stylesheet" href="/css/panels.css">
+<link rel="stylesheet" href="/css/dashboard.css">
+<link rel="stylesheet" href="/css/browser.css">
 </head>
 <body>
 <div id="app">

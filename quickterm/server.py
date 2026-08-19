@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
 
-from quickterm import putty_tools
+from quickterm import browse, putty_tools
 
 if TYPE_CHECKING:
     from quickterm.config import AppConfig
@@ -638,6 +638,33 @@ def create_app(
             "truncated": size > FILE_READ_CAP,
             "text": data.decode("utf-8", errors="replace"),
         }
+
+    @app.get("/api/fs/dirs")
+    async def list_dirs(path: str | None = None) -> dict:
+        # Backs the in-app folder browser, which replaced the native pywebview
+        # dialog: that one existed only in the installed app and dropped focus
+        # out of the page while it was open.
+        #
+        # This does widen what a frontend can learn about the host, and
+        # `_DesktopApi`'s docstring in app.py used to claim the browser
+        # frontend could not learn arbitrary host paths. That claim is no
+        # longer true, so it is worth being plain about the size of the change:
+        # it is small, because the boundary was never the file system. The
+        # server binds 127.0.0.1, every /api route requires the per-install
+        # token from auth.py, and behind that token `GET /api/file` already
+        # reads any file on the host while `POST /api/sessions` already spawns
+        # arbitrary processes. Anything that can call this endpoint can already
+        # run `dir` in a PTY and read the output back over the WebSocket. The
+        # token and the Host/Origin guard are the real boundary; do not weaken
+        # either to make this route more convenient.
+        #
+        # A directory scan is blocking I/O (a cold network share can take
+        # seconds), so it goes to a thread like every other filesystem call
+        # here. See the "blocking work never runs on the event loop" rule.
+        try:
+            return await asyncio.to_thread(browse.list_dirs, path)
+        except browse.BrowseError as exc:
+            raise HTTPException(404 if exc.missing else 400, str(exc)) from exc
 
     @app.post("/api/assets")
     async def upload_asset(request: Request) -> dict:

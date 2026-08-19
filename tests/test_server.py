@@ -1482,3 +1482,81 @@ def test_elevated_terminal_opens_in_the_workspace_folder(
     ).status_code == 200
     assert launched[-1]["cwd"] == str(root)
     assert "workspace" not in launched[-1]
+
+
+# --- directory browser endpoint -----------------------------------------------
+
+
+def test_dir_listing_reports_directories_a_git_flag_and_a_parent(client, tmp_path):
+    root = (tmp_path / "root").resolve()
+    (root / "repo" / ".git").mkdir(parents=True)
+    (root / "plain").mkdir()
+    (root / "notes.txt").write_text("x", encoding="utf-8")
+
+    body = client.get("/api/fs/dirs", params={"path": str(root)}).json()
+    assert body["path"] == str(root)
+    assert body["parent"] == str(root.parent)
+    assert [(d["name"], d["is_git"]) for d in body["dirs"]] == [("plain", False), ("repo", True)]
+    assert body["roots"], "the modal needs roots to offer once it runs out of parents"
+    assert body["truncated"] is False
+
+
+def test_dir_listing_defaults_to_the_home_folder(client):
+    from pathlib import Path as _Path
+
+    assert client.get("/api/fs/dirs").json()["path"] == str(_Path.home().resolve())
+
+
+def test_dir_listing_rejects_a_file_and_a_missing_path_without_a_traceback(client, tmp_path):
+    a_file = tmp_path / "notes.txt"
+    a_file.write_text("x", encoding="utf-8")
+
+    not_a_dir = client.get("/api/fs/dirs", params={"path": str(a_file)})
+    assert not_a_dir.status_code == 400
+    assert "not a folder" in not_a_dir.json()["detail"]
+
+    missing = client.get("/api/fs/dirs", params={"path": str(tmp_path / "gone")})
+    assert missing.status_code == 404
+    assert "no such folder" in missing.json()["detail"]
+
+
+def test_dir_listing_turns_a_permission_error_into_a_400(client, tmp_path, monkeypatch):
+    from quickterm import browse
+
+    def refuse(path):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(browse.os, "scandir", refuse)
+    response = client.get("/api/fs/dirs", params={"path": str(tmp_path)})
+    assert response.status_code == 400
+    assert "permission denied" in response.json()["detail"]
+
+
+def test_dir_listing_runs_off_the_event_loop(client, tmp_path, monkeypatch):
+    # A cold network share can take seconds to scan, and the loop also drives
+    # every live PTY's output pump. See the AGENTS "blocking work never runs on
+    # the event loop" rule.
+    from quickterm import browse
+
+    real = browse.list_dirs
+    on_loop: list[bool] = []
+
+    def record(path=None):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)  # a worker thread has no running loop
+        return real(path)
+
+    monkeypatch.setattr(browse, "list_dirs", record)
+    assert client.get("/api/fs/dirs", params={"path": str(tmp_path)}).status_code == 200
+    assert on_loop == [False]
+
+
+def test_dir_listing_is_token_gated_like_every_other_api_route(manager, cfg):
+    with TestClient(
+        create_app(manager, cfg, token="s3cret"), base_url=f"http://127.0.0.1:{cfg.port}"
+    ) as c:
+        assert c.get("/api/fs/dirs").status_code == 403
+        assert c.get("/api/fs/dirs", headers={"X-QuickTerm-Token": "s3cret"}).status_code == 200

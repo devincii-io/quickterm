@@ -3,6 +3,7 @@ import {
   DASHBOARD_REFRESH_MS, TERMINAL_TYPES, environmentError, inferTerminalType, make,
 } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
+import { claimFocus, releaseFocus } from "./focus.js";
 import { renderGeneralSettings } from "./panel_settings_general.js";
 import { renderThemePicker, renderLogoPicker } from "./panel_settings_appearance.js";
 import { renderTerminalSettings } from "./panel_settings_terminals.js";
@@ -94,6 +95,7 @@ export class Panels {
     // committed theme back so closing = cancel.
     const revert = this._themePreviewDirty ? this.app.appliedTheme() : null;
     this._themePreviewDirty = false;
+    if (this.open) releaseFocus("panel");
     this.open = null;
     this._clearInlineConfirmation();
     this.overlay.hidden = true;
@@ -116,6 +118,9 @@ export class Panels {
   show(name) {
     const refreshing = this.open === name;
     if (!refreshing) this.returnFocus = document.activeElement;
+    // A panel opened over a focused pane owns the keyboard until it closes;
+    // see focus.js for why the pane's own re-focus cannot be trusted to stop.
+    if (!this.open) claimFocus("panel");
     this.open = name;
     this.overlay.hidden = false;
     this.panelEl.dataset.view = name;
@@ -127,7 +132,7 @@ export class Panels {
     };
     [this.titleEl.textContent, this.subtitleEl.textContent] = titles[name] || titles.help;
     if (name === "dashboard") {
-      this._dashboard(refreshing);
+      this._dashboard();
       this._startDashboardRefresh();
     } else if (name === "settings") {
       this.bodyEl.textContent = "";
@@ -140,20 +145,40 @@ export class Panels {
   }
 
   // Live data on the dashboard (session list, pane counts) keeps itself
-  // fresh; refreshes render in place without flashing or moving the scroll.
+  // fresh. A refresh patches the existing DOM in place (see render.js), so it
+  // no longer replaces the node under the pointer, the input under the caret,
+  // or the field the folder picker is holding a reference to.
   _startDashboardRefresh() {
     this._stopDashboardRefresh();
     this._dashTimer = setInterval(() => {
-      // Rebuilding the dashboard steals focus from action buttons just as
-      // surely as from inputs. Pause while focus is anywhere in its body;
-      // header/close-button focus does not block background refreshes.
       // A hidden window (trayed, minimized, other virtual desktop) must not
-      // keep issuing 2+N requests and rebuilding the whole panel every 5 s.
+      // keep issuing 2+N requests every 5 s.
       if (document.hidden) return;
-      const interacting = this.bodyEl.contains(document.activeElement);
-      if (this.open === "dashboard" && !this._dashLoading
-          && !interacting && !this._inlineConfirmation) this._dashboard(true);
+      if (this.open !== "dashboard" || this._dashLoading) return;
+      // A destructive confirmation is a fixed box anchored to its trigger. A
+      // refresh that moved or removed the trigger would strand it.
+      if (this._inlineConfirmation) return;
+      // Somebody is holding the dashboard still across an await. This used to
+      // be inferred from "is anything in the panel body focused?", which is
+      // exactly the wrong test for the folder picker: it disables its Browse
+      // button before awaiting the chooser, a disabled button drops focus to
+      // <body>, and the refresh ran straight through the folder choice.
+      if (this._dashBusy > 0) return;
+      this._dashboard();
     }, DASHBOARD_REFRESH_MS);
+  }
+
+  // Counted, because two folder fields can be busy at once (the save form and
+  // an open card editor). The returned release is idempotent so a caller can
+  // wire it to both a completion signal and a timeout ceiling.
+  holdDashboardRefresh() {
+    this._dashBusy = (this._dashBusy || 0) + 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._dashBusy -= 1;
+    };
   }
 
   _stopDashboardRefresh() {
@@ -334,8 +359,10 @@ export class Panels {
     return preview;
   }
 
-  async _dashboard(refreshing = false) {
-    return renderDashboard.call(this, refreshing);
+  // No "refreshing" flag any more: every render is a patch of the same DOM,
+  // and the first one builds it.
+  async _dashboard() {
+    return renderDashboard.call(this);
   }
   _terminalLabel(profile) {
     const type = inferTerminalType(profile);

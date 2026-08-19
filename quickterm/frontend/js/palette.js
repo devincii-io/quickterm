@@ -4,6 +4,7 @@
 
 import * as api from "./api.js";
 import { displaySnippet } from "./panel_shared.js";
+import { claimFocus, releaseFocus } from "./focus.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
 // long multi-line snippet cannot push the destination out of view.
@@ -86,6 +87,11 @@ export class Palette {
   async openPalette() {
     const requestId = ++this.requestId;
     this.open = true;
+    // Claim the keyboard before focusing: whatever this palette replaced has
+    // already asked the focused pane to re-focus itself, and that request lands
+    // a frame from now. Without the claim it wins and Alt+K opens a palette you
+    // cannot type into.
+    claimFocus("palette");
     this.prompt = null;
     this.foreignMode = false;
     this.overlay.hidden = false;
@@ -93,7 +99,7 @@ export class Palette {
     this.input.placeholder = "command / profile / snippet / session";
     this.items = this._staticItems();
     this._refilter();
-    this.input.focus();
+    this.focusInput();
     // enrich with live data
     const [sessions, workspaces] = await Promise.all([
       api.getSessions().catch(() => []),
@@ -159,7 +165,21 @@ export class Palette {
     this.prompt = null;
     this.foreignMode = false;
     this.overlay.hidden = true;
+    // Release before asking for the terminal back, or the guard this palette
+    // installed would refuse its own hand-off.
+    releaseFocus("palette");
     this.app.refocusTerm();
+  }
+
+  // The input is the palette: every path that shows it, opening or stepping
+  // into a two-step prompt, lands here. Focus is re-asserted on the next frame
+  // because the overlay was hidden a moment ago and WebView2 does not always
+  // move focus into an element that was display:none in the same task.
+  focusInput() {
+    this.input.focus();
+    requestAnimationFrame(() => {
+      if (this.open && document.activeElement !== this.input) this.input.focus();
+    });
   }
 
   // ---- internals ----
@@ -230,11 +250,20 @@ export class Palette {
     // otherwise indistinguishable in the list.
     const target = a.focusedPaneName?.();
     for (const s of a.snippets) {
+      // A description says why the snippet is kept; the command usually only
+      // repeats what the name already implies. Snippets written before
+      // descriptions existed have none, so the command stays the fallback.
       const command = snippetHint(s.text);
+      const what = (s.description || "").trim() || command;
       items.push({
         kind: "snippet",
         label: `snippet: ${s.name}`,
-        hint: target ? `${command} → ${target}` : command,
+        hint: target ? `${what} → ${target}` : what,
+        // Searched but not shown: the row has one line, and a snippet found by
+        // a word from its description still has to be recognisable by name.
+        // The label leads, so typing "snippet" still lists every snippet and
+        // the word-start scoring bonus lands where it did before.
+        search: [`snippet: ${s.name}`, s.description, command].filter(Boolean).join(" "),
         run: () => a.sendSnippet(s),
       });
     }
@@ -248,7 +277,7 @@ export class Palette {
     this.listEl.textContent = "";
     this.filtered = [];
     this.sel = 0;
-    this.input.focus();
+    this.focusInput();
   }
 
   _foreignSessionMode() {
@@ -266,7 +295,7 @@ export class Palette {
       })),
     ];
     this._refilter();
-    this.input.focus();
+    this.focusInput();
   }
 
   _key(e) {
@@ -321,7 +350,10 @@ export class Palette {
     const q = this.input.value.trim();
     const previous = resetSelection ? null : this.filtered[this.sel];
     this.filtered = this.items
-      .map((item, i) => ({ item, i, score: fuzzyScore(q, item.label) }))
+      // `search` widens what an item can be found by without widening what it
+      // shows. A snippet carries its description there, so "deploy" finds the
+      // snippet described as the deploy step even though its name is `dp`.
+      .map((item, i) => ({ item, i, score: fuzzyScore(q, item.search || item.label) }))
       .filter((x) => x.score >= 0)
       .sort((x, y) => y.score - x.score || x.i - y.i)
       .map((x) => x.item);

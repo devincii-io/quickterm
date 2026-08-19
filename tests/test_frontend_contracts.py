@@ -114,24 +114,65 @@ def test_claude_code_is_an_explicit_project_profile_type():
     assert 'profile.subpath' not in source
 
 
-def test_every_folder_field_has_the_native_picker():
+def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog():
+    # This used to assert the native pywebview dialog *was* the mechanism. It
+    # cannot be: that dialog exists only in the installed app, so Browse was
+    # dead in a plain browser, and opening it moves focus out of the document.
+    # The invariant that matters is unchanged in shape — one shared control
+    # behind every folder field — but the primary picker is now the in-app
+    # browser, with the OS dialog kept as a secondary route.
     settings = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
     shared = (FRONTEND_JS / "panel_shared.js").read_text(encoding="utf-8")
     dashboard = (FRONTEND_JS / "panel_dashboard.js").read_text(encoding="utf-8")
+    browser = (FRONTEND_JS / "folder_browser.js").read_text(encoding="utf-8")
     app = (Path(__file__).parents[1] / "quickterm" / "app.py").read_text(encoding="utf-8")
 
-    assert 'class _DesktopApi:' in app
-    assert 'js_api=desktop_api' in app
     # One shared control backs every folder field, so a fix reaches all of them.
     assert "export function folderPickerControl" in shared
-    assert "pickNativeFolder(input.value" in shared
     assert 'folder-picker-control' in shared
+    # Primary: the in-app browser, opened from whatever the field already holds.
+    assert 'from "./folder_browser.js"' in shared
+    assert "openFolderBrowser({" in shared
+    assert "startPath: input.value || options.startIn" in shared
+    # Browse must never be disabled again: that is what made it useless outside
+    # the installed app.
+    assert "browse.disabled = !nativeFolderPickerAvailable()" not in shared
+    # Secondary: the OS dialog, still reachable, still only where it exists.
+    assert 'class _DesktopApi:' in app
+    assert 'js_api=desktop_api' in app
+    assert "pick: pickNativeFolder" in shared
+    assert "nativeBtn.hidden = !(native && native.available())" in browser
+    # The modal owns the keyboard while it is open, or the focused terminal
+    # pane re-asserts term.focus() a frame later and steals the path bar.
+    assert 'claimFocus(FOCUS_OWNER)' in browser
+    assert 'releaseFocus(FOCUS_OWNER)' in browser
     # Both places a workspace folder is chosen: naming a new one, and
     # repointing an existing card. Terminal settings has no folder field at all
     # now, so the dashboard is the only picker left.
     assert "folderPickerControl(" in dashboard
     assert dashboard.count("folderPickerControl(") >= 2
     assert "folderPickerControl(" not in settings
+
+
+def test_dashboard_refreshes_by_patching_instead_of_rebuilding():
+    dashboard = (FRONTEND_JS / "panel_dashboard.js").read_text(encoding="utf-8")
+    panels = PANELS_JS.read_text(encoding="utf-8")
+
+    # The dashboard reloads itself every 5 s. Emptying the panel body and
+    # rebuilding it destroyed whatever the user was in the middle of, including
+    # the <input> the folder picker had captured before awaiting the chooser.
+    assert 'from "./render.js"' in dashboard
+    assert "patchList(" in dashboard
+    assert 'this.bodyEl.textContent = ""' not in dashboard.split("function buildDashboard")[1]
+
+    # The refresh used to pause only while focus sat inside the panel body. The
+    # picker disables its Browse button before awaiting, a disabled button drops
+    # focus to <body>, and the guard let the refresh through. Callers now take
+    # an explicit counted lock instead.
+    assert "this.bodyEl.contains(document.activeElement)" not in panels
+    assert "holdDashboardRefresh()" in panels
+    assert "this._dashBusy > 0" in panels
+    assert "panel.holdDashboardRefresh()" in dashboard
 
 
 def test_workspace_folder_reaches_every_spawn_path():
@@ -192,3 +233,65 @@ def test_full_panels_return_focus_to_the_terminal():
     assert "if (!this.app.refocusTerm()" in panels
     assert "if (!layout.focused) return false" in main
     assert "layout.focused.setFocused(true)" in main
+
+
+def test_every_configurable_thing_carries_its_own_description():
+    """No configured thing is a bare name plus a value.
+
+    A profile and a snippet each declare what they are for, are searchable by
+    it, and say what they actually run. This is the invariant the whole
+    Settings rework exists for, so it is asserted rather than left to review.
+    """
+    terminals = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
+    snippets = (FRONTEND_JS / "panel_settings_snippets.js").read_text(encoding="utf-8")
+    kit = (FRONTEND_JS / "panel_settings_kit.js").read_text(encoding="utf-8")
+
+    for source in (terminals, snippets):
+        assert 'from "./panel_settings_kit.js"' in source
+        # A first-class field with its own label and hint, not a placeholder
+        # bolted onto something else.
+        assert 'this._field("Description"' in source
+        # A row shows the description and a compact line of what it runs.
+        assert "configDescription(" in source
+        assert "configSummary(" in source
+        # A problem is marked at the item. The footer check in panels.js
+        # `_settings()` stays as the backstop that refuses the save.
+        assert "configProblems(" in source
+        # An empty state names what to make; a filter searches every field.
+        assert "configEmpty({" in source
+        assert "matchesQuery(" in source
+        # A newly added item is created with the key its editor binds to.
+        assert 'description: ""' in source
+
+    assert "export const FILTER_THRESHOLD" in kit
+    assert "export function configEmpty" in kit
+    # Terminal profiles have a kind, so they are grouped by it.
+    assert "configGroupHeading(" in terminals
+    assert "inferTerminalType(profile) === kind" in terminals
+
+def test_absolutely_positioned_sidebar_children_outrank_the_stretch_rule():
+    """app.css stretches every direct sidebar child; the grip must outrank it.
+
+    `.launcher.sidebar > * { width: 100% }` beats a bare `.sidebar-grip` on
+    specificity whatever the file order, so the grip computed to the full
+    sidebar width. Being absolutely positioned at z-index 30, it then covered
+    the workspace list, the terminal picker and the footer buttons, and none of
+    them could be clicked at all. Only caught by opening the app.
+    """
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+    sidebar_css = (
+        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "sidebar.css"
+    ).read_text(encoding="utf-8")
+
+    # The stretch rule is the hazard this guards against. If it ever goes away,
+    # this test should be revisited rather than silently kept.
+    assert ".launcher.sidebar > * { width: 100%" in app_css
+    # Two classes plus the child element beat two classes plus the universal.
+    assert ".launcher.sidebar > .sidebar-grip {" in sidebar_css
+    grip = sidebar_css[sidebar_css.index(".launcher.sidebar > .sidebar-grip {"):]
+    grip = grip[: grip.index("}")]
+    assert "width: 3px" in grip
+    # inset:0 without an explicit left would stretch it back across the sidebar.
+    assert "left: auto" in grip

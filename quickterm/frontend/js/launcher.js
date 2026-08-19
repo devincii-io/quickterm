@@ -1,6 +1,31 @@
 import { icon } from "./icons.js";
 
 const SIDEBAR_KEY = "quickterm.sidebarCollapsed";
+const SIDEBAR_WIDTH_KEY = "quickterm.sidebarWidth";
+
+// Bounds for the expanded sidebar only; the collapsed rail keeps its own fixed
+// width in CSS. Below ~180px the 8.5-12px monospace labels lose their tails,
+// and past 40% of the window the workspace stops being the point of the app.
+export const SIDEBAR_WIDTH_DEFAULT = 244;
+export const SIDEBAR_WIDTH_MIN = 180;
+export const SIDEBAR_WIDTH_MAX = 460;
+
+// Pure on purpose: the clamp is the part worth testing, and a test should not
+// need a DOM to reach it. `viewport` is the window width; a non-positive or
+// unknown viewport falls back to the absolute cap.
+export function maxSidebarWidth(viewport) {
+  const room = Number(viewport) > 0 ? Math.round(Number(viewport) * 0.4) : SIDEBAR_WIDTH_MAX;
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, room));
+}
+
+export function clampSidebarWidth(width, viewport) {
+  // parseFloat, not Number: a blank or absent stored value must read as "no
+  // opinion" and fall back to the default, where Number would call it zero and
+  // pin the sidebar to its minimum.
+  const wanted = Math.round(Number.parseFloat(width));
+  if (!Number.isFinite(wanted)) return SIDEBAR_WIDTH_DEFAULT;
+  return Math.min(maxSidebarWidth(viewport), Math.max(SIDEBAR_WIDTH_MIN, wanted));
+}
 
 // The workspace folder is the one fact about a workspace worth a permanent
 // slot in the chrome; the full path stays in the tooltip.
@@ -55,7 +80,11 @@ function terminalChoices(options) {
       kind: "profile",
       profile,
       label: profile.name,
-      detail: shellLabel(profile),
+      // A description is why this profile exists; shellLabel only restates the
+      // command, which the name usually already implies. Profiles written
+      // before descriptions existed have none, so the shell label stays the
+      // fallback rather than leaving the row blank.
+      detail: (profile.description || "").trim() || shellLabel(profile),
     });
   }
   for (const type of options.inventory?.types || []) {
@@ -153,6 +182,18 @@ function loadCollapsed() {
 
 function saveCollapsed(collapsed) {
   try { localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); } catch (_) { /* optional */ }
+}
+
+function loadWidth() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (raw === null) return SIDEBAR_WIDTH_DEFAULT;
+    return clampSidebarWidth(parseInt(raw, 10), window.innerWidth);
+  } catch (_) { return SIDEBAR_WIDTH_DEFAULT; }
+}
+
+function saveWidth(width) {
+  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch (_) { /* optional */ }
 }
 
 export function initLauncher(el, options) {
@@ -320,7 +361,133 @@ export function initLauncher(el, options) {
   }
   el.append(footer);
 
-  const updateSessions = (sessions = [], attachedIds = [], ownedIds = []) => {
+  // Resize grip -------------------------------------------------------------
+  // The sidebar is a grid column of #app, so the width lives in --sidebar-w on
+  // the root rather than on this element: the column has to know it, and the
+  // element is thrown away and rebuilt on every config change. The grip is
+  // rebuilt with it, so its listeners hang off the same AbortController the
+  // rest of the launcher already uses; the window listener below would
+  // otherwise pile up one copy per rebuild.
+  const grip = make("div", "sidebar-grip");
+  grip.tabIndex = 0;
+  grip.setAttribute("role", "separator");
+  grip.setAttribute("aria-orientation", "vertical");
+  grip.setAttribute("aria-label", "Resize sidebar");
+  grip.title = "Drag to resize the sidebar, double-click to reset";
+  el.append(grip);
+
+  let desired = loadWidth();
+  let width = desired;
+  const applyWidth = (next, persist = false) => {
+    width = clampSidebarWidth(next, window.innerWidth);
+    if (persist) { desired = width; saveWidth(width); }
+    document.documentElement.style.setProperty("--sidebar-w", `${width}px`);
+    grip.setAttribute("aria-valuenow", String(width));
+    grip.setAttribute("aria-valuemin", String(SIDEBAR_WIDTH_MIN));
+    grip.setAttribute("aria-valuemax", String(maxSidebarWidth(window.innerWidth)));
+  };
+
+  let frame = 0;
+  let pending = width;
+  let fitTimer = 0;
+  // main.js answers onSidebarResize by re-fitting every xterm to its new pixel
+  // size, which is far too heavy to run per pointermove. So the width write is
+  // coalesced into one animation frame and the fit trails the last change;
+  // the end of a drag asks for it straight away.
+  const notifyResize = (now = false) => {
+    clearTimeout(fitTimer);
+    if (now) { options.onSidebarResize?.(); return; }
+    fitTimer = setTimeout(() => options.onSidebarResize?.(), 90);
+  };
+  const commit = () => {
+    frame = 0;
+    applyWidth(pending);
+    notifyResize();
+  };
+  const queueWidth = (next) => {
+    pending = next;
+    if (!frame) frame = requestAnimationFrame(commit);
+  };
+
+  let dragging = false;
+  let originLeft = 0;
+  grip.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || collapsed) return;
+    dragging = true;
+    // Measured once: reading the rect on every move forces a layout inside the
+    // very gesture that must stay smooth.
+    originLeft = el.getBoundingClientRect().left;
+    grip.setPointerCapture(event.pointerId);
+    grip.classList.add("dragging");
+    document.body.classList.add("sidebar-resizing", "sidebar-sizing");
+    // Leave the keyboard where it was. Dragging a grip is not a request to
+    // take focus off the terminal, and focus.js would hand it straight back.
+    event.preventDefault();
+  }, { signal: abort.signal });
+
+  grip.addEventListener("pointermove", (event) => {
+    if (dragging) queueWidth(event.clientX - originLeft);
+  }, { signal: abort.signal });
+
+  const endDrag = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    try { grip.releasePointerCapture(event.pointerId); } catch (_) { /* already gone */ }
+    grip.classList.remove("dragging");
+    document.body.classList.remove("sidebar-resizing", "sidebar-sizing");
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    applyWidth(pending, true);
+    notifyResize(true);
+  };
+  // Pointer capture is what makes this correct: a drag that ends outside the
+  // window still delivers its pointerup here, so the body class cannot stick.
+  grip.addEventListener("pointerup", endDrag, { signal: abort.signal });
+  grip.addEventListener("pointercancel", endDrag, { signal: abort.signal });
+
+  const resetWidth = () => {
+    applyWidth(SIDEBAR_WIDTH_DEFAULT, true);
+    notifyResize(true);
+  };
+  grip.addEventListener("dblclick", resetWidth, { signal: abort.signal });
+
+  // A pointer-only resize is unreachable without a pointer, so the grip is in
+  // the tab order and answers the arrows. Shift takes a coarse step, Home/End
+  // go to the bounds, Enter/Space are the double-click reset.
+  grip.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 32 : 8;
+    let next = null;
+    if (event.key === "ArrowLeft") next = width - step;
+    else if (event.key === "ArrowRight") next = width + step;
+    else if (event.key === "Home") next = SIDEBAR_WIDTH_MIN;
+    else if (event.key === "End") next = maxSidebarWidth(window.innerWidth);
+    else if (event.key === "Enter" || event.key === " ") next = SIDEBAR_WIDTH_DEFAULT;
+    else return;
+    event.preventDefault();
+    applyWidth(next, true);
+    notifyResize();
+  }, { signal: abort.signal });
+
+  // The cap is relative to the window, so a shrinking window has to pull the
+  // sidebar in. The stored width is left alone: it comes back when there is
+  // room for it again.
+  window.addEventListener("resize", () => {
+    const before = width;
+    applyWidth(desired);
+    if (width !== before) notifyResize();
+  }, { signal: abort.signal });
+
+  abort.signal.addEventListener("abort", () => {
+    if (frame) cancelAnimationFrame(frame);
+    clearTimeout(fitTimer);
+  });
+
+  // The stored width must land before the grid animates, or every start slides
+  // the sidebar out from the 244px default in the stylesheet.
+  document.body.classList.add("sidebar-sizing");
+  applyWidth(desired);
+  requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
+
+  const updateSessions =(sessions = [], attachedIds = [], ownedIds = []) => {
     const attached = new Set(attachedIds);
     const owned = new Set(ownedIds);
     const visible = sessions

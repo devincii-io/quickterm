@@ -1,3 +1,4 @@
+import { openFolderBrowser } from "./folder_browser.js";
 import { icon } from "./icons.js";
 import { CUSTOM_THEME } from "./themes.js";
 
@@ -74,6 +75,9 @@ export function inferTerminalType(profile) {
   return "custom";
 }
 
+// The OS dialog is the secondary route now, not the mechanism. It exists only
+// inside the installed pywebview shell, and it is injected late, so anything
+// that depends on it has to cope with both absence and late arrival.
 export function nativeFolderPickerAvailable() {
   return typeof globalThis.pywebview?.api?.pick_folder === "function";
 }
@@ -145,38 +149,43 @@ export function runnableSnippet(text) {
 // One folder field, one Browse button, everywhere a directory is chosen.
 // Picking a folder dispatches a bubbling "input" event on the field, so a
 // caller only ever needs the listener it already has for typing.
+//
+// Browse opens the in-app directory browser (folder_browser.js), which works in
+// every viewer. The native OS dialog is offered from inside that modal when the
+// pywebview bridge is there, because some people prefer the dialog they know.
+// It used to be the only mechanism, which left Browse disabled outright in a
+// plain browser and dropped focus out of the page in the installed app.
 export function folderPickerControl(input, options = {}) {
   const control = make("span", "folder-picker-control");
   const browse = make("button", "secondary-button folder-picker-button");
   browse.type = "button";
   browse.append(icon("folder", 14), make("span", "", "Browse"));
   browse.setAttribute("aria-label", options.label || "Choose a folder");
-  const syncAvailability = () => {
-    browse.disabled = !nativeFolderPickerAvailable();
-    browse.title = browse.disabled
-      ? "Folder picker is available in the installed QuickTerm app"
-      : "Choose a folder";
-  };
-  syncAvailability();
-  // pywebview injects its API after the page loads, so a picker that looks
-  // missing at render time can still arrive a moment later.
-  if (browse.disabled) document.addEventListener("pywebviewready", syncAvailability, { once: true });
+  browse.title = "Choose a folder";
   browse.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     browse.disabled = true;
-    const result = await pickNativeFolder(input.value || options.startIn || "");
-    if (result.path) {
-      input.value = result.path;
+    let chosen = null;
+    try {
+      chosen = await openFolderBrowser({
+        startPath: input.value || options.startIn || "",
+        label: options.label || "Choose a folder",
+        title: options.label || "Choose a folder",
+        // Injected rather than imported by folder_browser.js: the dependency
+        // runs this way only, so the two modules never form a cycle.
+        nativePicker: {
+          available: nativeFolderPickerAvailable,
+          pick: pickNativeFolder,
+        },
+      });
+    } finally {
+      browse.disabled = false;
+    }
+    if (chosen) {
+      input.value = chosen;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.focus();
-    }
-    browse.disabled = false;
-    syncAvailability();
-    if (result.failed) {
-      browse.title = "Folder picker failed; enter the path manually or try again";
-      browse.classList.add("picker-failed");
-      setTimeout(() => browse.classList.remove("picker-failed"), 2000);
     }
   });
   control.append(input, browse);

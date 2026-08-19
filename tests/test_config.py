@@ -3,7 +3,9 @@ import json
 import pytest
 
 from quickterm import config as cfgmod
-from quickterm.config import AppConfig, Profile, load_config, save_config, validate_environment
+from quickterm.config import (
+    AppConfig, Profile, Snippet, load_config, save_config, validate_environment,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -263,6 +265,74 @@ def test_save_rejects_duplicate_snippets(fake_appdata):
     cfg = AppConfig()
     cfg.snippets[1].name = cfg.snippets[0].name.upper()
     with pytest.raises(ValueError, match="Snippet names must be unique"):
+        save_config(cfg)
+
+
+def test_shipped_snippets_describe_themselves(fake_appdata):
+    """A snippet with no description is the thing this field exists to prevent.
+
+    The two defaults are the worked example every user starts from, so they
+    have to be examples of a described snippet, not of a bare one.
+    """
+    for snippet in AppConfig().snippets:
+        assert snippet.description.strip()
+
+
+def test_a_config_without_descriptions_still_loads(fake_appdata):
+    """Descriptions are newer than the config files people already have.
+
+    `_known()` only drops keys the dataclass no longer has. A key it gained
+    has to fill itself in from the field default instead, or opening the app
+    once after an update would cost the user every profile and snippet.
+    """
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    legacy = {
+        "profiles": [{"name": "Standard", "cmd": "powershell.exe", "terminal_type": "windows-powershell"}],
+        "snippets": [{"name": "git status", "text": "git status\r"}],
+    }
+    (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = load_config()
+
+    assert loaded.profiles[0].description == ""
+    assert loaded.snippets[0].description == ""
+    # An older config must still be a valid one, not a quarantined one.
+    assert not list(path.glob("config.invalid-*.json"))
+
+
+def test_descriptions_survive_save_and_reload(fake_appdata):
+    cfg = AppConfig()
+    cfg.profiles.append(Profile(
+        name="Dev shell",
+        cmd="pwsh.exe",
+        description="PowerShell 7 with the project's dev server already running.",
+    ))
+    cfg.snippets.append(Snippet(
+        name="tail logs",
+        text="Get-Content -Wait app.log\r",
+        description="Follow the running app's log until you stop it.",
+    ))
+    save_config(cfg)
+
+    loaded = load_config()
+
+    assert loaded.profiles[0].description == "PowerShell 7 with the project's dev server already running."
+    assert loaded.snippets[-1].description == "Follow the running app's log until you stop it."
+    # The shipped defaults keep their own descriptions through the round trip.
+    assert loaded.snippets[0].description == AppConfig().snippets[0].description
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+    assert stored["profiles"][0]["description"]
+    assert stored["snippets"][0]["description"]
+
+
+@pytest.mark.parametrize("payload, message", [
+    ({"profiles": [{"name": "x", "cmd": "cmd.exe", "description": 5}]}, "description must be a string"),
+    ({"snippets": [{"name": "x", "text": "x\r", "description": []}]}, "description must be a string"),
+])
+def test_save_rejects_non_string_descriptions(fake_appdata, payload, message):
+    cfg = cfgmod.config_from_dict(payload)
+    with pytest.raises(ValueError, match=message):
         save_config(cfg)
 
 

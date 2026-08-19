@@ -1,6 +1,7 @@
 import * as api from "./api.js";
 import { icon } from "./icons.js";
 import { make } from "./panel_shared.js";
+import { configPurpose } from "./panel_settings_kit.js";
 export function renderAboutSettings(host) {
     const cfg = this.settingsDraft;
     const version = this.app.version || "";
@@ -37,7 +38,10 @@ export function renderAboutSettings(host) {
     host.append(links);
 
     const card = make("section", "about-update");
-    card.append(make("h4", "", "Updates"));
+    card.append(
+      make("h4", "", "Updates"),
+      configPurpose("Checking asks GitHub for the latest release and compares it with the version you are running. Installing downloads that release's installer, verifies its SHA-256, and runs it; QuickTerm closes while it does."),
+    );
     const status = make("p", "about-update-status", "New versions are fetched from GitHub releases.");
     const row = make("div", "about-update-row");
     const check = this._button("Check for updates", "secondary-button compact");
@@ -84,7 +88,7 @@ export function renderAboutSettings(host) {
     });
 
     const toggle = make("label", "toggle-row standalone");
-    const checkbox = make("input");
+    const checkbox = make("input", "sr-only");
     checkbox.type = "checkbox";
     checkbox.checked = cfg.update_check !== false;
     checkbox.addEventListener("change", () => { cfg.update_check = checkbox.checked; });
@@ -104,7 +108,7 @@ export function renderVoiceSettings(host) {
     host.append(callout);
     const group = make("div", "settings-group");
     const enabled = make("label", "toggle-row standalone");
-    const enabledInput = make("input");
+    const enabledInput = make("input", "sr-only");
     enabledInput.type = "checkbox";
     enabledInput.checked = Boolean(cfg.voice.enabled);
     enabledInput.addEventListener("change", () => { cfg.voice.enabled = enabledInput.checked; });
@@ -124,8 +128,11 @@ export function renderVoiceSettings(host) {
 
 
 export function renderAdvancedSettings(host) {
-    host.append(this._sectionHeading("Advanced configuration", "The complete local configuration. Invalid JSON cannot be saved."));
-    const notice = make("div", "advanced-notice", "Use this for environment variables, precise argument arrays and settings not shown elsewhere.");
+    host.append(this._sectionHeading(
+      "Advanced configuration",
+      "The same configuration the other tabs edit, as the JSON file on disk. Invalid JSON cannot be saved.",
+    ));
+    const notice = make("div", "advanced-notice", "Use this for precise argument arrays, bulk edits and any setting that has no field of its own. Every profile and snippet here also carries a description; the other tabs are the readable way to write one.");
     const textarea = make("textarea", "settings-json");
     textarea.spellcheck = false;
     textarea.value = JSON.stringify(this.settingsDraft, null, 2);

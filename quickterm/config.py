@@ -25,6 +25,12 @@ _DPAPI_SCHEME = "dpapi-v1"
 class Profile:
     name: str
     cmd: str
+    # One line saying what this terminal is for. Every configurable thing
+    # carries its own explanation, so a list of profiles reads as documentation
+    # of the setup rather than a column of bare names. Optional and defaulted,
+    # because a config written by an older build has no such key and `_known()`
+    # only drops unknown fields; a field the older file lacks must fill itself in.
+    description: str = ""
     args: list[str] = field(default_factory=list)
     # No folder of any kind. A workspace IS a folder and it is the only thing
     # that places a terminal, so a profile is portable across every project.
@@ -47,6 +53,11 @@ class Profile:
 class Snippet:
     name: str
     text: str
+    # What the command does and when to reach for it. The keystrokes alone do
+    # not say it: "git status" repeats the name and answers nothing about why
+    # this one is kept. Defaulted for the same reason as `Profile.description`:
+    # older config files simply do not have the key.
+    description: str = ""
 
 
 @dataclass
@@ -64,9 +75,19 @@ def _default_profiles() -> list[Profile]:
 
 
 def _default_snippets() -> list[Snippet]:
+    # The shipped snippets double as the worked example of a good one: a name
+    # you would search for, and a description that says when you reach for it.
     return [
-        Snippet(name="git status", text="git status\r"),
-        Snippet(name="uv run pytest", text="uv run pytest\r"),
+        Snippet(
+            name="git status",
+            text="git status\r",
+            description="What has changed in this repository since the last commit.",
+        ),
+        Snippet(
+            name="uv run pytest",
+            text="uv run pytest\r",
+            description="Run the Python test suite of the project this terminal is in.",
+        ),
     ]
 
 
@@ -341,6 +362,8 @@ def validate_config(cfg: AppConfig) -> None:
         profile_names.add(folded)
         if not isinstance(profile.cmd, str):
             raise ValueError(f'Terminal profile "{name}": command must be a string')
+        if not isinstance(profile.description, str):
+            raise ValueError(f'Terminal profile "{name}": description must be a string')
         for field_label, value in (
             ("terminal type", profile.terminal_type),
             ("WSL distribution", profile.wsl_distro),
@@ -399,6 +422,8 @@ def validate_config(cfg: AppConfig) -> None:
         name = snippet.name.strip() if isinstance(snippet.name, str) else ""
         if not name or not isinstance(snippet.text, str) or not snippet.text.strip():
             raise ValueError("Every snippet needs a name and command")
+        if not isinstance(snippet.description, str):
+            raise ValueError(f'Snippet "{name}": description must be a string')
         folded = name.casefold()
         if folded in snippet_names:
             raise ValueError("Snippet names must be unique")

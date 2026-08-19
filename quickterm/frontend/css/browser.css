@@ -1,0 +1,219 @@
+/* In-app directory browser (js/folder_browser.js).
+   Loaded after app.css on purpose, so these rules win on order rather than on
+   specificity. Every colour here reads a token from app.css, or a palette
+   change stops reaching this modal. The one literal is the overlay scrim,
+   which has no token and is copied from .panel-overlay so the two backdrops
+   cannot drift apart. */
+
+.fb-overlay {
+  position: fixed;
+  inset: 0;
+  /* Above the panel overlay (100) and the palette (110): this modal is always
+     opened from on top of one of them. */
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+  background: rgba(7, 10, 9, .74);
+}
+
+.fb {
+  width: min(680px, 94vw);
+  max-height: min(760px, 88vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.fb-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+.fb-title { font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+.fb-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.fb-close:hover { border-color: var(--line-strong); color: var(--text); }
+
+.fb-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 16px 10px;
+}
+.fb-up, .fb-go {
+  flex: none;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  cursor: pointer;
+}
+.fb-up { width: 32px; padding: 0; font-size: 14px; line-height: 1; }
+.fb-up:hover:not(:disabled), .fb-go:hover { border-color: var(--line-hover); color: var(--text); }
+.fb-up:disabled { opacity: .35; cursor: default; }
+
+/* A path is an identifier, not prose: monospace so a stray space or a doubled
+   separator is visible before it becomes a failed listing. */
+.fb-path {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  caret-color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+}
+.fb-path::placeholder { color: var(--muted); font-family: var(--ui-font); }
+.fb-path:focus { border-color: var(--accent-border); }
+
+.fb-roots {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px 10px;
+}
+.fb-roots-label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.fb-root {
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.fb-root:hover { border-color: var(--accent-border); color: var(--text); }
+
+.fb-list {
+  flex: 1;
+  min-height: 180px;
+  overflow-y: auto;
+  margin: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.fb-list[aria-busy="true"] { opacity: .6; }
+
+/* Dense hairline rows: one separator, no card, no gap. A folder list is scanned
+   vertically, so anything that adds height between rows costs a visible row. */
+.fb-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+.fb-row:last-child { border-bottom: 0; }
+.fb-row .icon { color: var(--muted); }
+.fb-row:hover { background: var(--surface); color: var(--text); }
+.fb-row:focus {
+  background: var(--surface-soft);
+  color: var(--text);
+  outline: none;
+  /* An inset rail rather than a ring: the rows touch, so an outline would
+     overlap its neighbours' borders. */
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.fb-row:focus .icon { color: var(--accent); }
+.fb-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fb-git {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .04em;
+}
+.fb-empty { padding: 12px; color: var(--muted); font-size: 12px; }
+
+.fb-msg {
+  flex: none;
+  min-height: 17px;
+  padding: 7px 16px 0;
+  color: var(--text-soft);
+  font-size: 11.5px;
+}
+.fb-msg-error { color: var(--danger); }
+
+.fb-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px 14px;
+}
+.fb-foot-gap { flex: 1; }
+.fb-native, .fb-cancel, .fb-use {
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fb-native { border-style: dashed; color: var(--muted); font-weight: 400; }
+.fb-native:hover:not(:disabled), .fb-cancel:hover { border-color: var(--line-hover); color: var(--text); }
+.fb-use { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.fb-use:hover:not(:disabled) { border-color: var(--accent-hover); background: var(--accent-hover); }
+.fb-native:disabled, .fb-use:disabled { opacity: .45; cursor: default; }

@@ -60,6 +60,10 @@ export const putWorkspace = (name, layout, logo, sessionIds = [], path) =>
     ...(path === undefined ? {} : { path }),
   });
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
+// Directory-only listing for the in-app folder browser. A blank path lets the
+// backend choose the home folder, so the caller never has to know one.
+export const listDirs = (path) =>
+  req("GET", `/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`);
 export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");
