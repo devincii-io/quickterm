@@ -1,7 +1,9 @@
 import { icon } from "./icons.js";
+import { formatBytes, formatUptime, shortPath } from "./panel_shared.js";
 
 const SIDEBAR_KEY = "quickterm.sidebarCollapsed";
 const SIDEBAR_WIDTH_KEY = "quickterm.sidebarWidth";
+const SIDEBAR_GROUPS_KEY = "quickterm.sidebarClosedGroups";
 
 // Bounds for the expanded sidebar only; the collapsed rail keeps its own fixed
 // width in CSS. Below ~180px the 8.5-12px monospace labels lose their tails,
@@ -25,6 +27,148 @@ export function clampSidebarWidth(width, viewport) {
   const wanted = Math.round(Number.parseFloat(width));
   if (!Number.isFinite(wanted)) return SIDEBAR_WIDTH_DEFAULT;
   return Math.min(maxSidebarWidth(viewport), Math.max(SIDEBAR_WIDTH_MIN, wanted));
+}
+
+// Past this the terminal rows get a third line (the folder each shell is
+// sitting in) instead of hiding it behind a tooltip. Dragging the sidebar wide
+// should buy information, not whitespace.
+export const SIDEBAR_WIDE_AT = 300;
+
+export function isWideSidebar(width) {
+  return Number(width) >= SIDEBAR_WIDE_AT;
+}
+
+// Terminals nobody claims land here. panel_dashboard.js names the same set with
+// the same word, so the two views cannot describe one thing two ways.
+export const UNASSIGNED_GROUP = "Unassigned";
+const SCRATCH_GROUP = "scratch";
+
+function asSet(value) {
+  return value instanceof Set ? value : new Set(value || []);
+}
+
+// What one terminal is doing, in one word.
+//
+// `busy` is null on the sidebar's poll: main.js asks for `metrics: false`
+// because the truthful answer costs a full OS process snapshot every 10 s. A
+// null therefore means "not measured" and must never be printed as "idle", so
+// only an explicit `true` claims busy and the quiet figure below comes from
+// `activity.idle_seconds`, which the cheap payload does carry.
+//
+// `attachments` counts subscribers on the backend, not panes in this window,
+// so a terminal open in another QuickTerm window says so rather than looking
+// abandoned. That matters before moving it.
+export function sessionState(session, isAttached) {
+  const activity = session?.activity || {};
+  if (isAttached) return { key: "open", label: "open" };
+  if (session?.busy === true) return { key: "busy", label: "busy" };
+  if ((activity.background_output_bytes || 0) > 0) return { key: "unread", label: "new output" };
+  if ((session?.attachments || 0) > 0) return { key: "elsewhere", label: "open elsewhere" };
+  return { key: "idle", label: "background" };
+}
+
+// The line under the name, in the order someone scans it: what kind of terminal
+// this is, then why it wants attention, then how long since anything happened.
+// Memory only joins when a metrics-carrying payload actually measured it.
+export function sessionSummary(session) {
+  const activity = session?.activity || {};
+  const unread = activity.background_output_bytes || 0;
+  const parts = [session?.profile || "terminal"];
+  if (unread > 0) {
+    const age = activity.background_output_age_seconds;
+    parts.push(Number.isFinite(age)
+      ? `+${formatBytes(unread)} ${formatUptime(age)} ago`
+      : `+${formatBytes(unread)}`);
+  } else if (session?.busy === true) {
+    parts.push("working");
+  } else {
+    parts.push(`quiet ${formatUptime(activity.idle_seconds || 0)}`);
+  }
+  const usage = session?.usage;
+  if (usage?.available) parts.push(formatBytes(usage.working_set_bytes || 0));
+  return parts.join(" · ");
+}
+
+// Everything the row cannot show, for the tooltip. The id is here rather than
+// on the row because it is what you paste into a bug report and never what you
+// scan a list by.
+export function sessionTooltip(session, groupName) {
+  const usage = session?.usage;
+  const lines = [session?.name || session?.id, `workspace: ${groupName}`];
+  if (session?.cwd) lines.push(session.cwd);
+  if ((session?.attachments || 0) > 0) lines.push(`${session.attachments} viewer${session.attachments === 1 ? "" : "s"} attached`);
+  if (usage?.available) {
+    lines.push(`${formatBytes(usage.working_set_bytes || 0)} · ${(usage.cpu_percent ?? 0).toFixed(1)}% CPU · ${usage.process_count || 0} processes`);
+    lines.push(`up ${formatUptime(usage.uptime_seconds)}`);
+  }
+  lines.push(session?.id || "");
+  return lines.filter(Boolean).join("\n");
+}
+
+// Group every live terminal on the backend by the workspace that owns it.
+//
+// The ownership rule has to be the dashboard's rule or the two views disagree
+// about the same machine. panel_dashboard.js derives it from each saved
+// workspace's `session_ids` plus the ids in its layout; the backend mirrors
+// exactly that set onto every session as `workspace` on each workspace PUT
+// (`SessionManager.sync_workspace`), so reading the field here is the same
+// answer from the end the sidebar can afford. What the backend cannot know is
+// what this window has claimed since its last autosave, which is what
+// ownedIds/attachedIds add on top.
+export function groupSessionsByWorkspace(sessions = [], context = {}) {
+  const owned = asSet(context.ownedIds);
+  const attached = asSet(context.attachedIds);
+  const currentName = context.currentWorkspace || SCRATCH_GROUP;
+  const groups = new Map();
+  const groupFor = (name, kind) => {
+    let group = groups.get(name);
+    if (!group) {
+      group = { name, kind, sessions: [], open: 0, busy: 0, unread: 0 };
+      groups.set(name, group);
+    }
+    return group;
+  };
+
+  for (const session of sessions || []) {
+    if (!session || !session.alive) continue;
+    const isAttached = attached.has(session.id);
+    const claimed = session.workspace || null;
+    const isHere = isAttached || owned.has(session.id) || (claimed !== null && claimed === currentName);
+    const group = isHere
+      ? groupFor(currentName, "current")
+      : groupFor(claimed || UNASSIGNED_GROUP, claimed ? "workspace" : "unassigned");
+    const state = sessionState(session, isAttached);
+    group.sessions.push({ session, isAttached, isHere, state });
+    if (state.key === "open") group.open += 1;
+    else if (state.key === "busy") group.busy += 1;
+    else if (state.key === "unread") group.unread += 1;
+  }
+  if (groups.size && !groups.has(currentName)) groupFor(currentName, "current");
+
+  // Attention first inside a group, name second. A terminal you are looking at
+  // is the anchor, then the ones asking for you, then the rest.
+  const rank = { open: 0, unread: 1, busy: 2, elsewhere: 3, idle: 4 };
+  for (const group of groups.values()) {
+    group.sessions.sort((a, b) => (rank[a.state.key] ?? 9) - (rank[b.state.key] ?? 9)
+      || (a.session.name || a.session.id).localeCompare(b.session.name || b.session.id));
+  }
+  // Your workspace first, unassigned last, everything else alphabetical.
+  const order = (group) => (group.kind === "current" ? 0 : group.kind === "unassigned" ? 2 : 1);
+  return [...groups.values()].sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+}
+
+// The group's one-line summary. A collapsed group has to keep saying what is
+// inside it, or folding one away hides exactly what this section exists to
+// show. The count itself lives in the pill beside the name.
+export function groupSummary(group) {
+  if (!group.sessions.length) return "nothing running";
+  const parts = [];
+  if (group.open) parts.push(`${group.open} open`);
+  if (group.unread) parts.push(`${group.unread} new output`);
+  if (group.busy) parts.push(`${group.busy} busy`);
+  const quiet = group.sessions.length - group.open - group.unread - group.busy;
+  if (quiet > 0) parts.push(`${quiet} background`);
+  return parts.join(" · ");
 }
 
 // The workspace folder is the one fact about a workspace worth a permanent
@@ -196,6 +340,20 @@ function saveWidth(width) {
   try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch (_) { /* optional */ }
 }
 
+// Folded groups are stored by name, not by index: workspaces come and go, and
+// the fold has to survive `buildLauncher()` throwing the whole sidebar away on
+// every config change.
+function loadClosedGroups() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((name) => typeof name === "string") : []);
+  } catch (_) { return new Set(); }
+}
+
+function saveClosedGroups(names) {
+  try { localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify([...names])); } catch (_) { /* optional */ }
+}
+
 export function initLauncher(el, options) {
   if (el._launcherAbort) el._launcherAbort.abort();
   const abort = new AbortController();
@@ -347,7 +505,13 @@ export function initLauncher(el, options) {
 
   const footer = make("nav", "sidebar-footer");
   footer.setAttribute("aria-label", "Application");
-  const navIcons = { dashboard: "dashboard", settings: "settings", help: "help", commands: "terminal" };
+  // Keyed by the label main.js passes in `chrome`, so a new footer entry is
+  // one map line away from its own glyph instead of silently falling back
+  // to the terminal one.
+  const navIcons = {
+    dashboard: "dashboard", settings: "settings", help: "help",
+    commands: "terminal", "new window": "new-window",
+  };
   for (const [label, onClick, shortcut] of options.chrome || []) {
     const button = actionButton(navIcons[label] || "terminal", label, onClick, shortcut);
     button.classList.add("sidebar-nav-button");
@@ -382,6 +546,10 @@ export function initLauncher(el, options) {
     width = clampSidebarWidth(next, window.innerWidth);
     if (persist) { desired = width; saveWidth(width); }
     document.documentElement.style.setProperty("--sidebar-w", `${width}px`);
+    // A dragged-wide sidebar earns the extra line on every terminal row. The
+    // class rides the same coalesced write as the width, so a drag still costs
+    // one style write per frame.
+    document.body.classList.toggle("sidebar-wide", isWideSidebar(width));
     grip.setAttribute("aria-valuenow", String(width));
     grip.setAttribute("aria-valuemin", String(SIDEBAR_WIDTH_MIN));
     grip.setAttribute("aria-valuemax", String(maxSidebarWidth(window.innerWidth)));
@@ -487,45 +655,177 @@ export function initLauncher(el, options) {
   applyWidth(desired);
   requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
 
-  const updateSessions =(sessions = [], attachedIds = [], ownedIds = []) => {
-    const attached = new Set(attachedIds);
-    const owned = new Set(ownedIds);
-    const visible = sessions
-      .filter((session) => session.alive && (owned.has(session.id) || attached.has(session.id)))
-      .sort((a, b) => Number(attached.has(b.id)) - Number(attached.has(a.id))
-        || (a.name || a.id).localeCompare(b.name || b.id));
-    const totalLive = sessions.filter((session) => session.alive).length;
-    terminalsCount.textContent = totalLive === visible.length
-      ? String(visible.length)
-      : `${visible.length}/${totalLive}`;
-    terminalsCount.title = totalLive === visible.length
-      ? `${totalLive} live in this workspace`
-      : `${visible.length} in this workspace · ${totalLive} live overall`;
-    sessionList.textContent = "";
-    if (!visible.length) {
-      sessionList.append(make("div", "sidebar-empty sidebar-label", "no live terminals"));
-      return;
+  // Terminals ---------------------------------------------------------------
+  // The list shows every live terminal on this backend, grouped by the
+  // workspace that owns it. It used to show only what this window held, so a
+  // machine running seven terminals across three projects looked like two.
+  const closedGroups = loadClosedGroups();
+  // The foreign terminal whose choices are open. One at a time, and it survives
+  // the 10 s poll below, which rebuilds this list from scratch.
+  let armedSessionId = null;
+
+  const setArmed = (id) => {
+    armedSessionId = id;
+    for (const entry of sessionList.querySelectorAll(".session-entry")) {
+      const on = entry.dataset.sessionId === id;
+      entry.classList.toggle("armed", on);
+      const strip = entry.querySelector(".session-choices");
+      if (strip) strip.hidden = !on;
+      const row = entry.querySelector(".session-row[aria-expanded]");
+      if (row) row.setAttribute("aria-expanded", String(on));
     }
-    for (const session of visible) {
-      const isAttached = attached.has(session.id);
-      const unread = session.activity?.background_output_bytes || 0;
-      const row = make("button", `sidebar-row session-row${isAttached ? " attached" : " detached"}${unread ? " unread" : ""}`);
-      row.type = "button";
-      row.title = isAttached
-        ? `Focus ${session.name || session.id}`
-        : `Attach background terminal ${session.name || session.id}`;
-      const state = make("span", "session-state");
-      const copy = make("span", "sidebar-row-copy");
-      copy.append(
-        make("strong", "", session.name || session.id.slice(0, 8)),
-        make("small", "", isAttached ? "open" : unread ? "new output" : "background"),
-      );
-      row.append(state, copy);
+  };
+
+  const sessionEntry = (entry, group) => {
+    const { session, isAttached, isHere, state } = entry;
+    // Foreign means "another workspace owns it". Unassigned is not foreign:
+    // there is nobody to take it from, so attaching is the honest reading of a
+    // click, and main.js already allows exactly that.
+    const foreign = !isHere && group.kind === "workspace";
+    const wrap = make("div", `session-entry${foreign ? " foreign" : ""}`);
+    wrap.dataset.sessionId = session.id;
+    const row = make("button", [
+      "sidebar-row session-row",
+      `state-${state.key}`,
+      isAttached ? "attached" : "detached",
+      state.key === "unread" ? "unread" : "",
+    ].filter(Boolean).join(" "));
+    row.type = "button";
+    row.dataset.rowKey = session.id;
+    row.title = sessionTooltip(session, group.name);
+    const copy = make("span", "sidebar-row-copy");
+    copy.append(
+      make("strong", "", session.name || session.id.slice(0, 8)),
+      make("small", "session-meta", sessionSummary(session)),
+    );
+    // The folder is the fact that tells one project's shell from another's, so
+    // it gets its own line as soon as the sidebar is wide enough to hold it.
+    if (session.cwd) copy.append(make("small", "session-where", shortPath(session.cwd, 44)));
+    row.append(make("span", "session-state"), copy, make("span", `session-chip chip-${state.key}`, state.label));
+    wrap.append(row);
+
+    if (!foreign) {
       row.addEventListener("click", () => {
         if (isAttached) options.onFocusSession?.(session.id);
         else options.onAttachSession?.(session);
       });
-      sessionList.append(row);
+      return wrap;
+    }
+
+    // Clicking a terminal another workspace owns must never silently take it.
+    // The row offers the two honest choices instead, each labelled with what it
+    // does to which workspace.
+    row.setAttribute("aria-expanded", String(armedSessionId === session.id));
+    const choices = make("div", "session-choices");
+    choices.hidden = armedSessionId !== session.id;
+    const target = group.name === SCRATCH_GROUP ? null : group.name;
+    const openThere = actionButton("diamond", `open ${group.name}`,
+      () => options.onWorkspace?.(target));
+    openThere.dataset.rowKey = `${session.id}:open`;
+    openThere.classList.add("session-choice");
+    openThere.title = `Switch this window to ${group.name}, where this terminal already runs`;
+    choices.append(openThere);
+    if (typeof options.onMoveSession === "function") {
+      const move = actionButton("arrow-up-right", "move here & attach", () => {
+        setArmed(null);
+        options.onMoveSession(session, target);
+      });
+      move.dataset.rowKey = `${session.id}:move`;
+      move.classList.add("session-choice");
+      move.title = `Take this terminal out of ${group.name} and attach it in ${workspaceName}`;
+      choices.append(move);
+    } else {
+      choices.append(make("p", "session-choice-note",
+        `Moving it into ${workspaceName} is a Dashboard action.`));
+    }
+    // Escape backs out of a decision without making it. It stops here so the
+    // global key layer does not also read it as "close whatever is open".
+    choices.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setArmed(null);
+      row.focus();
+    });
+    row.addEventListener("click", () => setArmed(armedSessionId === session.id ? null : session.id));
+    wrap.append(choices);
+    return wrap;
+  };
+
+  // `bare` drops the heading when everything alive belongs to this workspace.
+  // A single group headed by its own name is a label for a list of one thing,
+  // and the section head above already says "terminals".
+  const sessionGroup = (group, bare = false) => {
+    const box = make("div", `session-group ${group.kind}`);
+    const closed = !bare && closedGroups.has(group.name);
+    const head = make("button", "session-group-head");
+    head.type = "button";
+    head.dataset.rowKey = `group:${group.name}`;
+    head.setAttribute("aria-expanded", String(!closed));
+    head.title = group.kind === "current"
+      ? `Terminals in ${group.name}, the workspace this window is in`
+      : group.kind === "unassigned"
+        ? "Live terminals no workspace owns"
+        : `Terminals owned by workspace ${group.name}`;
+    const chevron = make("span", "session-group-chevron");
+    chevron.append(icon(closed ? "chevron-right" : "chevron-down", 11));
+    const copy = make("span", "sidebar-row-copy");
+    copy.append(make("strong", "", group.name), make("small", "", groupSummary(group)));
+    head.append(chevron, copy, make("span", "sidebar-count", String(group.sessions.length)));
+
+    const rows = make("div", "session-group-rows");
+    rows.hidden = closed;
+    for (const entry of group.sessions) rows.append(sessionEntry(entry, group));
+    if (!group.sessions.length) {
+      rows.append(make("div", "sidebar-empty sidebar-label", "nothing running here"));
+    }
+    // Folding is a DOM toggle, not a re-render: rebuilding the list would drop
+    // the keyboard out of the very control that was just pressed.
+    head.addEventListener("click", () => {
+      const nowClosed = !rows.hidden;
+      rows.hidden = nowClosed;
+      head.setAttribute("aria-expanded", String(!nowClosed));
+      chevron.textContent = "";
+      chevron.append(icon(nowClosed ? "chevron-right" : "chevron-down", 11));
+      if (nowClosed) closedGroups.add(group.name);
+      else closedGroups.delete(group.name);
+      saveClosedGroups(closedGroups);
+    });
+    if (!bare) box.append(head);
+    box.append(rows);
+    return box;
+  };
+
+  const updateSessions = (sessions = [], attachedIds = [], ownedIds = []) => {
+    const groups = groupSessionsByWorkspace(sessions, {
+      currentWorkspace: options.currentWorkspace,
+      attachedIds,
+      ownedIds,
+    });
+    const totalLive = (sessions || []).filter((session) => session.alive).length;
+    const here = groups.find((group) => group.kind === "current")?.sessions.length || 0;
+    // The pill counts what is actually running on this backend. The old
+    // "2/7" counted the two this window held and left the other five with no
+    // way in at all, which is the complaint this section answers.
+    terminalsCount.textContent = String(totalLive);
+    terminalsCount.title = `${here} in ${workspaceName} · ${totalLive} live on this backend`;
+
+    // main.js repolls every 10 s and this list is rebuilt from the answer, so
+    // whatever the keyboard was inside has to be put back. Without it, opening
+    // the choices under a foreign terminal and reading them for ten seconds
+    // dropped focus to <body> mid-decision.
+    const activeKey = sessionList.contains(document.activeElement)
+      ? document.activeElement.dataset.rowKey || null
+      : null;
+    sessionList.textContent = "";
+    if (!groups.length) {
+      sessionList.append(make("div", "sidebar-empty sidebar-label", "no live terminals"));
+      return;
+    }
+    const solo = groups.length === 1 && groups[0].kind === "current";
+    for (const group of groups) sessionList.append(sessionGroup(group, solo));
+    if (!activeKey) return;
+    for (const node of sessionList.querySelectorAll("[data-row-key]")) {
+      if (node.dataset.rowKey === activeKey) { node.focus(); break; }
     }
   };
 

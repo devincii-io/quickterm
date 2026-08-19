@@ -54,6 +54,7 @@ export class Palette {
     this.sel = 0;
     this.prompt = null; // {submit(text)}
     this.foreignMode = false;
+    this.windowMode = false;
     this.foreignSessions = [];
     this.requestId = 0;
 
@@ -86,14 +87,21 @@ export class Palette {
 
   async openPalette() {
     const requestId = ++this.requestId;
+    const wasOpen = this.open;
     this.open = true;
     // Claim the keyboard before focusing: whatever this palette replaced has
     // already asked the focused pane to re-focus itself, and that request lands
     // a frame from now. Without the claim it wins and Alt+K opens a palette you
     // cannot type into.
-    claimFocus("palette");
+    //
+    // Once per open, though. A sub-mode's "back to commands" row re-enters here
+    // while the palette is still open, and focus.js counts claims per owner, so
+    // claiming twice left one claim standing after close() and the terminal
+    // never took the keyboard back.
+    if (!wasOpen) claimFocus("palette");
     this.prompt = null;
     this.foreignMode = false;
+    this.windowMode = false;
     this.overlay.hidden = false;
     this.input.value = "";
     this.input.placeholder = "command / profile / snippet / session";
@@ -105,7 +113,7 @@ export class Palette {
       api.getSessions().catch(() => []),
       api.listWorkspaces().catch(() => []),
     ]);
-    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode) return;
+    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode || this.windowMode) return;
     this.items = this._staticItems();
     for (const name of workspaces) {
       this.items.push({
@@ -118,7 +126,7 @@ export class Palette {
       name,
       saved: await api.getWorkspace(name).catch(() => null),
     })));
-    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode) return;
+    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode || this.windowMode) return;
     const owners = new Map();
     const layoutBound = new Set();
     for (const { name, saved } of workspaceData) {
@@ -164,11 +172,26 @@ export class Palette {
     this.requestId++;
     this.prompt = null;
     this.foreignMode = false;
+    this.windowMode = false;
     this.overlay.hidden = true;
     // Release before asking for the terminal back, or the guard this palette
     // installed would refuse its own hand-off.
     releaseFocus("palette");
     this.app.refocusTerm();
+  }
+
+  // The sidebar's "new window" button and the palette's own "new window…" row
+  // land here, so exactly one place decides what a second window may open on.
+  // Opening the picker directly skips the command list the button's user never
+  // asked for.
+  newWindowMode() {
+    if (!this.open) {
+      this.open = true;
+      this.requestId++;
+      claimFocus("palette");
+      this.overlay.hidden = false;
+    }
+    this._newWindowMode();
   }
 
   // The input is the palette: every path that shows it, opening or stepping
@@ -206,6 +229,13 @@ export class Palette {
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),
+      },
+      // No shortcut: keys.js may only claim cold Alt combos, and every letter
+      // left over is a readline or PSReadLine binding the shell needs (see
+      // AGENTS.md). The sidebar footer button is the other way in.
+      {
+        kind: "action", label: "new window…", hint: "a second window on another workspace",
+        keepOpen: true, run: () => this._newWindowMode(),
       },
       // Saving and loading are name-exact operations, and a free-text prompt
       // here used to tear the whole layout down on a typo. Loading is offered
@@ -298,11 +328,53 @@ export class Palette {
     this.focusInput();
   }
 
+  // Which workspace a second window opens on. Workspaces another window already
+  // holds stay in the list and say so: hiding them would read as "that
+  // workspace is gone", and the user needs to know where it went. Choosing one
+  // explains the refusal instead of opening a window that would fight over the
+  // same layout file.
+  async _newWindowMode() {
+    this.windowMode = true;
+    this.foreignMode = false;
+    this.prompt = null;
+    this.input.value = "";
+    this.input.placeholder = "Open a second window on…";
+    const request = ++this.requestId;
+    this.items = [
+      { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
+      {
+        kind: "window", label: "new window: scratch",
+        hint: "a disposable layout of its own",
+        run: () => this.app.openNewWindow(null),
+      },
+    ];
+    this._refilter();
+    this.focusInput();
+    const rows = await this.app.newWindowChoices().catch(() => []);
+    if (!this.open || !this.windowMode || request !== this.requestId) return;
+    if (!this.app.windowRegistryAvailable()) {
+      // Say so rather than let every workspace look free: the list below is
+      // this window's guess, not the registry's answer.
+      this.input.placeholder = "Open a second window on… (cannot check what other windows hold)";
+    }
+    for (const row of rows) {
+      this.items.push({
+        kind: "window",
+        label: `new window: ${row.name}`,
+        hint: row.hint,
+        run: () => (row.taken
+          ? this.app.explainWindowChoice(row)
+          : this.app.openNewWindow(row.name)),
+      });
+    }
+    this._refilter(false);
+  }
+
   _key(e) {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      if (this.foreignMode) {
+      if (this.foreignMode || this.windowMode) {
         this.openPalette();
         return;
       }

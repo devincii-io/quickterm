@@ -24,6 +24,13 @@ from uvicorn.server import Server as UvicornServer
 
 from quickterm import __version__
 from quickterm.server import create_app
+from quickterm.windows import (
+    WindowRegistry,
+    WorkspaceClaimed,
+    new_window_id,
+    normalize_workspace,
+    window_title,
+)
 
 if TYPE_CHECKING:
     from quickterm.config import AppConfig, Profile
@@ -90,11 +97,52 @@ class _DesktopApi:
     may depend on it being there.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, viewers: "Any | None" = None) -> None:
         self._window: Any | None = None
+        self._viewers = viewers
 
     def _bind_window(self, window: Any) -> None:
         self._window = window
+
+    def open_window(self, workspace: Any = "", cwd: Any = "") -> dict:
+        """Open another native viewer onto this same backend.
+
+        This is the primary route for "new window": the bridge runs each call
+        on its own thread, which is exactly where pywebview will materialise a
+        window while the GUI loop owns the main thread. The frontend may pass
+        the two values positionally or as one options object, because the
+        bridge forwards whatever JavaScript handed it.
+
+        Never raises: a rejected bridge promise carries a Python traceback into
+        the page, and a refusal here is ordinary (the workspace is already open
+        in another window), not a fault.
+        """
+        if isinstance(workspace, dict):
+            options = workspace
+            workspace = options.get("workspace", "")
+            cwd = options.get("cwd", cwd)
+        viewers = self._viewers
+        if viewers is None:
+            return {"opened": False, "error": "unavailable"}
+        try:
+            name = normalize_workspace(workspace)
+        except ValueError as exc:
+            return {"opened": False, "error": "invalid_workspace", "detail": str(exc)}
+        target = cwd.strip() if isinstance(cwd, str) else ""
+        try:
+            window_id = viewers.open(workspace=name, cwd=target or None)
+        except WorkspaceClaimed as exc:
+            return {
+                "opened": False,
+                "error": "workspace_claimed",
+                "detail": str(exc),
+                "workspace": exc.workspace,
+                "owner": exc.owner.id,
+            }
+        except Exception as exc:
+            log.warning("could not open a second window", exc_info=True)
+            return {"opened": False, "error": "failed", "detail": str(exc)}
+        return {"opened": True, "window_id": window_id, "workspace": name}
 
     def pick_folder(self, initial_directory: str = "") -> str | None:
         window = self._window
@@ -255,6 +303,8 @@ async def _serve(
     initial_launch: dict[str, Any] | None = None,
     elevated: bool = False,
     cwd: str | None = None,
+    windows: WindowRegistry | None = None,
+    open_window: Callable[[str | None, str | None], str] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
 
@@ -262,7 +312,14 @@ async def _serve(
 
     loop = asyncio.get_running_loop()
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
-    app = create_app(manager, cfg, auth.get_or_create_token(), elevated=elevated)
+    app = create_app(
+        manager,
+        cfg,
+        auth.get_or_create_token(),
+        elevated=elevated,
+        windows=windows,
+        open_window=open_window,
+    )
     server = UvicornServer(
         UvicornConfig(
             app,
@@ -333,6 +390,167 @@ def _sessions_worth_keeping(manager: Any) -> bool:
         return True
 
 
+class _ViewerWindows:
+    """Every native viewer this process owns, and the close/quit policy.
+
+    Two lists of windows exist and they are deliberately not the same thing.
+    `WindowRegistry` records what each window CLAIMS and expires an entry on a
+    missed heartbeat, because a viewer can be a browser tab that dies without a
+    word. This class records the native shells this process actually created,
+    and every quit decision reads it instead: a stalled heartbeat must never be
+    mistaken for "the last window closed", which would take the user's
+    terminals down with it.
+    """
+
+    def __init__(
+        self,
+        cfg: "AppConfig",
+        state: dict[str, Any],
+        registry: WindowRegistry,
+        *,
+        elevated: bool,
+        base_title: str,
+    ) -> None:
+        self._cfg = cfg
+        self._state = state
+        self._registry = registry
+        self._elevated = elevated
+        self._base_title = base_title
+        self._lock = threading.Lock()
+        self._live: dict[str, Any] = {}  # pywebview uid -> window, oldest first
+        self._ids: dict[str, str] = {}  # pywebview uid -> registry window id
+        self.quitting = threading.Event()
+        self.tray: Any | None = None
+
+    def adopt(self, window: Any, window_id: str) -> None:
+        """Take ownership of a native window's close policy and file drops."""
+        uid = str(getattr(window, "uid", "") or window_id)
+        with self._lock:
+            self._live[uid] = window
+            self._ids[uid] = window_id
+        # Zero-argument lambdas on purpose: pywebview inspects the handler
+        # signature and only calls a no-parameter handler with no arguments.
+        window.events.closing += lambda: self._on_closing(uid)
+        window.events.closed += lambda: self._on_closed(uid)
+        _wire_native_file_drop(window)
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._live)
+
+    def open(self, *, workspace: str | None = None, cwd: str | None = None) -> str:
+        """Create another viewer onto this same backend. Returns its window id."""
+        if threading.current_thread() is threading.main_thread():
+            # pywebview materialises a window at runtime only when
+            # create_window is called off the main thread; from the main thread
+            # it merely appends one that never appears, because webview.start()
+            # is already running the GUI loop there.
+            raise RuntimeError("a window cannot be opened from the main thread")
+        name = normalize_workspace(workspace)
+        if name is not None:
+            # Refuse before anything is drawn. Letting the window open and then
+            # fail its claim would show the user an empty shell and no reason.
+            owner = self._registry.owner_of(name)
+            if owner is not None:
+                raise WorkspaceClaimed(name, owner)
+        import webview
+
+        window_id = new_window_id()
+        api = _DesktopApi(self)
+        window = webview.create_window(
+            window_title(self._base_title, name, primary=False),
+            _window_url(self._cfg.port, cwd, workspace=name, window_id=window_id),
+            width=1280,
+            height=800,
+            min_size=(760, 480),
+            background_color="#171918",
+            js_api=api,
+            text_select=True,
+        )
+        if window is None:
+            raise RuntimeError("pywebview declined to create the window")
+        api._bind_window(window)
+        self.adopt(window, window_id)
+        return window_id
+
+    def show_all(self) -> None:
+        for window in self._snapshot():
+            _show_window(window)
+
+    def quit_all(self) -> None:
+        """Real quit: every window goes, and with the last one the backend."""
+        self.quitting.set()
+        for window in self._snapshot():
+            try:
+                window.destroy()
+            except Exception:
+                log.debug("window destroy failed", exc_info=True)
+
+    def _snapshot(self) -> list[Any]:
+        with self._lock:
+            return list(self._live.values())
+
+    def _on_closing(self, uid: str) -> bool:
+        # _updating: the in-app updater is about to run Setup, which asks the
+        # windows to close. Hiding to tray there strands the installer.
+        if self.quitting.is_set() or _updating.is_set():
+            return True
+        with self._lock:
+            window = self._live.get(uid)
+            others = len(self._live) - (1 if uid in self._live else 0)
+        # A secondary window is only a viewer. Closing it must never stop the
+        # backend or another window's terminals: sessions are backend-owned and
+        # stay attachable from whichever window claims their workspace next.
+        if others > 0:
+            return True
+        if self._elevated or self.tray is None:
+            # An elevated instance never hides: a resident admin backend that
+            # lives only in the notification area would be a foot-gun. Without
+            # a tray icon there is nothing to hide behind either. Either way
+            # the last close is a real quit.
+            return True
+        if not _sessions_worth_keeping(self._state.get("manager")):
+            return True  # nothing running worth the RAM: real quit
+        if window is None:
+            return True
+        window.hide()
+        self.tray.balloon_once(
+            "QuickTerm is still running",
+            "Your terminals keep running in the background. "
+            "Click the tray icon to reopen, right-click it to quit.",
+        )
+        return False  # cancel the close; we merely hid
+
+    def _on_closed(self, uid: str) -> None:
+        with self._lock:
+            self._live.pop(uid, None)
+            window_id = self._ids.pop(uid, None)
+        if window_id:
+            # Free the workspace claim now instead of waiting out the heartbeat
+            # TTL: the user may well be reopening that workspace right away.
+            self._registry.forget(window_id)
+        self._promote_title()
+
+    def _promote_title(self) -> None:
+        """Keep exactly one live window holding the bare base title.
+
+        hotkeys.py matches the window to summon by exact title, so closing the
+        first window would otherwise leave the summon hotkey and the Explorer
+        folder handoff with nothing to aim at.
+        """
+        if self.quitting.is_set():
+            return
+        live = self._snapshot()
+        if not live:
+            return
+        if any(getattr(win, "title", None) == self._base_title for win in live):
+            return
+        try:
+            live[0].set_title(self._base_title)
+        except Exception:
+            log.debug("could not promote a window title", exc_info=True)
+
+
 def _run_desktop(
     cfg: "AppConfig",
     *,
@@ -352,6 +570,11 @@ def _run_desktop(
     ready = threading.Event()
     state: dict[str, Any] = {}
     errors: list[BaseException] = []
+    title = "QuickTerm - Administrator" if elevated else "QuickTerm"
+    # One registry, shared: the API routes hand out and check workspace claims
+    # while the GUI side drops a claim the moment its window is destroyed.
+    registry = WindowRegistry()
+    viewers = _ViewerWindows(cfg, state, registry, elevated=elevated, base_title=title)
 
     def serve() -> None:
         try:
@@ -363,6 +586,8 @@ def _run_desktop(
                     state=state,
                     initial_launch=initial_launch,
                     elevated=elevated,
+                    windows=registry,
+                    open_window=_open_window_hook(viewers),
                 )
             )
         except BaseException as exc:
@@ -377,11 +602,11 @@ def _run_desktop(
             log.error("backend failed before the desktop window opened", exc_info=errors[0])
         return False
 
-    title = "QuickTerm - Administrator" if elevated else "QuickTerm"
-    desktop_api = _DesktopApi()
+    window_id = new_window_id()
+    desktop_api = _DesktopApi(viewers)
     window = webview.create_window(
         title,
-        _window_url(cfg.port, cwd),
+        _window_url(cfg.port, cwd, window_id=window_id, primary=True),
         width=1280,
         height=800,
         min_size=(760, 480),
@@ -390,66 +615,57 @@ def _run_desktop(
         text_select=True,
     )
     desktop_api._bind_window(window)
-    _wire_native_file_drop(window)
+    viewers.adopt(window, window_id)
 
-    # Hide-to-tray: closing the primary window keeps terminals alive in the
-    # background when they hold real work; otherwise it quits. Elevated windows
-    # always quit on close: a resident admin backend would be a foot-gun.
-    quitting = threading.Event()
+    # Hide-to-tray: closing the LAST window keeps terminals alive in the
+    # background when they hold real work; otherwise it quits. Closing any
+    # earlier window is just a viewer going away. Elevated instances never hide
+    # at all: a resident admin backend would be a foot-gun.
     global _shutdown_hook
-    _shutdown_hook = lambda: _quit_window(window, quitting)  # noqa: E731 (updater hand-off)
-    tray = None
+    _shutdown_hook = viewers.quit_all
     if not elevated:
         try:
             from quickterm.tray import TrayIcon
 
-            tray = TrayIcon(
-                on_open=lambda: _show_window(window),
-                on_quit=lambda: _quit_window(window, quitting),
-            )
+            tray = TrayIcon(on_open=viewers.show_all, on_quit=viewers.quit_all)
             # start() now reports whether an icon really exists. Without that,
             # close-to-tray could hide the window behind nothing.
             if tray.start() is False:
                 log.warning("tray icon unavailable; window close will quit")
                 tray.dispose()
-                tray = None
+            else:
+                viewers.tray = tray
         except Exception:
             log.exception("tray unavailable; window close will quit")
-            tray = None
 
-    def on_closing() -> bool:
-        # _updating: the in-app updater is about to run Setup, which asks this
-        # window to close. Hiding to tray there strands the installer.
-        if quitting.is_set() or _updating.is_set() or tray is None:
-            return True
-        if not _sessions_worth_keeping(state.get("manager")):
-            return True  # nothing running worth the RAM: real quit
-        window.hide()
-        tray.balloon_once(
-            "QuickTerm is still running",
-            "Your terminals keep running in the background. "
-            "Click the tray icon to reopen, right-click it to quit.",
-        )
-        return False  # cancel the close; we merely hid
-
-    window.events.closing += on_closing
     try:
         from quickterm.config import config_dir
 
+        # Returns once the last window is destroyed; pywebview ends its GUI
+        # loop on the last window, not on the first.
         webview.start(
             gui="edgechromium",
             private_mode=False,
             storage_path=str(config_dir() / "webview"),
         )
     finally:
-        if tray is not None:
-            tray.dispose()
+        if viewers.tray is not None:
+            viewers.tray.dispose()
         server = state.get("server")
         loop = state.get("loop")
         if server is not None and loop is not None:
             loop.call_soon_threadsafe(setattr, server, "should_exit", True)
         backend.join(timeout=10)
     return True
+
+
+def _open_window_hook(viewers: _ViewerWindows) -> Callable[[str | None, str | None], str]:
+    """Adapt the viewer supervisor to the server's open-window hook.
+
+    Kept as a plain function so `create_app` never learns what pywebview is;
+    the server only knows it may call something that returns a new window id.
+    """
+    return lambda workspace, cwd: viewers.open(workspace=workspace, cwd=cwd)
 
 
 def _show_window(window: Any) -> None:
@@ -502,28 +718,38 @@ def _wire_native_file_drop(window: Any) -> None:
     window.events.loaded += install
 
 
-def _quit_window(window: Any, quitting: threading.Event) -> None:
-    quitting.set()  # checked by on_closing: this close is a real quit
-    try:
-        window.destroy()
-    except Exception:
-        log.debug("tray quit failed", exc_info=True)
-
-
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
 
 
-def _window_url(port: int, cwd: str | None = None) -> str:
+def _window_url(
+    port: int,
+    cwd: str | None = None,
+    *,
+    workspace: str | None = None,
+    window_id: str | None = None,
+    primary: bool = False,
+) -> str:
     # The auth token rides in the URL fragment: the browser reads it client-side
     # and it is never sent to the server or written to any log. An optional cwd
     # query tells the frontend to open its first terminal in that directory
-    # (Explorer "Open QuickTerm here").
+    # (Explorer "Open QuickTerm here"). `window` and `workspace` tell a second
+    # window who it is and what it should claim; `primary` marks the one window
+    # the Explorer handoff and the summon hotkey aim at.
     from quickterm import auth
 
-    query = f"?cwd={urllib.parse.quote(cwd)}" if cwd else ""
+    params: list[tuple[str, str]] = []
+    if cwd:
+        params.append(("cwd", cwd))
+    if workspace:
+        params.append(("workspace", workspace))
+    if window_id:
+        params.append(("window", window_id))
+    if primary:
+        params.append(("primary", "1"))
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
     return f"http://127.0.0.1:{port}/{query}#t={auth.get_or_create_token()}"
 
 

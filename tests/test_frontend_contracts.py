@@ -195,12 +195,47 @@ def test_sidebar_collapse_returns_input_focus_to_the_terminal():
 
 
 def test_open_here_claims_one_folder_launch_and_shows_workspace_global_counts():
+    """The status bar keeps naming both figures; the sidebar pill now counts all.
+
+    The launcher assertion used to pin `${visible.length}/${totalLive}`, the
+    count of a list filtered down to this window's own terminals. That filter
+    was the bug: seven live terminals showed as "2/7" with no way to reach the
+    other five. The invariant is now the opposite one, so the check moved to
+    test_sidebar_lists_every_live_terminal_grouped_by_workspace rather than
+    being dropped.
+    """
     main = MAIN_JS.read_text(encoding="utf-8")
     launcher = LAUNCHER_JS.read_text(encoding="utf-8")
     assert "const launch = await api.claimLaunch()" in main
     assert "await openFolderInScratch(launch.cwd)" in main
     assert "`${workspaceLabel} · ${totalLive} total`" in main
-    assert "`${visible.length}/${totalLive}`" in launcher
+    assert "terminalsCount.textContent = String(totalLive);" in launcher
+
+
+def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
+    """Nothing live may be filtered out of the sidebar, and none of it is stolen.
+
+    The list is grouped by the workspace that owns each terminal, using the
+    same ownership rule the dashboard applies, and the pill counts the backend
+    total. Acting on a terminal another workspace owns stays a decision: the
+    row offers "open that workspace" or an explicit move, and never attaches on
+    the click itself.
+    """
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    # No filter may narrow the list to what this window happens to hold.
+    assert "owned.has(session.id) || attached.has(session.id)" not in launcher
+    assert "groupSessionsByWorkspace(sessions, {" in launcher
+    assert "`${here} in ${workspaceName} · ${totalLive} live on this backend`" in launcher
+
+    start = launcher.index("  const sessionEntry = (entry, group) => {")
+    end = launcher.index("\n  const sessionGroup =", start)
+    entry = launcher[start:end]
+    # A foreign row arms its choices; only the two labelled buttons act.
+    assert 'const foreign = !isHere && group.kind === "workspace";' in entry
+    assert entry.index("if (!foreign) {") < entry.index("options.onAttachSession?.(session)")
+    assert "row.addEventListener(\"click\", () => setArmed(" in entry
+    assert "options.onWorkspace?.(target)" in entry
+    assert "options.onMoveSession(session, target)" in entry
 
 
 def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():
@@ -295,3 +330,134 @@ def test_absolutely_positioned_sidebar_children_outrank_the_stretch_rule():
     assert "width: 3px" in grip
     # inset:0 without an explicit left would stretch it back across the sidebar.
     assert "left: auto" in grip
+
+
+def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
+    main = MAIN_JS.read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    keys = KEYS_JS.read_text(encoding="utf-8")
+
+    # Two entry points, one picker: the sidebar footer button and the palette
+    # row both land in the same list of workspaces a new window may open on.
+    # The footer is built from the `chrome` array, so that is where it goes.
+    assert '["new window", () => {' in main
+    assert "palette.newWindowMode()" in main
+    assert 'label: "new window…"' in palette
+    assert "run: () => this._newWindowMode()" in palette
+    # No new keyboard shortcut: keys.js may claim only cold Alt combos, and the
+    # letters left over are readline/PSReadLine bindings the shell needs.
+    assert "newWindow" not in keys
+
+    # The packaged shell owns the native window, so it is asked first; a plain
+    # browser still gets a window instead of a dead button, and the token only
+    # reaches it through the URL fragment.
+    open_start = main.index("  async function openNewWindow(")
+    opener = main[open_start:main.index("\n  // Tear down the current scratch layout", open_start)]
+    assert opener.index("globalThis.pywebview?.api?.open_window") < opener.index("api.requestWindow(")
+    assert opener.index("api.requestWindow(") < opener.index("newWindowUrl(location.pathname")
+    assert "api.token()" in opener
+
+
+def test_two_windows_can_never_own_one_workspace():
+    main = MAIN_JS.read_text(encoding="utf-8")
+    assert (FRONTEND_JS / "windows.js").exists()
+    assert 'from "./windows.js"' in main
+
+    # The claim is taken before anything is saved, discarded or torn down, and a
+    # refusal is a visible banner rather than a silent no-op.
+    start = main.index("  async function switchWorkspace(")
+    switch = main[start:main.index("\n  // Which scratch terminals", start)]
+    assert switch.index("await claimWorkspaceFor(target)") < switch.index("transitioning = true;")
+    assert "showError(refusal);" in switch
+
+    # Boot claims before restoring: this window autosaves the layout on every
+    # pane change, so restoring a workspace it may not own would start
+    # overwriting the other window's file before anyone could read a warning.
+    boot = main[main.index("  await acquireWindowId();"):main.index("  const initialSessions")]
+    assert "const refusal = await claimWorkspaceFor(currentWorkspace);" in boot
+    assert boot.index("currentWorkspace = null;") < boot.index("showError(refusal);")
+
+    # Adopting scratch and naming a workspace are the other two ways to take a
+    # workspace name, so both ask as well.
+    assert "if (await claimWorkspaceFor(SCRATCH_WS)) return;" in main
+    assert "const refusal = await claimWorkspaceFor(cleanName);" in main
+
+
+def test_an_unreachable_registry_lets_the_user_work_but_never_fakes_a_claim():
+    main = MAIN_JS.read_text(encoding="utf-8")
+    start = main.index("  async function claimWorkspaceFor(")
+    claim = main[start:main.index("\n  // The registry expires", start)]
+    # Only a 409 refuses; anything else degrades to "carry on" (claimOutcome is
+    # unit-tested in tests/js/windows.test.mjs).
+    assert 'if (claimOutcome(error) === "unavailable") {' in claim
+    assert "return claimRefusalMessage(name, holder);" in claim
+    # Every failure path leaves the claim unheld, so nothing later believes it.
+    assert claim.count("claimedWorkspace = null;") >= 3
+
+
+def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
+    main = MAIN_JS.read_text(encoding="utf-8")
+    assert "api.heartbeatWindow(windowId).then(" in main
+    assert "}, WINDOW_HEARTBEAT_MS);" in main
+    # The registry answers a beat from an expired window with 404 instead of
+    # reviving it, because an expired window has lost its claim and must not
+    # carry on autosaving a workspace someone else may now own.
+    assert "if (error?.status === 404) recoverWindowRegistration();" in main
+    recover_start = main.index("  async function recoverWindowRegistration()")
+    recover = main[recover_start:main.index("\n  // Opening a window is", recover_start)]
+    # Losing the claim costs no terminal and no layout: the window lets go the
+    # same way deleting the current workspace already does.
+    assert "for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);" in recover
+    assert "currentWorkspace = null;" in recover
+    assert "api.killSession" not in recover
+    assert "cleanupSessions" not in recover
+
+    start = main.index("  function persistOnExit()")
+    exiting = main[start:main.index('\n  window.addEventListener("pagehide"', start)]
+    # keepalive for the same reason the layout PUT needs it: the document is
+    # going away and a normal fetch is cancelled with it, so the release would
+    # never leave and the workspace would stay claimed until the heartbeat
+    # expired.
+    assert "fetch(`/api/windows/${encodeURIComponent(windowId)}`, {" in exiting
+    assert exiting.count("keepalive: true") >= 2
+    assert '"DELETE"' in exiting
+
+
+def test_a_window_registers_under_the_id_its_shell_gave_it():
+    # app.py puts the window id in the launch URL and forgets *that* id when the
+    # native window closes, so registering under any other one would keep the
+    # workspace claimed until the heartbeat TTL ran out.
+    main = MAIN_JS.read_text(encoding="utf-8")
+    start = main.index("function captureWindowIdentity()")
+    identity = main[start:main.index("\nasync function boot()", start)]
+    assert 'params.get("window")' in identity
+    assert 'params.get("primary") === "1"' in identity
+    # workspace is three-valued, and a secondary shell window without one was
+    # asked for scratch: restoring the workspace remembered in the shared
+    # localStorage there is exactly the collision this prevents.
+    assert "raw === null" in identity
+    assert "(id && !primary ? null : undefined)" in identity
+
+    acquire_start = main.index("  async function acquireWindowId()")
+    acquire = main[acquire_start:main.index("\n  async function listWindowsSafe", acquire_start)]
+    assert "id: identity.id || rememberedWindowId()," in acquire
+    assert "primary: identity.primary," in acquire
+    # No workspace key: registering is also how a reloaded page says hello, and
+    # an omitted key preserves the claim instead of dropping it for a moment.
+    assert "workspace" not in acquire.split("api.registerWindow({")[1].split("});")[0]
+
+
+def test_only_the_primary_window_claims_the_explorer_folder_handoff():
+    # The queue behind GET /api/launches/next hands each launch to exactly one
+    # waiter, so several windows waiting on it made "Open QuickTerm here"
+    # non-deterministic. The registry already names the window it is meant for.
+    main = MAIN_JS.read_text(encoding="utf-8")
+    start = main.index("  async function claimLaunchLoop()")
+    loop = main[start:main.index("\n  function removeSessionFromLayout", start)]
+    assert "if (!windowIsPrimary && registryAvailable) {" in loop
+    # Unchanged otherwise: one claim, opened as a folder in scratch.
+    assert "const launch = await api.claimLaunch()" in loop
+    assert "await openFolderInScratch(launch.cwd)" in loop
+    # The flag is read back from the registry, which promotes a new primary when
+    # that window closes, not trusted from the launch URL for the whole run.
+    assert 'if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);' in main

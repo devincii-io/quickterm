@@ -254,11 +254,100 @@ a typed path bar cannot produce a traceback; `missing` separates "no such
 folder" (→ 404) from "not a folder / cannot be read" (→ 400). Statically
 imported by `server.py`, so it needs no `hiddenimports` entry.
 
+## quickterm/windows.py
+
+One backend serves several viewer windows, so something has to say which
+window owns which workspace. Two windows on one workspace would both autosave
+its layout on every pane change and the loser's panes would disappear without a
+word, so a workspace has at most one live owner and a colliding claim FAILS.
+There is no force-take.
+
+```python
+DEFAULT_TTL_S: float = 45.0
+DEFAULT_MAX_WINDOWS: int = 12
+KEEP: object                      # "this call is not about the claim"
+
+class WindowError(Exception):  status: int      # UnknownWindow 404,
+class UnknownWindow(WindowError)                # WorkspaceClaimed 409 (.workspace,
+class WorkspaceClaimed(WindowError)             # .owner), TooManyWindows 409
+class TooManyWindows(WindowError)
+
+@dataclass
+class WindowInfo:
+    id: str
+    workspace: str | None = None   # None = claims nothing
+    title: str = ""
+    primary: bool = False
+    created: float = 0.0           # monotonic, never sent to a client
+    last_seen: float = 0.0
+
+def new_window_id() -> str
+def as_payload(info: WindowInfo) -> dict          # {id, workspace, title, primary}
+def normalize_workspace(value: object) -> str | None   # ValueError on junk
+def window_title(base: str, workspace: str | None, *, primary: bool) -> str
+
+class WindowRegistry:
+    def __init__(self, *, ttl_s=DEFAULT_TTL_S, max_windows=DEFAULT_MAX_WINDOWS,
+                 clock=time.monotonic) -> None
+    ttl_s: float
+    def register(self, *, window_id=None, workspace=KEEP, title="",
+                 primary=False, now=None) -> WindowInfo
+    def heartbeat(self, window_id, *, now=None) -> WindowInfo
+    def claim(self, window_id, workspace, *, now=None) -> WindowInfo
+    def release(self, window_id, *, now=None) -> WindowInfo
+    def forget(self, window_id, *, now=None) -> bool
+    def prune(self, *, now=None) -> list[WindowInfo]
+    def list(self, *, now=None) -> list[WindowInfo]
+    def get(self, window_id, *, now=None) -> WindowInfo | None
+    def owner_of(self, workspace, *, now=None) -> WindowInfo | None
+    def count(self, *, now=None) -> int
+    def snapshot(self, *, now=None) -> list[dict]   # payload + idle/age seconds
+```
+
+Rules:
+
+- **One live owner per workspace.** A claim that collides raises
+  `WorkspaceClaimed` and changes nothing. Re-claiming what you already hold is
+  a no-op success, so a page reload cannot 409 against itself. Claiming a
+  second workspace releases the first in the same step: a window shows one
+  workspace, so it owns one.
+- `workspace=None` means "claims nothing" and never collides. A window with no
+  claim MUST NOT autosave a layout. A window that wants exclusive Scratch
+  claims the name `scratch` like any other workspace.
+- Names are compared **exactly**, never case-folded, because `workspace.py`
+  stores `dev` and `Dev` as separate files and they are separate workspaces.
+- **Liveness is a heartbeat, not a process handle**, because a viewer can be a
+  browser tab that dies without a word. An entry older than `ttl_s` expires and
+  its workspace is free again; otherwise one crashed window would lock its
+  project out of the app for the life of the backend. Every method prunes
+  first, so expiry needs no timer.
+- A heartbeat or claim for an unknown or already expired id raises
+  `UnknownWindow`. The client must re-register rather than keep autosaving a
+  workspace that may now belong to somebody else.
+- Exactly one live window is `primary` while any window exists; when it is
+  forgotten or expires, the oldest survivor inherits the role. `primary` is who
+  the Explorer folder handoff and the summon hotkey aim at, so only the primary
+  window should long-poll `GET /api/launches/next`.
+- Timestamps are `time.monotonic` (a DST or NTP step must not expire every
+  window at once) and never leave the process; the wire carries
+  `idle_seconds` / `age_seconds` instead.
+- Pure and thread-safe: no pywebview import, no I/O, one lock, and callers get
+  copies of `WindowInfo` rather than the registry's own records. `server.py`
+  imports it statically, so it needs no `hiddenimports` entry.
+
 ## quickterm/server.py
 
 ```python
-def create_app(manager: SessionManager, cfg: AppConfig) -> FastAPI
+def create_app(manager: SessionManager, cfg: AppConfig, token: str = "",
+               elevated: bool = False, *,
+               windows: WindowRegistry | None = None,
+               open_window: Callable[[str | None, str | None], str] | None = None) -> FastAPI
 ```
+
+`windows` is the registry shared with `app.py`'s native side; omitted, the app
+builds a private one (headless, tests). `open_window(workspace, cwd) -> window
+id` exists only when a pywebview shell is running; it blocks, so the route
+calls it through `asyncio.to_thread`.
 
 Static: serve packaged `quickterm/frontend/` at `/` and its viewer at `/viewer`.
 
@@ -271,7 +360,13 @@ REST (JSON, under `/api`):
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
 | POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
-| GET | /api/launches/next | Long-poll and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe |
+| GET | /api/launches/next | Long-poll and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. |
+| GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, idle_seconds, age_seconds}]}`, oldest window first |
+| POST | /api/windows | `{id?, workspace?, title?, primary?}` → `{id, workspace, title, primary}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. 409 on a claimed workspace or too many windows, 400 on a junk name |
+| POST | /api/windows/{id}/heartbeat | → `{id, workspace, title, primary}`; **404 when the id is unknown or already expired**, which is the client's signal to re-register instead of carrying on autosaving a workspace it may have lost |
+| PUT | /api/windows/{id}/workspace | `{workspace: name\|null}` → `{id, workspace, title, primary}`. 404 unknown window, 400 missing key/junk name, 409 `{detail, error: "workspace_claimed", workspace, owner: {id, workspace, title, primary}}` when another live window holds it. Never merged, never force-taken: both windows would autosave the same layout file |
+| DELETE | /api/windows/{id} | Drop a window and free its claim now instead of waiting out the TTL → 204, idempotent (this is a closing page's goodbye and may arrive twice) |
+| POST | /api/windows/open | `{workspace?, cwd?}` → `{opened: true, target: "native", window_id}`. Asks the desktop shell for another native window. 409 (same shape as above) when the workspace is already open, so nothing is drawn before the refusal; 400 on a junk name or a missing `cwd`; 500 when the shell refuses. Without a pywebview shell (plain browser, POSIX, tests) it answers **200** `{opened: false, target: "unavailable"}` so the caller degrades to opening the URL itself. The frontend's own routes are the JS bridge and `window.open`; this exists for callers that have neither, above all a second QuickTerm process handing work to the resident one |
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
 | POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
 | DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id, 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
@@ -337,6 +432,16 @@ def main() -> None
 
 class _DesktopApi:
     def pick_folder(self, initial_directory: str = "") -> str | None
+    def open_window(self, workspace="", cwd="") -> dict
+        # {opened: True, window_id, workspace}
+        # {opened: False, error: "workspace_claimed"|"invalid_workspace"|"unavailable"|"failed", ...}
+
+class _ViewerWindows:                       # the native windows this process owns
+    def adopt(self, window, window_id) -> None
+    def open(self, *, workspace=None, cwd=None) -> str
+    def show_all(self) -> None
+    def quit_all(self) -> None
+    def count(self) -> int
 ```
 
 - Fail fast unless `sys.getwindowsversion().build >= 17763` (Win10 1809).
@@ -357,11 +462,52 @@ class _DesktopApi:
   spawns arbitrary processes.
 - Spawn autostart profiles on startup.
 - Clean shutdown: manager.shutdown() on exit.
-- Close-to-tray (win32, non-elevated): closing the primary window hides to the
-  system tray (quickterm/tray.py, ctypes Shell_NotifyIcon) iff any live session
-  has `touched=True`, `retained=True`, or its shell has a child process.
-  Otherwise the app quits.
-  Tray menu: Open / Quit. The summon hotkey also restores a tray-hidden window.
+
+### Several windows, one backend
+
+The window URL is `http://127.0.0.1:<port>/?<params>#t=<token>`, where the
+params are `cwd` (Explorer handoff), `workspace` (what this window should open
+and claim), `window` (**the id this window MUST register with**, so a native
+close can free its claim at once instead of waiting out the TTL) and `primary`
+(`1` on the one window the Explorer handoff and the summon hotkey aim at).
+
+Opening a window: `_DesktopApi.open_window` is the primary route, because the
+bridge runs every call on its own thread, which is where pywebview will
+actually materialise a window while the GUI loop owns the main thread. It never
+raises (a rejected bridge promise would carry a traceback into the page) and a
+refused claim is an ordinary `{opened: false}` answer. In a plain browser the
+bridge does not exist and `window.open` on the same URL is the whole feature;
+`POST /api/windows/open` is for the callers that have neither.
+
+Two lists of windows exist and they are NOT interchangeable. `WindowRegistry`
+records what each window CLAIMS and expires on a missed heartbeat.
+`_ViewerWindows` records the native shells this process created, and every quit
+decision reads that one: a stalled heartbeat must never be read as "the last
+window closed".
+
+Close and quit, in the order the checks run:
+
+1. A quit already in progress (tray **Quit**, `begin_update_shutdown`) or
+   `_updating`: every window closes. Hiding to tray during an update strands
+   Inno Setup at a window that refuses to go away.
+2. Another window is still open: the close is allowed and nothing else happens.
+   A secondary window is only a viewer, so closing it never stops the backend,
+   another window's terminals, or any session; sessions stay backend-owned and
+   reattach from whichever window claims their workspace next. Its workspace
+   claim is released immediately.
+3. Last window, no tray icon (elevated instance, or the icon could not be
+   created): real quit. An elevated instance never hides, because a resident
+   admin backend visible only in the notification area would be a foot-gun; it
+   simply exits when its last window closes rather than on any close.
+4. Last window, tray present: hide to tray iff a live session is `touched`,
+   `retained`, or busy (`_sessions_worth_keeping`), else quit.
+
+pywebview ends its GUI loop on the LAST window, not the first, so
+`webview.start()` returns (and the backend stops) exactly when rule 2 stops
+applying. Tray menu: Open / Quit, where Open restores every live window and the
+summon hotkey also restores a tray-hidden one. When the window holding the bare
+title closes, the oldest survivor is retitled to it, because `hotkeys.py`
+summons by exact title match and would otherwise have nothing to aim at.
 
 ## quickterm/hotkeys.py
 
@@ -409,6 +555,25 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - `pane_protocol.js` is the DOM-free attach/replay/backpressure state machine
   used by `pane.js`; `node --test tests/js/*.test.mjs` verifies replay gating,
   stale generations, transition to live input, and overflow-driven resync.
+- `windows.js` is the DOM-free half of multi-window ownership: which workspace
+  this window may claim, what a refusal means, and the wording the user sees.
+  `main.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
+  DELETE on `pagehide`); the decisions live here so they can be unit-tested.
+  The rule it exists to enforce: two windows must never own one workspace,
+  because the layout autosaves on every pane change and the loser's panes would
+  be overwritten in silence.
+- The sidebar footer is built from the `chrome` array `main.js` passes to
+  `initLauncher`, each entry `[label, onClick, shortcut?]`. `launcher.js` maps
+  the label to a glyph in `navIcons`; an unmapped label falls back to the
+  terminal icon, so a new entry needs one line there as well.
+- `render.js` is the keyed reconciler behind every live panel. A refresh must
+  patch, never rebuild: the dashboard reloads every 5 s and recreating its DOM
+  destroyed half-typed input and the folder picker's captured field. Nodes are
+  reused per key and never moved when already in place, because detaching a
+  node blurs a focused control inside it.
+- `focus.js` decides who owns the keyboard. A pane re-asserts `term.focus()`
+  immediately, on a frame, and on a timeout, so an overlay that focuses its own
+  control must claim first and release before handing back.
 - `document.title = "QuickTerm"` (hotkey summon matches on this).
 - Layout tree in JS mirrors the workspace JSON schema exactly.
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use

@@ -9,6 +9,10 @@ import * as workspace from "./workspace.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
 import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
+import {
+  claimOutcome, claimRefusalMessage, conflictHolder, describeHolder, newWindowUrl,
+  normalizeWindows, windowChoiceMessage, windowChoices, workspaceHolder,
+} from "./windows.js";
 
 document.title = "QuickTerm";
 
@@ -16,6 +20,11 @@ const $ = (id) => document.getElementById(id);
 const ACTIVE_WORKSPACE_KEY = "quickterm.activeWorkspace";
 const SCRATCH_ACTIVE_KEY = "quickterm.scratchActive";
 const SCRATCH_WS = "scratch";
+const WINDOW_ID_KEY = "qt.windowId";
+// Well inside whatever the registry uses to expire a silent window: a missed
+// beat must never look like a crashed window, because expiry is what hands this
+// window's workspace to someone else.
+const WINDOW_HEARTBEAT_MS = 5000;
 
 function storedWorkspace() {
   try { return localStorage.getItem(ACTIVE_WORKSPACE_KEY); } catch (_) { return null; }
@@ -84,8 +93,50 @@ function captureOpenDir() {
   } catch (_) { return null; }
 }
 
+// Who this window is, from the launch URL app.py built (`_window_url`).
+//
+// `window` is the id the desktop shell already assigned: it must be reused when
+// registering, because that is the id the shell forgets when the native window
+// closes, and a registration under any other id would keep the workspace
+// claimed until the heartbeat expired. `primary` marks the one window the
+// Explorer handoff and the summon hotkey aim at.
+//
+// `workspace` is three-valued, like `path` on the workspace PUT. A name is an
+// instruction. Absent normally means "restore what you remember", which is what
+// the primary window and a plain browser tab want. Absent in a *secondary*
+// shell window means scratch: that window was asked for a scratch window, and
+// localStorage is shared across every window on this origin, so restoring the
+// remembered workspace there would collide with the window that opened it. The
+// browser fallback says the same thing explicitly with an empty value.
+function captureWindowIdentity() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const id = params.get("window") || null;
+    const primary = params.get("primary") === "1";
+    const raw = params.get("workspace");
+    const workspace = raw === null
+      ? (id && !primary ? null : undefined)
+      : (raw || null);
+    return { id, primary, workspace };
+  } catch (_) { return { id: null, primary: false, workspace: undefined }; }
+}
+
+// sessionStorage is per window and survives a reload, so a reloaded window asks
+// the registry for the id it just had. Its release on pagehide and its new
+// claim are then two facts about the same window instead of a race between a
+// dying one and a new one over the same workspace.
+function rememberedWindowId() {
+  try { return sessionStorage.getItem(WINDOW_ID_KEY) || null; } catch (_) { return null; }
+}
+
+function rememberWindowId(id) {
+  try { sessionStorage.setItem(WINDOW_ID_KEY, id); } catch (_) { /* storage may be disabled */ }
+}
+
 async function boot() {
   const openDir = captureOpenDir();
+  const identity = captureWindowIdentity();
+  const requestedWorkspace = identity.workspace;
   captureToken();
   let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, profiles: [], snippets: [], voice_available: false };
   const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
@@ -100,11 +151,52 @@ async function boot() {
   let snippets = cfg.snippets || [];
   let workspaceNames = loadedWorkspaces || [];
   let terminalInventory = loadedInventory;
+  // This window's identity in the registry, and the workspace it is allowed to
+  // own. Declared before the workspace is resolved because resolving it is
+  // already a claim decision.
+  let windowId = null;
+  let claimedWorkspace = null;
+  let registryAvailable = true;
+  let windowHeartbeatTimer = null;
+  // Exactly one live window is primary, and the registry promotes the oldest
+  // survivor when it closes, so this is read back from the registry rather than
+  // trusted from the launch URL for the rest of the run.
+  let windowIsPrimary = identity.primary;
+
   const remembered = storedWorkspace();
   let currentWorkspace = null;
-  if (storedScratchActive() && workspaceNames.includes(SCRATCH_WS)) currentWorkspace = SCRATCH_WS;
+  if (requestedWorkspace !== undefined) {
+    // Opened by another window: the URL is the instruction and shared
+    // localStorage is not consulted at all.
+    currentWorkspace = requestedWorkspace && workspaceNames.includes(requestedWorkspace)
+      ? requestedWorkspace
+      : null;
+  } else if (storedScratchActive() && workspaceNames.includes(SCRATCH_WS)) currentWorkspace = SCRATCH_WS;
   else if (remembered && workspaceNames.includes(remembered)) currentWorkspace = remembered;
-  if (!currentWorkspace) rememberWorkspace(null);
+  // Only a window that resolved its own workspace may rewrite the shared
+  // memory of which one that is. A second window landing on scratch must not
+  // erase the first window's last real workspace.
+  if (!currentWorkspace && requestedWorkspace === undefined) rememberWorkspace(null);
+  // "Open QuickTerm here" opens this window as a scratch window whose first
+  // terminal starts in the given folder, regardless of any remembered
+  // workspace. Decided here rather than just before the restore, so this window
+  // never claims a workspace it is not going to open.
+  if (openDir) currentWorkspace = null;
+
+  // Claim before restoring, never after. This window autosaves the layout on
+  // every pane change, so restoring a workspace another window holds would
+  // start overwriting its file within the first second, before anyone could
+  // read a warning. A refused claim drops this window into scratch and says so.
+  await acquireWindowId();
+  const refusal = await claimWorkspaceFor(currentWorkspace);
+  if (refusal) {
+    // The remembered name is deliberately left alone: the workspace is not
+    // lost, it is busy, and it must come back the next time this window is the
+    // only one on it.
+    currentWorkspace = null;
+    showError(refusal);
+  }
+  startWindowHeartbeat();
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
   let lastSessions = initialSessions;
@@ -563,6 +655,204 @@ async function boot() {
     if (banner) banner.hidden = true;
   }
 
+  // ---- this window in the registry ---------------------------------------
+  //
+  // The invariant: two windows must never own the same workspace, because both
+  // of them autosave the whole layout on every pane change and the loser's
+  // panes disappear without a trace. Every path that changes what this window
+  // owns goes through claimWorkspaceFor().
+
+  // The id in the launch URL wins: app.py's viewer bookkeeping forgets a window
+  // by exactly that id when its native shell closes, so registering under any
+  // other one would leave the workspace claimed until the heartbeat expired.
+  // The remembered id is the fallback for a plain browser tab, where a reload
+  // otherwise looks like a second window fighting its own claim.
+  //
+  // No workspace key: registering is also how a reloaded page says hello, and
+  // an omitted key preserves the claim it already holds instead of dropping it
+  // for the moment it takes to ask for it back.
+  async function acquireWindowId() {
+    try {
+      const info = await api.registerWindow({
+        id: identity.id || rememberedWindowId(),
+        primary: identity.primary,
+      });
+      windowId = info && info.id ? String(info.id) : null;
+      registryAvailable = Boolean(windowId);
+      if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);
+      if (windowId) rememberWindowId(windowId);
+    } catch (_) {
+      // An older backend without the registry, one still starting up, or the
+      // window cap. The app is fully usable without it; only the guarantee is
+      // missing, and pretending otherwise would be the worse failure.
+      windowId = null;
+      registryAvailable = false;
+    }
+    return windowId;
+  }
+
+  async function listWindowsSafe() {
+    try {
+      const list = normalizeWindows(await api.listWindows());
+      registryAvailable = true;
+      return list;
+    } catch (_) {
+      registryAvailable = false;
+      return [];
+    }
+  }
+
+  // Returns null when this window may own `name` (and now does), or the message
+  // to show when it may not. `name` null means scratch, which is nobody's:
+  // an unadopted scratch layout has no file to overwrite.
+  //
+  // A registry that cannot answer degrades to "carry on": blocking the user out
+  // of their own workspace because a route 404'd is a worse failure than the
+  // one being prevented. It never degrades to pretending the claim worked,
+  // which is why claimedWorkspace stays null on that path.
+  async function claimWorkspaceFor(name) {
+    if (!windowId) {
+      claimedWorkspace = null;
+      return null;
+    }
+    try {
+      if (!name) {
+        await api.releaseWindowWorkspace(windowId);
+        claimedWorkspace = null;
+        return null;
+      }
+      await api.claimWindowWorkspace(windowId, name);
+      claimedWorkspace = name;
+      return null;
+    } catch (error) {
+      claimedWorkspace = null;
+      if (claimOutcome(error) === "unavailable") {
+        registryAvailable = false;
+        return null;
+      }
+      // Refused. The 409 body names the window that holds it, so "taken" is
+      // actionable; the registry listing is only the fallback.
+      const holder = conflictHolder(error)
+        || workspaceHolder(await listWindowsSafe(), windowId, name);
+      return claimRefusalMessage(name, holder);
+    }
+  }
+
+  // The registry expires a window that stops answering; that is how a crashed
+  // or force-killed window lets go of its workspace. It answers a beat from an
+  // expired window with 404 rather than reviving it silently, and that 404 is
+  // the one heartbeat failure that matters: this window is autosaving a
+  // workspace it no longer owns.
+  function startWindowHeartbeat() {
+    if (!windowId || windowHeartbeatTimer) return;
+    windowHeartbeatTimer = setInterval(() => {
+      api.heartbeatWindow(windowId).then(
+        (info) => {
+          registryAvailable = true;
+          if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);
+        },
+        (error) => { if (error?.status === 404) recoverWindowRegistration(); },
+      );
+    }, WINDOW_HEARTBEAT_MS);
+  }
+
+  // Say hello again and ask for the same workspace back. If it has been taken
+  // in the meantime this window must stop owning it, and it lets go the same
+  // way deleting the current workspace already does: the layout and every
+  // terminal in it stay exactly as they are and carry on as an unnamed scratch
+  // layout. Nothing is killed, nothing is saved over.
+  async function recoverWindowRegistration() {
+    const wanted = currentWorkspace;
+    let refused = null;
+    try {
+      const info = await api.registerWindow({
+        id: windowId,
+        workspace: wanted || null,
+        primary: identity.primary,
+      });
+      if (info && info.id) {
+        windowId = String(info.id);
+        rememberWindowId(windowId);
+        if ("primary" in info) windowIsPrimary = Boolean(info.primary);
+      }
+      claimedWorkspace = wanted || null;
+      registryAvailable = true;
+      return;
+    } catch (error) {
+      claimedWorkspace = null;
+      if (claimOutcome(error) !== "refused") {
+        registryAvailable = false;
+        return;
+      }
+      refused = `“${wanted}” was taken over by ${describeHolder(conflictHolder(error))} `
+        + "while this window was unreachable. Nothing here was closed: your terminals "
+        + "keep running and this layout carries on as an unnamed scratch layout.";
+    }
+    clearTimeout(workspaceSaveTimer);
+    for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
+    workspaceSessionIds = new Set();
+    currentWorkspace = null;
+    showError(refused);
+    buildLauncher();
+    refreshStatusSoon();
+  }
+
+  // Opening a window is the desktop shell's job: it owns the native window and
+  // knows the launch URL, token fragment included. The backend route is for a
+  // viewer that is not the shell but is talking to a backend that has one. A
+  // plain browser window is the last resort, so the button is never dead.
+  async function openNewWindow(name) {
+    const target = name || null;
+    const bridge = globalThis.pywebview?.api?.open_window;
+    if (typeof bridge === "function") {
+      // The bridge never rejects: a refusal is ordinary, so it answers
+      // {opened:false, error}. Only "unavailable" means "there is no shell
+      // here, ask someone else"; every other error is this window's answer.
+      const result = await bridge(target || "", "").catch(() => null);
+      if (result && result.opened) return true;
+      if (result && result.error === "workspace_claimed") {
+        // The bridge answers with the owner's id; the listing turns it into
+        // something the user can point at.
+        const holder = (await listWindowsSafe()).find((entry) => entry.id === result.owner) || null;
+        showError(claimRefusalMessageForOpen(target, holder));
+        return false;
+      }
+      if (result && result.error && result.error !== "unavailable") {
+        showError(result.detail || "Could not open a second window.");
+        return false;
+      }
+    }
+    try {
+      const result = await api.requestWindow({ workspace: target });
+      if (result && result.opened) return true;
+    } catch (error) {
+      if (claimOutcome(error) === "refused") {
+        showError(claimRefusalMessageForOpen(target, conflictHolder(error)));
+        return false;
+      }
+      // Anything else means no shell answered, which is exactly what a plain
+      // browser looks like. Fall through rather than leave a dead button.
+    }
+    const opened = window.open(
+      newWindowUrl(location.pathname, target, api.token()),
+      "_blank",
+      "noopener",
+    );
+    if (!opened) {
+      showError("Could not open a second window. Your browser blocked the pop-up.");
+      return false;
+    }
+    return true;
+  }
+
+  // Same refusal, different consequence: nothing was switched here, the second
+  // window simply did not open.
+  function claimRefusalMessageForOpen(name, holder) {
+    return `“${name}” is already open in ${describeHolder(holder)}, `
+      + "so no second window was opened. Two windows on one workspace overwrite "
+      + "each other's saved layout.";
+  }
+
   // Tear down the current scratch layout before leaving it: scratch is
   // disposable, so its sessions are killed and its file dropped. Handles both
   // pre-adoption scratch (tracked in scratchSessionIds) and the adopted
@@ -620,6 +910,10 @@ async function boot() {
       // rather than fighting over the file (its sessions stay disposable).
       const names = await api.listWorkspaces().catch(() => null);
       if (names && names.includes(SCRATCH_WS)) return;
+      // The same reasoning one step earlier: the registry knows about a window
+      // that has adopted scratch but has not written the file yet, so ask it
+      // before taking the name. Refused means stay in pure scratch.
+      if (await claimWorkspaceFor(SCRATCH_WS)) return;
       currentWorkspace = SCRATCH_WS;
       workspacePath = scratchRoot || null;
       workspacePathExists = true;
@@ -645,6 +939,7 @@ async function boot() {
     if (currentWorkspace) return true;
     const names = await api.listWorkspaces().catch(() => []);
     if (names.includes(SCRATCH_WS)) return false;
+    if (await claimWorkspaceFor(SCRATCH_WS)) return false;
     currentWorkspace = SCRATCH_WS;
     workspacePath = scratchRoot || null;
     workspacePathExists = true;
@@ -767,6 +1062,21 @@ async function boot() {
     // discardScratch(), killing every live scratch terminal without asking.
     // Replacing scratch is the explicit, confirmed "New scratch" action only.
     if (!name && currentWorkspace === SCRATCH_WS && !replaceScratch) return true;
+    // What this call really lands on. The sidebar's scratch row passes null,
+    // but an adopted scratch is a workspace file like any other and is
+    // restored, not replaced; only the confirmed "New scratch" action replaces.
+    const target = name
+      || (!replaceScratch && workspaceNames.includes(SCRATCH_WS) ? SCRATCH_WS : null);
+    // Ask the registry first, before anything is saved, discarded or torn down.
+    // A refused switch must leave this window exactly where it was, with the
+    // reason on screen instead of a silent no-op.
+    if (target) {
+      const refusal = await claimWorkspaceFor(target);
+      if (refusal) {
+        showError(refusal);
+        return false;
+      }
+    }
     const leavingWorkspace = currentWorkspace;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
@@ -781,6 +1091,9 @@ async function boot() {
         );
       } catch (_) {
         transitioning = false;
+        // The claim was moved a moment ago for a switch that is not happening.
+        // Put it back on the workspace this window is still sitting on.
+        if (target) await claimWorkspaceFor(currentWorkspace);
         showError(`Could not save “${currentWorkspace}”. The workspace was not switched and nothing was closed.`);
         return false;
       }
@@ -796,14 +1109,29 @@ async function boot() {
       rememberWorkspace(name);
       const restored = await restoreWorkspace(name);
       if (!restored) opened = await startScratch();
+    } else if (!replaceScratch && workspaceNames.includes(SCRATCH_WS)) {
+      // Going *to* scratch. An adopted scratch is restored exactly like any
+      // other workspace, terminals and all: the old code deleted the file here
+      // and built an empty one, so simply navigating to scratch from another
+      // workspace destroyed the scratch layout the user had left running. Only
+      // the confirmed "New scratch" action below may replace it.
+      currentWorkspace = SCRATCH_WS;
+      rememberWorkspace(SCRATCH_WS); // scratch has its own flag, not the durable key
+      const restored = await restoreWorkspace(SCRATCH_WS);
+      if (!restored) opened = await startScratch(scratchCwd);
     } else {
-      // "New scratch" is explicit replacement. Ordinary workspace switching
-      // preserves the adopted Scratch workspace for the rest of this run.
+      // Explicit replacement, or there is no adopted scratch to go back to.
+      // newScratchWorkspace() has already named what dies and asked.
       if (leavingWorkspace === SCRATCH_WS) await discardScratch({ force: true });
       else if (workspaceNames.includes(SCRATCH_WS)) await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
       workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
       opened = await startScratch(scratchCwd);
     }
+    // Sync the claim to where this window actually ended up. A window on an
+    // unadopted scratch owns nothing, so the workspace it just left is free for
+    // another window at once instead of after a heartbeat timeout, and a failed
+    // restore that fell back to scratch does not keep holding a name.
+    if (currentWorkspace !== claimedWorkspace) await claimWorkspaceFor(currentWorkspace);
     transitioning = false;
     clearError();
     buildLauncher();
@@ -904,6 +1232,18 @@ async function boot() {
   async function claimLaunchLoop() {
     while (!launchLoopStopped) {
       try {
+        // One folder, one window. The queue behind GET /api/launches/next hands
+        // each launch to a single waiter, so with several windows waiting the
+        // folder used to land in whichever one happened to poll first. The
+        // registry already names the window this is meant for: `primary` is the
+        // same window the summon hotkey raises and the one whose native title
+        // hotkeys.py matches, and it is re-promoted when that window closes.
+        // A window with no registry to ask still claims, because a lost folder
+        // handoff is worse than an unlikely double claim.
+        if (!windowIsPrimary && registryAvailable) {
+          await sleep(1000);
+          continue;
+        }
         let waits = 0;
         while (transitioning && !launchLoopStopped && waits++ < LAUNCH_MAX_WAITS) await sleep(100);
         const launch = await api.claimLaunch();
@@ -1164,6 +1504,13 @@ async function boot() {
       const cleanName = (name || "").trim();
       const problem = app.validateWorkspaceName(cleanName);
       if (problem) return problem;
+      // Naming this layout into a workspace another window already has open
+      // would put two autosaving windows on one file from the next keystroke on.
+      const refusal = await claimWorkspaceFor(cleanName);
+      if (refusal) {
+        showError(refusal);
+        return refusal;
+      }
       // A workspace is a folder first. An empty box falls back to a real
       // previous choice, never to the disposable scratch root.
       const folder = (folderInput || "").trim()
@@ -1199,6 +1546,8 @@ async function boot() {
         scratchSessionIds.clear();
         for (const sid of previousScratchIds) scratchSessionIds.add(sid);
         rememberWorkspace(previousWorkspace);
+        await claimWorkspaceFor(previousWorkspace); // the rename did not happen
+
         const message = error?.detail || `Could not save “${cleanName}”. Nothing was changed.`;
         showError(message);
         return message;
@@ -1223,6 +1572,14 @@ async function boot() {
     // kills sessions nobody is attached to, and deleting the workspace you're
     // in simply turns the live layout into a scratch layout in place.
     deleteWorkspace: async (name) => {
+      // Deleting a workspace another window has open pulls the file out from
+      // under a live layout that is still autosaving into it.
+      const holder = workspaceHolder(await listWindowsSafe(), windowId, name);
+      if (holder) {
+        showError(windowChoiceMessage({ name, taken: true, mine: false, holder })
+          + " Close it there first.");
+        return false;
+      }
       try {
         await api.deleteWorkspace(name);
       } catch (_) {
@@ -1232,6 +1589,7 @@ async function boot() {
       const deletingCurrent = currentWorkspace === name;
       if (deletingCurrent) {
         clearTimeout(workspaceSaveTimer);
+        await claimWorkspaceFor(null); // the live layout is a scratch layout now
         currentWorkspace = null;
         workspaceLogo = null;
         workspacePath = scratchRoot || null;
@@ -1251,6 +1609,20 @@ async function boot() {
       buildLauncher();
     },
     currentWorkspace: () => currentWorkspace,
+    // Second-window support. The picker offers scratch plus every named
+    // workspace, marking the ones another window already holds instead of
+    // hiding them: a missing row reads as "that workspace is gone". "scratch"
+    // itself is not offered by name, exactly as the sidebar does not list it;
+    // the disposable scratch row is the way to open one.
+    newWindowChoices: async () => windowChoices(
+      workspaceNames.filter((item) => item !== SCRATCH_WS),
+      await listWindowsSafe(),
+      windowId,
+      currentWorkspace,
+    ),
+    openNewWindow,
+    explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
+    windowRegistryAvailable: () => registryAvailable,
     // Set when RegisterHotKey failed at startup (another program owns the
     // combination). Settings renders it next to the field.
     hotkeyError: () => cfg.hotkey_error || null,
@@ -1601,6 +1973,11 @@ async function boot() {
         if (pane) layout.focusPane(pane);
       },
       onAttachSession: attachSession,
+      // A terminal another workspace owns is never attached by a click alone.
+      // The sidebar arms a choice first; this is the explicit half of it, and
+      // moveSessionHere re-checks the session is alive and takes it out of the
+      // old workspace's saved ownership before attaching.
+      onMoveSession: (session, fromWorkspace) => app.moveSessionHere(session, fromWorkspace),
       onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
       sessions: lastSessions,
       attachedSessionIds: app.attachedSessionIds(),
@@ -1611,6 +1988,16 @@ async function boot() {
       // sit here AND directly above as "Manage workspaces", pixel-identical
       // once the sidebar is collapsed.
       chrome: [
+        // The discoverable half of the palette's "new window…" row. Both land
+        // in the same picker, because which workspace a second window opens on
+        // is a choice and the free/taken list only exists in one place. No
+        // shortcut: keys.js may claim only cold Alt combos, and the letters
+        // still free are readline/PSReadLine bindings the shell needs.
+        ["new window", () => {
+          closeQuickSettings();
+          panels.close();
+          palette.newWindowMode();
+        }],
         ["dashboard", () => panels.toggle("dashboard"), "alt+g"],
         ["settings", () => panels.toggle("settings"), "alt+s"],
         ["help", () => panels.toggle("help"), "alt+i"],
@@ -1666,6 +2053,19 @@ async function boot() {
 
   function persistOnExit() {
     launchLoopStopped = true;
+    clearInterval(windowHeartbeatTimer);
+    // keepalive, for the same reason the layout PUT below needs it: the
+    // document is going away and a normal fetch is cancelled with it, so the
+    // release would never leave and this window's workspace would stay claimed
+    // until the registry expired the heartbeat. That is the difference between
+    // the other window opening it now and the user waiting out a timeout.
+    if (windowId) {
+      fetch(`/api/windows/${encodeURIComponent(windowId)}`, {
+        method: "DELETE",
+        headers: { ...api.authHeaders() },
+        keepalive: true,
+      }).catch(() => {});
+    }
     if (currentWorkspace && layout.root && !transitioning) {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
@@ -1698,10 +2098,6 @@ async function boot() {
       layout.fitAll();
     }
   });
-
-  // "Open QuickTerm here" opens this window as a scratch window whose first
-  // terminal starts in the given folder, regardless of any remembered workspace.
-  if (openDir) currentWorkspace = null;
 
   if (currentWorkspace) {
     const restored = await restoreWorkspace(currentWorkspace);

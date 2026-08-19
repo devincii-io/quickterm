@@ -110,10 +110,8 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   letter-spacing: .09em;
   text-transform: uppercase;
 }
-/* Only the two states worth interrupting for become chips. Everything else
-   stays a caption, or the list turns into a wall of badges. */
-.sidebar-row.active .sidebar-row-copy small,
-.session-row.unread .sidebar-row-copy small {
+/* The workspace you are in states it in place of its caption. */
+.sidebar-row.active .sidebar-row-copy small {
   align-self: flex-start;
   margin-top: 3px;
   padding: 0 5px;
@@ -122,10 +120,109 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   color: var(--accent);
   line-height: 13px;
 }
-.session-row.unread .sidebar-row-copy small {
-  background: color-mix(in srgb, var(--sage) 16%, transparent);
-  color: var(--sage);
+
+/* ---------- terminals, grouped by owning workspace ---------- */
+
+/* Every group after the first needs a boundary that is actually visible, and
+   --line is 1.26:1 on this ground, so the separator is --line-hover and the
+   group you are in also carries the accent bar. */
+.session-group + .session-group {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line-hover);
 }
+.session-group-head {
+  width: 100%;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.session-group-head:hover { background: var(--surface-raised); color: var(--text); }
+.session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-group.current > .session-group-head {
+  background: var(--surface-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+.session-group-head .sidebar-row-copy strong { font-size: 10px; letter-spacing: .04em; }
+.session-group.current > .session-group-head .sidebar-row-copy strong { color: var(--text); }
+.session-group-head .sidebar-row-copy small { margin-top: 2px; letter-spacing: .07em; }
+.session-group-head .sidebar-count { flex: none; margin-left: auto; }
+.session-group-chevron { width: 12px; flex: none; display: grid; place-items: center; color: var(--muted); }
+.session-group-rows { display: flex; flex-direction: column; gap: 1px; padding-top: 2px; }
+/* An empty group still occupies a line rather than vanishing: "nothing running
+   here" is information about the workspace you are standing in. */
+.session-group-rows .sidebar-empty { padding: 4px 8px; }
+
+/* A terminal row is three stacked facts, so it aligns to the top instead of
+   centring a growing block against a 7px dot. */
+.session-row { align-items: flex-start; padding: 5px 6px; }
+.session-row .session-state { margin-top: 3px; }
+.session-row .sidebar-row-copy small { text-transform: none; letter-spacing: .04em; }
+.session-row .session-meta { color: var(--text-soft); }
+/* The folder is what tells one project's shell from another's. It costs a line,
+   so it appears once the sidebar has been dragged past the point where a path
+   fits; below that the tooltip carries it. */
+.session-where { display: none; color: var(--muted); font-size: 7.5px; }
+body.sidebar-wide .session-where { display: block; }
+
+/* Chips only for the states worth interrupting for. "background" stays a plain
+   dim word, or the list turns into a wall of badges. */
+.session-chip {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 0 5px;
+  border-radius: 20px;
+  color: var(--muted);
+  font-size: 7.5px;
+  line-height: 13px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.chip-open { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.chip-busy { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); }
+.chip-unread { background: color-mix(in srgb, var(--sage) 16%, transparent); color: var(--sage); }
+.chip-elsewhere { background: var(--surface); color: var(--text-soft); }
+.session-row.state-busy .session-state { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* Acting on a terminal another workspace owns is a decision, so the row opens
+   the choices instead of making one. The strip is tied to its row by the accent
+   rule down its left edge. */
+.session-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 1px 0 3px 12px;
+  padding: 2px 0 2px 6px;
+  border-left: 1px solid var(--accent);
+}
+.session-choice { min-height: 24px; padding: 3px 6px; color: var(--text-soft); font-size: 9px; }
+.session-choice .sidebar-label { text-transform: lowercase; letter-spacing: .04em; }
+.session-choice:hover { color: var(--accent); }
+.session-choice-note { margin: 0; padding: 2px 6px; color: var(--muted); font-size: 8.5px; line-height: 1.35; }
+.session-entry.armed > .session-row { background: var(--surface-soft); }
+
+/* The icon rail keeps its old job: the terminals you are working in, as dots.
+   Headings, chips and choice strips have no room there, and a choice you cannot
+   read is not a choice. */
+body.sidebar-collapsed .session-group:not(.current),
+body.sidebar-collapsed .session-group-head,
+body.sidebar-collapsed .session-chip,
+body.sidebar-collapsed .session-choices { display: none; }
+body.sidebar-collapsed .session-group + .session-group { margin-top: 0; padding-top: 0; border-top: 0; }
+body.sidebar-collapsed .session-row { align-items: center; padding: 0; }
+body.sidebar-collapsed .session-row .session-state { margin-top: 0; }
 
 /* ---------- launch ---------- */
 

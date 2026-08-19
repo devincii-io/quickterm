@@ -1560,3 +1560,125 @@ def test_dir_listing_is_token_gated_like_every_other_api_route(manager, cfg):
     ) as c:
         assert c.get("/api/fs/dirs").status_code == 403
         assert c.get("/api/fs/dirs", headers={"X-QuickTerm-Token": "s3cret"}).status_code == 200
+
+
+# --- windows: one owner per workspace, or two windows fight over its layout --
+
+
+@pytest.fixture
+def window_client(manager, cfg) -> TestClient:
+    with TestClient(create_app(manager, cfg), base_url=f"http://127.0.0.1:{cfg.port}") as c:
+        yield c
+
+
+def test_a_window_registers_claims_and_is_listed(window_client):
+    created = window_client.post(
+        "/api/windows", json={"id": "w1", "workspace": "dev", "title": "QuickTerm", "primary": True}
+    )
+    assert created.status_code == 200
+    assert created.json() == {
+        "id": "w1",
+        "workspace": "dev",
+        "title": "QuickTerm",
+        "primary": True,
+    }
+    listed = window_client.get("/api/windows").json()
+    assert listed["ttl_seconds"] > 0
+    assert [row["id"] for row in listed["windows"]] == ["w1"]
+    assert listed["windows"][0]["idle_seconds"] >= 0
+
+
+def test_a_second_window_cannot_take_a_claimed_workspace(window_client):
+    window_client.post("/api/windows", json={"id": "w1", "workspace": "dev"})
+    window_client.post("/api/windows", json={"id": "w2"})
+    conflict = window_client.put("/api/windows/w2/workspace", json={"workspace": "dev"})
+    # Loud, never merged: both windows would autosave the same layout and the
+    # loser's panes would vanish without a word.
+    assert conflict.status_code == 409
+    body = conflict.json()
+    assert body["error"] == "workspace_claimed"
+    assert body["owner"]["id"] == "w1"
+    assert isinstance(body["detail"], str)
+    assert window_client.post("/api/windows", json={"id": "w3", "workspace": "dev"}).status_code == 409
+
+
+def test_releasing_a_workspace_hands_it_to_the_next_window(window_client):
+    window_client.post("/api/windows", json={"id": "w1", "workspace": "dev"})
+    window_client.post("/api/windows", json={"id": "w2"})
+    assert window_client.put("/api/windows/w1/workspace", json={"workspace": None}).status_code == 200
+    assert window_client.put("/api/windows/w2/workspace", json={"workspace": "dev"}).status_code == 200
+
+
+def test_forgetting_a_window_is_idempotent_and_frees_the_claim(window_client):
+    window_client.post("/api/windows", json={"id": "w1", "workspace": "dev"})
+    assert window_client.delete("/api/windows/w1").status_code == 204
+    assert window_client.delete("/api/windows/w1").status_code == 204
+    assert window_client.post("/api/windows", json={"id": "w2", "workspace": "dev"}).status_code == 200
+
+
+def test_a_heartbeat_for_an_unknown_window_is_a_404(window_client):
+    # The window must re-register instead of carrying on autosaving a workspace
+    # somebody else may now own.
+    assert window_client.post("/api/windows/ghost/heartbeat").status_code == 404
+    window_client.post("/api/windows", json={"id": "w1"})
+    assert window_client.post("/api/windows/w1/heartbeat").json()["id"] == "w1"
+
+
+def test_window_routes_reject_malformed_bodies(window_client):
+    window_client.post("/api/windows", json={"id": "w1"})
+    assert window_client.post("/api/windows", json=["nope"]).status_code == 400
+    assert window_client.put("/api/windows/w1/workspace", json={}).status_code == 400
+    assert window_client.put("/api/windows/w1/workspace", json={"workspace": 7}).status_code == 400
+    assert window_client.put("/api/windows/ghost/workspace", json={"workspace": "x"}).status_code == 404
+
+
+def test_open_window_reports_that_no_native_shell_exists(window_client):
+    # A plain browser opens its own window; the route only has to say so, so
+    # the client can degrade instead of waiting for a window that never comes.
+    body = window_client.post("/api/windows/open", json={}).json()
+    assert body == {"opened": False, "target": "unavailable"}
+
+
+def test_open_window_asks_the_desktop_shell_off_the_event_loop(manager, cfg, tmp_path):
+    from quickterm.windows import WindowRegistry
+
+    calls: list[tuple] = []
+    on_loop: list[bool] = []
+
+    def open_window(workspace, cwd):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)  # a worker thread has no running loop
+        calls.append((workspace, cwd))
+        return "w9"
+
+    registry = WindowRegistry()
+    app = create_app(manager, cfg, windows=registry, open_window=open_window)
+    with TestClient(app, base_url=f"http://127.0.0.1:{cfg.port}") as c:
+        body = c.post(
+            "/api/windows/open", json={"workspace": "dev", "cwd": str(tmp_path)}
+        ).json()
+        assert body == {"opened": True, "target": "native", "window_id": "w9"}
+        assert calls == [("dev", str(tmp_path))]
+        # Creating a window marshals onto the GUI thread and waits for it.
+        assert on_loop == [False]
+        # A workspace another window already holds must be refused before a
+        # window is drawn, not after.
+        registry.register(window_id="w1", workspace="docs")
+        refused = c.post("/api/windows/open", json={"workspace": "docs"})
+        assert refused.status_code == 409
+        assert refused.json()["owner"]["id"] == "w1"
+        assert c.post("/api/windows/open", json={"cwd": str(tmp_path / "gone")}).status_code == 400
+        assert len(calls) == 1
+
+
+def test_window_routes_are_token_gated_like_every_other_api_route(manager, cfg):
+    with TestClient(
+        create_app(manager, cfg, token="s3cret"), base_url=f"http://127.0.0.1:{cfg.port}"
+    ) as c:
+        assert c.get("/api/windows").status_code == 403
+        assert c.post("/api/windows", json={}).status_code == 403
+        assert c.post("/api/windows/open", json={}).status_code == 403
+        assert c.get("/api/windows", headers={"X-QuickTerm-Token": "s3cret"}).status_code == 200

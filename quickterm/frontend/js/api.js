@@ -22,6 +22,10 @@ async function req(method, path, body) {
     try {
       const payload = await res.json();
       if (payload && payload.detail) err.detail = String(payload.detail);
+      // The whole body, for the few errors that carry structure worth acting
+      // on: a 409 from the window registry names the window that holds the
+      // workspace, so the UI can say who instead of only saying no.
+      err.payload = payload;
     } catch (_) { /* response was not JSON */ }
     throw err;
   }
@@ -64,6 +68,33 @@ export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encode
 // backend choose the home folder, so the caller never has to know one.
 export const listDirs = (path) =>
   req("GET", `/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+// Window registry (quickterm/windows.py). One backend process serves every
+// window and every window autosaves the layout of the workspace it is on, so
+// the registry is the only thing keeping two of them off one file. Every route
+// here is token-gated like the rest of /api.
+export const listWindows = () => req("GET", "/api/windows");
+// Announce this window, optionally claiming a workspace in the same step.
+// Re-registering a known id is idempotent, so a reload does not 409 against its
+// own claim; the id the shell put in the launch URL must be reused, because
+// that is the id it forgets when the native window closes.
+// `workspace` is three-valued like `path` on the workspace PUT: omit to keep
+// the current claim, null to drop it, a name to take it.
+export const registerWindow = (body) => req("POST", "/api/windows", body || {});
+export const heartbeatWindow = (id) =>
+  req("POST", `/api/windows/${encodeURIComponent(id)}/heartbeat`, {});
+// 409 = another live window holds that workspace. That is a refusal and must be
+// shown; any other failure is the registry being unavailable (see claimOutcome
+// in windows.js), which must never block the user. The 409 body carries
+// `owner`, so the UI can name the window instead of only refusing.
+export const claimWindowWorkspace = (id, workspace) =>
+  req("PUT", `/api/windows/${encodeURIComponent(id)}/workspace`, { workspace });
+export const releaseWindowWorkspace = (id) => claimWindowWorkspace(id, null);
+export const unregisterWindow = (id) => req("DELETE", `/api/windows/${encodeURIComponent(id)}`);
+// Ask the desktop shell to open another window. It answers {opened:false,
+// target:"unavailable"} where there is no native shell, which is the signal to
+// open the same URL in a browser window instead (newWindowUrl in windows.js).
+export const requestWindow = (body) => req("POST", "/api/windows/open", body || {});
+
 export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");

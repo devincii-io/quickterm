@@ -104,3 +104,41 @@ def test_leaving_scratch_spares_busy_and_used_terminals():
     assert "if (!sessions) return;" in implementation
     assert "return session.busy === false && !session.touched;" in implementation
     assert "await discardScratch({ force: true });" in main
+
+
+def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
+    # Clicking the sidebar's scratch row passes name=null, and that branch used
+    # to delete the adopted "scratch" workspace file and build an empty layout,
+    # so navigating to scratch from another workspace destroyed the scratch
+    # terminals the user had left running there. Only the confirmed "New
+    # scratch" action, which already carries replaceScratch, may replace it.
+    main = MAIN_JS.read_text(encoding="utf-8")
+    start = main.index("  async function switchWorkspace(")
+    switch = main[start:main.index("\n  // Which scratch terminals", start)]
+
+    guard = "} else if (!replaceScratch && workspaceNames.includes(SCRATCH_WS)) {"
+    assert guard in switch
+    restore_start = switch.index(guard)
+    replace_start = switch.index("\n    } else {", restore_start)
+    restore = switch[restore_start:replace_start]
+
+    # Restored like any other workspace, and through rememberWorkspace, which
+    # writes scratch's own flag rather than the durable key.
+    assert "currentWorkspace = SCRATCH_WS;" in restore
+    assert "rememberWorkspace(SCRATCH_WS)" in restore
+    assert "await restoreWorkspace(SCRATCH_WS)" in restore
+    # The backend drops the scratch file at app start, so an absent one is
+    # normal and a fresh scratch is the right fallback.
+    assert "if (!restored) opened = await startScratch(scratchCwd);" in restore
+    # Nothing on this path may destroy anything.
+    assert "deleteWorkspace" not in restore
+    assert "discardScratch" not in restore
+
+    replace = switch[replace_start:]
+    assert "await discardScratch({ force: true })" in replace
+    assert "api.deleteWorkspace(SCRATCH_WS)" in replace
+
+    # The one caller allowed to reach that branch asks first.
+    new_scratch_start = main.index("  async function newScratchWorkspace()")
+    new_scratch = main[new_scratch_start:main.index("\n  async function openFolderInScratch", new_scratch_start)]
+    assert "switchWorkspace(null, null, { replaceScratch: true })" in new_scratch
