@@ -137,6 +137,32 @@ def create_app(
         env = body.get("env")
         start_command = body.get("start_command")
         claude_mode = body.get("claude_mode")
+        workspace_name = body.get("workspace")
+        if workspace_name is not None and not isinstance(workspace_name, str):
+            raise HTTPException(400, "workspace must be a string")
+        workspace_name = (workspace_name or "").strip() or None
+        # A workspace is a folder: every session it owns starts there unless
+        # the request names a directory itself (Explorer handoff, or a split
+        # inheriting the source pane's cwd). Profiles contribute only a
+        # subfolder relative to that root.
+        request_cwd = cwd if isinstance(cwd, str) and cwd.strip() else None
+
+        async def workspace_cwd(subpath: object) -> str | None:
+            if not workspace_name:
+                return None
+            workspace_mod = importlib.import_module("quickterm.workspace")
+
+            def read() -> str | None:
+                saved = workspace_mod.load_workspace(workspace_name)
+                if saved is None:
+                    return None
+                return workspace_mod.resolve_start_dir(
+                    getattr(saved, "path", None),
+                    subpath if isinstance(subpath, str) else None,
+                )
+
+            return await asyncio.to_thread(read)
+
         prof = None
         if profile_name is not None:
             if not isinstance(profile_name, str) or not profile_name.strip():
@@ -154,8 +180,15 @@ def create_app(
                 if claude_mode not in {"new", "continue", "resume", "agents"}:
                     raise HTTPException(400, "claude_mode must be new, continue, resume, or agents")
                 prof = dataclasses.replace(prof, claude_mode=claude_mode)
+            # A profile carrying its own `cwd` is pinned on purpose ("Always
+            # this folder" in Settings) and opts out of the workspace root;
+            # only an explicit request directory overrides it.
+            pinned = isinstance(getattr(prof, "cwd", None), str) and prof.cwd.strip()
+            effective_cwd = request_cwd
+            if effective_cwd is None and not pinned:
+                effective_cwd = await workspace_cwd(getattr(prof, "subpath", None))
             try:
-                resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, cwd)
+                resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, effective_cwd)
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             cmd = cmd or resolved_cmd
@@ -166,6 +199,10 @@ def create_app(
             env = env if env is not None else dict(prof.env)
         elif start_command is not None or claude_mode is not None:
             raise HTTPException(400, "start_command and claude_mode require a profile")
+        else:
+            # System shells carry no profile, so the workspace root is the only
+            # thing that can place them.
+            cwd = request_cwd or await workspace_cwd(None)
         if not isinstance(cmd, str) or not cmd.strip():
             raise HTTPException(400, "either 'profile' or 'cmd' is required")
         cmd = cmd.strip()
@@ -194,9 +231,6 @@ def create_app(
         name = body.get("name")
         if name is not None and not isinstance(name, str):
             raise HTTPException(400, "name must be a string")
-        workspace = body.get("workspace")
-        if workspace is not None and not isinstance(workspace, str):
-            raise HTTPException(400, "workspace must be a string")
         cols = _bounded_int(body.get("cols", 120), "cols", 2, 1000)
         rows = _bounded_int(body.get("rows", 30), "rows", 1, 1000)
         tools = putty_tools.tools_dir()
@@ -216,7 +250,7 @@ def create_app(
                 env=env or {},
                 cols=cols,
                 rows=rows,
-                workspace=workspace if isinstance(workspace, str) and workspace else None,
+                workspace=workspace_name,
             )
         except Exception as exc:
             from quickterm.session_manager import SessionLimitError
@@ -339,7 +373,12 @@ def create_app(
         ws = workspace.load_workspace(name)
         if ws is None:
             raise HTTPException(404, "no such workspace")
-        return _asdict(ws)
+        out = _asdict(ws)
+        # A workspace folder can be renamed, unmounted or deleted behind our
+        # back. Report it instead of letting every spawn silently land in the
+        # home directory with no explanation.
+        out["path_exists"] = workspace.root_exists(getattr(ws, "path", None))
+        return out
 
     @app.put("/api/workspaces/{name}")
     async def put_workspace(name: str, request: Request) -> Response:
@@ -355,13 +394,30 @@ def create_app(
             if isinstance(raw_session_ids, list)
             else sorted(_layout_session_ids(body["layout"]))
         )
-        workspace.save_workspace(
+        # The workspace folder is edited from one place but autosaved from
+        # several. An ABSENT "path" key preserves the stored folder; an
+        # explicit null clears it. Without that rule every layout autosave
+        # would silently drop the folder the user just chose.
+        if "path" in body:
+            try:
+                path = workspace.normalize_root(body.get("path"))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        else:
+            existing = await asyncio.to_thread(workspace.load_workspace, name)
+            path = getattr(existing, "path", None) if existing is not None else None
+        # The layout autosaves on every pane change, and save_workspace fsyncs.
+        # Left on the event loop that stalls every PTY pump for the duration of
+        # a durable write.
+        await asyncio.to_thread(
+            workspace.save_workspace,
             workspace.Workspace(
                 name=name,
                 layout=body["layout"],
                 logo=logo,
+                path=path,
                 session_ids=session_ids,
-            )
+            ),
         )
         manager.sync_workspace(name, set(session_ids))
         return Response(status_code=204)
@@ -407,6 +463,9 @@ def create_app(
             "profiles": [_asdict(p) for p in cfg.profiles],
             "snippets": [_asdict(s) for s in cfg.snippets],
             "voice_available": _voice_available(),
+            # Resolved root for the disposable scratch workspace, so the UI can
+            # show it and open scratch terminals there.
+            "scratch_dir": _scratch_dir(cfg),
             "elevated": elevated,
             "version": __version__,
             "update_check": cfg.update_check,
@@ -443,11 +502,35 @@ def create_app(
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
         profile_name = body.get("profile")
+        # An administrator terminal opened from a workspace belongs in that
+        # workspace's folder, exactly like an ordinary one.
+        requested_workspace = body.get("workspace")
+        workspace_cwd = None
+        if isinstance(requested_workspace, str) and requested_workspace.strip():
+            workspace_mod = importlib.import_module("quickterm.workspace")
+
+            def _elevated_cwd(name: str, subpath: object) -> str | None:
+                saved = workspace_mod.load_workspace(name)
+                if saved is None:
+                    return None
+                return workspace_mod.resolve_start_dir(
+                    getattr(saved, "path", None),
+                    subpath if isinstance(subpath, str) else None,
+                )
+
         if profile_name is not None:
             prof = next((p for p in cfg.profiles if p.name == profile_name), None)
             if prof is None:
                 raise HTTPException(404, f"unknown profile: {profile_name}")
-            cmd, args, cwd = _resolve_profile(prof)
+            pinned = isinstance(getattr(prof, "cwd", None), str) and prof.cwd.strip()
+            if not pinned and isinstance(requested_workspace, str) and requested_workspace.strip():
+                workspace_cwd = await asyncio.to_thread(
+                    _elevated_cwd, requested_workspace.strip(), getattr(prof, "subpath", None)
+                )
+            try:
+                cmd, args, cwd = _resolve_profile(prof, workspace_cwd)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             spec = {
                 "cmd": cmd,
                 "args": args,
@@ -456,7 +539,16 @@ def create_app(
                 "name": prof.name,
             }
         else:
-            spec = body
+            spec = dict(body)
+            spec.pop("workspace", None)
+            if not (isinstance(spec.get("cwd"), str) and spec["cwd"].strip()) and (
+                isinstance(requested_workspace, str) and requested_workspace.strip()
+            ):
+                resolved = await asyncio.to_thread(
+                    _elevated_cwd, requested_workspace.strip(), None
+                )
+                if resolved:
+                    spec["cwd"] = resolved
         try:
             from quickterm.elevation import launch
 
@@ -756,6 +848,15 @@ def _voice_available() -> bool:
         return bool(voice.voice_available())
     except Exception:
         return False
+
+
+def _scratch_dir(cfg: Any) -> str:
+    """Resolved scratch root, or "" if the folder cannot be created."""
+    config_mod = importlib.import_module("quickterm.config")  # stubbable in tests
+    try:
+        return config_mod.scratch_root(getattr(cfg, "scratch_dir", "") or "")
+    except (OSError, AttributeError):
+        return ""
 
 
 def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, list[str], str | None]:

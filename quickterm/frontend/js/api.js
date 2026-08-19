@@ -49,11 +49,15 @@ export const sessionBusy = (id) =>
 export const listWorkspaces = () =>
   req("GET", "/api/workspaces").then((names) => (names || []).filter((name) => !name.startsWith(".")));
 export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURIComponent(name)}`);
-export const putWorkspace = (name, layout, logo, sessionIds = []) =>
+// `path` is deliberately three-valued: undefined omits the key so the server
+// keeps the stored folder (every layout autosave takes this branch), null
+// clears it, a string sets it.
+export const putWorkspace = (name, layout, logo, sessionIds = [], path) =>
   req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
     layout,
     logo: logo ?? null,
     session_ids: [...new Set(sessionIds || [])],
+    ...(path === undefined ? {} : { path }),
   });
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
 export const getFullConfig = () => req("GET", "/api/config/full");

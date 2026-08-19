@@ -43,6 +43,7 @@ class SessionInfo:
     touched: bool = False  # True once the user has written any input
     retained: bool = False  # Explicit detach: keep even if untouched and idle
     workspace: str | None = None  # workspace this session belongs to
+    cwd: str | None = None  # directory the shell was started in
 
 
 class Attachment:
@@ -177,6 +178,7 @@ class SessionManager:
                 f"terminal limit reached ({self._max_sessions}); stop a terminal or raise the limit"
             )
         sid = uuid.uuid4().hex
+        start_dir = cwd or default_cwd()
         info = SessionInfo(
             id=sid,
             name=name or profile or cmd,
@@ -186,6 +188,7 @@ class SessionManager:
             cols=cols,
             rows=rows,
             workspace=workspace,
+            cwd=start_dir,
         )
         session = Session(info, self._cap)
         if os.path.basename(cmd).casefold() in {"wsl", "wsl.exe"}:
@@ -194,7 +197,7 @@ class SessionManager:
         session.pty = PtySession(
             cmd,
             list(args or []),
-            cwd or default_cwd(),
+            start_dir,
             child_env,
             cols,
             rows,

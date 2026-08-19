@@ -119,6 +119,15 @@ async function boot() {
   let panels;
   let launcherView = null;
   let workspaceLogo = null;
+  // A workspace is a folder: this is the root every session it owns starts in.
+  // null means "no folder chosen" — the backend falls back to the profile's own
+  // directory and finally the home folder.
+  let workspacePath = null;
+  let workspacePathExists = true;
+  // Scratch is disposable, so its terminals start in a disposable folder
+  // instead of the user's home directory. Re-read whenever settings are saved,
+  // because scratch_dir is configurable.
+  let scratchRoot = cfg.scratch_dir || null;
   let fontSize = clampFont(cfg.font_size);
   let fontSaveTimer = null;
 
@@ -190,6 +199,39 @@ async function boot() {
     return rect.width > rect.height * 1.8 ? "h" : "v";
   }
 
+  // Where a new terminal should start when the caller has no directory of its
+  // own. Inside a named workspace the answer is "let the backend resolve the
+  // workspace folder"; in scratch it is the disposable scratch folder; a
+  // profile pinned to a fixed folder always keeps it.
+  function contextCwd(explicit, profile) {
+    if (explicit) return explicit;
+    if (profile && profile.cwd) return null;
+    if (!currentWorkspace || currentWorkspace === SCRATCH_WS) return scratchRoot || null;
+    return null;
+  }
+
+  // The workspace folder only counts if it is still there; a deleted folder
+  // must fall back instead of failing every spawn.
+  function usableWorkspacePath() {
+    return workspacePath && workspacePathExists ? workspacePath : null;
+  }
+
+  // What to pre-fill when the user names a workspace. The folder the focused
+  // terminal is actually in is the best answer — a scratch shell the user cd'd
+  // into their project names that project. The disposable scratch root is
+  // never suggested: pinning a saved workspace to a temp folder is exactly the
+  // mistake this box exists to prevent.
+  function suggestedWorkspaceFolder() {
+    const paneCwd = layout.focused?.bestKnownCwd?.() || null;
+    if (paneCwd && paneCwd !== scratchRoot) return paneCwd;
+    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) return workspacePath;
+    return null;
+  }
+
+  function profileByName(name) {
+    return profiles.find((profile) => profile.name === name) || null;
+  }
+
   function serializableSpec(spec) {
     const out = {
       cmd: spec.cmd,
@@ -237,7 +279,9 @@ async function boot() {
       pane.profileName = profileName;
       pane.terminalType = profileTerminalType(profileName);
       pane.launchSpec = null;
-      pane.setLaunchCwd(cwd || profiles.find((profile) => profile.name === profileName)?.cwd || null);
+      // The backend resolves the workspace folder, so its answer — not the
+      // hint we sent — is what this pane actually opened in.
+      pane.setLaunchCwd(info.cwd || cwd || profileByName(profileName)?.cwd || null);
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -259,7 +303,7 @@ async function boot() {
       const info = await api.createSession({ ...launchSpec, workspace: spawnWorkspaceTag() });
       pane.profileName = null;
       pane.terminalType = commandTerminalType(launchSpec);
-      pane.setLaunchCwd(launchSpec.cwd);
+      pane.setLaunchCwd(info.cwd || launchSpec.cwd);
       pane.launchSpec = launchSpec;
       pane.attach(info);
       pane.spawnedFresh = true;
@@ -281,21 +325,20 @@ async function boot() {
   function spawnDefaultInto(pane, cwdOverride) {
     if (selectedTerminal) {
       if (selectedTerminal.kind === "profile") {
-        return spawnInto(pane, selectedTerminal.profile.name, cwdOverride || selectedTerminal.profile.cwd || null);
+        return spawnInto(pane, selectedTerminal.profile.name, contextCwd(cwdOverride, selectedTerminal.profile));
       }
       return spawnSpecInto(pane, {
         cmd: selectedTerminal.cmd,
         args: selectedTerminal.args || [],
-        cwd: cwdOverride || null,
+        cwd: contextCwd(cwdOverride, null),
         name: selectedTerminal.label,
         terminalType: selectedTerminal.id,
       });
     }
     const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, cwdOverride || profile.cwd || null);
+    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride, profile));
     const system = defaultSystemSpec();
-    if (system && cwdOverride) return spawnSpecInto(pane, { ...system, cwd: cwdOverride });
-    if (system) return spawnSpecInto(pane, system);
+    if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride, null) });
     pane.showNotice("[no shell found — add one in settings]");
     return Promise.resolve(null);
   }
@@ -315,7 +358,7 @@ async function boot() {
       if (selectedTerminal.kind === "profile") {
         const profile = selectedTerminal.profile;
         const claudeMode = normalClaudeSplitMode(profile);
-        return spawnInto(pane, profile.name, cwd || profile.cwd || null, { claudeMode });
+        return spawnInto(pane, profile.name, contextCwd(cwd, profile), { claudeMode });
       }
       return spawnSpecInto(pane, {
         cmd: selectedTerminal.cmd,
@@ -328,14 +371,14 @@ async function boot() {
     const profile = defaultProfile();
     if (profile) {
       const choice = { kind: "profile", profile };
-      return spawnInto(pane, profile.name, splitCwd(source, choice) || profile.cwd || null, {
+      return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice), profile), {
         claudeMode: normalClaudeSplitMode(profile),
       });
     }
     const system = defaultSystemSpec();
     if (!system) return spawnDefaultInto(pane);
     const choice = { kind: "system", id: system.terminalType, ...system };
-    return spawnSpecInto(pane, { ...system, cwd: splitCwd(source, choice) });
+    return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice), null) });
   }
 
   async function runProfile(profile) {
@@ -343,7 +386,7 @@ async function boot() {
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, profile.cwd || null);
+    await spawnInto(pane, profile.name, contextCwd(null, profile));
   }
 
   async function runClaudeMode(profile, claudeMode) {
@@ -351,7 +394,7 @@ async function boot() {
     if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, profile.cwd || null, { claudeMode });
+    await spawnInto(pane, profile.name, contextCwd(null, profile), { claudeMode });
   }
 
   async function splitClaudeAgentView(profile) {
@@ -359,7 +402,7 @@ async function boot() {
     const pane = layout.splitPane(source, autoDir(source));
     if (!pane) return null;
     layout.focusPane(pane);
-    return spawnInto(pane, profile.name, profile.cwd || null, { claudeMode: "agents" });
+    return spawnInto(pane, profile.name, contextCwd(null, profile), { claudeMode: "agents" });
   }
 
   async function runSystemTerminal(system) {
@@ -393,7 +436,10 @@ async function boot() {
   }
 
   function elevateProfile(profile) {
-    return elevate({ profile: profile.name }, profile.name);
+    return elevate(
+      { profile: profile.name, workspace: spawnWorkspaceTag() },
+      profile.name,
+    );
   }
 
   function elevateSystemTerminal(system) {
@@ -401,6 +447,8 @@ async function boot() {
       cmd: system.cmd,
       args: system.args || [],
       name: system.label,
+      cwd: contextCwd(null, null) || undefined,
+      workspace: spawnWorkspaceTag(),
     }, system.label);
   }
 
@@ -448,6 +496,7 @@ async function boot() {
         layout.serialize(),
         workspaceLogo,
         [...ownedSessionIds()],
+        workspacePath,
       );
       saved = true;
       if (currentWorkspace === targetWorkspace) {
@@ -545,6 +594,8 @@ async function boot() {
       const names = await api.listWorkspaces().catch(() => null);
       if (names && names.includes(SCRATCH_WS)) return;
       currentWorkspace = SCRATCH_WS;
+      workspacePath = scratchRoot || null;
+      workspacePathExists = true;
       workspaceSessionIds = new Set(scratchSessionIds);
       for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
       scratchSessionIds.clear(); // these sessions are workspace-managed now
@@ -568,6 +619,8 @@ async function boot() {
     const names = await api.listWorkspaces().catch(() => []);
     if (names.includes(SCRATCH_WS)) return false;
     currentWorkspace = SCRATCH_WS;
+    workspacePath = scratchRoot || null;
+    workspacePathExists = true;
     workspaceSessionIds = new Set(scratchSessionIds);
     for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
     scratchSessionIds.clear();
@@ -622,6 +675,11 @@ async function boot() {
     if (!saved || !saved.layout) return false;
     const savedLayout = saved.layout;
     workspaceLogo = saved.logo || null;
+    workspacePath = saved.path || null;
+    workspacePathExists = saved.path ? saved.path_exists !== false : true;
+    if (saved.path && saved.path_exists === false) {
+      showError(`The folder for “${name}” is missing: ${saved.path} — new terminals open in your home folder until you pick another.`);
+    }
     const knownSessions = await api.getSessions({ metrics: false }).catch(() => []);
     const knownById = new Map(knownSessions.map((session) => [session.id, session]));
     const byId = new Map(knownSessions.filter((session) => session.alive).map((session) => [session.id, session]));
@@ -645,9 +703,14 @@ async function boot() {
           onPickClaude: claudeProfileForPane(pane) ? () => resumeClaudePane(pane, "resume") : null,
         });
       } else if (pane.profileName) {
-        await spawnInto(pane, pane.profileName, pane.cwd);
+        // With a workspace folder the root is authoritative: move the
+        // workspace and every restored terminal follows it. Without one the
+        // pane's own remembered directory still wins.
+        await spawnInto(pane, pane.profileName, usableWorkspacePath() ? null : pane.cwd);
       } else if (pane.launchSpec) {
-        await spawnSpecInto(pane, pane.launchSpec);
+        await spawnSpecInto(pane, usableWorkspacePath()
+          ? { ...pane.launchSpec, cwd: null }
+          : pane.launchSpec);
       } else {
         await spawnDefaultInto(pane);
       }
@@ -659,6 +722,8 @@ async function boot() {
   async function startScratch(cwdOverride = null) {
     currentWorkspace = null;
     workspaceLogo = null;
+    workspacePath = scratchRoot || null;
+    workspacePathExists = true;
     workspaceSessionIds = new Set();
     rememberWorkspace(null);
     const pane = layout.restore(null)[0];
@@ -685,6 +750,7 @@ async function boot() {
           layout.serialize(),
           workspaceLogo,
           [...ownedSessionIds()],
+          workspacePath,
         );
       } catch (_) {
         transitioning = false;
@@ -818,6 +884,8 @@ async function boot() {
     const removedOwnership = ids.delete(sessionId);
     const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
     const changed = removedOwnership || removedLayoutReference;
+    // No path argument: the folder of a workspace we are only fixing up
+    // ownership for must survive untouched.
     if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
   }
 
@@ -1003,16 +1071,21 @@ async function boot() {
     // validation message and a failed PUT used to vanish: the caller saw
     // nothing, and a rejected save still left the app pointing at a workspace
     // that was never written.
-    saveWorkspace: async (name) => {
+    saveWorkspace: async (name, folderInput) => {
       const cleanName = (name || "").trim();
       const problem = app.validateWorkspaceName(cleanName);
       if (problem) return problem;
+      // A workspace is a folder first. An empty box falls back to a real
+      // previous choice — never to the disposable scratch root.
+      const folder = (folderInput || "").trim()
+        || (currentWorkspace && currentWorkspace !== SCRATCH_WS ? workspacePath : null);
       // Naming is the only way to create a workspace, so this always promotes
       // the current (scratch) layout IN PLACE: every session moves into the
       // named workspace and the disposable "scratch" is cleared — no terminal
       // is killed, and scratch never lingers beside the workspace it became.
       const promotingScratchWs = currentWorkspace === SCRATCH_WS;
       const previousWorkspace = currentWorkspace;
+      const previousPath = workspacePath;
       const previousWorkspaceIds = new Set(workspaceSessionIds);
       const previousScratchIds = new Set(scratchSessionIds);
       if (!currentWorkspace) {
@@ -1023,11 +1096,16 @@ async function boot() {
       for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
       clearTimeout(workspaceSaveTimer);
       currentWorkspace = cleanName;
+      workspacePath = folder;
+      workspacePathExists = true;
       rememberWorkspace(cleanName);
       try {
-        await workspace.save(cleanName, layout.serialize(), workspaceLogo, [...ownedSessionIds()]);
+        await workspace.save(
+        cleanName, layout.serialize(), workspaceLogo, [...ownedSessionIds()], folder,
+      );
       } catch (error) {
         currentWorkspace = previousWorkspace;
+        workspacePath = previousPath;
         workspaceSessionIds = previousWorkspaceIds;
         scratchSessionIds.clear();
         for (const sid of previousScratchIds) scratchSessionIds.add(sid);
@@ -1067,6 +1145,8 @@ async function boot() {
         clearTimeout(workspaceSaveTimer);
         currentWorkspace = null;
         workspaceLogo = null;
+        workspacePath = scratchRoot || null;
+        workspacePathExists = true;
         rememberWorkspace(null);
         for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
         workspaceSessionIds = new Set();
@@ -1086,10 +1166,62 @@ async function boot() {
     // combination). Settings renders it next to the field.
     hotkeyError: () => cfg.hotkey_error || null,
     workspaceLogo: () => workspaceLogo,
+    workspacePath: () => workspacePath,
+    suggestedWorkspaceFolder,
+    workspacePathExists: () => workspacePathExists,
+    scratchRoot: () => scratchRoot,
+    // Repointing a workspace at a different folder is a plain, reversible
+    // edit: nothing running is touched, and the next terminal opens there.
+    // Any saved workspace can be repointed from the Dashboard, not just the
+    // one that happens to be open.
+    setWorkspaceFolder: async (name, folder) => {
+      if (!name || name === currentWorkspace) return app.setWorkspacePath(folder);
+      const saved = await workspace.details(name).catch(() => null);
+      if (!saved) {
+        showError(`Workspace “${name}” could not be read.`);
+        return false;
+      }
+      try {
+        await workspace.save(
+          name, saved.layout, saved.logo || null, [...(saved.session_ids || [])],
+          (folder || "").trim() || null,
+        );
+      } catch (error) {
+        showError(error?.detail || `That folder could not be saved for “${name}”.`);
+        return false;
+      }
+      clearError();
+      return true;
+    },
+    setWorkspacePath: async (folder) => {
+      const next = (folder || "").trim() || null;
+      if (!currentWorkspace) {
+        showError("Name this workspace before giving it a folder.");
+        return false;
+      }
+      const previous = workspacePath;
+      workspacePath = next;
+      workspacePathExists = true;
+      try {
+        await workspace.save(
+          currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()], next,
+        );
+      } catch (error) {
+        workspacePath = previous;
+        showError(error?.detail || "That folder could not be saved for this workspace.");
+        return false;
+      }
+      clearError();
+      buildLauncher();
+      refreshStatusSoon();
+      return true;
+    },
     setWorkspaceLogo: async (assetId) => {
       if (!currentWorkspace) return false;
       workspaceLogo = assetId || null;
-      await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()]);
+      await workspace.save(
+        currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()], workspacePath,
+      );
       buildLauncher();
       return true;
     },
@@ -1109,6 +1241,7 @@ async function boot() {
       ]);
       if (!fresh) return;
       cfg = fresh;
+      scratchRoot = fresh.scratch_dir || scratchRoot;
       profiles = fresh.profiles || [];
       snippets = fresh.snippets || [];
       terminalInventory = freshInventory;
@@ -1340,6 +1473,8 @@ async function boot() {
       inventory: terminalInventory,
       workspaces: workspaceNames,
       currentWorkspace,
+      workspacePath,
+      workspacePathExists,
       selectedTerminal,
       defaultProfile: cfg.default_profile,
       onSelectTerminal: (choice) => { selectedTerminal = choice; },
@@ -1374,9 +1509,20 @@ async function boot() {
   }
 
   function refreshStatus() {
-    $("sb-workspace").textContent = currentWorkspace && currentWorkspace !== "scratch"
+    const workspaceName = currentWorkspace && currentWorkspace !== "scratch"
       ? `ws ${currentWorkspace}`
       : "scratch · disposable";
+    const workspaceStatus = $("sb-workspace");
+    const folderLabel = workspacePath
+      ? (workspacePath.split(/[\\/]+/).filter(Boolean).pop() || workspacePath)
+      : "";
+    // "scratch · disposable · scratch" says nothing twice.
+    workspaceStatus.textContent = folderLabel && !workspaceName.includes(folderLabel)
+      ? `${workspaceName} · ${folderLabel}`
+      : workspaceName;
+    workspaceStatus.title = workspacePath
+      ? (workspacePathExists ? workspacePath : `${workspacePath} (missing)`)
+      : "This workspace has no folder — terminals open in your home folder.";
     if (document.hidden) return;
     api.getSessions({ metrics: false }).then((list) => {
       lastSessions = list;
@@ -1451,6 +1597,11 @@ async function boot() {
     const restored = await restoreWorkspace(currentWorkspace);
     if (!restored) await startScratch();
   } else {
+    // Boot straight into scratch without going through startScratch(): adopt
+    // the scratch folder here too, or the sidebar and status bar would claim
+    // scratch has no folder while its terminals open in one.
+    workspacePath = scratchRoot || null;
+    workspacePathExists = true;
     const pane = layout.init();
     const administratorSession = !openDir && initialSessions.find((session) =>
       (session.name || "").startsWith("Administrator - "));

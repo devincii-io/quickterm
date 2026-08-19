@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +9,11 @@ from quickterm.workspace import (
     delete_workspace,
     list_workspaces,
     load_workspace,
+    normalize_root,
+    resolve_start_dir,
+    root_exists,
     save_workspace,
+    validate_subpath,
 )
 
 LAYOUT = {
@@ -147,3 +152,81 @@ def test_case_differing_names_do_not_share_a_file():
     assert lower.session_ids == ["a1"]
     assert upper.session_ids == ["b1"]
     assert sorted(list_workspaces()) == ["Dev", "dev"]
+
+
+# --- workspaces are folders -------------------------------------------------
+
+
+def test_workspace_path_roundtrips_and_normalizes(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("QT_TEST_ROOT", str(project))
+    save_workspace(Workspace(name="dev", layout=LAYOUT, path="%QT_TEST_ROOT%"))
+    loaded = load_workspace("dev")
+    assert loaded is not None
+    assert loaded.path == str(project)
+    assert json.loads((tmp_path / "quickterm" / "workspaces" / "dev.json").read_text())["path"] == str(project)
+
+
+def test_workspace_without_path_stays_none():
+    save_workspace(Workspace(name="plain", layout=LAYOUT))
+    assert load_workspace("plain").path is None
+
+
+def test_normalize_root_rejects_bad_values():
+    assert normalize_root(None) is None
+    assert normalize_root("   ") is None
+    with pytest.raises(ValueError):
+        normalize_root(5)
+    with pytest.raises(ValueError):
+        normalize_root("a" * 5000)
+    with pytest.raises(ValueError):
+        normalize_root("C:/dev\nrm")
+
+
+def test_normalize_root_is_absolute():
+    assert Path(normalize_root("relative/folder")).is_absolute()
+
+
+def test_validate_subpath_rules():
+    assert validate_subpath(None) is None
+    assert validate_subpath("  ") is None
+    assert validate_subpath("/backend/") == "backend"
+    assert validate_subpath(r"apps\web") == r"apps\web"
+    with pytest.raises(ValueError):
+        validate_subpath("../secrets")
+    with pytest.raises(ValueError):
+        validate_subpath("apps/../../secrets")
+    with pytest.raises(ValueError):
+        validate_subpath("C:/windows")
+    with pytest.raises(ValueError):
+        validate_subpath(7)
+
+
+def test_resolve_start_dir_prefers_subfolder_then_root(tmp_path):
+    root = tmp_path / "repo"
+    (root / "backend").mkdir(parents=True)
+    assert resolve_start_dir(str(root)) == str(root)
+    assert resolve_start_dir(str(root), "backend") == str(root / "backend")
+    # A subfolder that has been deleted degrades to the root; it never fails
+    # the spawn and never escapes.
+    assert resolve_start_dir(str(root), "gone") == str(root)
+    assert resolve_start_dir(str(root), "../..") == str(root)
+    assert resolve_start_dir(None, "backend") is None
+    assert resolve_start_dir(str(tmp_path / "missing")) is None
+
+
+def test_root_exists(tmp_path):
+    assert root_exists(str(tmp_path)) is True
+    assert root_exists(str(tmp_path / "nope")) is False
+    assert root_exists(None) is False
+
+
+def test_hand_edited_bad_path_still_loads(tmp_path):
+    save_workspace(Workspace(name="broken", layout=LAYOUT, path=str(tmp_path)))
+    file = tmp_path / "quickterm" / "workspaces" / "broken.json"
+    raw = json.loads(file.read_text())
+    raw["path"] = 12
+    file.write_text(json.dumps(raw))
+    loaded = load_workspace("broken")
+    assert loaded is not None and loaded.path is None

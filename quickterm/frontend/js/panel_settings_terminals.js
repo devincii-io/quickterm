@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import {
-  TERMINAL_TYPES, envToLines, inferTerminalType, make, nativeFolderPickerAvailable,
-  parseEnvLines, pickNativeFolder,
+  TERMINAL_TYPES, envToLines, folderPickerControl, inferTerminalType, make,
+  parseEnvLines,
 } from "./panel_shared.js";
 export function renderTerminalSettings(host, rerender) {
     const cfg = this.settingsDraft;
@@ -16,7 +16,7 @@ export function renderTerminalSettings(host, rerender) {
         type.executable && type.available !== false && type.id !== "claude-code");
       const base = available || { id: "custom", executable: "" };
       const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
-      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
+      cfg.profiles.push({ name: `Terminal ${n}`, cmd: base.executable || "", args, cwd: null, subpath: null, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
       rerender();
       host.lastElementChild?.scrollIntoView({ block: "nearest" });
     });
@@ -71,7 +71,7 @@ export function renderTerminalSettings(host, rerender) {
         // would show it is not rendered for ssh/sftp — so a leftover local cwd
         // stayed invisible while the backend kept validating it, and the
         // profile stopped launching once that folder was deleted.
-        if (type.value === "ssh" || type.value === "sftp") profile.cwd = null;
+        if (type.value === "ssh" || type.value === "sftp") { profile.cwd = null; profile.subpath = null; }
         if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
         else profile.args = [];
         if (type.value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";
@@ -119,43 +119,50 @@ export function renderTerminalSettings(host, rerender) {
           this._field("Private key", keyInput, "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal."),
         );
       } else {
-        const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
-        cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
-        const folderControl = make("span", "folder-picker-control");
-        const browse = this._button("", "secondary-button folder-picker-button");
-        browse.type = "button";
-        browse.append(icon("folder", 14), make("span", "", "Browse"));
-        browse.setAttribute("aria-label", `Choose ${kind === "claude-code" ? "project" : "starting"} folder`);
-        const syncPickerAvailability = () => {
-          browse.disabled = !nativeFolderPickerAvailable();
-          browse.title = browse.disabled
-            ? "Folder picker is available in the installed QuickTerm app"
-            : "Choose a folder";
-        };
-        syncPickerAvailability();
-        if (browse.disabled) document.addEventListener("pywebviewready", syncPickerAvailability, { once: true });
-        browse.addEventListener("click", async (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          browse.disabled = true;
-          const result = await pickNativeFolder(cwd.value);
-          if (result.path) {
-            cwd.value = result.path;
-            profile.cwd = result.path;
-            cwd.focus();
+        // Workspaces own the folder now. A profile either follows the
+        // workspace it is opened in (optionally into a subfolder) or pins
+        // itself to one fixed directory — never both, so switching leaves
+        // nothing invisible behind.
+        const pinned = Boolean(profile.cwd);
+        const mode = this._select([
+          { value: "workspace", label: "Follow the workspace folder" },
+          { value: "fixed", label: "Always this folder" },
+        ], pinned ? "fixed" : "workspace");
+        mode.addEventListener("change", () => {
+          if (mode.value === "fixed") {
+            profile.cwd = profile.cwd || "";
+            profile.subpath = null;
+          } else {
+            profile.cwd = null;
           }
-          browse.disabled = false;
-          if (result.failed) {
-            browse.title = "Folder picker failed; enter the path manually or try again";
-            browse.classList.add("picker-failed");
-            setTimeout(() => browse.classList.remove("picker-failed"), 2000);
-          }
+          rerender();
         });
-        folderControl.append(cwd, browse);
-        const folderHint = kind === "wsl" ? "Enter a Linux path, or browse for an absolute Windows folder."
-          : kind === "claude-code" ? "Required project context for Claude's continue and session picker."
-            : "Leave empty to start in your home folder.";
-        fields.append(this._field(kind === "claude-code" ? "Project folder" : "Starting folder", folderControl, folderHint));
+        fields.append(this._field(
+          kind === "claude-code" ? "Project folder" : "Starting folder",
+          mode,
+          kind === "claude-code"
+            ? "Claude's project context. Following the workspace keeps one profile usable in every project."
+            : "Following the workspace means this terminal opens wherever the workspace points.",
+        ));
+        if (pinned) {
+          const cwd = this._textInput(profile.cwd, kind === "wsl" ? "~ or /home/you/project" : "C:\\Users\\you\\project");
+          cwd.addEventListener("input", () => { profile.cwd = cwd.value || null; });
+          fields.append(this._field(
+            "Fixed folder",
+            folderPickerControl(cwd, { label: "Choose the fixed folder" }),
+            kind === "wsl"
+              ? "Enter a Linux path, or browse for an absolute Windows folder."
+              : "This profile always starts here, whichever workspace it is opened in.",
+          ));
+        } else {
+          const subpath = this._textInput(profile.subpath, "backend");
+          subpath.addEventListener("input", () => { profile.subpath = subpath.value || null; });
+          fields.append(this._field(
+            "Subfolder",
+            subpath,
+            "Optional, relative to the workspace folder. Empty opens the workspace root, and a subfolder that has gone missing falls back to it.",
+          ));
+        }
       }
       if (kind === "claude-code") {
         const launchMode = this._select([

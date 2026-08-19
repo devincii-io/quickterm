@@ -2,6 +2,14 @@ import { icon } from "./icons.js";
 
 const SIDEBAR_KEY = "quickterm.sidebarCollapsed";
 
+// The workspace folder is the one fact about a workspace worth a permanent
+// slot in the chrome; the full path stays in the tooltip.
+function folderName(path) {
+  if (!path) return "";
+  const parts = String(path).split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || String(path);
+}
+
 function make(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -163,7 +171,19 @@ export function initLauncher(el, options) {
     brand.append(defaultBrandMark());
   }
   const brandCopy = make("span", "sidebar-brand-copy sidebar-label");
-  brandCopy.append(make("strong", "", "quickterm"), make("small", "", options.currentWorkspace || "scratch"));
+  const workspaceName = options.currentWorkspace || "scratch";
+  const folder = folderName(options.workspacePath);
+  // "scratch · scratch" says nothing twice; drop the folder when it repeats
+  // the workspace name.
+  const showFolder = folder && folder.toLowerCase() !== workspaceName.toLowerCase();
+  const where = make("small", "", showFolder ? `${workspaceName} · ${folder}` : workspaceName);
+  if (options.workspacePath) {
+    where.title = options.workspacePathExists === false
+      ? `${options.workspacePath} (missing)`
+      : options.workspacePath;
+    if (options.workspacePathExists === false) where.classList.add("warning");
+  }
+  brandCopy.append(make("strong", "", "quickterm"), where);
   brand.append(brandCopy);
   const collapse = make("button", "sidebar-collapse");
   collapse.type = "button";

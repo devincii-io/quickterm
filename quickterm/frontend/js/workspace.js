@@ -3,8 +3,9 @@
 
 import * as api from "./api.js";
 
-export async function save(name, layoutTree, logo, sessionIds = []) {
-  await api.putWorkspace(name, layoutTree, logo, sessionIds);
+// `path` omitted preserves the stored workspace folder; null clears it.
+export async function save(name, layoutTree, logo, sessionIds = [], path) {
+  await api.putWorkspace(name, layoutTree, logo, sessionIds, path);
 }
 
 export async function load(name) {
@@ -14,6 +15,11 @@ export async function load(name) {
 
 export function details(name) {
   return api.getWorkspace(name);
+}
+
+export async function folder(name) {
+  const ws = await api.getWorkspace(name).catch(() => null);
+  return ws ? ws.path || null : null;
 }
 
 export async function loadLogo(name) {

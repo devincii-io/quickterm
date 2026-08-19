@@ -26,7 +26,12 @@ class Profile:
     name: str
     cmd: str
     args: list[str] = field(default_factory=list)
+    # Fixed absolute folder. Legacy/opt-out: when set it pins the profile to
+    # one directory regardless of the workspace it is launched in.
     cwd: str | None = None
+    # Folder relative to the workspace root, used when `cwd` is unset. This is
+    # the workspace-first way to say "this terminal opens in ./backend".
+    subpath: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     keybinding: str | None = None
     autostart: bool = False
@@ -86,6 +91,9 @@ class AppConfig:
     # probe GitHub releases and offer one-click updates in the UI
     update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
+    # Root folder for the disposable scratch workspace. Empty = a QuickTerm
+    # folder under the system temp directory, created on demand.
+    scratch_dir: str = ""
     default_profile: str = ""  # empty = first profile, else first system shell
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
@@ -110,6 +118,28 @@ def default_cwd() -> str:
     except OSError:
         pass
     return os.getcwd()
+
+
+def scratch_root(configured: str = "") -> str:
+    """Root folder for the disposable scratch workspace.
+
+    Scratch is throwaway by design, so its terminals start in a throwaway
+    folder rather than the user's home — nothing typed there lands somewhere
+    that matters by accident. The directory is created on demand and reused
+    across runs; QuickTerm never deletes its contents.
+    """
+    text = (configured or "").strip()
+    if text:
+        candidate = Path(os.path.expandvars(os.path.expanduser(text)))
+    else:
+        candidate = Path(tempfile.gettempdir()) / "QuickTerm" / "scratch"
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        if candidate.is_dir():
+            return str(candidate)
+    except OSError:
+        pass
+    return default_cwd()
 
 
 def config_dir() -> Path:
@@ -252,6 +282,9 @@ def config_from_dict(raw: dict) -> AppConfig:
 
 def validate_config(cfg: AppConfig) -> None:
     from .hotkeys import parse_binding
+    # Imported here, not at module scope: workspace.py imports config_dir from
+    # this module, so a top-level import would be circular.
+    from .workspace import validate_subpath
 
     if cfg.host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Host must be loopback (127.0.0.1, localhost, or ::1)")
@@ -282,6 +315,12 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("Logo must be a string or null")
     if not isinstance(cfg.default_profile, str):
         raise ValueError("Default profile must be a string")
+    if not isinstance(cfg.scratch_dir, str):
+        raise ValueError("Scratch folder must be a string")
+    if cfg.scratch_dir.strip():
+        scratch = Path(os.path.expandvars(os.path.expanduser(cfg.scratch_dir.strip())))
+        if scratch.exists() and not scratch.is_dir():
+            raise ValueError(f"Scratch folder is not a folder: {cfg.scratch_dir}")
     if not isinstance(cfg.update_check, bool):
         raise ValueError("Update check must be true or false")
     if not isinstance(cfg.custom_theme, dict) or any(
@@ -327,12 +366,13 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(
                 f'Terminal profile "{name}": Claude launch mode must be new, continue, resume, or agents'
             )
-        if profile.terminal_type == "claude-code" and not (
-            isinstance(profile.cwd, str) and profile.cwd.strip()
-        ):
-            raise ValueError(
-                f'Terminal profile "{name}": project folder is required for Claude Code'
-            )
+        # Claude Code needs a project folder, but it no longer has to be pinned
+        # on the profile: the workspace root (plus any subfolder) supplies it,
+        # and _resolve_profile refuses the spawn if nothing resolves.
+        try:
+            validate_subpath(profile.subpath)
+        except ValueError as exc:
+            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
         if profile.terminal_type in ("ssh", "sftp"):

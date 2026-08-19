@@ -1,7 +1,8 @@
 import * as api from "./api.js";
 import { icon } from "./icons.js";
 import {
-  countPanes, formatBytes, formatUptime, layoutSessionIds, make,
+  countPanes, folderPickerControl, formatBytes, formatUptime, layoutSessionIds, make,
+  shortPath,
 } from "./panel_shared.js";
 export async function renderDashboard(refreshing = false) {
     this._dashLoading = true;
@@ -32,10 +33,16 @@ export async function renderDashboard(refreshing = false) {
 
     const hero = make("div", "dashboard-hero");
     const heroCopy = make("div", "hero-copy");
+    const currentFolder = this.app.workspacePath ? this.app.workspacePath() : null;
+    const folderMissing = currentFolder && this.app.workspacePathExists
+      && this.app.workspacePathExists() === false;
+    const heroText = currentFolder
+      ? `Every terminal here opens in ${currentFolder}${folderMissing ? " — that folder is missing" : ""}.`
+      : "Open layouts, reattach background terminals, or clean up sessions from one place.";
     heroCopy.append(
       make("span", "hero-kicker", "Workspace overview"),
       make("h2", "hero-title", this.app.currentWorkspace() || "Scratch"),
-      make("p", "hero-text", "Open layouts, reattach background terminals, or clean up sessions from one place."),
+      make("p", `hero-text${folderMissing ? " warning" : ""}`, heroText),
     );
     const stats = make("div", "dashboard-stats");
     const liveSessions = sessions.filter((session) => session.alive);
@@ -112,9 +119,14 @@ export async function renderDashboard(refreshing = false) {
     this.bodyEl.append(usageSection);
 
     const workspaceSection = make("section", "dashboard-section");
-    const wsHeading = this._sectionHeading("Workspaces", "Saved arrangements of terminals, folders and tools.");
+    const wsHeading = this._sectionHeading("Workspaces", "A workspace is a folder plus the terminals you arranged in it.");
     const saveForm = make("div", "save-workspace-form");
     const saveInput = this._textInput("", "Name this workspace");
+    // A workspace is a folder, so naming one asks for the folder in the same
+    // breath. Pre-filled with wherever the live layout already points.
+    const suggested = this.app.suggestedWorkspaceFolder ? this.app.suggestedWorkspaceFolder() : null;
+    const folderInput = this._textInput(suggested || "", "Folder for this workspace");
+    const folderField = folderPickerControl(folderInput, { label: "Choose the workspace folder" });
     const saveButton = this._button("Save current", "primary-button");
     const saveNote = make("p", "save-workspace-note");
     let confirmOverwrite = null; // name armed for a second "really overwrite" click
@@ -136,7 +148,7 @@ export async function renderDashboard(refreshing = false) {
         return;
       }
       saveButton.disabled = true;
-      const failure = await this.app.saveWorkspace(name);
+      const failure = await this.app.saveWorkspace(name, folderInput.value);
       saveButton.disabled = false;
       if (failure) {
         saveNote.textContent = failure;
@@ -154,7 +166,7 @@ export async function renderDashboard(refreshing = false) {
       saveButton.textContent = "Save current";
       saveNote.textContent = "";
     });
-    saveForm.append(saveInput, saveButton);
+    saveForm.append(saveInput, folderField, saveButton);
     wsHeading.append(saveForm, saveNote);
     workspaceSection.append(wsHeading);
 
@@ -195,13 +207,55 @@ export async function renderDashboard(refreshing = false) {
       const preview = this._layoutPreview(layout);
       const footer = make("div", "workspace-card-footer");
       const name = make("div");
-      name.append(make("h3", "", workspace.name), make("p", "", workspace.name === "scratch" ? "Disposable · gone when the app quits" : "Saved workspace"));
+      const folder = workspace.data && workspace.data.path;
+      const missing = Boolean(folder) && workspace.data.path_exists === false;
+      const subtitle = make("p", `workspace-card-folder${missing ? " warning" : ""}`,
+        folder
+          ? (missing ? `${shortPath(folder)} — folder missing` : shortPath(folder))
+          : workspace.name === "scratch"
+            ? "Disposable · gone when the app quits"
+            : "No folder yet · terminals open in your home folder");
+      if (folder) subtitle.title = folder;
+      name.append(make("h3", "", workspace.name), subtitle);
+      const actions = make("div", "workspace-card-actions");
+      const editFolder = this._button("Folder", "text-button compact");
+      editFolder.title = "Choose the folder every terminal in this workspace opens in";
       const load = this._button("Open workspace", "card-open-button");
       load.addEventListener("click", () => {
         this.close();
         this.app.loadWorkspace(workspace.name);
       });
-      footer.append(name, load);
+      // Editing in place: no modal, no navigation, and Escape puts the row
+      // back exactly as it was.
+      editFolder.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (footer.querySelector(".workspace-folder-editor")) return;
+        const editor = make("div", "workspace-folder-editor");
+        const input = this._textInput(folder || "", "Folder for this workspace");
+        const control = folderPickerControl(input, { label: `Choose the folder for ${workspace.name}` });
+        const apply = this._button("Save", "secondary-button compact");
+        const cancel = this._button("Cancel", "text-button compact");
+        const dismiss = () => { editor.remove(); editFolder.disabled = false; editFolder.focus(); };
+        apply.addEventListener("click", async () => {
+          apply.disabled = true;
+          const saved = await this.app.setWorkspaceFolder(workspace.name, input.value);
+          apply.disabled = false;
+          if (!saved) return;
+          dismiss();
+          if (this.open === "dashboard") this._dashboard(true);
+        });
+        cancel.addEventListener("click", dismiss);
+        input.addEventListener("keydown", (keyEvent) => {
+          if (keyEvent.key === "Enter") apply.click();
+          else if (keyEvent.key === "Escape") { keyEvent.stopPropagation(); dismiss(); }
+        });
+        editor.append(control, apply, cancel);
+        editFolder.disabled = true;
+        footer.append(editor);
+        input.focus();
+      });
+      actions.append(editFolder, load);
+      footer.append(name, actions);
       card.append(top, preview, footer);
       card.addEventListener("dblclick", () => load.click());
       cards.append(card);

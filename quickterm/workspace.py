@@ -1,4 +1,9 @@
-"""Workspace models + JSON persistence in %APPDATA%/quickterm/workspaces."""
+"""Workspace models + JSON persistence in %APPDATA%/quickterm/workspaces.
+
+A workspace is a folder first and a layout second: `Workspace.path` is the
+root directory every session in that workspace starts in, and profiles only
+carry an optional `subpath` relative to it.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +13,12 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from .config import config_dir
+
+
+MAX_PATH_CHARS = 4096
 
 
 @dataclass
@@ -18,9 +26,99 @@ class Workspace:
     name: str
     layout: dict
     logo: str | None = None  # per-workspace brand override (asset id)
+    # Root folder for every session in this workspace. None keeps the legacy
+    # behaviour (profile cwd, else the user's home directory).
+    path: str | None = None
     # Workspace ownership is wider than the visible layout: detaching a pane
     # removes it from `layout` but its live session remains here for reattach.
     session_ids: list[str] = field(default_factory=list)
+
+
+def normalize_root(value: object) -> str | None:
+    """Normalize a stored workspace root. Blank/None means "no folder"."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("workspace folder must be a string or null")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > MAX_PATH_CHARS:
+        raise ValueError("workspace folder path is too long")
+    if any(ord(char) < 32 for char in text):
+        raise ValueError("workspace folder path contains control characters")
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    # A relative root would resolve against the server process cwd — which for
+    # a frozen build is the install directory. Anchor it once, at the edge.
+    return os.path.abspath(expanded)
+
+
+def validate_subpath(value: object) -> str | None:
+    """Validate a profile subfolder: relative, inside the workspace root."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("subfolder must be a string or null")
+    text = value.strip().strip("/\\")
+    if not text:
+        return None
+    if len(text) > MAX_PATH_CHARS:
+        raise ValueError("subfolder path is too long")
+    if any(ord(char) < 32 for char in text):
+        raise ValueError("subfolder path contains control characters")
+    candidate = PurePath(text)
+    if candidate.is_absolute() or candidate.anchor or candidate.drive:
+        raise ValueError("subfolder must be relative to the workspace folder")
+    if any(part == ".." for part in candidate.parts):
+        raise ValueError("subfolder cannot step outside the workspace folder")
+    return text
+
+
+def _contained(base: Path, child: Path) -> bool:
+    try:
+        base_real = base.resolve()
+        child_real = child.resolve()
+    except OSError:
+        return False
+    return child_real == base_real or base_real in child_real.parents
+
+
+def resolve_start_dir(root: str | None, subpath: str | None = None) -> str | None:
+    """Existing directory a session should start in, or None if unusable.
+
+    A missing subfolder degrades to the workspace root rather than failing the
+    spawn; a missing root degrades to the caller's own fallback.
+    """
+    if not root:
+        return None
+    base = Path(root)
+    try:
+        if not base.is_dir():
+            return None
+    except OSError:
+        return None
+    try:
+        relative = validate_subpath(subpath)
+    except ValueError:
+        return str(base)
+    if not relative:
+        return str(base)
+    child = base / relative
+    try:
+        if child.is_dir() and _contained(base, child):
+            return str(child)
+    except OSError:
+        pass
+    return str(base)
+
+
+def root_exists(root: str | None) -> bool:
+    if not root:
+        return False
+    try:
+        return Path(root).is_dir()
+    except OSError:
+        return False
 
 
 def _workspaces_dir() -> Path:
@@ -95,21 +193,34 @@ def load_workspace(name: str) -> Workspace | None:
         found: set[str] = set()
         _collect_session_ids(raw.get("layout", {}), found)
         session_ids = sorted(found)
+    try:
+        path = normalize_root(raw.get("path"))
+    except ValueError:
+        path = None  # a hand-edited file must not make the workspace unloadable
     return Workspace(
         name=raw.get("name", name),
         layout=raw.get("layout", {}),
         logo=raw.get("logo"),
+        path=path,
         session_ids=[sid for sid in session_ids if isinstance(sid, str) and sid],
     )
 
 
 def save_workspace(ws: Workspace) -> None:
     path = _path_for(ws.name)
+    # Canonicalize on the way in so the stored document always holds an
+    # absolute folder, whatever the caller passed (env vars, ~, a relative
+    # path). A value we cannot make sense of is dropped, not persisted.
+    try:
+        root = normalize_root(ws.path)
+    except ValueError:
+        root = None
     text = json.dumps(
         {
             "name": ws.name,
             "layout": ws.layout,
             "logo": ws.logo,
+            "path": root,
             "session_ids": sorted(set(ws.session_ids)),
         },
         indent=2,

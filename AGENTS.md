@@ -74,23 +74,45 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   visible. Destructive confirmation triggers must remain visible, their
   popovers must be clamped inside the viewport and follow a scrolling panel,
   and **Cancel** owns the initial focus.
+- Panels (Dashboard/Settings/Help) are a centred, bounded sheet, never
+  full-bleed: the dense styling is about the rows inside, not the frame.
+  Stretching `.panel-overlay` edge to edge removes the click-outside-to-close
+  target and makes a dialog read as a second application.
 - No destructive action may be reachable without consent or feedback. `×` on a
   pane detaches, never kills; kill is a separate labelled `.danger` control.
   Clicking the workspace row you are already on is a no-op, scratch included.
   There is no free-text workspace prompt. Errors go to the `#app-error` banner
   or the pane notice — `#sb-save` is the saving/saved lifecycle only.
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
-  (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan, and
-  the `ShellExecuteW` UAC handshake all go through `asyncio.to_thread`. The
+  (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
+  `save_workspace` (it fsyncs, and the layout autosaves on every pane change),
+  and the `ShellExecuteW` UAC handshake all go through `asyncio.to_thread`. The
   session registry is mutated on the loop thread but read from the threadpool
   and the GUI thread, so every iteration snapshots with `list(...)` first.
 - The WS attach must never lose bytes: a fresh subscription is drained from the
   moment it exists (`_HandshakeBuffer`, bounded), an exited session still in the
   registry is served replay-only rather than refused, and the client reconnects
   after a 1013 overflow even if the session has since exited.
+- A workspace IS a folder. `Workspace.path` is the root every session it owns
+  starts in; profiles carry only an optional `subpath` relative to it. Spawn
+  order: explicit request `cwd` > a profile's own `cwd` (an explicit "Always
+  this folder" opt-out) > workspace root + `subpath` > `default_cwd()`. A
+  missing `subpath` degrades to the root and a missing root to the home folder
+  — a folder that has been deleted must never fail the spawn. `PUT
+  /api/workspaces/{name}` treats `path` as three-valued: **absent preserves**
+  (every layout autosave takes that branch), `null` clears, a string sets.
+- Scratch is disposable, so it opens in a disposable folder:
+  `config.scratch_root()` (`AppConfig.scratch_dir`, else
+  `<temp>/QuickTerm/scratch`). Never suggest that folder when naming a
+  workspace — `suggestedWorkspaceFolder()` offers the focused pane's real
+  directory instead, so promoting a scratch you `cd`'d into your project names
+  that project.
 - Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
-  (`new`, `continue`, `resume`, or `agents`) and a project `cwd`. Recovery uses
-  Claude's own CLI flags and must remain explicit when the old PTY is gone.
+  (`new`, `continue`, `resume`, or `agents`) and a project folder that now
+  comes from the workspace unless the profile pins one. `_resolve_profile`
+  raises only when nothing resolves (a 400 on the spawn, not a config-save
+  error). Recovery uses Claude's own CLI flags and must remain explicit when
+  the old PTY is gone.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`

@@ -23,7 +23,8 @@ class Profile:
     name: str
     cmd: str                    # executable, e.g. "powershell.exe" or "claude"
     args: list[str] = field(default_factory=list)
-    cwd: str | None = None
+    cwd: str | None = None       # fixed folder; pins the profile regardless of workspace
+    subpath: str | None = None   # folder RELATIVE to the workspace root; used when cwd is unset
     env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
     keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
     autostart: bool = False
@@ -91,11 +92,35 @@ pairs, empty names, `=`, control characters, NUL values, and names that collide
 case-insensitively. Both PTY backends merge the validated override over the
 QuickTerm process environment.
 
-`default_cwd()` is the starting folder for any spawn that specifies no `cwd`
-(profiles without one, detected system shells, splits). It prefers the user's
-Desktop, then home, then the process cwd — never the install directory, which
-is where a frozen exe's `os.getcwd()` would otherwise land. `SessionManager.spawn`
-applies it, so every PTY backend receives a concrete folder.
+### Where a session starts
+
+A workspace IS a folder. The resolution order for a new session's directory is
+fixed and applies to every spawn path:
+
+1. an explicit `cwd` in the request (Explorer handoff, a split inheriting the
+   source pane's directory) — always wins;
+2. the profile's own `cwd` when it has one. A pinned folder is an explicit
+   opt-out ("Always this folder" in Settings), so the workspace root does NOT
+   override it — otherwise the setting would be a lie;
+3. otherwise the workspace root (`Workspace.path`) joined with the profile's
+   `subpath`; a `subpath` that no longer exists degrades to the root, and a
+   root that no longer exists degrades to step 4 — never to an error;
+4. `default_cwd()`.
+
+`default_cwd()` prefers the user's home directory, then the process cwd — never
+the install directory, which is where a frozen exe's `os.getcwd()` would
+otherwise land. `SessionManager.spawn` applies it and records the result on
+`SessionInfo.cwd`, so every PTY backend receives a concrete folder and every
+client can show where a terminal actually opened.
+
+`scratch_root(configured)` is the disposable scratch workspace's folder:
+`AppConfig.scratch_dir` when set, else `<system temp>/QuickTerm/scratch`. It is
+created on demand, reused across runs, and its contents are never deleted by
+QuickTerm. Scratch terminals start there rather than in the user's home folder.
+
+Claude Code profiles need a project folder but no longer have to carry one: the
+workspace root supplies it. `_resolve_profile` raises only when nothing at all
+resolves, which surfaces as a 400 on the spawn rather than a config-save error.
 
 ## quickterm/pty_session.py
 
@@ -196,12 +221,19 @@ class Workspace:
     name: str
     layout: dict   # tree above
     logo: str | None = None
+    path: str | None = None   # root folder every session in this workspace starts in
     session_ids: list[str] = field(default_factory=list)  # includes detached
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
-def save_workspace(ws: Workspace) -> None
+def save_workspace(ws: Workspace) -> None      # normalizes `path` before writing
 def delete_workspace(name: str) -> None
+
+# folder helpers (also used by config validation and the spawn path)
+def normalize_root(value: object) -> str | None      # expands ~/env vars, absolutizes
+def validate_subpath(value: object) -> str | None    # relative only; rejects "..", drives
+def resolve_start_dir(root: str | None, subpath: str | None = None) -> str | None
+def root_exists(root: str | None) -> bool
 ```
 
 ## quickterm/server.py
@@ -228,8 +260,8 @@ REST (JSON, under `/api`):
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
-| GET | /api/workspaces/{name} | → `Workspace` |
-| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?}` → 204 |
+| GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool` |
+| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path` is three-valued: **absent preserves** the stored folder (every layout autosave relies on this), `null` clears it, a string sets it (normalized; existence is NOT required so a temporarily missing folder cannot break autosave). 400 on a non-string/oversized/control-character path |
 | DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204 |
 | GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool, hotkey_error: str\|null}` — `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. |

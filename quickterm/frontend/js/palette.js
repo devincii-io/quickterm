@@ -122,6 +122,15 @@ export class Palette {
       for (const sid of ids) if (!owners.has(sid)) owners.set(sid, name);
       layoutSessionIds(saved.layout, layoutBound);
     }
+    // The folder is what distinguishes two similarly named workspaces, so
+    // show it on the row once the details have arrived.
+    for (const { name, saved } of workspaceData) {
+      if (!saved || !saved.path) continue;
+      const row = this.items.find(
+        (item) => item.kind === "workspace" && item.label === `load workspace: ${name}`,
+      );
+      if (row) row.hint = saved.path_exists === false ? `${saved.path} (missing)` : saved.path;
+    }
     const attached = new Set(this.app.attachedSessionIds());
     const current = this.app.currentWorkspace() || "scratch";
     const currentOwned = new Set(this.app.ownedSessionIds ? this.app.ownedSessionIds() : []);

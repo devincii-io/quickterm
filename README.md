@@ -53,17 +53,32 @@ window. Ordinary launches are single-instance: starting QuickTerm again summons
 the existing window instead of creating a second viewer with ambiguous session
 ownership. Explorer **Open QuickTerm here** securely queues that folder to the
 running viewer, switches it to Scratch, and opens the terminal there; the user
-can then save or move it deliberately. The sidebar workspace list controls persistence: a named workspace
+can then save or move it deliberately.
+
+**A workspace is a folder.** Give a workspace the directory you work in and
+every terminal it opens starts there, so switching workspace switches project.
+Set or change the folder from the Dashboard (with a native folder picker);
+terminal profiles keep only an optional subfolder relative to it, so one
+"Claude Code" or "PowerShell" profile is usable in every project. A profile
+that genuinely belongs to one place can still pin itself with **Always this
+folder**, and that pin wins. A folder that has been moved or deleted is
+reported in the Dashboard and sidebar rather than silently failing the next
+terminal.
+
+The sidebar workspace list controls persistence: a named workspace
 autosaves its exact split arrangement and live session IDs for reattachment
 with in-memory scrollback while those processes are still alive. If a saved
 process is gone, QuickTerm restores an explicitly unavailable pane and never
 silently starts a replacement shell under the old identity. Claude-oriented
 profiles additionally offer explicit **Continue latest** and **Choose session**
 recovery actions.
-**Scratch** is the disposable mode: the moment you type
+**Scratch** is the disposable mode: it opens in a throwaway folder under your
+system temp directory, and the moment you type
 into a scratch layout it starts autosaving as the special `scratch` workspace
 (replacing the previous one), survives closing the window during a run, and is
-deleted for good when the app quits.
+deleted for good when the app quits. Naming a scratch in the Dashboard offers
+the folder the focused terminal is actually in — so a shell you `cd`'d into
+your project suggests that project, never the temp folder.
 
 Closing the window is smart about your work: if any terminal you have typed
 into or any shell with a running child process is still active (an SSH session,

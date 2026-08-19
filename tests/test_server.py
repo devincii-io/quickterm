@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import pytest
 from fastapi.testclient import TestClient
 
+from quickterm import workspace as real_workspace
 from quickterm.server import create_app
 
 # --- fakes implementing the contract surface -------------------------------
@@ -28,6 +29,7 @@ class FakeProfile:
     cmd: str
     args: list = field(default_factory=list)
     cwd: str | None = None
+    subpath: str | None = None
     env: dict = field(default_factory=dict)
     keybinding: str | None = None
     autostart: bool = False
@@ -69,6 +71,7 @@ class FakeConfig:
     max_sessions: int = 0
     update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
+    scratch_dir: str = ""
     default_profile: str = "powershell"
     profiles: list = field(default_factory=list)
     snippets: list = field(default_factory=list)
@@ -260,6 +263,7 @@ def fake_workspace(monkeypatch):
         name: str
         layout: dict
         logo: str | None = None
+        path: str | None = None
         session_ids: list[str] = field(default_factory=list)
 
     store: dict[str, Workspace] = {}
@@ -268,6 +272,12 @@ def fake_workspace(monkeypatch):
     mod.load_workspace = lambda name: store.get(name)
     mod.save_workspace = lambda ws: store.__setitem__(ws.name, ws)
     mod.delete_workspace = lambda name: store.pop(name, None)
+    # Complete-interface fake: the folder helpers the server calls are the real
+    # ones, so path handling is exercised rather than stubbed away.
+    mod.normalize_root = real_workspace.normalize_root
+    mod.validate_subpath = real_workspace.validate_subpath
+    mod.resolve_start_dir = real_workspace.resolve_start_dir
+    mod.root_exists = real_workspace.root_exists
     monkeypatch.setitem(sys.modules, "quickterm.workspace", mod)
     return store
 
@@ -835,7 +845,10 @@ def test_workspace_crud(client, fake_workspace):
     assert r.status_code == 204
     assert client.get("/api/workspaces").json() == ["dev"]
     ws = client.get("/api/workspaces/dev").json()
-    assert ws == {"name": "dev", "layout": layout, "logo": None, "session_ids": []}
+    assert ws == {
+        "name": "dev", "layout": layout, "logo": None, "path": None,
+        "session_ids": [], "path_exists": False,
+    }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert client.get("/api/workspaces").json() == []
@@ -1326,3 +1339,154 @@ def test_handshake_output_is_delivered_after_replay(client, manager):
         ws.send_text(json.dumps({"type": "replay_ack"}))
         assert json.loads(ws.receive_text()) == {"type": "replay_done"}
         assert ws.receive_bytes() == b"during-handshake"
+
+
+# --- workspaces are folders -------------------------------------------------
+
+
+def test_workspace_path_is_stored_and_preserved_by_layout_autosaves(
+    client, fake_workspace, tmp_path
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    layout = {"type": "pane"}
+    assert client.put(
+        "/api/workspaces/dev", json={"layout": layout, "path": str(root)}
+    ).status_code == 204
+    body = client.get("/api/workspaces/dev").json()
+    assert body["path"] == str(root)
+    assert body["path_exists"] is True
+
+    # An autosave carries no "path" key at all; the folder must survive it.
+    assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
+    assert client.get("/api/workspaces/dev").json()["path"] == str(root)
+
+    # An explicit null is the only way to clear it.
+    assert client.put(
+        "/api/workspaces/dev", json={"layout": layout, "path": None}
+    ).status_code == 204
+    assert client.get("/api/workspaces/dev").json()["path"] is None
+
+
+def test_workspace_path_rejects_unusable_values(client, fake_workspace):
+    r = client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": 12})
+    assert r.status_code == 400
+
+
+def test_missing_workspace_folder_is_reported(client, fake_workspace, tmp_path):
+    gone = tmp_path / "deleted"
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(gone)})
+    body = client.get("/api/workspaces/dev").json()
+    assert body["path"] == str(gone)
+    assert body["path_exists"] is False
+
+
+def test_session_spawns_in_its_workspace_folder(client, manager, fake_workspace, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+    r = client.post("/api/sessions", json={"cmd": "cmd.exe", "workspace": "dev"})
+    assert r.status_code == 200
+    assert manager.last_spawn["cwd"] == str(root)
+    assert manager.last_spawn["workspace"] == "dev"
+
+
+def test_profile_subpath_resolves_under_the_workspace_folder(
+    client, manager, fake_workspace, cfg, tmp_path
+):
+    root = tmp_path / "repo"
+    (root / "backend").mkdir(parents=True)
+    cfg.profiles.append(
+        FakeProfile(name="api", cmd="cmd.exe", subpath="backend", terminal_type="command-prompt")
+    )
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+    client.post("/api/sessions", json={"profile": "api", "workspace": "dev"})
+    assert manager.last_spawn["cwd"] == str(root / "backend")
+
+
+def test_profile_subpath_cannot_escape_the_workspace_folder(
+    client, manager, fake_workspace, cfg, tmp_path
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    cfg.profiles.append(
+        FakeProfile(name="bad", cmd="cmd.exe", subpath="../..", terminal_type="command-prompt")
+    )
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+    client.post("/api/sessions", json={"profile": "bad", "workspace": "dev"})
+    assert manager.last_spawn["cwd"] == str(root)
+
+
+def test_explicit_cwd_beats_the_workspace_folder(client, manager, fake_workspace, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+    client.post(
+        "/api/sessions",
+        json={"cmd": "cmd.exe", "workspace": "dev", "cwd": str(elsewhere)},
+    )
+    assert manager.last_spawn["cwd"] == str(elsewhere)
+
+
+def test_a_pinned_profile_keeps_its_folder_inside_a_workspace(
+    client, manager, fake_workspace, cfg, tmp_path
+):
+    """"Always this folder" in Settings is an opt-out, not a suggestion."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    cfg.profiles.append(
+        FakeProfile(name="pinned", cmd="cmd.exe", cwd=str(pinned), terminal_type="command-prompt")
+    )
+    # No workspace folder at all.
+    client.put("/api/workspaces/plain", json={"layout": {"type": "pane"}})
+    client.post("/api/sessions", json={"profile": "pinned", "workspace": "plain"})
+    assert manager.last_spawn["cwd"] == str(pinned)
+
+    # And with one: the pin still wins, because the user asked for it.
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+    client.post("/api/sessions", json={"profile": "pinned", "workspace": "dev"})
+    assert manager.last_spawn["cwd"] == str(pinned)
+
+    # An explicit request directory still overrides everything.
+    client.post(
+        "/api/sessions",
+        json={"profile": "pinned", "workspace": "dev", "cwd": str(root)},
+    )
+    assert manager.last_spawn["cwd"] == str(root)
+
+
+def test_scratch_dir_is_exposed_to_the_ui(client):
+    scratch = client.get("/api/config").json()["scratch_dir"]
+    assert scratch and os.path.isdir(scratch)
+
+
+def test_elevated_terminal_opens_in_the_workspace_folder(
+    client, fake_workspace, cfg, tmp_path, monkeypatch
+):
+    if os.name != "nt":
+        pytest.skip("administrator terminals are Windows-only")
+    root = tmp_path / "repo"
+    (root / "backend").mkdir(parents=True)
+    cfg.profiles.append(
+        FakeProfile(name="api", cmd="cmd.exe", subpath="backend", terminal_type="command-prompt")
+    )
+    client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
+
+    launched: list[dict] = []
+    elevation = types.ModuleType("quickterm.elevation")
+    elevation.launch = launched.append
+    monkeypatch.setitem(sys.modules, "quickterm.elevation", elevation)
+
+    assert client.post("/api/elevate", json={"profile": "api", "workspace": "dev"}).status_code == 200
+    assert launched[-1]["cwd"] == str(root / "backend")
+
+    # A system shell carries no profile, so the workspace root is all it has.
+    assert client.post(
+        "/api/elevate", json={"cmd": "cmd.exe", "name": "Command Prompt", "workspace": "dev"}
+    ).status_code == 200
+    assert launched[-1]["cwd"] == str(root)
+    assert "workspace" not in launched[-1]

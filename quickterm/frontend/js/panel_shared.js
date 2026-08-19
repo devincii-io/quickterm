@@ -1,3 +1,4 @@
+import { icon } from "./icons.js";
 import { CUSTOM_THEME } from "./themes.js";
 
 export const DASHBOARD_REFRESH_MS = 5000;
@@ -129,4 +130,54 @@ export function displaySnippet(text) {
 export function runnableSnippet(text) {
   const body = String(text || "").replace(/\r\n?/g, "\n");
   return body ? `${body}\r` : "";
+}
+
+
+// One folder field, one Browse button, everywhere a directory is chosen.
+// Picking a folder dispatches a bubbling "input" event on the field, so a
+// caller only ever needs the listener it already has for typing.
+export function folderPickerControl(input, options = {}) {
+  const control = make("span", "folder-picker-control");
+  const browse = make("button", "secondary-button folder-picker-button");
+  browse.type = "button";
+  browse.append(icon("folder", 14), make("span", "", "Browse"));
+  browse.setAttribute("aria-label", options.label || "Choose a folder");
+  const syncAvailability = () => {
+    browse.disabled = !nativeFolderPickerAvailable();
+    browse.title = browse.disabled
+      ? "Folder picker is available in the installed QuickTerm app"
+      : "Choose a folder";
+  };
+  syncAvailability();
+  // pywebview injects its API after the page loads, so a picker that looks
+  // missing at render time can still arrive a moment later.
+  if (browse.disabled) document.addEventListener("pywebviewready", syncAvailability, { once: true });
+  browse.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    browse.disabled = true;
+    const result = await pickNativeFolder(input.value || options.startIn || "");
+    if (result.path) {
+      input.value = result.path;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    }
+    browse.disabled = false;
+    syncAvailability();
+    if (result.failed) {
+      browse.title = "Folder picker failed; enter the path manually or try again";
+      browse.classList.add("picker-failed");
+      setTimeout(() => browse.classList.remove("picker-failed"), 2000);
+    }
+  });
+  control.append(input, browse);
+  return control;
+}
+
+// Long absolute paths blow up narrow rows. Keep the tail, which is the part
+// that identifies the project.
+export function shortPath(value, max = 46) {
+  const text = String(value || "");
+  if (text.length <= max) return text;
+  return `…${text.slice(-(max - 1))}`;
 }

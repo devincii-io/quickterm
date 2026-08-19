@@ -2,6 +2,52 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.2.0
+
+### Workspaces are folders
+
+- A workspace now has a **folder**, and every terminal it owns starts there.
+  Switching workspace switches project. Set or change it from the Dashboard —
+  each workspace row shows its folder and has a **Folder** button with a native
+  picker, and naming a new workspace asks for the folder in the same form.
+- Terminal profiles no longer carry a project path. A profile either **follows
+  the workspace folder** (optionally into a **subfolder** such as `backend`) or
+  pins itself to one fixed directory with **Always this folder** — never both,
+  so switching one off leaves nothing invisible behind. Existing profiles with
+  a folder keep it and are shown as pinned; nothing needs migrating.
+- Claude Code profiles no longer require their own project folder. One Claude
+  profile is now usable in every project, taking its context from the workspace.
+- Scratch opens in a throwaway folder under your system temp directory instead
+  of your home folder, so nothing typed in a disposable terminal lands
+  somewhere that matters by accident. Naming a scratch offers the folder its
+  focused terminal is really in, never the temp folder itself.
+- A workspace folder that has been moved or deleted is reported in the sidebar,
+  the Dashboard and the message banner. It degrades to your home folder rather
+  than failing the next terminal, and a subfolder that has gone missing falls
+  back to the workspace root.
+- Administrator terminals and restored layouts follow the workspace folder too,
+  so an elevated shell no longer lands somewhere different from its siblings.
+- `GET /api/workspaces/{name}` now returns `path` and `path_exists`, `PUT`
+  accepts `path` (absent preserves the stored folder, `null` clears it), and
+  `SessionInfo` reports the `cwd` a terminal actually started in.
+
+### Fixes and polish
+
+- **Settings and Dashboard no longer stretch to the corners of the screen.**
+  They are a centred, bounded sheet again: the click-outside-to-close target is
+  back, rows stop stretching to the full width of a wide monitor, and a dialog
+  reads as a dialog rather than a second application.
+- A profile pinned to a fixed folder is no longer overridden by the workspace
+  root — the Settings choice is honoured exactly as written.
+- Saving a workspace layout no longer fsyncs on the event loop. The layout
+  autosaves on every pane change, so that write briefly stalled every terminal's
+  output pump.
+- One shared folder-picker control now backs every folder field, so the
+  "Browse" button behaves identically in Settings and the Dashboard and appears
+  as soon as the desktop API is ready.
+- The command palette shows each workspace's folder next to its name, and
+  fixed spacing in terminal profile cards where a hint ran into the next label.
+
 ## QuickTerm 3.1.0
 
 ### Nothing destructive without consent

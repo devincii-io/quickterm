@@ -87,9 +87,15 @@ def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
     with pytest.raises(ValueError, match="Claude launch mode"):
         save_config(AppConfig(profiles=[loaded]))
 
+    # A Claude profile no longer has to pin its own folder: the workspace root
+    # supplies it, and the spawn path refuses only when nothing resolves.
     loaded.claude_mode = "continue"
     loaded.cwd = None
-    with pytest.raises(ValueError, match="project folder is required"):
+    save_config(AppConfig(profiles=[loaded]))
+    assert load_config().profiles[0].cwd is None
+
+    loaded.subpath = "../escape"
+    with pytest.raises(ValueError, match="outside the workspace folder"):
         save_config(AppConfig(profiles=[loaded]))
 
 
