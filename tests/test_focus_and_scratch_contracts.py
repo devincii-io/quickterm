@@ -19,8 +19,10 @@ def test_every_overlay_claims_the_keyboard_before_focusing_its_own_control():
     # A pane re-asserts term.focus() on a frame and on a timeout, so an overlay
     # that only focuses its input loses it again one frame later. Alt+K opened a
     # palette you could not type into for exactly this reason.
+    # main.js used to own an overlay of its own (the quick-settings drawer);
+    # it no longer has one, so only the palette and the panels are checked.
     assert FOCUS_JS.exists()
-    for source in (PALETTE_JS, PANELS_JS, MAIN_JS):
+    for source in (PALETTE_JS, PANELS_JS):
         text = source.read_text(encoding="utf-8")
         assert 'from "./focus.js"' in text, source.name
         assert "claimFocus(" in text, source.name
@@ -55,14 +57,6 @@ def test_palette_focuses_its_input_on_open_and_returns_the_terminal_on_close():
     assert close_impl.index('releaseFocus("palette")') < close_impl.index(
         "this.app.refocusTerm()"
     )
-
-
-def test_quick_settings_hands_focus_back_to_the_terminal_not_its_trigger():
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  function closeQuickSettings(")
-    implementation = main[start:main.index("\n  function toggleQuickSettings", start)]
-    assert "if (!app.refocusTerm()) quickButton.focus();" in implementation
-    assert 'releaseFocus("quick-settings")' in implementation
 
 
 def test_new_scratch_only_destroys_terminals_that_are_idle_and_untouched():

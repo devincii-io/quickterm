@@ -1,20 +1,29 @@
-/* The sidebar: its resize grip, and the refinement pass over the base rules in
-   app.css. Loaded after app.css, so plain overrides win on order alone.
-   Everything here reads the theme variables; no colour is written literally. */
+/* The sidebar is the whole chrome, so this file owns everything in it: the
+   new-terminal row, the workspace row, the terminal list, the icon footer,
+   the resize grip, the 30px rail, and the floating "+" that replaces the
+   sidebar while it is hidden. app.css only provides the grid column and the
+   base `.launcher.sidebar` box. Everything reads the theme variables; no
+   colour is written literally. */
 
-/* ---------- width ---------- */
+/* ---------- width and modes ---------- */
 
 :root {
-  /* The icon rail is a fixed size, not a resizable one: below the labels there
-     is nothing left to give. */
-  --sidebar-rail: 42px;
+  /* The rail is a fixed size, not a resizable one: below the labels there is
+     nothing left to give. */
+  --sidebar-rail: 30px;
 }
 
-#app { grid-template-columns: var(--sidebar-w, 244px) minmax(0, 1fr); }
+#app { grid-template-columns: var(--sidebar-w, 200px) minmax(0, 1fr); }
 
-/* Collapsed wins over any stored width. A rail that remembered 380px would be
-   a very wide column of centred icons. */
+/* A mode wins over any stored width. A rail that remembered 380px would be a
+   very wide column of centred dots. */
 body.sidebar-collapsed #app { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+body.sidebar-hidden #app { grid-template-columns: 0 minmax(0, 1fr); }
+body.sidebar-hidden .launcher.sidebar { display: none; }
+/* Placed explicitly: with the sidebar display:none, auto-placement would put
+   the workspace into the first column, the one that is 0px wide. */
+#app > .launcher.sidebar { grid-column: 1; }
+#app > .workspace-shell { grid-column: 2; }
 
 /* The grid column animates on collapse, which is exactly wrong while a pointer
    is dragging the edge: the sidebar would arrive .14s behind the cursor. The
@@ -27,9 +36,9 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 /* Selector weight is load-bearing here. app.css stretches every direct child of
    the sidebar with `.launcher.sidebar > * { width: 100% }`, which outranks a
    bare `.sidebar-grip` on specificity no matter which file loads last. Without
-   matching that weight the grip computed to the full 244px width and, being
-   absolutely positioned at z-index 30, covered the whole sidebar: workspaces,
-   the terminal picker and the footer buttons were all unclickable. */
+   matching that weight the grip computed to the full sidebar width and, being
+   absolutely positioned at z-index 30, covered the whole sidebar: nothing in it
+   could be clicked. */
 .launcher.sidebar > .sidebar-grip {
   position: absolute;
   z-index: 30;
@@ -54,90 +63,156 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 }
 body.sidebar-collapsed .sidebar-grip { display: none; }
 
-/* ---------- head ---------- */
+/* ---------- shared bits ---------- */
 
-.sidebar-head { padding: 5px 7px 5px 10px; }
-.sidebar-brand-copy strong { letter-spacing: .07em; }
-/* The workspace line is a folder, so it reads as one. */
-.sidebar-brand-copy small { font-family: var(--mono); font-size: 9px; letter-spacing: .01em; }
-.sidebar-collapse:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-
-/* ---------- sections ---------- */
-
-.sidebar-section { padding: 8px 7px; }
-.sidebar-section-head {
-  padding: 0 6px 5px;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: .12em;
-}
-/* The count is a fact about the list, so it gets the pill and the figures get
-   the monospace: two workspaces and twelve must line up in the same slot. */
+.sidebar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-count {
-  padding: 0 6px;
-  border-radius: 20px;
-  background: var(--surface);
-  font-family: var(--mono);
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
   font-size: 9px;
-  line-height: 15px;
+  font-variant-numeric: tabular-nums;
 }
+.sidebar-empty { padding: 6px 8px; color: var(--muted); font-size: 9.5px; }
+.launcher.sidebar select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.launcher.sidebar option, .launcher.sidebar optgroup { background: var(--surface); color: var(--text); }
 
-.sidebar-list { gap: 2px; }
+/* ---------- new terminal ---------- */
 
-/* ---------- rows ---------- */
-
-.sidebar-row, .sidebar-action { border-radius: 3px; }
-.sidebar-row { padding: 4px 6px; }
-.sidebar-row:focus-visible, .sidebar-action:focus-visible {
+/* One row, three targets: "+ name" opens, the chevron changes the choice, the
+   shield elevates. Only the first carries a fill: opening a terminal is what
+   this sidebar is for. */
+.sidebar-launch {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 5px 4px;
+}
+.sidebar-new {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 6px;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font: 10.5px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-new .icon { flex: none; }
+.sidebar-new:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.sidebar-new:disabled { color: var(--muted); background: var(--surface-raised); cursor: default; }
+.sidebar-new:focus-visible, .sidebar-admin:focus-visible, .sidebar-terminal-select:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-/* Hover is a hint, the current row is a statement: the fill steps up and the
-   accent bar is solid, so the two never read as the same state. */
-.sidebar-row.active {
-  background: var(--surface-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
+/* The select shows no text of its own; the name is on the button beside it.
+   What is left is a 20px chevron drawn by the background, so the row reads as
+   one control with a menu, not a button next to a form field. */
+.launcher.sidebar .sidebar-terminal-select {
+  flex: none;
+  width: 20px;
+  height: 26px;
+  padding: 0;
+  border-radius: 3px;
+  color: transparent;
+  text-indent: -999px;
+  background:
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9.5 12 15.5 18 9.5"/></svg>')
+    center / 12px no-repeat;
 }
-.sidebar-row.active .sidebar-row-copy strong { color: var(--text); font-weight: 650; }
+.sidebar-terminal-select:hover { background-color: var(--surface-raised); }
+.sidebar-admin {
+  flex: none;
+  width: 22px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sidebar-admin:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-admin:disabled { opacity: .5; cursor: default; }
 
-.sidebar-row-copy strong { font-size: 10.5px; }
-/* Session names come from the shell and are compared character by character,
-   so they stay monospace even where the workspace names do not. */
-.session-row .sidebar-row-copy strong { font-family: var(--mono); }
-.sidebar-row-copy small {
-  margin-top: 3px;
-  font-size: 8px;
-  letter-spacing: .09em;
-  text-transform: uppercase;
-}
-/* The workspace you are in states it in place of its caption. */
-.sidebar-row.active .sidebar-row-copy small {
-  align-self: flex-start;
-  margin-top: 3px;
-  padding: 0 5px;
-  border-radius: 20px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-  line-height: 13px;
-}
+/* ---------- workspace ---------- */
 
-/* ---------- terminals, grouped by owning workspace ---------- */
-
-/* Every group after the first needs a boundary that is actually visible, and
-   --line is 1.26:1 on this ground, so the separator is --line-hover and the
-   group you are in also carries the accent bar. */
-.session-group + .session-group {
-  margin-top: 5px;
-  padding-top: 5px;
-  border-top: 1px solid var(--line-hover);
-}
-.session-group-head {
-  width: 100%;
-  min-height: 24px;
+.sidebar-where {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 6px;
+  gap: 4px;
+  padding: 2px 5px 6px 7px;
+  border-bottom: 1px solid var(--line);
+}
+.sidebar-where-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.sidebar-workspace-select {
+  width: 100%;
+  height: 20px;
+  padding: 0 14px 0 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  background:
+    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9.5 12 15.5 18 9.5"/></svg>')
+    right 1px center / 10px no-repeat;
+}
+.sidebar-workspace-select:hover { color: var(--accent); }
+.sidebar-workspace-select:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.sidebar-folder {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-folder.warning { color: var(--danger); }
+/* The save dot: invisible while nothing is happening, accent while saving,
+   danger when the save failed. main.js drives it through data-state. */
+.sidebar-save { flex: none; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
+.sidebar-save[data-state="saving"] { background: var(--accent); opacity: .6; }
+.sidebar-save[data-state="saved"] { background: var(--sage); }
+.sidebar-save[data-state="error"] { background: var(--danger); }
+
+/* ---------- terminals ---------- */
+
+.sidebar-sessions {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 3px;
+}
+.sidebar-sessions::-webkit-scrollbar { width: 6px; }
+.sidebar-sessions::-webkit-scrollbar-thumb { border: 0; background: var(--line-hover); }
+
+.session-row {
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  padding: 2px 6px 2px 7px;
   border: 0;
   border-radius: 3px;
   background: transparent;
@@ -146,55 +221,97 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   text-align: left;
   cursor: pointer;
 }
-.session-group-head:hover { background: var(--surface-raised); color: var(--text); }
-.session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.session-group.current > .session-group-head {
-  background: var(--surface-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
-  color: var(--text);
+.session-row:hover { background: var(--surface-raised); color: var(--text); }
+.session-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-row.attached { color: var(--text); }
+.session-name {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.session-group-head .sidebar-row-copy strong { font-size: 10px; letter-spacing: .04em; }
-.session-group.current > .session-group-head .sidebar-row-copy strong { color: var(--text); }
-.session-group-head .sidebar-row-copy small { margin-top: 2px; letter-spacing: .07em; }
-.session-group-head .sidebar-count { flex: none; margin-left: auto; }
-.session-group-chevron { width: 12px; flex: none; display: grid; place-items: center; color: var(--muted); }
-.session-group-rows { display: flex; flex-direction: column; gap: 1px; padding-top: 2px; }
-/* An empty group still occupies a line rather than vanishing: "nothing running
-   here" is information about the workspace you are standing in. */
-.session-group-rows .sidebar-empty { padding: 4px 8px; }
+.session-rename {
+  flex: 1 1 0;
+  min-width: 0;
+  border: 1px solid var(--accent-border);
+  border-radius: 2px;
+  outline: 0;
+  padding: 0 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: 10.5px var(--mono);
+}
+/* One dot says what the terminal is doing: solid accent when it is open here,
+   hollow when it runs in the background, green when it printed while you were
+   away, filled accent and pulsing while a Claude is busy. */
+.session-state {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+}
+.session-row.attached .session-state { border-color: var(--accent); background: var(--accent); }
+.session-row.state-unread .session-state {
+  border-color: var(--sage);
+  background: var(--sage);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sage) 20%, transparent);
+}
+.session-row.state-busy .session-state {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: session-busy 1.4s ease-in-out infinite;
+}
+@keyframes session-busy { 50% { opacity: .35; } }
+.session-row.state-elsewhere .session-state { border-style: dashed; }
 
-/* A terminal row is three stacked facts, so it aligns to the top instead of
-   centring a growing block against a 7px dot. */
-.session-row { align-items: flex-start; padding: 5px 6px; }
-.session-row .session-state { margin-top: 3px; }
-.session-row .sidebar-row-copy small { text-transform: none; letter-spacing: .04em; }
-.session-row .session-meta { color: var(--text-soft); }
-/* The folder is what tells one project's shell from another's. It costs a line,
-   so it appears once the sidebar has been dragged past the point where a path
-   fits; below that the tooltip carries it. */
-.session-where { display: none; color: var(--muted); font-size: 7.5px; }
+/* The folder is a second line and only once the sidebar has been dragged wide
+   enough to hold one; below that the tooltip carries it. */
+.session-where { display: none; flex-basis: 100%; padding-left: 13px; color: var(--muted); font-size: 8.5px; }
 body.sidebar-wide .session-where { display: block; }
 
-/* Chips only for the states worth interrupting for. "background" stays a plain
-   dim word, or the list turns into a wall of badges. */
 .session-chip {
   flex: none;
-  align-self: flex-start;
-  margin-top: 1px;
-  padding: 0 5px;
+  padding: 0 4px;
   border-radius: 20px;
-  color: var(--muted);
   font-size: 7.5px;
-  line-height: 13px;
-  letter-spacing: .08em;
+  line-height: 12px;
+  letter-spacing: .06em;
   text-transform: uppercase;
   white-space: nowrap;
 }
-.chip-open { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.chip-busy { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); }
-.chip-unread { background: color-mix(in srgb, var(--sage) 16%, transparent); color: var(--sage); }
-.chip-elsewhere { background: var(--surface); color: var(--text-soft); }
-.session-row.state-busy .session-state { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.chip-unread { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
+.chip-elsewhere { background: var(--surface); color: var(--muted); }
+
+/* Other workspaces fold under a small head. Yours has no head at all when it
+   is the only one: a list of one thing needs no label. */
+.session-group + .session-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line-hover); }
+.session-group-head {
+  width: 100%;
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px 1px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font: 9px var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+.session-group-head:hover { background: var(--surface-raised); color: var(--text); }
+.session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-group.current > .session-group-head { color: var(--text-soft); }
+.session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group-chevron { width: 10px; flex: none; display: grid; place-items: center; }
+.session-group-rows { display: flex; flex-direction: column; gap: 1px; }
 
 /* Acting on a terminal another workspace owns is a decision, so the row opens
    the choices instead of making one. The strip is tied to its row by the accent
@@ -204,54 +321,145 @@ body.sidebar-wide .session-where { display: block; }
   flex-direction: column;
   gap: 1px;
   margin: 1px 0 3px 12px;
-  padding: 2px 0 2px 6px;
+  padding: 2px 0 2px 5px;
   border-left: 1px solid var(--accent);
 }
-.session-choice { min-height: 24px; padding: 3px 6px; color: var(--text-soft); font-size: 9px; }
-.session-choice .sidebar-label { text-transform: lowercase; letter-spacing: .04em; }
-.session-choice:hover { color: var(--accent); }
+.session-choice {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-soft);
+  font: 9.5px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.session-choice:hover { background: var(--surface-raised); color: var(--accent); }
+.session-choice:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-choice-note { margin: 0; padding: 2px 6px; color: var(--muted); font-size: 8.5px; line-height: 1.35; }
-.session-entry.armed > .session-row { background: var(--surface-soft); }
+.session-entry.armed > .session-row { background: var(--surface-raised); }
 
-/* The icon rail keeps its old job: the terminals you are working in, as dots.
-   Headings, chips and choice strips have no room there, and a choice you cannot
-   read is not a choice. */
-body.sidebar-collapsed .session-group:not(.current),
-body.sidebar-collapsed .session-group-head,
-body.sidebar-collapsed .session-chip,
-body.sidebar-collapsed .session-choices { display: none; }
-body.sidebar-collapsed .session-group + .session-group { margin-top: 0; padding-top: 0; border-top: 0; }
-body.sidebar-collapsed .session-row { align-items: center; padding: 0; }
-body.sidebar-collapsed .session-row .session-state { margin-top: 0; }
+/* ---------- footer ---------- */
 
-/* ---------- launch ---------- */
-
-.sidebar-terminal-select { border-radius: 3px; }
-.sidebar-terminal-select:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.sidebar-launch-actions .sidebar-action { border-radius: 3px; letter-spacing: .06em; }
-/* Opening a terminal is what this sidebar is for; the admin button beside it
-   is the exception. Only one of them carries a fill. */
-.sidebar-launch-actions .sidebar-action.primary {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+/* Four icons in a row and the collapse chevron on the right. No labels: the
+   tooltip carries the name and the shortcut. */
+.sidebar-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 4px;
+  border-top: 1px solid var(--line);
 }
-.sidebar-launch-actions .sidebar-action.primary:hover {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+.sidebar-nav-button, .sidebar-collapse {
+  width: 24px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sidebar-nav-button:hover, .sidebar-collapse:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-nav-button:focus-visible, .sidebar-collapse:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.sidebar-collapse { margin-left: auto; }
+.sidebar-collapse svg { transform: rotate(180deg); transition: transform .14s ease; }
+.sidebar-admin-badge { display: grid; place-items: center; width: 20px; color: var(--danger); }
+/* The update notice is a dot on the settings icon, not a pill: it has to fit
+   the rail. main.js adds it to the footer; the title says which version. */
+.update-pill {
+  position: relative;
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   color: var(--accent);
+  font: 9px var(--mono);
+  cursor: pointer;
 }
-
-/* ---------- lists and footer ---------- */
-
-.sidebar-empty {
-  padding: 8px 6px;
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: .09em;
-  text-transform: uppercase;
+.update-pill::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
 }
-/* The scrollbar thumb is drawn with a 3px inset in the surface colour; inside
-   the sidebar the ground is --bg, and the inherited ring shows as a seam. */
-.sidebar-workspaces::-webkit-scrollbar-thumb,
-.sidebar-sessions::-webkit-scrollbar-thumb { border-color: var(--bg); }
+.update-pill:hover { background: var(--surface-raised); }
 
-.sidebar-footer { padding: 6px 7px 8px; }
-.sidebar-shortcut { font-family: var(--mono); border-radius: 3px; }
+/* ---------- rail ---------- */
+
+/* Thirty pixels: the "+", one dot per terminal, the gear, the chevron. Text,
+   chips and choice strips have no room, and a choice you cannot read is not a
+   choice, so foreign groups are not offered at all here. */
+body.sidebar-collapsed .sidebar-launch { padding: 4px 2px 2px; }
+body.sidebar-collapsed .sidebar-new { height: 26px; padding: 0; justify-content: center; gap: 0; }
+body.sidebar-collapsed .sidebar-new .sidebar-label,
+body.sidebar-collapsed .sidebar-terminal-select,
+body.sidebar-collapsed .sidebar-admin,
+body.sidebar-collapsed .sidebar-where,
+body.sidebar-collapsed .session-name,
+body.sidebar-collapsed .session-where,
+body.sidebar-collapsed .session-chip,
+body.sidebar-collapsed .session-group-head,
+body.sidebar-collapsed .session-group:not(.current),
+body.sidebar-collapsed .session-choices,
+body.sidebar-collapsed .sidebar-empty,
+body.sidebar-collapsed .sidebar-nav-button:not([data-nav="settings"]),
+body.sidebar-collapsed .sidebar-admin-badge { display: none; }
+body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
+body.sidebar-collapsed .session-group + .session-group { margin: 0; padding: 0; border: 0; }
+body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
+body.sidebar-collapsed .session-state { width: 8px; height: 8px; }
+body.sidebar-collapsed .sidebar-footer { flex-direction: column; padding: 3px 0; }
+body.sidebar-collapsed .sidebar-collapse { margin: 0; }
+body.sidebar-collapsed .sidebar-collapse svg { transform: none; }
+body.sidebar-collapsed .update-pill { width: 24px; }
+
+/* ---------- floating "+" while hidden ---------- */
+
+.float-launch {
+  position: fixed;
+  z-index: 40;
+  left: 0;
+  top: 12px;
+  display: flex;
+  align-items: stretch;
+  height: 24px;
+  border: 1px solid var(--line-strong);
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+  opacity: .55;
+  transition: opacity .12s ease;
+}
+.float-launch:hover, .float-launch.dragging { opacity: 1; }
+.float-launch[hidden] { display: none; }
+.float-handle {
+  width: 8px;
+  cursor: ns-resize;
+  background:
+    radial-gradient(circle, var(--muted) 1px, transparent 1.2px) 3px 4px / 3px 4px repeat-y;
+}
+.float-launch button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: 15px var(--mono);
+  cursor: pointer;
+}
+.float-new { width: 24px; }
+.float-show { width: 16px; color: var(--muted); }
+.float-launch button:hover { background: var(--surface-raised); }
+.float-launch button:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }

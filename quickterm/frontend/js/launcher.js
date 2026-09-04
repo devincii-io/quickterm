@@ -1,16 +1,30 @@
 import { icon } from "./icons.js";
-import { formatBytes, formatUptime, shortPath } from "./panel_shared.js";
+import { formatBytes, formatUptime } from "./panel_shared.js";
 
-const SIDEBAR_KEY = "quickterm.sidebarCollapsed";
+// The sidebar is the whole chrome. Three modes, one hotkey (Alt+Shift+S)
+// cycles them, and the choice is remembered per machine:
+//   full    a list: new terminal, workspace, every live terminal, four icons
+//   rail    30px of dots, so the state of every terminal is still in view
+//   hidden  nothing at all; a small floating "+" sits over the terminal's left
+//           edge and can be dragged up and down
+export const SIDEBAR_MODES = ["full", "rail", "hidden"];
+const SIDEBAR_MODE_KEY = "quickterm.sidebarMode";
+const LEGACY_COLLAPSED_KEY = "quickterm.sidebarCollapsed";
 const SIDEBAR_WIDTH_KEY = "quickterm.sidebarWidth";
 const SIDEBAR_GROUPS_KEY = "quickterm.sidebarClosedGroups";
+const FLOAT_TOP_KEY = "quickterm.floatTop";
 
-// Bounds for the expanded sidebar only; the collapsed rail keeps its own fixed
-// width in CSS. Below ~180px the 8.5-12px monospace labels lose their tails,
-// and past 40% of the window the workspace stops being the point of the app.
-export const SIDEBAR_WIDTH_DEFAULT = 244;
-export const SIDEBAR_WIDTH_MIN = 180;
-export const SIDEBAR_WIDTH_MAX = 460;
+export function nextSidebarMode(mode) {
+  const index = SIDEBAR_MODES.indexOf(mode);
+  return SIDEBAR_MODES[(index + 1) % SIDEBAR_MODES.length];
+}
+
+// Bounds for the full sidebar only; the rail is a fixed width in CSS. Below
+// 150px a terminal name is three letters and a dot; past 40% of the window the
+// terminal stops being the point of the app.
+export const SIDEBAR_WIDTH_DEFAULT = 200;
+export const SIDEBAR_WIDTH_MIN = 150;
+export const SIDEBAR_WIDTH_MAX = 400;
 
 // Pure on purpose: the clamp is the part worth testing, and a test should not
 // need a DOM to reach it. `viewport` is the window width; a non-positive or
@@ -29,10 +43,10 @@ export function clampSidebarWidth(width, viewport) {
   return Math.min(maxSidebarWidth(viewport), Math.max(SIDEBAR_WIDTH_MIN, wanted));
 }
 
-// Past this the terminal rows get a third line (the folder each shell is
+// Past this the terminal rows get a second line (the folder each shell is
 // sitting in) instead of hiding it behind a tooltip. Dragging the sidebar wide
 // should buy information, not whitespace.
-export const SIDEBAR_WIDE_AT = 300;
+export const SIDEBAR_WIDE_AT = 280;
 
 export function isWideSidebar(width) {
   return Number(width) >= SIDEBAR_WIDE_AT;
@@ -94,7 +108,7 @@ export function sessionSummary(session) {
 // scan a list by.
 export function sessionTooltip(session, groupName) {
   const usage = session?.usage;
-  const lines = [session?.name || session?.id, `workspace: ${groupName}`];
+  const lines = [session?.name || session?.id, sessionSummary(session), `workspace: ${groupName}`];
   if (session?.cwd) lines.push(session.cwd);
   if ((session?.attachments || 0) > 0) lines.push(`${session.attachments} viewer${session.attachments === 1 ? "" : "s"} attached`);
   if (usage?.available) {
@@ -215,7 +229,19 @@ const SYSTEM_META = {
   nushell: { args: [] },
 };
 
-function terminalChoices(options) {
+// Claude needs no profile. When the inventory finds the CLI, three choices
+// exist out of the box, each just the CLI plus one flag; the workspace folder
+// is where they open, exactly like a shell.
+const CLAUDE_MODES = [
+  ["continue", ["--continue"], "Claude · continue", "Continue the latest conversation in this folder"],
+  ["new", [], "Claude · new", "Start a new conversation in this folder"],
+  ["resume", ["--resume"], "Claude · resume", "Choose one of Claude's sessions in this folder"],
+];
+
+// Every choice carries its own `key`, and the selection is compared by that
+// key alone, so a choice object from a previous build of the sidebar still
+// selects the right row after the list is rebuilt.
+export function terminalChoices(options) {
   const choices = [];
   for (const profile of options.profiles || []) {
     choices.push({
@@ -231,7 +257,8 @@ function terminalChoices(options) {
       detail: (profile.description || "").trim() || shellLabel(profile),
     });
   }
-  for (const type of options.inventory?.types || []) {
+  const types = options.inventory?.types || [];
+  for (const type of types) {
     if (!type.executable || type.available === false || ["custom", "ssh", "sftp", "claude-code"].includes(type.id)) continue;
     const meta = SYSTEM_META[type.id] || { args: [] };
     if (type.id === "wsl" && (options.inventory?.wsl_distributions || []).length) {
@@ -261,71 +288,58 @@ function terminalChoices(options) {
       detail: type.executable,
     });
   }
+  const claude = types.find((type) => type.id === "claude-code" && type.executable && type.available !== false);
+  if (claude) {
+    for (const [mode, args, label, detail] of CLAUDE_MODES) {
+      choices.push({
+        key: `claude:${mode}`,
+        group: "Claude",
+        kind: "system",
+        id: "claude-code",
+        cmd: claude.executable,
+        args,
+        mode,
+        label,
+        detail,
+      });
+    }
+  }
   return choices;
 }
 
 function choiceKey(choice) {
-  if (!choice) return "";
-  if (choice.kind === "profile") return `profile:${choice.profile?.name || ""}`;
-  return choice.distro ? `system:${choice.id}:${choice.distro}` : `system:${choice.id}`;
+  return choice?.key || "";
 }
 
-function section(title, count) {
-  const head = make("div", "sidebar-section-head");
-  head.append(make("span", "sidebar-label", title));
-  if (count !== undefined) head.append(make("span", "sidebar-count", String(count)));
-  return head;
-}
-
-function actionButton(iconName, label, onClick, shortcut = null) {
-  const button = make("button", "sidebar-action");
+function iconButton(className, iconName, title, onClick) {
+  const button = make("button", className);
   button.type = "button";
-  // The shortcut belongs in the tooltip too: the visible chip disappears with
-  // the labels once the sidebar is collapsed to icons.
-  button.title = shortcut ? `${label} (${shortcut})` : label;
-  button.append(icon(iconName, 15), make("span", "sidebar-label", label));
-  if (shortcut) button.append(make("span", "sidebar-shortcut", shortcut));
-  button.addEventListener("click", onClick);
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.append(icon(iconName, 14));
+  if (onClick) button.addEventListener("click", onClick);
   return button;
 }
 
-function workspaceButton(name, currentWorkspace, onOpen) {
-  const scratch = name === null || name === "scratch";
-  const active = scratch
-    ? !currentWorkspace || currentWorkspace === "scratch"
-    : currentWorkspace === name;
-  const button = make("button", `sidebar-row workspace-row${active ? " active" : ""}`);
-  button.type = "button";
-  // Clicking the row you are already on is a no-op for every workspace,
-  // scratch included. Replacing scratch is the separate "New scratch" action.
-  button.title = active
-    ? `${scratch ? "Scratch" : name} is already open`
-    : scratch ? "Open the disposable scratch workspace" : `Open workspace ${name}`;
-  const mark = make("span", `sidebar-mark${scratch ? " scratch" : ""}`);
-  mark.append(icon(scratch ? "circle-dashed" : "diamond", 12));
-  const copy = make("span", "sidebar-row-copy");
-  copy.append(
-    make("strong", "", scratch ? "scratch" : name),
-    make("small", "", active ? "current" : scratch ? "disposable" : "saved"),
-  );
-  button.append(mark, copy);
-  button.addEventListener("click", () => onOpen(name));
-  return button;
+// Overlays claim the keyboard in focus.js; a native <select> does not need to,
+// because the pane only re-asserts focus on its own gestures. What it does need
+// is to hand the keyboard back once a choice is made, or the next keystroke
+// changes the selection again instead of reaching the shell.
+function handBack(options) {
+  requestAnimationFrame(() => options.onLaunchComplete?.());
 }
 
-function defaultBrandMark() {
-  const image = make("img", "sidebar-logo");
-  image.src = "/assets/icon-64.png";
-  image.alt = "";
-  return image;
+function loadMode() {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_MODE_KEY);
+    if (SIDEBAR_MODES.includes(stored)) return stored;
+    // Sidebars collapsed before modes existed stay collapsed.
+    return localStorage.getItem(LEGACY_COLLAPSED_KEY) === "1" ? "rail" : "full";
+  } catch (_) { return "full"; }
 }
 
-function loadCollapsed() {
-  try { return localStorage.getItem(SIDEBAR_KEY) === "1"; } catch (_) { return false; }
-}
-
-function saveCollapsed(collapsed) {
-  try { localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); } catch (_) { /* optional */ }
+function saveMode(mode) {
+  try { localStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) { /* optional */ }
 }
 
 function loadWidth() {
@@ -354,67 +368,129 @@ function saveClosedGroups(names) {
   try { localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify([...names])); } catch (_) { /* optional */ }
 }
 
+function loadFloatTop() {
+  try {
+    const raw = Number.parseInt(localStorage.getItem(FLOAT_TOP_KEY), 10);
+    return Number.isFinite(raw) ? raw : 12;
+  } catch (_) { return 12; }
+}
+
+function saveFloatTop(top) {
+  try { localStorage.setItem(FLOAT_TOP_KEY, String(top)); } catch (_) { /* optional */ }
+}
+
+// The floating "+" that stands in for the sidebar while it is hidden. It is
+// static in index.html, so it survives every rebuild; only its listeners hang
+// off the launcher's AbortController. Dragging the handle moves it up and down
+// and the position is remembered.
+function wireFloat(options, abort, showSidebar) {
+  const float = document.getElementById("float-launch");
+  if (!float) return { show() {}, hide() {} };
+  const handle = float.querySelector(".float-handle");
+  const open = float.querySelector(".float-new");
+  const reveal = float.querySelector(".float-show");
+  const signal = abort.signal;
+
+  const clampTop = (top) => Math.max(4, Math.min(window.innerHeight - float.offsetHeight - 4, Math.round(top)));
+  const place = (top) => { float.style.top = `${clampTop(top)}px`; };
+
+  open?.addEventListener("click", () => options.onNewTerminal?.(), { signal });
+  open?.addEventListener("contextmenu", (event) => { event.preventDefault(); showSidebar(); }, { signal });
+  reveal?.addEventListener("click", showSidebar, { signal });
+
+  let dragging = false;
+  let grabOffset = 0;
+  handle?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    dragging = true;
+    grabOffset = event.clientY - float.getBoundingClientRect().top;
+    handle.setPointerCapture(event.pointerId);
+    float.classList.add("dragging");
+    event.preventDefault();
+  }, { signal });
+  handle?.addEventListener("pointermove", (event) => {
+    if (dragging) place(event.clientY - grabOffset);
+  }, { signal });
+  const endDrag = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    try { handle.releasePointerCapture(event.pointerId); } catch (_) { /* already gone */ }
+    float.classList.remove("dragging");
+    saveFloatTop(Number.parseInt(float.style.top, 10) || 12);
+  };
+  handle?.addEventListener("pointerup", endDrag, { signal });
+  handle?.addEventListener("pointercancel", endDrag, { signal });
+  window.addEventListener("resize", () => { if (!float.hidden) place(Number.parseInt(float.style.top, 10) || 12); }, { signal });
+
+  return {
+    show() { float.hidden = false; place(loadFloatTop()); },
+    hide() { float.hidden = true; },
+  };
+}
+
 export function initLauncher(el, options) {
   if (el._launcherAbort) el._launcherAbort.abort();
   const abort = new AbortController();
   el._launcherAbort = abort;
   el.textContent = "";
   el.classList.add("sidebar");
-
-  const head = make("div", "sidebar-head");
-  const brand = make("div", "sidebar-brand");
-  if (options.logoUrl) {
-    const image = make("img", "sidebar-logo");
-    image.src = options.logoUrl;
-    image.alt = "";
-    image.addEventListener("error", () => image.replaceWith(defaultBrandMark()));
-    brand.append(image);
-  } else {
-    brand.append(defaultBrandMark());
-  }
-  const brandCopy = make("span", "sidebar-brand-copy sidebar-label");
   const workspaceName = options.currentWorkspace || "scratch";
-  const folder = folderName(options.workspacePath);
-  // "scratch · scratch" says nothing twice; drop the folder when it repeats
-  // the workspace name.
-  const showFolder = folder && folder.toLowerCase() !== workspaceName.toLowerCase();
-  const where = make("small", "", showFolder ? `${workspaceName} · ${folder}` : workspaceName);
-  if (options.workspacePath) {
-    where.title = options.workspacePathExists === false
-      ? `${options.workspacePath} (missing)`
-      : options.workspacePath;
-    if (options.workspacePathExists === false) where.classList.add("warning");
-  }
-  brandCopy.append(make("strong", "", "quickterm"), where);
-  brand.append(brandCopy);
-  const collapse = make("button", "sidebar-collapse");
-  collapse.type = "button";
-  collapse.setAttribute("aria-label", "Collapse sidebar");
-  collapse.append(icon("chevron-right", 14));
-  head.append(brand, collapse);
-  el.append(head);
 
-  let collapsed = loadCollapsed();
-  const applyCollapsed = () => {
-    document.body.classList.toggle("sidebar-collapsed", collapsed);
-    collapse.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
-    collapse.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
-    collapse.setAttribute("aria-expanded", String(!collapsed));
-    saveCollapsed(collapsed);
-    if (options.onSidebarResize) options.onSidebarResize();
+  // Mode -------------------------------------------------------------------
+  let mode = loadMode();
+  const float = wireFloat(options, abort, () => setMode("full"));
+  const applyMode = () => {
+    document.body.classList.toggle("sidebar-collapsed", mode === "rail");
+    document.body.classList.toggle("sidebar-hidden", mode === "hidden");
+    el.setAttribute("aria-hidden", String(mode === "hidden"));
+    if (mode === "hidden") float.show(); else float.hide();
+    saveMode(mode);
+    options.onSidebarResize?.();
   };
-  collapse.addEventListener("click", () => {
-    collapsed = !collapsed;
-    applyCollapsed();
-    requestAnimationFrame(() => options.onLaunchComplete?.());
-  });
-  applyCollapsed();
+  let describeCollapse = () => {};
+  const setMode = (next) => {
+    if (!SIDEBAR_MODES.includes(next) || next === mode) return;
+    mode = next;
+    applyMode();
+    describeCollapse();
+    handBack(options);
+  };
 
-  const launch = make("section", "sidebar-section sidebar-launch");
-  launch.append(section("new terminal"));
+  // New terminal -----------------------------------------------------------
+  // One button that opens whatever is selected, and a native <select> beside
+  // it for changing the selection. The select is the one control here that is
+  // not a button: it draws the OS list, which costs nothing to keep open.
+  const launch = make("div", "sidebar-launch");
   const choices = terminalChoices(options);
+  let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
+  if (!selected && options.defaultProfile) {
+    selected = choices.find((choice) =>
+      choice.key === `profile:${options.defaultProfile}` || choice.key === `system:${options.defaultProfile}`);
+  }
+  selected ||= choices[0] || null;
+
+  const open = make("button", "sidebar-new");
+  open.type = "button";
+  const openLabel = make("span", "sidebar-label");
+  open.append(icon("plus", 15), openLabel);
+  const describeOpen = () => {
+    openLabel.textContent = selected ? selected.label : "no shell found";
+    open.title = selected
+      ? `New ${selected.label} (Alt+N) · ${selected.detail}`
+      : "No shell was found on this computer";
+    open.disabled = !selected;
+  };
+  open.addEventListener("click", () => {
+    if (!selected) return;
+    const launched = selected.kind === "profile"
+      ? options.onRunProfile(selected.profile)
+      : options.onRunSystem(selected);
+    Promise.resolve(launched).finally(() => options.onLaunchComplete?.());
+  });
+
   const select = make("select", "sidebar-terminal-select");
   select.setAttribute("aria-label", "Terminal for new panes");
+  select.title = "Choose what a new terminal runs";
   const grouped = new Map();
   for (const choice of choices) {
     if (!grouped.has(choice.group)) grouped.set(choice.group, []);
@@ -431,41 +507,31 @@ export function initLauncher(el, options) {
     }
     select.append(group);
   }
-  let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
-  if (!selected && options.defaultProfile) {
-    selected = choices.find((choice) =>
-      choice.key === `profile:${options.defaultProfile}` || choice.key === `system:${options.defaultProfile}`);
-  }
-  selected ||= choices[0] || null;
   if (selected) {
     select.value = selected.key;
     options.onSelectTerminal?.(selected);
   } else {
-    const empty = make("option", "", "No shell found");
-    empty.value = "";
-    select.append(empty);
     select.disabled = true;
   }
   select.addEventListener("change", () => {
     selected = choices.find((choice) => choice.key === select.value) || null;
     if (selected) options.onSelectTerminal?.(selected);
+    describeOpen();
+    handBack(options);
   });
-  const launchActions = make("div", "sidebar-launch-actions");
-  const open = actionButton("plus", "New terminal", () => {
-    if (!selected) return;
-    const launched = selected.kind === "profile"
-      ? options.onRunProfile(selected.profile)
-      : options.onRunSystem(selected);
-    Promise.resolve(launched).finally(() => options.onLaunchComplete?.());
+  // Right-clicking "+" is the fast way to the same list.
+  open.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    if (typeof select.showPicker === "function") { try { select.showPicker(); return; } catch (_) { /* fall through */ } }
+    select.focus();
   });
-  open.querySelector(".sidebar-label").textContent = "open";
-  open.classList.add("primary");
-  launchActions.append(open);
+  describeOpen();
+  launch.append(open, select);
   if (!options.elevated) {
     // Elevation spawns a separate process, so success is invisible here and a
     // declined UAC prompt is indistinguishable from a dead button. Hold the
     // button while the request is in flight and let main.js report the outcome.
-    const admin = actionButton("shield", "New administrator terminal", () => {
+    const admin = iconButton("sidebar-admin", "shield", "New administrator terminal", () => {
       if (!selected || admin.disabled) return;
       admin.disabled = true;
       const request = selected.kind === "profile"
@@ -473,56 +539,96 @@ export function initLauncher(el, options) {
         : options.onElevateSystem(selected);
       Promise.resolve(request).finally(() => { admin.disabled = false; });
     });
-    admin.querySelector(".sidebar-label").textContent = "admin";
-    launchActions.append(admin);
+    launch.append(admin);
   }
-  launch.append(select, launchActions);
   el.append(launch);
 
-  const workspaces = make("section", "sidebar-section sidebar-workspaces");
-  workspaces.append(section("workspaces", (options.workspaces || []).filter((name) => name !== "scratch").length));
-  const workspaceList = make("div", "sidebar-list");
-  workspaceList.append(workspaceButton(null, options.currentWorkspace, options.onWorkspace));
+  // Workspace --------------------------------------------------------------
+  // One row: the workspace as a native select, the folder under it, and the
+  // save dot main.js drives through #sb-save. "New scratch" is an option in
+  // the same list rather than a button of its own; choosing it is the explicit
+  // act, and main.js confirms before anything running is replaced.
+  const where = make("div", "sidebar-where");
+  const workspaceSelect = make("select", "sidebar-workspace-select");
+  workspaceSelect.setAttribute("aria-label", "Workspace");
+  const NEW_SCRATCH = "__new-scratch__";
+  const addWorkspaceOption = (value, label) => {
+    const option = make("option", "", label);
+    option.value = value;
+    workspaceSelect.append(option);
+  };
+  addWorkspaceOption("scratch", "scratch");
   for (const name of options.workspaces || []) {
-    if (name === "scratch") continue;
-    workspaceList.append(workspaceButton(name, options.currentWorkspace, options.onWorkspace));
+    if (name !== "scratch") addWorkspaceOption(name, name);
   }
-  workspaces.append(workspaceList);
-  // Explicit, confirmed replacement of the live scratch layout. The scratch row
-  // itself only opens scratch; it never discards running terminals.
-  const newScratch = actionButton("circle-dashed", "New scratch workspace", () => options.onNewScratch?.());
-  newScratch.querySelector(".sidebar-label").textContent = "new scratch";
-  newScratch.classList.add("sidebar-manage");
-  workspaces.append(newScratch);
-  el.append(workspaces);
+  addWorkspaceOption(NEW_SCRATCH, "+ new scratch");
+  workspaceSelect.value = workspaceName;
+  workspaceSelect.addEventListener("change", () => {
+    const value = workspaceSelect.value;
+    workspaceSelect.value = workspaceName;
+    if (value === NEW_SCRATCH) options.onNewScratch?.();
+    else if (value !== workspaceName) options.onWorkspace?.(value === "scratch" ? null : value);
+    handBack(options);
+  });
+  // "scratch / scratch" says nothing twice: the folder line is dropped when it
+  // only repeats the workspace name.
+  const folder = folderName(options.workspacePath);
+  const folderLine = make("small", "sidebar-folder", folder || "no folder");
+  if (folder && folder.toLowerCase() === workspaceName.toLowerCase()) folderLine.hidden = true;
+  if (options.workspacePath) {
+    folderLine.title = options.workspacePathExists === false
+      ? `${options.workspacePath} (missing)`
+      : options.workspacePath;
+    if (options.workspacePathExists === false) folderLine.classList.add("warning");
+  } else {
+    folderLine.title = "This workspace has no folder. Terminals open in your home folder.";
+  }
+  workspaceSelect.title = folderLine.title;
+  const save = make("span", "sidebar-save");
+  save.id = "sb-save";
+  save.setAttribute("role", "status");
+  save.setAttribute("aria-live", "polite");
+  const whereCopy = make("div", "sidebar-where-copy");
+  whereCopy.append(workspaceSelect, folderLine);
+  where.append(whereCopy, save);
+  el.append(where);
 
-  const terminals = make("section", "sidebar-section sidebar-sessions");
-  const terminalsHead = section("terminals", 0);
-  const terminalsCount = terminalsHead.querySelector(".sidebar-count");
-  const sessionList = make("div", "sidebar-list sidebar-session-list");
-  terminals.append(terminalsHead, sessionList);
-  el.append(terminals);
+  // Terminals --------------------------------------------------------------
+  const sessionList = make("div", "sidebar-sessions");
+  el.append(sessionList);
 
-  const footer = make("nav", "sidebar-footer");
-  footer.setAttribute("aria-label", "Application");
+  // Footer -----------------------------------------------------------------
   // Keyed by the label main.js passes in `chrome`, so a new footer entry is
   // one map line away from its own glyph instead of silently falling back
   // to the terminal one.
+  const footer = make("nav", "sidebar-footer");
+  footer.setAttribute("aria-label", "Application");
   const navIcons = {
     dashboard: "dashboard", settings: "settings", help: "help",
     commands: "terminal", "new window": "new-window",
   };
   for (const [label, onClick, shortcut] of options.chrome || []) {
-    const button = actionButton(navIcons[label] || "terminal", label, onClick, shortcut);
-    button.classList.add("sidebar-nav-button");
+    const button = iconButton("sidebar-nav-button", navIcons[label] || "terminal",
+      shortcut ? `${label} (${shortcut})` : label, onClick);
+    button.dataset.nav = label;
     footer.append(button);
   }
   if (options.elevated) {
-    const badge = make("div", "sidebar-admin");
+    const badge = make("span", "sidebar-admin-badge");
     badge.title = "Administrator mode";
-    badge.append(icon("shield", 14), make("span", "sidebar-label", "administrator"));
+    badge.append(icon("shield", 13));
     footer.prepend(badge);
   }
+  const collapse = iconButton("sidebar-collapse", "chevron-right", "", () => {
+    setMode(mode === "rail" ? "full" : "rail");
+  });
+  describeCollapse = () => {
+    const title = mode === "rail" ? "Expand sidebar (Alt+Shift+S cycles)" : "Collapse sidebar to dots (Alt+Shift+S cycles)";
+    collapse.title = title;
+    collapse.setAttribute("aria-label", title);
+    collapse.setAttribute("aria-expanded", String(mode !== "rail"));
+  };
+  footer.append(collapse);
   el.append(footer);
 
   // Resize grip -------------------------------------------------------------
@@ -580,7 +686,7 @@ export function initLauncher(el, options) {
   let dragging = false;
   let originLeft = 0;
   grip.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || collapsed) return;
+    if (event.button !== 0 || mode !== "full") return;
     dragging = true;
     // Measured once: reading the rect on every move forces a layout inside the
     // very gesture that must stay smooth.
@@ -650,9 +756,11 @@ export function initLauncher(el, options) {
   });
 
   // The stored width must land before the grid animates, or every start slides
-  // the sidebar out from the 244px default in the stylesheet.
+  // the sidebar out from the default in the stylesheet.
   document.body.classList.add("sidebar-sizing");
   applyWidth(desired);
+  applyMode();
+  describeCollapse();
   requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
 
   // Terminals ---------------------------------------------------------------
@@ -676,6 +784,35 @@ export function initLauncher(el, options) {
     }
   };
 
+  // Double-click renames in place, the same gesture the pane header had. The
+  // header is gone on a lone pane, so this is where the name is edited now.
+  const startRename = (row, nameEl, session) => {
+    if (row.querySelector("input")) return;
+    const input = make("input", "session-rename");
+    input.value = session.name || "";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "Terminal name");
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      input.replaceWith(nameEl);
+      if (save && value && value !== session.name) options.onRenameSession?.(session, value);
+      handBack(options);
+    };
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") commit(true);
+      else if (event.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("click", (event) => event.stopPropagation());
+  };
+
   const sessionEntry = (entry, group) => {
     const { session, isAttached, isHere, state } = entry;
     // Foreign means "another workspace owns it". Unassigned is not foreign:
@@ -685,7 +822,7 @@ export function initLauncher(el, options) {
     const wrap = make("div", `session-entry${foreign ? " foreign" : ""}`);
     wrap.dataset.sessionId = session.id;
     const row = make("button", [
-      "sidebar-row session-row",
+      "session-row",
       `state-${state.key}`,
       isAttached ? "attached" : "detached",
       state.key === "unread" ? "unread" : "",
@@ -693,21 +830,26 @@ export function initLauncher(el, options) {
     row.type = "button";
     row.dataset.rowKey = session.id;
     row.title = sessionTooltip(session, group.name);
-    const copy = make("span", "sidebar-row-copy");
-    copy.append(
-      make("strong", "", session.name || session.id.slice(0, 8)),
-      make("small", "session-meta", sessionSummary(session)),
-    );
+    const name = make("span", "session-name", session.name || session.id.slice(0, 8));
+    row.append(make("span", "session-state"), name);
     // The folder is the fact that tells one project's shell from another's, so
     // it gets its own line as soon as the sidebar is wide enough to hold it.
-    if (session.cwd) copy.append(make("small", "session-where", shortPath(session.cwd, 44)));
-    row.append(make("span", "session-state"), copy, make("span", `session-chip chip-${state.key}`, state.label));
+    if (session.cwd) row.append(make("small", "session-where", folderName(session.cwd)));
+    // Chips only for the states worth interrupting for: a plain background
+    // shell is a hollow dot, or the list turns into a wall of badges.
+    if (state.key === "unread" || state.key === "busy" || state.key === "elsewhere") {
+      row.append(make("span", `session-chip chip-${state.key}`, state.key === "unread" ? "new" : state.label));
+    }
     wrap.append(row);
 
     if (!foreign) {
       row.addEventListener("click", () => {
         if (isAttached) options.onFocusSession?.(session.id);
         else options.onAttachSession?.(session);
+      });
+      row.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        startRename(row, name, session);
       });
       return wrap;
     }
@@ -719,20 +861,27 @@ export function initLauncher(el, options) {
     const choices = make("div", "session-choices");
     choices.hidden = armedSessionId !== session.id;
     const target = group.name === SCRATCH_GROUP ? null : group.name;
-    const openThere = actionButton("diamond", `open ${group.name}`,
+    const choiceButton = (iconName, label, title, onClick) => {
+      const button = make("button", "session-choice");
+      button.type = "button";
+      button.title = title;
+      button.append(icon(iconName, 12), make("span", "sidebar-label", label));
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    const openThere = choiceButton("diamond", `open ${group.name}`,
+      `Switch this window to ${group.name}, where this terminal already runs`,
       () => options.onWorkspace?.(target));
     openThere.dataset.rowKey = `${session.id}:open`;
-    openThere.classList.add("session-choice");
-    openThere.title = `Switch this window to ${group.name}, where this terminal already runs`;
     choices.append(openThere);
     if (typeof options.onMoveSession === "function") {
-      const move = actionButton("arrow-up-right", "move here & attach", () => {
-        setArmed(null);
-        options.onMoveSession(session, target);
-      });
+      const move = choiceButton("arrow-up-right", "move here",
+        `Take this terminal out of ${group.name} and attach it in ${workspaceName}`,
+        () => {
+          setArmed(null);
+          options.onMoveSession(session, target);
+        });
       move.dataset.rowKey = `${session.id}:move`;
-      move.classList.add("session-choice");
-      move.title = `Take this terminal out of ${group.name} and attach it in ${workspaceName}`;
       choices.append(move);
     } else {
       choices.append(make("p", "session-choice-note",
@@ -752,8 +901,7 @@ export function initLauncher(el, options) {
   };
 
   // `bare` drops the heading when everything alive belongs to this workspace.
-  // A single group headed by its own name is a label for a list of one thing,
-  // and the section head above already says "terminals".
+  // A single group headed by its own name is a label for a list of one thing.
   const sessionGroup = (group, bare = false) => {
     const box = make("div", `session-group ${group.kind}`);
     const closed = !bare && closedGroups.has(group.name);
@@ -761,22 +909,21 @@ export function initLauncher(el, options) {
     head.type = "button";
     head.dataset.rowKey = `group:${group.name}`;
     head.setAttribute("aria-expanded", String(!closed));
-    head.title = group.kind === "current"
+    head.title = (group.kind === "current"
       ? `Terminals in ${group.name}, the workspace this window is in`
       : group.kind === "unassigned"
         ? "Live terminals no workspace owns"
-        : `Terminals owned by workspace ${group.name}`;
+        : `Terminals owned by workspace ${group.name}`) + ` · ${groupSummary(group)}`;
     const chevron = make("span", "session-group-chevron");
-    chevron.append(icon(closed ? "chevron-right" : "chevron-down", 11));
-    const copy = make("span", "sidebar-row-copy");
-    copy.append(make("strong", "", group.name), make("small", "", groupSummary(group)));
-    head.append(chevron, copy, make("span", "sidebar-count", String(group.sessions.length)));
+    chevron.append(icon(closed ? "chevron-right" : "chevron-down", 10));
+    head.append(chevron, make("span", "session-group-name", group.name),
+      make("span", "sidebar-count", String(group.sessions.length)));
 
     const rows = make("div", "session-group-rows");
     rows.hidden = closed;
     for (const entry of group.sessions) rows.append(sessionEntry(entry, group));
     if (!group.sessions.length) {
-      rows.append(make("div", "sidebar-empty sidebar-label", "nothing running here"));
+      rows.append(make("div", "sidebar-empty", "nothing running"));
     }
     // Folding is a DOM toggle, not a re-render: rebuilding the list would drop
     // the keyboard out of the very control that was just pressed.
@@ -785,7 +932,7 @@ export function initLauncher(el, options) {
       rows.hidden = nowClosed;
       head.setAttribute("aria-expanded", String(!nowClosed));
       chevron.textContent = "";
-      chevron.append(icon(nowClosed ? "chevron-right" : "chevron-down", 11));
+      chevron.append(icon(nowClosed ? "chevron-right" : "chevron-down", 10));
       if (nowClosed) closedGroups.add(group.name);
       else closedGroups.delete(group.name);
       saveClosedGroups(closedGroups);
@@ -803,22 +950,20 @@ export function initLauncher(el, options) {
     });
     const totalLive = (sessions || []).filter((session) => session.alive).length;
     const here = groups.find((group) => group.kind === "current")?.sessions.length || 0;
-    // The pill counts what is actually running on this backend. The old
-    // "2/7" counted the two this window held and left the other five with no
-    // way in at all, which is the complaint this section answers.
-    terminalsCount.textContent = String(totalLive);
-    terminalsCount.title = `${here} in ${workspaceName} · ${totalLive} live on this backend`;
+    sessionList.title = `${here} in ${workspaceName} · ${totalLive} live on this backend`;
 
     // main.js repolls every 10 s and this list is rebuilt from the answer, so
     // whatever the keyboard was inside has to be put back. Without it, opening
     // the choices under a foreign terminal and reading them for ten seconds
-    // dropped focus to <body> mid-decision.
+    // dropped focus to <body> mid-decision. A rename in progress is left alone
+    // for the same reason.
+    if (sessionList.querySelector("input")) return;
     const activeKey = sessionList.contains(document.activeElement)
       ? document.activeElement.dataset.rowKey || null
       : null;
     sessionList.textContent = "";
     if (!groups.length) {
-      sessionList.append(make("div", "sidebar-empty sidebar-label", "no live terminals"));
+      sessionList.append(make("div", "sidebar-empty", "no terminals"));
       return;
     }
     const solo = groups.length === 1 && groups[0].kind === "current";
@@ -838,9 +983,12 @@ export function initLauncher(el, options) {
       selected = choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length];
       select.value = selected.key;
       options.onSelectTerminal?.(selected);
-      requestAnimationFrame(() => options.onLaunchComplete?.());
+      describeOpen();
+      handBack(options);
       return selected;
     },
-    setCollapsed(value) { collapsed = Boolean(value); applyCollapsed(); },
+    mode: () => mode,
+    setMode,
+    cycleMode() { setMode(nextSidebarMode(mode)); return mode; },
   };
 }

@@ -8,7 +8,7 @@ import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
-import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
+import { terminalMayFocus } from "./focus.js";
 import {
   claimOutcome, claimRefusalMessage, conflictHolder, describeHolder, newWindowUrl,
   normalizeWindows, windowChoiceMessage, windowChoices, workspaceHolder,
@@ -139,12 +139,19 @@ async function boot() {
   const requestedWorkspace = identity.workspace;
   captureToken();
   let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, profiles: [], snippets: [], voice_available: false };
+  // The shell inventory probes the disk for every shell and asks WSL for its
+  // distributions, a third of a second that used to sit in the boot path. The
+  // last answer is kept in localStorage: boot draws with it and a fresh scan
+  // replaces it in the background once the first terminal is up.
+  const cachedInventory = loadInventoryCache();
   const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
     api.getProfiles().catch(() => null),
-    api.getSessions().catch(() => []),
+    api.getSessions({ metrics: false }).catch(() => []),
     api.listWorkspaces().catch(() => []),
-    api.getTerminalOptions().catch(() => ({ types: [], wsl_distributions: [] })),
+    cachedInventory
+      ? Promise.resolve(cachedInventory)
+      : api.getTerminalOptions().then(saveInventoryCache).catch(() => ({ types: [], wsl_distributions: [] })),
   ]);
   if (loadedConfig) cfg = loadedConfig;
   let profiles = loadedProfiles || cfg.profiles || [];
@@ -248,7 +255,7 @@ async function boot() {
     fontFamily: cfg.font_family || "JetBrains Mono",
     fontSize,
     theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
-    onFocusChange: () => { refreshStatusSoon(); updateQuickSettings(); },
+    onFocusChange: () => refreshStatusSoon(),
     onPaneState: (pane) => {
       refreshStatusSoon();
       maybeAdoptScratch(pane);
@@ -629,11 +636,15 @@ async function boot() {
   // #sb-save owns the saving/saved lifecycle only. It is a 9 px span that
   // collapses when empty and disappears under the panel overlay, so it is the
   // wrong place for anything the user has to act on.
+  // #sb-save is the save dot on the sidebar's workspace row: data-state drives
+  // the colour, the title carries the words. It is the saving/saved lifecycle
+  // and nothing else.
   function setWorkspaceSaveState(text, state = "") {
     const status = $("sb-save");
     if (!status) return;
-    status.textContent = text;
-    if (state) status.dataset.state = state;
+    const key = state || text;
+    status.title = text;
+    if (key) status.dataset.state = key;
     else delete status.dataset.state;
   }
 
@@ -1378,6 +1389,20 @@ async function boot() {
       if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
       if (pane) spawnDefaultInto(pane);
     },
+    // Renaming from the sidebar row; a pane showing the terminal takes the
+    // new name too, and the workspace autosaves it like a header rename.
+    renameSession: async (sessionId, name) => {
+      let info = null;
+      try {
+        info = await api.renameSession(sessionId, name);
+      } catch (error) {
+        showError(error.detail || "rename failed");
+        return;
+      }
+      const pane = layout.panes().find((item) => item.session?.id === sessionId);
+      if (pane) pane.setTitle(name, info);
+      refreshStatusSoon();
+    },
     cycleTerminal: (delta) => {
       const choice = launcherView?.cycleTerminal(delta);
       if (choice) layout.focused?.flashNotice(`[new terminal: ${choice.label}]`);
@@ -1711,7 +1736,7 @@ async function boot() {
       scratchRoot = fresh.scratch_dir || scratchRoot;
       profiles = fresh.profiles || [];
       snippets = fresh.snippets || [];
-      terminalInventory = freshInventory;
+      terminalInventory = saveInventoryCache(freshInventory);
       app.profiles = profiles;
       app.snippets = snippets;
       app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
@@ -1725,12 +1750,7 @@ async function boot() {
 
   const palette = new Palette(app);
   panels = new Panels(app);
-  app.openPanel = (name) => { closeQuickSettings(); panels.show(name); };
-  $("sb-shortcuts").addEventListener("click", () => {
-    closeQuickSettings();
-    panels.close();
-    palette.toggle();
-  });
+  app.openPanel = (name) => panels.show(name);
   $("app-error-close").addEventListener("click", () => {
     clearError();
     app.refocusTerm();
@@ -1757,71 +1777,30 @@ async function boot() {
     fontSize = next;
     layout.setFontSize(fontSize);
     if (persist) persistFontSize();
-    updateQuickSettings();
   }
   app.setFontSize = setFontSize;
   app.fontSize = () => fontSize;
 
-  // Pane-first is the least surprising developer default: changing text size
-  // in one terminal should not reflow every other running terminal.  "All
-  // panes" remains one click away and persists the default for new panes.
-  let fontScope = "pane";
-  const quickSettings = $("quick-settings");
-  const quickButton = $("sb-quick");
-
+  // Ctrl+± changes the focused pane only and Ctrl+0 puts it back on the saved
+  // default; Settings changes that default for every pane. Pane-first is the
+  // least surprising: changing text size in one terminal should not reflow
+  // every other running terminal.
   function scopedFontSize() {
-    return fontScope === "pane" && layout.focused ? layout.focused.fontSize : fontSize;
-  }
-
-  function updateQuickSettings() {
-    const value = clampFont(scopedFontSize());
-    const paneScope = fontScope === "pane" && Boolean(layout.focused);
-    const statusValue = $("sb-font-size");
-    if (statusValue) statusValue.textContent = `${value} px · ${paneScope ? "pane" : "all"}`;
-    const output = $("quick-font-value");
-    if (!output) return;
-    output.textContent = `${value} px`;
-    $("quick-font-smaller").disabled = value <= MIN_FONT;
-    $("quick-font-bigger").disabled = value >= MAX_FONT;
-    $("quick-scope-pane").classList.toggle("active", paneScope);
-    $("quick-scope-pane").setAttribute("aria-pressed", String(paneScope));
-    $("quick-scope-all").classList.toggle("active", !paneScope);
-    $("quick-scope-all").setAttribute("aria-pressed", String(!paneScope));
-    $("quick-scope-hint").textContent = paneScope
-      ? "This pane only; its size resets when the view is recreated."
-      : "All panes and the saved default for new terminals.";
-    $("quick-focus").textContent = layout.zoomed ? "Show all panes" : "Focus this pane";
-    const canWidth = layout.canResizeFocused("h");
-    const canHeight = layout.canResizeFocused("v");
-    $("quick-width-smaller").disabled = !canWidth;
-    $("quick-width-bigger").disabled = !canWidth;
-    $("quick-height-smaller").disabled = !canHeight;
-    $("quick-height-bigger").disabled = !canHeight;
-    $("quick-pane-balance").disabled = !canWidth && !canHeight;
-  }
-
-  function setFontScope(scope) {
-    fontScope = scope === "pane" && layout.focused ? "pane" : "all";
-    // Switching back to All intentionally clears temporary per-pane
-    // overrides so the value shown here matches every terminal immediately.
-    if (fontScope === "all") layout.setFontSize(fontSize);
-    updateQuickSettings();
+    return layout.focused ? layout.focused.fontSize : fontSize;
   }
 
   function setScopedFontSize(px) {
     const next = clampFont(px);
-    if (fontScope === "pane" && layout.focused) {
+    if (layout.focused) {
       layout.focused.setFontSize(next);
-      layout.focused.flashNotice(`[font ${next}px · this pane]`);
-      updateQuickSettings();
+      layout.focused.flashNotice(`[font ${next}px]`);
       return;
     }
     setFontSize(next);
-    if (layout.focused) layout.focused.flashNotice(`[font ${next}px · all panes]`);
   }
 
   function resetScopedFontSize() {
-    setScopedFontSize(fontScope === "pane" ? fontSize : DEFAULT_FONT);
+    setScopedFontSize(fontSize);
   }
 
   app.fontBigger = () => setScopedFontSize(scopedFontSize() + 1);
@@ -1829,63 +1808,6 @@ async function boot() {
   app.fontReset = resetScopedFontSize;
   app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
   app.balanceFocused = () => layout.balanceFocusedSplit();
-
-  // One rule for every overlay in the app: dismissing it makes the focused
-  // terminal typeable again, and the trigger is only the fallback when there is
-  // no pane to go back to. Panels already worked this way; quick settings
-  // parked focus on the status-bar button instead, so the next keystroke went
-  // nowhere. `handBack` is false only when the caller is opening something else
-  // that will claim focus for itself.
-  function closeQuickSettings(handBack = false) {
-    const wasOpen = !quickSettings.hidden;
-    quickSettings.hidden = true;
-    quickButton.setAttribute("aria-expanded", "false");
-    if (wasOpen) releaseFocus("quick-settings");
-    if (!handBack) return;
-    if (!app.refocusTerm()) quickButton.focus();
-  }
-
-  function toggleQuickSettings() {
-    const opening = quickSettings.hidden;
-    if (!opening) { closeQuickSettings(true); return; }
-    palette.close();
-    panels.close();
-    document.dispatchEvent(new CustomEvent("quickterm:close-dropdowns"));
-    quickSettings.hidden = false;
-    quickButton.setAttribute("aria-expanded", "true");
-    // Claimed before focusing, because panels.close() above just asked the
-    // focused pane to take the keyboard back on the next frame (focus.js).
-    claimFocus("quick-settings");
-    updateQuickSettings();
-    $("quick-font-smaller").focus();
-  }
-
-  quickButton.addEventListener("click", toggleQuickSettings);
-  $("quick-close").addEventListener("click", () => closeQuickSettings(true));
-  $("quick-scope-pane").addEventListener("click", () => setFontScope("pane"));
-  $("quick-scope-all").addEventListener("click", () => setFontScope("all"));
-  $("quick-font-smaller").addEventListener("click", () => setScopedFontSize(scopedFontSize() - 1));
-  $("quick-font-bigger").addEventListener("click", () => setScopedFontSize(scopedFontSize() + 1));
-  $("quick-font-reset").addEventListener("click", resetScopedFontSize);
-  const resizeFocused = (axis, amount) => { layout.adjustFocusedSize(axis, amount); updateQuickSettings(); };
-  $("quick-width-smaller").addEventListener("click", () => resizeFocused("h", -0.05));
-  $("quick-width-bigger").addEventListener("click", () => resizeFocused("h", 0.05));
-  $("quick-height-smaller").addEventListener("click", () => resizeFocused("v", -0.05));
-  $("quick-height-bigger").addEventListener("click", () => resizeFocused("v", 0.05));
-  $("quick-pane-balance").addEventListener("click", () => { layout.balanceFocusedSplit(); updateQuickSettings(); });
-  $("quick-focus").addEventListener("click", () => { layout.toggleZoom(); updateQuickSettings(); });
-  $("quick-full-settings").addEventListener("click", () => { closeQuickSettings(true); panels.show("settings"); });
-  document.addEventListener("mousedown", (event) => {
-    if (!quickSettings.hidden && !quickSettings.contains(event.target) && !quickButton.contains(event.target)) closeQuickSettings();
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !quickSettings.hidden) {
-      event.preventDefault();
-      event.stopPropagation();
-      closeQuickSettings(true);
-    }
-  }, true);
-  updateQuickSettings();
 
   // Live theme preview: apply the chrome and every terminal's colors instantly
   // (Settings calls this the moment you click a theme) without persisting.
@@ -1906,8 +1828,9 @@ async function boot() {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = "sidebar-action sidebar-nav-button update-pill";
-    pill.title = `QuickTerm v${latest} is available - open About to install`;
-    pill.textContent = `Update v${latest}`;
+    pill.title = `QuickTerm v${latest} is available. Open About to install.`;
+    pill.setAttribute("aria-label", pill.title);
+    pill.textContent = "up";
     pill.addEventListener("click", () => {
       panels.settingsTab = "about"; // land directly on About, where install lives
       panels.show("settings");
@@ -1928,7 +1851,7 @@ async function boot() {
   watchUpdates();
 
   initKeys({
-    togglePalette: () => { closeQuickSettings(); panels.close(); palette.toggle(); },
+    togglePalette: () => { panels.close(); palette.toggle(); },
     // Quick Settings is intentionally non-modal: its view shortcuts keep
     // working while the drawer is open. Full panels and the command palette
     // still own the keyboard while they are active.
@@ -1941,9 +1864,10 @@ async function boot() {
     closePane: app.closePane,
     killSession: app.killFocusedSession,
     focusDir: (direction) => layout.focusDir(direction),
-    toggleDashboard: () => { closeQuickSettings(); palette.close(); panels.toggle("dashboard"); },
-    toggleSettings: () => { closeQuickSettings(); palette.close(); panels.toggle("settings"); },
-    toggleHelp: () => { closeQuickSettings(); palette.close(); panels.toggle("help"); },
+    toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
+    toggleSettings: () => { palette.close(); panels.toggle("settings"); },
+    toggleHelp: () => { palette.close(); panels.toggle("help"); },
+    toggleSidebar: () => launcherView?.cycleMode(),
     fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
     fontSmaller: () => setScopedFontSize(scopedFontSize() - 1),
     fontReset: resetScopedFontSize,
@@ -1968,6 +1892,8 @@ async function boot() {
       onElevateSystem: elevateSystemTerminal,
       onWorkspace: switchWorkspace,
       onNewScratch: newScratchWorkspace,
+      onNewTerminal: app.newTerminal,
+      onRenameSession: (session, name) => app.renameSession(session.id, name),
       onFocusSession: (sessionId) => {
         const pane = layout.panes().find((item) => item.session?.id === sessionId);
         if (pane) layout.focusPane(pane);
@@ -1994,7 +1920,6 @@ async function boot() {
         // shortcut: keys.js may claim only cold Alt combos, and the letters
         // still free are readline/PSReadLine bindings the shell needs.
         ["new window", () => {
-          closeQuickSettings();
           panels.close();
           palette.newWindowMode();
         }],
@@ -2006,49 +1931,16 @@ async function boot() {
   }
 
   function refreshStatus() {
-    const workspaceName = currentWorkspace && currentWorkspace !== "scratch"
-      ? `ws ${currentWorkspace}`
-      : "scratch · disposable";
-    const workspaceStatus = $("sb-workspace");
-    const folderLabel = workspacePath
-      ? (workspacePath.split(/[\\/]+/).filter(Boolean).pop() || workspacePath)
-      : "";
-    // "scratch · disposable · scratch" says nothing twice.
-    workspaceStatus.textContent = folderLabel && !workspaceName.includes(folderLabel)
-      ? `${workspaceName} · ${folderLabel}`
-      : workspaceName;
-    workspaceStatus.title = workspacePath
-      ? (workspacePathExists ? workspacePath : `${workspacePath} (missing)`)
-      : "This workspace has no folder. Terminals open in your home folder.";
     if (document.hidden) return;
     api.getSessions({ metrics: false }).then((list) => {
       lastSessions = list;
-      const owned = new Set(app.ownedSessionIds());
-      const attached = new Set(app.attachedSessionIds());
-      const liveOwned = list.filter((session) => session.alive && owned.has(session.id));
-      const visible = liveOwned.filter((session) => attached.has(session.id)).length;
-      const detached = liveOwned.filter((session) => !attached.has(session.id)).length;
-      const workspaceLabel = detached
-        ? `${visible} open · ${detached} background`
-        : `${visible} open`;
-      const totalLive = list.filter((session) => session.alive).length;
-      const countLabel = totalLive === liveOwned.length
-        ? workspaceLabel
-        : `${workspaceLabel} · ${totalLive} total`;
-      $("sb-sessions").textContent = countLabel;
-      launcherView?.updateSessions(list, [...attached], [...owned]);
-    }).catch(() => { $("sb-sessions").textContent = "offline"; });
+      launcherView?.updateSessions(list, [...app.attachedSessionIds()], [...app.ownedSessionIds()]);
+    }).catch(() => {});
   }
 
   function refreshStatusSoon() {
     clearTimeout(statusTimer);
     statusTimer = setTimeout(refreshStatus, 250);
-  }
-
-  function tickClock() {
-    const date = new Date();
-    const pad = (number) => String(number).padStart(2, "0");
-    $("sb-clock").textContent = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
   function persistOnExit() {
@@ -2088,9 +1980,6 @@ async function boot() {
   }
   window.addEventListener("pagehide", persistOnExit);
 
-  $("voice-indicator").textContent = ""; // voice is parked until it has a real overlay
-  tickClock();
-  setInterval(tickClock, 15000);
   setInterval(refreshStatus, 10000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
@@ -2127,6 +2016,33 @@ async function boot() {
   refreshStatus();
   claimLaunchLoop();
   scheduleWorkspaceSave();
+  if (cachedInventory) {
+    setTimeout(() => {
+      api.getTerminalOptions().then((fresh) => {
+        if (JSON.stringify(fresh) === JSON.stringify(terminalInventory)) return;
+        terminalInventory = saveInventoryCache(fresh);
+        buildLauncher();
+      }).catch(() => {});
+    }, 1500);
+  }
+}
+
+const INVENTORY_CACHE_KEY = "quickterm.inventory";
+
+function loadInventoryCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(INVENTORY_CACHE_KEY) || "null");
+    return parsed && Array.isArray(parsed.types) ? parsed : null;
+  } catch (_) { return null; }
+}
+
+function saveInventoryCache(inventory) {
+  try {
+    if (inventory && Array.isArray(inventory.types)) {
+      localStorage.setItem(INVENTORY_CACHE_KEY, JSON.stringify(inventory));
+    }
+  } catch (_) { /* optional */ }
+  return inventory;
 }
 
 boot();

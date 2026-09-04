@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  SIDEBAR_MODES, nextSidebarMode,
   SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
   clampSidebarWidth, maxSidebarWidth,
 } from "../../quickterm/frontend/js/launcher.js";
@@ -30,4 +31,12 @@ test("unreadable storage falls back to the default width", () => {
   assert.equal(clampSidebarWidth("", 1920), SIDEBAR_WIDTH_DEFAULT);
   assert.equal(clampSidebarWidth(undefined, 1920), SIDEBAR_WIDTH_DEFAULT);
   assert.equal(clampSidebarWidth("320", 1920), 320);
+});
+
+test("the sidebar cycles full, rail, hidden, and an unknown mode starts over", () => {
+  assert.deepEqual(SIDEBAR_MODES, ["full", "rail", "hidden"]);
+  assert.equal(nextSidebarMode("full"), "rail");
+  assert.equal(nextSidebarMode("rail"), "hidden");
+  assert.equal(nextSidebarMode("hidden"), "full");
+  assert.equal(nextSidebarMode("bogus"), "full");
 });

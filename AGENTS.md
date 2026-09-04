@@ -52,7 +52,9 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
   detach, Alt+W confirmed kill, and
   Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
-  (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; and
+  (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; Alt+Shift+S
+  cycles the sidebar (full, rail, hidden; plain Alt+B is readline's
+  backward-word and Ctrl+B the tmux prefix, so neither is ours); and
   Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
   bindings). Never re-claim them. The zoom layer matches only keys that really
@@ -129,7 +131,15 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   pane detaches, never kills; kill is a separate labelled `.danger` control.
   Clicking the workspace row you are already on is a no-op, scratch included.
   There is no free-text workspace prompt. Errors go to the `#app-error` banner
-  or the pane notice. `#sb-save` is the saving/saved lifecycle only.
+  or the pane notice. `#sb-save` is the saving/saved lifecycle only: it is the
+  dot on the sidebar's workspace row, driven by `data-state`, never text.
+- The sidebar is the whole chrome. No status bar, no top bar, no drawer: the
+  workspace, the terminals and the panel icons all live in `launcher.js`, and
+  a lone pane has no header (`#grid > .pane > .pane-tab { display: none }`;
+  the sidebar row names it). Headers return with a second pane, actions only
+  on hover. Before adding a control, ask whether the palette (Alt+K) or a
+  tooltip already carries it. The shell inventory is cached in localStorage
+  and served from a 60 s server-side cache, so boot never waits for it.
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),

@@ -13,6 +13,7 @@
 //   Alt+Shift+Right    split to the right
 //   Alt+Shift+Down     split below
 //   Alt+Shift+Left/Up  previous / next new-terminal profile
+//   Alt+Shift+S        sidebar: full, rail, hidden
 // Everything on plain Alt that shells and TUIs actually bind passes through:
 // Alt+V (Claude Code image paste on Windows/WSL), Alt+P (Claude Code model
 // switch), Alt+H (PSReadLine parameter help), Alt+0..9/Alt+- (readline digit
@@ -81,9 +82,13 @@ export function initKeys(actions) {
       return;
     }
 
-    // Alt+Shift layer: splits and pane resizing.
+    // Alt+Shift layer: splits, the terminal choice, and the sidebar.
     if (key === "h") return done(actions.splitH);
     if (key === "v") return done(actions.splitV);
+    // Alt+Shift+S cycles the sidebar: full, rail, hidden. Plain Alt+B is
+    // readline's backward-word and Ctrl+B the tmux prefix, so neither is
+    // ours to take.
+    if (key === "s") return done(actions.toggleSidebar);
     if (key === "arrowleft") return done(() => actions.cycleTerminal(-1));
     if (key === "arrowup") return done(() => actions.cycleTerminal(1));
     if (key === "arrowright") return done(actions.splitH);

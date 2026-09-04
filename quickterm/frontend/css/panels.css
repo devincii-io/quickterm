@@ -822,47 +822,6 @@
 }
 #app-error-close:hover { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--text); }
 
-/* 28 px, because the two controls in here are real click targets and a 24 px
-   bar cannot hold one. The bar has no vertical padding, so the buttons fill
-   it exactly rather than making it taller still. */
-.statusbar {
-  min-height: 28px;
-  gap: 8px;
-  padding: 0 9px;
-  border-top: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.sb-sep { color: var(--fg-faint); }
-#sb-shortcuts, #sb-quick {
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-}
-#sb-shortcuts:hover, #sb-quick:hover, #sb-quick[aria-expanded="true"] {
-  border-color: transparent;
-  background: var(--surface-raised);
-  color: var(--text);
-}
-#sb-shortcuts kbd {
-  padding: 0 4px;
-  border: 1px solid var(--fg-faint);
-  border-radius: 4px;
-  color: var(--text-soft);
-  font: inherit;
-  line-height: 15px;
-}
-#sb-font-size { color: var(--text-soft); }
 
 /* ======================= narrow windows =======================
    These re-state the narrow behaviour rather than leaving it to app.css:

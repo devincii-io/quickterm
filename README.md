@@ -31,10 +31,11 @@ QuickTerm opens as its own native desktop window. The installer adds an
 optional **Open QuickTerm here** entry to the right-click menu, both on a folder
 and inside one. It opens a terminal in that directory. When a new
 version is published, the app shows a small **Update** pill; Settings → About
-has the details and a one-click, checksum-verified install. The collapsible
-terminal sidebar detects installed PowerShell, Command Prompt, WSL
-distributions, Git Bash, and Nushell. Use the **Admin** action beside **Open**
-to start the selected terminal in a separate UAC-approved window. Both the
+has the details and a one-click, checksum-verified install. The sidebar
+detects installed PowerShell, Command Prompt, WSL distributions, Git Bash, and
+Nushell, and offers Claude Code directly (continue, new, resume) when the CLI
+is on this computer, no profile needed. The shield beside **+** starts the
+selected terminal in a separate UAC-approved window. Both the
 window and the session are labeled `Administrator`.
 
 ### From source
@@ -64,7 +65,10 @@ Terminal profiles carry no folder of their own, so one "Claude Code" or
 somewhere you cannot see. A folder that has been moved or deleted is reported
 in the Dashboard and sidebar rather than silently failing the next terminal.
 
-The sidebar workspace list controls persistence. A named workspace autosaves
+The sidebar is the whole interface: there is no status bar and no header on
+a lone pane. `Alt+Shift+S` cycles it through full, a 30 px rail of state dots,
+and hidden; hidden leaves a small **+** over the terminal's left edge that you
+can drag up and down. The workspace row in the sidebar controls persistence. A named workspace autosaves
 its exact split arrangement and live session IDs for reattachment with
 in-memory scrollback, for as long as those processes are alive. If a saved
 process is gone, QuickTerm restores an explicitly unavailable pane and never
@@ -118,6 +122,7 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 | `Alt+N` | Open a new default terminal beside the focused pane |
 | `Alt+Shift+Left` / `Alt+Shift+Up` | Cycle previous / next profile used by new terminals |
 | `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |
+| `Alt+Shift+S` | Sidebar: full, rail, hidden |
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
 | `Alt+D` | Detach pane; the terminal keeps running in the background |
@@ -137,19 +142,16 @@ workspace folder instead. Claude splits stay bound to their workspace project
 and never implicitly open `claude agents`; use
 Alt+K → **Split Claude agent view** for an explicit project-scoped manager.
 
-The status bar's **View** drawer has `−` / `+` font controls with an explicit
-**This pane / All panes** scope, plus width and height controls for the
-selected pane, split balancing, focus mode, and a shortcut to full Settings.
-Keyboard font shortcuts follow the scope selected there. Pane-only sizes are
-temporary; All panes also updates the saved default. Split dividers are wide,
-keyboard-adjustable, and can be double-clicked to balance them.
+`Ctrl+±` changes the focused pane's text size for this session and `Ctrl+0`
+puts it back; the saved default for every pane is in Settings. Split dividers
+are wide, keyboard-adjustable, and can be double-clicked to balance them.
 
 Per-profile global hotkeys (for example `Ctrl+Alt+1` to spawn the claude
 profile) are set with `keybinding` in the profile config.
 
-Live and background sessions appear directly in the sidebar. Its counter shows
-`workspace/global` when the two differ, while the status bar spells out the
-global total. Dashboard statistics show **this workspace** and **all live**
+Every live terminal appears in the sidebar, grouped by the workspace that owns
+it, as a state dot and a name; double-click a row to rename it. Dashboard
+statistics show **this workspace** and **all live**
 separately; unowned sessions are labelled **Unassigned** instead of looking
 like a hidden workspace. Detailed detached sessions stay under **Dashboard →
 Detached sessions** with **Attach** and **Kill** controls. `Alt+K` only offers
@@ -159,8 +161,8 @@ ownership rule during the current run, but Scratch and all of its sessions are
 discarded when QuickTerm quits.
 
 **Dashboard → Terminal usage** shows the host process tree's current working
-set, sampled CPU, process count, and uptime for every live terminal. The status
-bar and sidebar use a cheap liveness query and do not continuously take an OS
+set, sampled CPU, process count, and uptime for every live terminal. The
+sidebar uses a cheap liveness query and do not continuously take an OS
 process snapshot. WSL is labelled **host side only**, because Linux processes
 inside the WSL VM cannot be attributed reliably to one Windows terminal. Output
 produced after a terminal is detached is marked **New output** with its byte

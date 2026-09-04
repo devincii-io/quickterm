@@ -194,22 +194,18 @@ def test_sidebar_collapse_returns_input_focus_to_the_terminal():
     assert "requestAnimationFrame(() => options.onLaunchComplete?.())" in source
 
 
-def test_open_here_claims_one_folder_launch_and_shows_workspace_global_counts():
-    """The status bar keeps naming both figures; the sidebar pill now counts all.
+def test_open_here_claims_one_folder_launch():
+    """The status bar is gone; the sidebar list is the only count there is.
 
     The launcher assertion used to pin `${visible.length}/${totalLive}`, the
     count of a list filtered down to this window's own terminals. That filter
     was the bug: seven live terminals showed as "2/7" with no way to reach the
-    other five. The invariant is now the opposite one, so the check moved to
-    test_sidebar_lists_every_live_terminal_grouped_by_workspace rather than
-    being dropped.
+    other five. The invariant is now the opposite one, kept by
+    test_sidebar_lists_every_live_terminal_grouped_by_workspace.
     """
     main = MAIN_JS.read_text(encoding="utf-8")
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
     assert "const launch = await api.claimLaunch()" in main
     assert "await openFolderInScratch(launch.cwd)" in main
-    assert "`${workspaceLabel} · ${totalLive} total`" in main
-    assert "terminalsCount.textContent = String(totalLive);" in launcher
 
 
 def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
@@ -226,6 +222,8 @@ def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
     assert "owned.has(session.id) || attached.has(session.id)" not in launcher
     assert "groupSessionsByWorkspace(sessions, {" in launcher
     assert "`${here} in ${workspaceName} · ${totalLive} live on this backend`" in launcher
+    # Claude needs no profile: the CLI found by the inventory is offered as is.
+    assert 'key: `claude:${mode}`' in launcher
 
     start = launcher.index("  const sessionEntry = (entry, group) => {")
     end = launcher.index("\n  const sessionGroup =", start)
@@ -461,3 +459,35 @@ def test_only_the_primary_window_claims_the_explorer_folder_handoff():
     # The flag is read back from the registry, which promotes a new primary when
     # that window closes, not trusted from the launch URL for the whole run.
     assert 'if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);' in main
+
+
+def test_the_chrome_is_the_sidebar_and_nothing_else():
+    """No status bar, no quick-settings drawer, no header on a lone pane.
+
+    The sidebar carries the workspace, the terminals and the four panel icons;
+    a single pane is a terminal from edge to edge; the pane header returns only
+    with a second pane and its actions only on hover. Alt+Shift+S cycles the
+    sidebar through full, rail and hidden, and the hidden state leaves a
+    floating "+" that can be dragged along the terminal's left edge.
+    """
+    html = (Path(__file__).parents[1] / "quickterm" / "frontend" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+    keys = KEYS_JS.read_text(encoding="utf-8")
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+
+    assert "statusbar" not in html and "quick-settings" not in html
+    assert 'id="float-launch"' in html
+    assert "#grid > .pane > .pane-tab" in app_css
+    assert ".pane:hover .pane-actions" in app_css
+    assert "quick-settings" not in app_css and ".statusbar" not in app_css
+    assert 'if (key === "s") return done(actions.toggleSidebar);' in keys
+    assert 'export const SIDEBAR_MODES = ["full", "rail", "hidden"];' in launcher
+    assert "toggleSidebar: () => launcherView?.cycleMode()," in main
+    # The save dot keeps its id: main.js drives it through data-state only.
+    assert 'save.id = "sb-save";' in launcher
+    assert "status.textContent = text;" not in main

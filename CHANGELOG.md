@@ -2,6 +2,32 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.6.0
+
+### The sidebar is the whole interface
+
+- The status bar, the quick-settings drawer and the pane header on a lone
+  pane are gone. A single terminal fills the window edge to edge; the sidebar
+  names it and shows its state. Headers come back with a second pane and
+  their actions only draw on hover.
+- The sidebar is one list: **+ name** opens a terminal and the chevron beside
+  it changes what that is; the workspace is a dropdown with **+ new scratch**
+  as its last row; then every live terminal as a dot and a name, with
+  double-click to rename; then four icons.
+- `Alt+Shift+S` cycles the sidebar through full, a 30 px rail of dots, and
+  hidden. Hidden leaves a small **+** over the terminal's left edge that can
+  be dragged up and down and remembers where it was.
+- Claude Code needs no profile any more. When the CLI is installed, **Claude ·
+  continue / new / resume** are offered next to the system shells and open in
+  the workspace folder like any shell.
+- Boot no longer waits for the shell inventory scan or a full process-metrics
+  sweep: the inventory is cached in the browser and on the server, and the
+  first session list is the cheap one. Both were about half a second on the
+  path to the first prompt.
+- `Ctrl+±/0` change the focused pane's text size; the saved default is in
+  Settings. The **This pane / All panes** scope switch is gone with the drawer.
+- About 25 KB of stylesheet for the old top bar and status bar was removed.
+
 ## QuickTerm 3.3.0
 
 ### Profiles no longer carry a folder

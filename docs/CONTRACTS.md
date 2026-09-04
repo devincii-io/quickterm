@@ -580,8 +580,24 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `term.write(data, cb)` callbacks for backpressure.
 - Focus: 2px theme-accent rail with a compact semantic state dot; inactive
   terminals remain fully readable.
-- Launcher: collapsible terminal-style sidebar with a compact profile dropdown,
-  explicit open/admin actions, workspace/session rows, and dashboard/settings/help navigation.
+- Chrome: the sidebar is the whole chrome. There is no status bar, no top bar
+  and no quick-settings drawer. A lone pane has no header: the layout mounts
+  it as the direct child of `#grid` (or `#zoom-host` while zoomed) and CSS hides
+  `.pane-tab`/`.pane-actions` there. Headers return with a second pane and
+  their actions draw only on hover, focus, or while armed.
+- Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
+  chevron beside it is a native `<select>` over Personal profiles, System
+  shells and the built-in Claude choices (`claude:continue|new|resume`, the
+  CLI plus one flag, no profile needed); the workspace row is a native
+  `<select>` whose last option is **+ new scratch**, with the folder under it
+  and the `#sb-save` dot beside it; the terminal list; four icons (new window,
+  dashboard, settings, help) and the collapse chevron. Double-click on a
+  terminal row renames it (`onRenameSession` → `PATCH /api/sessions/{id}`,
+  then `Pane.setTitle`). Three modes, remembered in `quickterm.sidebarMode`:
+  `full` (resizable, 150 to 400 px), `rail` (30 px: plus, one dot per terminal,
+  gear, chevron) and `hidden` (nothing; `#float-launch` sits over the
+  terminal's left edge, its handle drags it up and down, `+` opens a terminal,
+  right-click or `›` shows the sidebar). Alt+Shift+S cycles the modes.
 - Dashboard: dense saved-workspace rows, global/current ownership and resource
   statistics, detached-session management, and quick profile launch.
 - Sidebar workspace rows: named workspaces autosave layout and session IDs and
@@ -593,10 +609,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   at process start and shutdown so it never survives a run. The name `scratch`
   (any case) and dot-prefixed names are rejected in user save paths; workspace
   names must survive `_safe_name` unchanged.
-- Collapsible left sidebar: flat Personal/System terminal picker, one-click open/admin actions, workspaces, live/background sessions, and navigation. The terminal grid starts at the top edge and expands when the sidebar collapses; no top app bar or card shell owns vertical space.
-  Session counts distinguish the current workspace from all backend sessions;
-  when different the sidebar uses `workspace/global`, the status names the total,
-  and Dashboard has separate **this workspace** / **all live** statistics plus
+- The terminal list shows every live terminal on the backend, grouped by the
+  owning workspace (yours first and unheaded when it is the only group). A row
+  is a state dot and a name; chips appear only for new output, busy and open
+  elsewhere. The list's tooltip carries `<n> in <workspace> · <total> live`.
+  Dashboard has separate **this workspace** / **all live** statistics plus
   explicit Unassigned ownership.
 - Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Nothing configurable is a bare
   name plus a value: profiles and snippets each carry a `description`, and every row shows name,
@@ -618,11 +635,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   palettes under Dark, Neon, Soft, Warm, Light, and Custom. Clicking a theme previews
   both application chrome and every open xterm immediately; Cancel restores the
   persisted theme.
-- Quick settings: the status-bar View drawer controls font size for either the
-  focused pane or all panes, resizes the focused pane against its nearest
-  horizontal/vertical split, balances that split, toggles focus mode, and links
-  to full Settings. Ctrl+±/0 follows the selected scope; pane-only
-  overrides are temporary, while All panes persists the global default.
+- Font size: Ctrl+±/0 change the focused pane only and are temporary; the
+  saved default for every pane lives in Settings. Pane sizing lives on the
+  splitter (drag, keyboard, double-click to balance) and Alt+Z zooms.
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
@@ -661,7 +676,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   silently; saving is owned by the Dashboard, which validates the name and shows
   the error. Snippet rows carry the command text and the destination pane, and a
   multi-line snippet is confirmed in the pane before it runs. Pane sizing is not
-  duplicated here; it lives on the splitter and in Quick settings.
+  duplicated here; it lives on the splitter.
 - Split actions launch the selected terminal choice in the source pane's
   best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
   signals, falling back to their launch folder; prompt text is never parsed.
@@ -670,7 +685,8 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   conversation when that profile's default mode is `agents`; the palette's
   explicit **Split Claude agent view** runs `claude agents --cwd <project>`.
 - Keybindings (in addition to palette): Alt+N opens a new default terminal,
-  Alt+Shift+Right/Down split (H/V aliases), Alt+Z zoom, Alt+D detaches and
+  Alt+Shift+Right/Down split (H/V aliases), Alt+Shift+S cycles the sidebar
+  (full, rail, hidden), Alt+Z zoom, Alt+D detaches and
   retains the process, Alt+W always opens confirmation before a process-tree
   kill and pane close, Alt+arrows focus move,
   Ctrl+±/0 font size. Plain Alt+V/P/H/0-9/- pass through to the shell

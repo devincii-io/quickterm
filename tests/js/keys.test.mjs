@@ -30,6 +30,7 @@ async function captureHandler({ paletteOpen = false } = {}) {
     fontBigger: () => calls.push("fontBigger"),
     fontSmaller: () => calls.push("fontSmaller"),
     fontReset: () => calls.push("fontReset"),
+    toggleSidebar: () => calls.push("toggleSidebar"),
   });
   return { handler, calls };
 }
@@ -129,4 +130,18 @@ test("a panel key still closes its own panel", async () => {
   handler(keyEvent({ key: "n", altKey: true })); // new terminal must stay blocked
 
   assert.deepEqual(calls, ["toggleSettings"]);
+});
+
+test("Alt+Shift+S cycles the sidebar; plain Alt+S is still Settings and Alt+B is the shell's", async () => {
+  const { handler, calls } = await captureHandler();
+  const cycle = keyEvent({ key: "S", altKey: true, shiftKey: true });
+  handler(cycle);
+  assert.equal(cycle.defaultPrevented, true);
+  const settings = keyEvent({ key: "s", altKey: true });
+  handler(settings);
+  // readline backward-word: never ours.
+  const back = keyEvent({ key: "b", altKey: true });
+  handler(back);
+  assert.equal(back.defaultPrevented, false);
+  assert.deepEqual(calls, ["toggleSidebar", "toggleSettings"]);
 });

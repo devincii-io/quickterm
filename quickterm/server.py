@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -79,6 +80,7 @@ def create_app(
     windows: WindowRegistry | None = None,
     open_window: Callable[[str | None, str | None], str] | None = None,
 ) -> FastAPI:
+    inventory_cache: dict[str, Any] = {}
     from quickterm import auth
 
     app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
@@ -627,8 +629,18 @@ def create_app(
             return _asdict(cfg)
 
     @app.get("/api/system/terminals")
-    def get_system_terminals() -> dict:
-        return _terminal_inventory()
+    async def get_system_terminals() -> dict:
+        # Probing every shell path and asking wsl.exe for its distributions
+        # takes a third of a second, and installed shells do not change between
+        # one sidebar rebuild and the next. Off the loop, and remembered for a
+        # minute.
+        now = time.monotonic()
+        cached = inventory_cache.get("value")
+        if cached is not None and now - inventory_cache.get("at", 0.0) < 60.0:
+            return cached
+        value = await asyncio.to_thread(_terminal_inventory)
+        inventory_cache.update(value=value, at=time.monotonic())
+        return value
 
     @app.post("/api/elevate")
     async def elevate_terminal(request: Request) -> dict:

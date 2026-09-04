@@ -357,6 +357,17 @@ export class Pane {
     this._activityTimer = null;
   }
 
+  // A rename that happened elsewhere (the sidebar row). The backend already
+  // knows; this pane only has to show it and let the workspace save it.
+  setTitle(value, info = null) {
+    const name = String(value || "").trim();
+    if (!name) return;
+    this.title = name;
+    if (info && this.session && this.session.id === info.id) this.session = info;
+    this._renderTab();
+    this.onStateChange(this);
+  }
+
   _startRename() {
     if (this.tabEl.querySelector("input")) return;
     const input = document.createElement("input");
