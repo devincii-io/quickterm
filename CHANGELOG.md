@@ -2,6 +2,24 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.7.0
+
+### Open the folder you are in
+
+- Two buttons beside the workspace name open the focused terminal's folder in
+  Explorer or VS Code, and so do `Alt+Shift+E` / `Alt+Shift+C` and two rows in
+  `Alt+K`. The folder is where that shell is right now (it follows `cd`), else
+  the workspace folder. VS Code is started from `Code.exe`, never the batch
+  shim, because the folder name comes from the shell and cmd.exe re-parses
+  batch arguments.
+
+### Drag panes into place
+
+- Drag a pane by its header onto another pane. The edges of the target dock
+  the dragged pane on that side, the middle swaps the two, and a box shows
+  the spot before you let go. Escape cancels. The layout autosaves like
+  after a split.
+
 ## QuickTerm 3.6.0
 
 ### The sidebar is the whole interface

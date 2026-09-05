@@ -590,7 +590,28 @@ export function initLauncher(el, options) {
   save.setAttribute("aria-live", "polite");
   const whereCopy = make("div", "sidebar-where-copy");
   whereCopy.append(workspaceSelect, folderLine);
-  where.append(whereCopy, save);
+  where.append(whereCopy);
+  // Two buttons for the folder this row is about: Explorer and VS Code. The
+  // folder is resolved by main.js at click time, so it is where the focused
+  // terminal is right now (a `cd` counts), else the workspace folder. The
+  // titles stay generic because this row is rebuilt only on config changes.
+  if (typeof options.onOpenFolder === "function") {
+    const tools = make("div", "sidebar-folder-tools");
+    const openIn = (app, iconName, label) => {
+      const button = iconButton("sidebar-folder-open", iconName, label, () => {
+        options.onOpenFolder(app);
+        handBack(options);
+      });
+      button.dataset.app = app;
+      return button;
+    };
+    tools.append(
+      openIn("explorer", "folder", "Open the focused terminal's folder in Explorer (Alt+Shift+E)"),
+      openIn("vscode", "code", "Open the focused terminal's folder in VS Code (Alt+Shift+C)"),
+    );
+    where.append(tools);
+  }
+  where.append(save);
   el.append(where);
 
   // Terminals --------------------------------------------------------------

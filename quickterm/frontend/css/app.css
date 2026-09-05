@@ -812,9 +812,35 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 #grid > .pane > .term-host, #zoom-host > .pane > .term-host { inset: 3px 1px 2px 6px; }
 #grid > .pane.drop-target::after, #zoom-host > .pane.drop-target::after { inset: 2px 1px 2px 2px; }
 #grid > .pane { border-width: 0; }
-.pane-tab { height: 20px; padding: 0 8px 0 7px; font-size: 9.5px; }
+.pane-tab { height: 20px; padding: 0 8px 0 7px; font-size: 9.5px; cursor: grab; }
 .term-host { inset: 21px 1px 2px 6px; }
 .pane.drop-target::after { inset: 21px 1px 2px 2px; }
 .pane-actions { height: 20px; opacity: 0; transition: opacity .1s ease; }
 .pane:hover .pane-actions, .pane-actions:focus-within, .pane-actions:has(.armed) { opacity: 1; }
 .pane-action { height: 18px; }
+/* Drag a header to move the pane (layout.js _wireDrag). The ghost follows the
+   pointer with the pane's name; the hint is one fixed box over the half of
+   the target the pane would take, or the whole target for a swap. Both are
+   inert to the pointer, so they never sit between it and the pane below. */
+body.pane-dragging, body.pane-dragging .pane-tab { cursor: grabbing; }
+.pane-drag-ghost {
+  position: fixed;
+  z-index: 45;
+  pointer-events: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: 10px var(--mono);
+  white-space: nowrap;
+}
+.pane-drop-hint {
+  position: fixed;
+  z-index: 44;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pane-drop-hint[data-zone="center"] { border-style: dashed; }

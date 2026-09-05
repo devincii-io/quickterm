@@ -726,18 +726,28 @@ def create_app(
 
     @app.post("/api/open")
     async def open_target(request: Request) -> dict:
-        # Ctrl+click on a link/path in a terminal. Token-gated (under /api);
-        # opener.py refuses non-http(s) URLs and reveals executables instead
-        # of running them.
+        # Ctrl+click on a link/path in a terminal, or with `app` the sidebar's
+        # "open this folder in Explorer / VS Code". Token-gated (under /api);
+        # opener.py refuses non-http(s) URLs, reveals executables instead of
+        # running them, and launches VS Code from Code.exe, never the batch
+        # shim.
         opener = importlib.import_module("quickterm.opener")  # stubbable in tests
         body = await _read_json(request)
         target = body.get("target") if isinstance(body, dict) else None
         if not isinstance(target, str):
             raise HTTPException(400, "body must be {'target': <string>}")
+        app_name = body.get("app")
+        if app_name is not None and not isinstance(app_name, str):
+            raise HTTPException(400, "app must be a string")
         try:
+            if app_name is not None:
+                return await asyncio.to_thread(opener.open_folder, target, app_name)
             return await asyncio.to_thread(opener.open_target, target)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except LookupError as exc:
+            # VS Code is not installed: say so, the banner shows the detail.
+            raise HTTPException(404, str(exc)) from exc
         except FileNotFoundError:
             raise HTTPException(404, "no such path") from None
 

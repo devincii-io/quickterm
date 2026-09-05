@@ -209,6 +209,10 @@ export class Palette {
 
   _staticItems() {
     const a = this.app;
+    // The two folder rows name the folder they would open: that is the
+    // focused terminal's directory when there is one, else the workspace's.
+    const here = a.hereFolder?.() || null;
+    const folderHint = (keys) => (here ? `${here} · ${keys}` : keys);
     const items = [
       { kind: "action", label: "dashboard", run: () => a.openPanel("dashboard") },
       { kind: "action", label: "settings", run: () => a.openPanel("settings") },
@@ -226,6 +230,8 @@ export class Palette {
       // Quick settings. Duplicating it as five palette rows only crowded the list.
       { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
       { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession() },
+      { kind: "action", label: "open folder in Explorer", hint: folderHint("Alt+Shift+E"), run: () => a.openExplorer() },
+      { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor() },
       {
         kind: "action", label: "attach from another workspace…", keepOpen: true,
         run: () => this._foreignSessionMode(),

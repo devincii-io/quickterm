@@ -185,6 +185,23 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   white-space: nowrap;
 }
 .sidebar-folder.warning { color: var(--danger); }
+/* Explorer and VS Code for the folder named above. Same weight as the footer
+   icons: this row is about where the terminal is, and these are the two ways
+   out of it. */
+.sidebar-folder-tools { flex: none; display: flex; gap: 1px; }
+.sidebar-folder-open {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sidebar-folder-open:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-folder-open:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 /* The save dot: invisible while nothing is happening, accent while saving,
    danger when the save failed. main.js drives it through data-state. */
 .sidebar-save { flex: none; width: 6px; height: 6px; border-radius: 50%; background: transparent; }

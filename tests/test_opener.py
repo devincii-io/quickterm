@@ -86,3 +86,76 @@ def test_other_executable_capable_files_are_revealed(monkeypatch, tmp_path, suff
         )
     assert opener.open_target(str(target)) == {"action": "revealed"}
     assert len(popen_calls) == 1
+
+
+# --- folders (sidebar buttons, Alt+Shift+E / Alt+Shift+C) ---------------------
+
+
+def test_open_folder_refuses_bad_input(tmp_path):
+    with pytest.raises(ValueError):
+        opener.open_folder(str(tmp_path), "notepad")
+    with pytest.raises(ValueError):
+        opener.open_folder("   ", "explorer")
+    with pytest.raises(FileNotFoundError):
+        opener.open_folder(str(tmp_path / "gone"), "explorer")
+    a_file = tmp_path / "notes.txt"
+    a_file.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError):
+        opener.open_folder(str(a_file), "explorer")
+
+
+def test_open_folder_in_explorer(monkeypatch, tmp_path):
+    shown = []
+    if sys.platform == "win32":
+        monkeypatch.setattr(opener.os, "startfile", lambda p: shown.append(p), raising=False)
+    else:
+        monkeypatch.setattr(opener.subprocess, "Popen", lambda argv, **kw: shown.append(argv[-1]))
+    # Quotes around a pasted path are stripped like open_target does.
+    assert opener.open_folder(f'"{tmp_path}"', "explorer") == {"action": "explorer"}
+    assert shown == [str(tmp_path)]
+
+
+def test_open_folder_in_vscode_runs_the_editor_with_the_folder(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(opener, "find_vscode", lambda: "/apps/code")
+    monkeypatch.setattr(
+        opener.subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw.get("cwd")))
+    )
+    assert opener.open_folder(str(tmp_path), "vscode") == {"action": "vscode"}
+    assert calls == [(["/apps/code", str(tmp_path)], str(tmp_path))]
+
+
+def test_open_folder_without_vscode_says_so(monkeypatch, tmp_path):
+    monkeypatch.setattr(opener, "find_vscode", lambda: None)
+    monkeypatch.setattr(
+        opener.subprocess, "Popen",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("nothing may run")),
+    )
+    with pytest.raises(LookupError):
+        opener.open_folder(str(tmp_path), "vscode")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="code.cmd is the Windows install layout")
+def test_find_vscode_runs_code_exe_never_the_batch_shim(monkeypatch, tmp_path):
+    # cmd.exe re-parses a batch file's arguments, and the folder comes from an
+    # OSC 7 report any program in the terminal can forge.
+    install = tmp_path / "Microsoft VS Code"
+    (install / "bin").mkdir(parents=True)
+    shim = install / "bin" / "code.cmd"
+    shim.write_text("@echo off", encoding="utf-8")
+    exe = install / "Code.exe"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(opener.shutil, "which", lambda name: str(shim) if name == "code" else None)
+    assert opener.find_vscode() == str(exe)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows install locations")
+def test_find_vscode_falls_back_to_the_per_user_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(opener.shutil, "which", lambda name: None)
+    monkeypatch.setenv("LocalAppData", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+    assert opener.find_vscode() is None
+    exe = tmp_path / "Programs" / "Microsoft VS Code" / "Code.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    assert opener.find_vscode() == str(exe)

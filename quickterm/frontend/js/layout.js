@@ -6,8 +6,12 @@
 // reused across re-renders so terminals survive structural changes.
 
 import { Pane } from "./pane.js";
+import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 
 const MIN_PANE_PX = 90;
+// Pointer travel before a press on a header becomes a drag. Below it, the
+// press is a click (focus) or half of a double-click (rename).
+const DRAG_START_PX = 6;
 
 export class LayoutManager {
   constructor(gridEl, zoomHostEl, opts = {}) {
@@ -20,7 +24,7 @@ export class LayoutManager {
   }
 
   newPane(profile, cwd, sessionId, launchSpec, title) {
-    return new Pane({
+    const pane = new Pane({
       fontFamily: this.opts.fontFamily,
       fontSize: this.opts.fontSize,
       theme: this.opts.theme,
@@ -35,6 +39,8 @@ export class LayoutManager {
         if (this.opts.onPaneAction) this.opts.onPaneAction(action, p);
       },
     });
+    this._wireDrag(pane);
+    return pane;
   }
 
   init() {
@@ -113,6 +119,19 @@ export class LayoutManager {
 
   splitFocused(dir) {
     return this.splitPane(this.focused, dir);
+  }
+
+  // Drop `pane` on `target`: `zone` is a side (dock it there) or "center"
+  // (swap the two). A structural change like a split, so it is rendered and
+  // autosaved the same way. Returns false when nothing moved.
+  movePane(pane, target, zone) {
+    const root = movePaneNode(this.root, pane, target, zone);
+    if (!root) return false;
+    this.root = root;
+    this.render();
+    this.focusPane(pane);
+    this._changed();
+    return true;
   }
 
   closePane(pane = this.focused) {
@@ -375,6 +394,98 @@ export class LayoutManager {
       window.addEventListener("pointerup", up);
       window.addEventListener("pointercancel", up);
     });
+  }
+
+  // ---- drag to rearrange ----
+  //
+  // The header is the handle. It exists only with two or more panes and never
+  // while zoomed, so a lone pane cannot start a drag. A few pixels of travel
+  // start one, which leaves click-to-focus and double-click-to-rename alone;
+  // Escape cancels. The zone under the pointer is the outer band of another
+  // pane (dock on that side) or its middle (swap), previewed by one fixed
+  // element over the half the pane would take.
+  _wireDrag(pane) {
+    const tab = pane.tabEl;
+    if (!tab) return;
+    tab.addEventListener("pointerdown", (down) => {
+      if (down.button !== 0 || this.zoomed) return;
+      if (down.target.closest("input")) return; // a rename in progress
+      const startX = down.clientX;
+      const startY = down.clientY;
+      const pointerId = down.pointerId;
+      let dragging = false;
+      let hint = null;
+      let ghost = null;
+      let preview = null;
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", stop);
+        window.removeEventListener("keydown", key, true);
+        if (!dragging) return;
+        dragging = false;
+        try { tab.releasePointerCapture(pointerId); } catch (_) { /* already released */ }
+        document.body.classList.remove("dragging", "pane-dragging");
+        ghost.remove();
+        preview.remove();
+      };
+      const move = (ev) => {
+        if (!dragging) {
+          if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_START_PX) return;
+          dragging = true;
+          // Capture, so the drop lands here even from over an xterm canvas or
+          // outside the window; body.dragging also switches pointer events
+          // off on every pane, exactly as the splitter drag does.
+          try { tab.setPointerCapture(pointerId); } catch (_) { /* old WebView */ }
+          document.body.classList.add("dragging", "pane-dragging");
+          ghost = document.createElement("div");
+          ghost.className = "pane-drag-ghost";
+          ghost.textContent = pane.displayName();
+          preview = document.createElement("div");
+          preview.className = "pane-drop-hint";
+          preview.hidden = true;
+          document.body.append(ghost, preview);
+        }
+        // Kept inside the window, or a drop near the right edge hides the
+        // very name that says what is being moved.
+        ghost.style.left = `${Math.max(0, Math.min(ev.clientX + 12, window.innerWidth - ghost.offsetWidth - 4))}px`;
+        ghost.style.top = `${Math.max(0, Math.min(ev.clientY + 12, window.innerHeight - ghost.offsetHeight - 4))}px`;
+        hint = this._dropHint(pane, ev.clientX, ev.clientY);
+        preview.hidden = !hint;
+        if (!hint) return;
+        const box = zoneRect(hint.rect, hint.zone);
+        preview.style.left = `${box.left}px`;
+        preview.style.top = `${box.top}px`;
+        preview.style.width = `${box.width}px`;
+        preview.style.height = `${box.height}px`;
+        preview.dataset.zone = hint.zone;
+      };
+      const up = () => {
+        const drop = dragging ? hint : null;
+        stop();
+        if (drop) this.movePane(pane, drop.target, drop.zone);
+      };
+      const key = (ev) => {
+        if (ev.key !== "Escape" || !dragging) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        stop();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", stop);
+      window.addEventListener("keydown", key, true);
+    });
+  }
+
+  _dropHint(dragged, x, y) {
+    for (const target of this.panes()) {
+      if (target === dragged) continue;
+      const rect = target.el.getBoundingClientRect();
+      const zone = dropZone(rect, x, y);
+      if (zone) return { target, zone, rect };
+    }
+    return null;
   }
 
   _findLeaf(pane, node = this.root, parent = null) {

@@ -9,11 +9,14 @@ export function renderHelp() {
       ["Alt Shift ↓", "Split selected profile below in current folder"], ["Alt arrows", "Move between panes"],
       ["Alt N", "New default terminal"], ["Alt Z", "Focus one pane"],
       ["Alt Shift ← / ↑", "Previous / next new-terminal profile"],
+      ["Alt Shift E", "Open the focused terminal's folder in Explorer"],
+      ["Alt Shift C", "Open the focused terminal's folder in VS Code"],
       ["Alt D", "Detach current pane"], ["Alt W", "Confirm kill and close"],
       ["Ctrl +", "Bigger terminal text"], ["Ctrl -", "Smaller terminal text"],
       ["Ctrl 0", "Reset terminal text size"],
       ["Ctrl C", "Copy selection (otherwise interrupt)"], ["Ctrl V", "Paste into terminal"],
       ["Right click", "Copy the current selection"],
+      ["Drag a pane header", "Move the pane: an edge of another pane docks it there, the middle swaps the two"],
       ["Ctrl click", "Open a link or file path printed in the terminal"],
     ];
     const keyCard = make("section", "help-card");

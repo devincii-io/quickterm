@@ -387,7 +387,7 @@ REST (JSON, under `/api`):
 | GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
-| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. |
+| POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. With `app` (`explorer` \\| `vscode`), `{target, app}` opens the existing folder `target` in that app → `{action: app}`: unknown app or not a folder → 400, missing folder → 404, VS Code not installed → 404 with a `detail` naming that. VS Code is launched from `Code.exe`, never the `code.cmd` shim (cmd.exe re-parses batch arguments, and the folder comes from an OSC 7 report). |
 
 JSON bodies for session creation, elevation, and full-config updates are capped
 at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
@@ -589,8 +589,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   chevron beside it is a native `<select>` over Personal profiles, System
   shells and the built-in Claude choices (`claude:continue|new|resume`, the
   CLI plus one flag, no profile needed); the workspace row is a native
-  `<select>` whose last option is **+ new scratch**, with the folder under it
-  and the `#sb-save` dot beside it; the terminal list; four icons (new window,
+  `<select>` whose last option is **+ new scratch**, with the folder under it,
+  two buttons that open the focused terminal's folder in Explorer / VS Code
+  (`onOpenFolder`; also Alt+Shift+E / Alt+Shift+C and two palette rows) and
+  the `#sb-save` dot beside it; the terminal list; four icons (new window,
   dashboard, settings, help) and the collapse chevron. Double-click on a
   terminal row renames it (`onRenameSession` → `PATCH /api/sessions/{id}`,
   then `Pane.setTitle`). Three modes, remembered in `quickterm.sidebarMode`:
@@ -638,6 +640,14 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Font size: Ctrl+±/0 change the focused pane only and are temporary; the
   saved default for every pane lives in Settings. Pane sizing lives on the
   splitter (drag, keyboard, double-click to balance) and Alt+Z zooms.
+- Pane rearrangement: drag a pane header onto another pane. The outer 30 %
+  band of the target docks the dragged pane on that side (a new split at
+  ratio 0.5; the split it left collapses into its sibling), the middle swaps
+  the two leaves and keeps every ratio. `pane_move.js` is pure and
+  unit-tested; `LayoutManager.movePane` renders and autosaves the result
+  through `onLayoutChange` like a split. A drag starts after 6 px of travel,
+  so click-to-focus and double-click-to-rename are unchanged; Escape cancels
+  it; a lone or zoomed pane has no header and so cannot be dragged.
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
@@ -670,7 +680,8 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   path that was typed but never listed, so a typo shows an error in the modal
   instead of becoming a workspace folder that does not exist.
 - Command palette Alt+K: fuzzy over profiles / actions (new terminal, split h/v,
-  zoom, detach, kill, open file viewer) / snippets / recent sessions. Workspaces
+  zoom, detach, kill, open folder in Explorer / VS Code, open file viewer) /
+  snippets / recent sessions. Workspaces
   are offered ONLY as enumerated `load workspace: <name>` rows. There is no
   free-text workspace prompt, because a typo used to tear the whole layout down
   silently; saving is owned by the Dashboard, which validates the name and shows
@@ -696,6 +707,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (readline/PSReadLine undo) reach the shell on ANSI layouts.
   Alt+Shift+Left/Up cycle the previous/next new-terminal profile. Ctrl+Left/Right
   remain untouched for PowerShell/readline word navigation.
+  Alt+Shift+E / Alt+Shift+C open the focused terminal's folder (its OSC 7
+  directory, else its launch folder, else the workspace folder) in Explorer /
+  VS Code through `POST /api/open`; plain Alt+E and Alt+C stay with the shell
+  (Alt+C is readline's capitalize-word).
 - A second ordinary QuickTerm process never creates another native viewer.
   It authenticates to the existing loopback backend, queues an optional Explorer
   folder through `/api/launches`, and restores/focuses the one existing window.

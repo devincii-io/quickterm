@@ -31,6 +31,8 @@ async function captureHandler({ paletteOpen = false } = {}) {
     fontSmaller: () => calls.push("fontSmaller"),
     fontReset: () => calls.push("fontReset"),
     toggleSidebar: () => calls.push("toggleSidebar"),
+    openExplorer: () => calls.push("openExplorer"),
+    openEditor: () => calls.push("openEditor"),
   });
   return { handler, calls };
 }
@@ -144,4 +146,23 @@ test("Alt+Shift+S cycles the sidebar; plain Alt+S is still Settings and Alt+B is
   handler(back);
   assert.equal(back.defaultPrevented, false);
   assert.deepEqual(calls, ["toggleSidebar", "toggleSettings"]);
+});
+
+test("Alt+Shift+E and Alt+Shift+C open the folder; plain Alt+E and Alt+C stay with the shell", async () => {
+  const { handler, calls } = await captureHandler();
+
+  const explorer = keyEvent({ key: "E", altKey: true, shiftKey: true });
+  handler(explorer);
+  assert.equal(explorer.defaultPrevented, true);
+  const editor = keyEvent({ key: "C", altKey: true, shiftKey: true });
+  handler(editor);
+  assert.equal(editor.defaultPrevented, true);
+
+  // Alt+C is readline's capitalize-word; Alt+E is left alone as well.
+  for (const key of ["c", "e"]) {
+    const event = keyEvent({ key, altKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, false, `Alt+${key} must reach the shell`);
+  }
+  assert.deepEqual(calls, ["openExplorer", "openEditor"]);
 });

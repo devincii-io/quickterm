@@ -1,15 +1,19 @@
-"""Open URLs / local paths with the OS default handler (terminal Ctrl+click).
+"""Open URLs / local paths with the OS default handler (terminal Ctrl+click),
+and open a folder in the file manager or VS Code (sidebar buttons, Alt+Shift+E
+and Alt+Shift+C).
 
-Only two shapes are accepted: http(s) URLs and existing local paths. Anything
-else raises ValueError (the server maps it to 400). Executable-ish files are
-revealed in the file manager instead of run: a program printing a path to a
-.exe must not be able to lure a click into executing it.
+Only two shapes are accepted by open_target: http(s) URLs and existing local
+paths. Anything else raises ValueError (the server maps it to 400).
+Executable-ish files are revealed in the file manager instead of run: a
+program printing a path to a .exe must not be able to lure a click into
+executing it.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import webbrowser
@@ -65,3 +69,78 @@ def open_target(target: str) -> dict:
         return {"action": "revealed"}
     subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
     return {"action": "opened"}
+
+
+# ---- folders -----------------------------------------------------------------
+
+FOLDER_APPS = ("explorer", "vscode")
+
+
+def find_vscode() -> str | None:
+    """Path of the VS Code executable, or None when it is not installed.
+
+    On Windows `shutil.which("code")` finds the `code.cmd` shim, a batch file.
+    cmd.exe re-parses a batch file's arguments, so a folder name containing
+    `&` or `"` could run something. The pane's directory comes from the shell's
+    OSC 7 report, which any program running in the terminal can forge, so the
+    shim is never launched: its install folder holds the real Code.exe, and
+    that is what is run.
+    """
+    if sys.platform == "win32":
+        candidates: list[Path] = []
+        shim = shutil.which("code")
+        if shim:
+            candidates.append(Path(shim).resolve().parent.parent / "Code.exe")
+        local = os.environ.get("LocalAppData")
+        if local:
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        candidates.append(Path(program_files) / "Microsoft VS Code" / "Code.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+    found = shutil.which("code")
+    if found:
+        return found
+    if sys.platform == "darwin":
+        bundled = Path("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code")
+        if bundled.is_file():
+            return str(bundled)
+    return None
+
+
+def _show_folder(folder: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(str(folder))  # noqa: S606 - a directory, so Explorer
+        return
+    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+
+
+def open_folder(path: str, app: str) -> dict:
+    """Open the existing directory `path` in `app` ("explorer" or "vscode").
+
+    Returns {"action": app}. Raises ValueError for an unknown app, an empty
+    path or a path that is not a directory; FileNotFoundError when the path
+    does not exist; LookupError when VS Code is not installed.
+    """
+    if app not in FOLDER_APPS:
+        raise ValueError(f"unknown app: {app!r}")
+    cleaned = (path or "").strip().strip('"').strip("'")
+    if not cleaned:
+        raise ValueError("empty path")
+    folder = Path(os.path.expanduser(cleaned))
+    if not folder.exists():
+        raise FileNotFoundError(cleaned)
+    if not folder.is_dir():
+        raise ValueError("not a folder")
+    if app == "vscode":
+        code = find_vscode()
+        if not code:
+            raise LookupError("VS Code was not found on this computer")
+        # Absolute image and an explicit cwd, for the same reason explorer.exe
+        # is spelled out above: never let CreateProcess search for the program.
+        subprocess.Popen([code, str(folder)], cwd=str(folder))
+        return {"action": "vscode"}
+    _show_folder(folder)
+    return {"action": "explorer"}

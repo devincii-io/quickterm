@@ -68,7 +68,9 @@ in the Dashboard and sidebar rather than silently failing the next terminal.
 The sidebar is the whole interface: there is no status bar and no header on
 a lone pane. `Alt+Shift+S` cycles it through full, a 30 px rail of state dots,
 and hidden; hidden leaves a small **+** over the terminal's left edge that you
-can drag up and down. The workspace row in the sidebar controls persistence. A named workspace autosaves
+can drag up and down. Two buttons beside the workspace name open the focused
+terminal's folder in Explorer or VS Code (`Alt+Shift+E` / `Alt+Shift+C`).
+The workspace row in the sidebar controls persistence. A named workspace autosaves
 its exact split arrangement and live session IDs for reattachment with
 in-memory scrollback, for as long as those processes are alive. If a saved
 process is gone, QuickTerm restores an explicitly unavailable pane and never
@@ -123,6 +125,7 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 | `Alt+Shift+Left` / `Alt+Shift+Up` | Cycle previous / next profile used by new terminals |
 | `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |
 | `Alt+Shift+S` | Sidebar: full, rail, hidden |
+| `Alt+Shift+E` / `Alt+Shift+C` | Open the focused terminal's folder in Explorer / VS Code |
 | `Alt+Arrows` | Move focus between panes |
 | `Alt+Z` | Zoom focused pane |
 | `Alt+D` | Detach pane; the terminal keeps running in the background |
@@ -132,6 +135,7 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Compatible copy / paste aliases |
 | `Ctrl+Click` | Open a URL or file path printed in the terminal |
 | Drop file/image | Paste its quoted local path without submitting it |
+| Drag a pane header | Move the pane: an edge of another pane docks it there, the middle swaps the two |
 | `Ctrl+Alt+`` ` | Summon/hide the window (global, configurable, also restores from tray) |
 
 Split actions open the currently selected terminal profile in the focused

@@ -28,6 +28,7 @@ const PATHS = {
   "circle-dashed": '<circle cx="12" cy="12" r="7.5" stroke-dasharray="3.4 3.6"/>',
   diamond: '<path d="M12 3.2 20.8 12 12 20.8 3.2 12z"/>',
   link: '<path d="M10 14a5 5 0 0 0 7.1 0l2.4-2.4a5 5 0 0 0-7.1-7.1L11 5.9"/><path d="M14 10a5 5 0 0 0-7.1 0l-2.4 2.4a5 5 0 0 0 7.1 7.1L13 18.1"/>',
+  code: '<polyline points="8.5 7 3.5 12 8.5 17"/><polyline points="15.5 7 20.5 12 15.5 17"/><line x1="13.6" y1="5" x2="10.4" y2="19"/>',
   "new-window":
     '<rect x="3" y="4.5" width="13" height="13" rx="1.8"/><path d="M15 3.5h5.5V9"/><line x1="20" y1="4" x2="13.5" y2="10.5"/>',
 };

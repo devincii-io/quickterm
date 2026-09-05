@@ -188,7 +188,7 @@ export class Pane {
     const el = document.createElement("div");
     el.className = "pane";
     el.innerHTML =
-      '<div class="pane-tab" title="Double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span><span class="pane-tab-activity" hidden></span></div>' +
+      '<div class="pane-tab" title="Drag to move · double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span><span class="pane-tab-activity" hidden></span></div>' +
       '<div class="pane-actions" aria-label="Pane actions">' +
         '<button class="pane-action" type="button" data-action="split-h" title="Split right (Alt+Shift+Right)">|</button>' +
         '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">—</button>' +

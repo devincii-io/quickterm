@@ -1040,9 +1040,11 @@ def test_update_install_value_error_is_400(client, monkeypatch):
 # --- open endpoint (terminal Ctrl+click links) --------------------------------
 
 
-def _stub_opener_module(monkeypatch, open_target):
+def _stub_opener_module(monkeypatch, open_target, open_folder=None):
     mod = types.ModuleType("quickterm.opener")
     mod.open_target = open_target
+    if open_folder is not None:
+        mod.open_folder = open_folder
     monkeypatch.setitem(sys.modules, "quickterm.opener", mod)
 
 
@@ -1073,6 +1075,34 @@ def test_open_endpoint_maps_errors(client, monkeypatch):
 
     _stub_opener_module(monkeypatch, missing)
     assert client.post("/api/open", json={"target": "C:/gone"}).status_code == 404
+
+
+def test_open_endpoint_opens_a_folder_in_an_app(client, monkeypatch):
+    opened = []
+
+    def fake_folder(path, app):
+        opened.append((path, app))
+        return {"action": app}
+
+    def never(target):
+        raise AssertionError("a folder request must not go through open_target")
+
+    _stub_opener_module(monkeypatch, never, fake_folder)
+    r = client.post("/api/open", json={"target": "C:/proj", "app": "vscode"})
+    assert r.status_code == 200
+    assert r.json() == {"action": "vscode"}
+    assert opened == [("C:/proj", "vscode")]
+    assert client.post("/api/open", json={"target": "C:/proj", "app": 7}).status_code == 400
+
+
+def test_open_endpoint_reports_a_missing_editor(client, monkeypatch):
+    def no_editor(path, app):
+        raise LookupError("VS Code was not found on this computer")
+
+    _stub_opener_module(monkeypatch, lambda target: None, no_editor)
+    r = client.post("/api/open", json={"target": "C:/proj", "app": "vscode"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "VS Code was not found on this computer"
 
 
 # --- WebSocket attach protocol ----------------------------------------------

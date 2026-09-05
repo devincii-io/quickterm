@@ -101,6 +101,11 @@ export const getTerminalOptions = () => req("GET", "/api/system/terminals");
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
 export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);
 export const openTarget = (target) => req("POST", "/api/open", { target });
+// The sidebar's folder buttons, Alt+Shift+E / Alt+Shift+C and the palette:
+// open an existing folder in Explorer or VS Code. A 404 carries a `detail`
+// when VS Code is not installed, so the banner can say that instead of
+// "no such path".
+export const openFolder = (path, app) => req("POST", "/api/open", { target: path, app });
 export const installUpdate = () => req("POST", "/api/update/install");
 
 // Branding assets (logos). Uploads send the raw file with its own content-type.

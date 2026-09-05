@@ -318,6 +318,31 @@ async function boot() {
     return workspacePath && workspacePathExists ? workspacePath : null;
   }
 
+  // "Here" for the sidebar's folder buttons, Alt+Shift+E/C and the palette:
+  // the focused terminal's current directory (OSC 7, else its launch folder),
+  // else the workspace folder. Scratch resolves to its throwaway root, which
+  // is the honest answer: that is where the shell is.
+  function hereFolder() {
+    return layout.focused?.bestKnownCwd?.() || usableWorkspacePath() || null;
+  }
+
+  async function openHere(appName) {
+    const label = appName === "vscode" ? "VS Code" : "Explorer";
+    const folder = hereFolder();
+    if (!folder) {
+      showError(`Nothing to open in ${label}: focus a terminal or give this workspace a folder.`);
+      return false;
+    }
+    try {
+      await api.openFolder(folder, appName);
+      return true;
+    } catch (error) {
+      const why = error?.detail ? `: ${error.detail}` : "";
+      showError(`Could not open ${folder} in ${label}${why}.`);
+      return false;
+    }
+  }
+
   // What to pre-fill when the user names a workspace. The folder the focused
   // terminal is actually in is the best answer: a scratch shell the user cd'd
   // into their project names that project. The disposable scratch root is
@@ -1482,6 +1507,9 @@ async function boot() {
     moveSessionHere,
     killWorkspaceSession,
     focusedPaneName: () => layout.focused?.displayName() || null,
+    hereFolder,
+    openExplorer: () => openHere("explorer"),
+    openEditor: () => openHere("vscode"),
     // Snippets type straight into the focused terminal. Say where they went,
     // say when they went nowhere, and confirm anything multi-line first. One
     // Enter in the palette should never run three commands unannounced.
@@ -1868,6 +1896,8 @@ async function boot() {
     toggleSettings: () => { palette.close(); panels.toggle("settings"); },
     toggleHelp: () => { palette.close(); panels.toggle("help"); },
     toggleSidebar: () => launcherView?.cycleMode(),
+    openExplorer: app.openExplorer,
+    openEditor: app.openEditor,
     fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
     fontSmaller: () => setScopedFontSize(scopedFontSize() - 1),
     fontReset: resetScopedFontSize,
@@ -1905,6 +1935,7 @@ async function boot() {
       // old workspace's saved ownership before attaching.
       onMoveSession: (session, fromWorkspace) => app.moveSessionHere(session, fromWorkspace),
       onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
+      onOpenFolder: openHere,
       sessions: lastSessions,
       attachedSessionIds: app.attachedSessionIds(),
       ownedSessionIds: app.ownedSessionIds(),

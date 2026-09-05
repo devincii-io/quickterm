@@ -491,3 +491,58 @@ def test_the_chrome_is_the_sidebar_and_nothing_else():
     # The save dot keeps its id: main.js drives it through data-state only.
     assert 'save.id = "sb-save";' in launcher
     assert "status.textContent = text;" not in main
+
+
+def test_open_folder_actions_share_one_resolver_and_one_route():
+    """Sidebar buttons, Alt+Shift+E/C and two palette rows all open the focused
+    terminal's folder. One resolver (`hereFolder`: the pane's OSC 7 directory,
+    else its launch folder, else the workspace folder) and one token-gated
+    route (`POST /api/open` with `app`), so every entry point opens the same
+    place and says so in the same banner when it cannot.
+    """
+    main = MAIN_JS.read_text(encoding="utf-8")
+    keys = KEYS_JS.read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
+
+    assert "return layout.focused?.bestKnownCwd?.() || usableWorkspacePath() || null;" in main
+    assert 'openExplorer: () => openHere("explorer"),' in main
+    assert 'openEditor: () => openHere("vscode"),' in main
+    assert "onOpenFolder: openHere," in main
+    # Shift layer only: plain Alt+C is readline's capitalize-word.
+    assert 'if (key === "e") return done(actions.openExplorer);' in keys
+    assert 'if (key === "c") return done(actions.openEditor);' in keys
+    assert keys.index("// Alt+Shift layer") < keys.index('if (key === "e") return done(actions.openExplorer);')
+    assert 'label: "open folder in Explorer", hint: folderHint("Alt+Shift+E")' in palette
+    assert 'label: "open folder in VS Code", hint: folderHint("Alt+Shift+C")' in palette
+    assert 'openIn("explorer", "folder",' in launcher
+    assert 'openIn("vscode", "code",' in launcher
+    assert 'req("POST", "/api/open", { target: path, app })' in api
+
+
+def test_panes_move_by_dragging_their_header():
+    """The header is the drag handle. It is only drawn with two or more panes
+    and never while zoomed, so a lone pane cannot start a drag. The geometry
+    and the tree surgery live in pane_move.js, pure and unit-tested; layout.js
+    renders the result and autosaves it like any other structural change.
+    """
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+    pane = PANE_JS.read_text(encoding="utf-8")
+
+    assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in layout
+    assert "this._wireDrag(pane);" in layout
+    move = layout[layout.index("  movePane(pane, target, zone) {"):]
+    move = move[:move.index("\n  }\n") + 4]
+    assert "const root = movePaneNode(this.root, pane, target, zone);" in move
+    assert "this.render();" in move and "this._changed();" in move
+    # A press has to travel before it is a drag, or a double-click rename and
+    # a click to focus would both start one.
+    assert "const DRAG_START_PX = 6;" in layout
+    assert "if (down.button !== 0 || this.zoomed) return;" in layout
+    assert 'title="Drag to move · double-click to rename"' in pane
+    assert ".pane-drop-hint" in app_css and ".pane-drag-ghost" in app_css
+    assert ".pane-drag-ghost {" in app_css and "pointer-events: none;" in app_css
