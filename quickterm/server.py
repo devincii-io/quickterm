@@ -81,6 +81,7 @@ def create_app(
     open_window: Callable[[str | None, str | None], str] | None = None,
 ) -> FastAPI:
     inventory_cache: dict[str, Any] = {}
+    workspace_write_lock = asyncio.Lock()
     from quickterm import auth
 
     app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
@@ -532,32 +533,33 @@ def create_app(
             if isinstance(raw_session_ids, list)
             else sorted(_layout_session_ids(body["layout"]))
         )
-        # The workspace folder is edited from one place but autosaved from
-        # several. An ABSENT "path" key preserves the stored folder; an
-        # explicit null clears it. Without that rule every layout autosave
-        # would silently drop the folder the user just chose.
-        if "path" in body:
-            try:
-                path = workspace.normalize_root(body.get("path"))
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-        else:
-            existing = await asyncio.to_thread(workspace.load_workspace, name)
-            path = getattr(existing, "path", None) if existing is not None else None
-        # The layout autosaves on every pane change, and save_workspace fsyncs.
-        # Left on the event loop that stalls every PTY pump for the duration of
-        # a durable write.
-        await asyncio.to_thread(
-            workspace.save_workspace,
-            workspace.Workspace(
-                name=name,
-                layout=body["layout"],
-                logo=logo,
-                path=path,
-                session_ids=session_ids,
-            ),
-        )
-        manager.sync_workspace(name, set(session_ids))
+        async with workspace_write_lock:
+            # The workspace folder is edited from one place but autosaved from
+            # several. An ABSENT "path" key preserves the stored folder; an
+            # explicit null clears it. Without that rule every layout autosave
+            # would silently drop the folder the user just chose.
+            if "path" in body:
+                try:
+                    path = workspace.normalize_root(body.get("path"))
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            else:
+                existing = await asyncio.to_thread(workspace.load_workspace, name)
+                path = getattr(existing, "path", None) if existing is not None else None
+            # The layout autosaves on every pane change, and save_workspace fsyncs.
+            # Left on the event loop that stalls every PTY pump for the duration of
+            # a durable write.
+            await asyncio.to_thread(
+                workspace.save_workspace,
+                workspace.Workspace(
+                    name=name,
+                    layout=body["layout"],
+                    logo=logo,
+                    path=path,
+                    session_ids=session_ids,
+                ),
+            )
+            manager.sync_workspace(name, set(session_ids))
         return Response(status_code=204)
 
     @app.delete("/api/workspaces/{name}")

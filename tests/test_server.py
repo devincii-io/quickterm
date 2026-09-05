@@ -9,11 +9,13 @@ import dataclasses
 import json
 import os
 import sys
+import threading
 import time
 import types
 import uuid
 from dataclasses import dataclass, field
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -275,6 +277,40 @@ def fake_workspace(monkeypatch):
     mod.root_exists = real_workspace.root_exists
     monkeypatch.setitem(sys.modules, "quickterm.workspace", mod)
     return store
+
+
+async def test_workspace_puts_cannot_finish_out_of_order(manager, cfg, fake_workspace, monkeypatch):
+    module = sys.modules["quickterm.workspace"]
+    started = threading.Event()
+    release = threading.Event()
+    writes = []
+
+    def save(ws):
+        writes.append(ws.layout["title"])
+        if ws.layout["title"] == "old":
+            started.set()
+            assert release.wait(3)
+        fake_workspace[ws.name] = ws
+
+    monkeypatch.setattr(module, "save_workspace", save)
+    transport = httpx.ASGITransport(app=create_app(manager, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url=f"http://127.0.0.1:{cfg.port}") as client:
+        old = asyncio.create_task(client.put("/api/workspaces/dev", json={
+            "layout": {"type": "pane", "title": "old"}, "path": "/tmp/project",
+        }))
+        assert await asyncio.to_thread(started.wait, 2)
+        new = asyncio.create_task(client.put("/api/workspaces/dev", json={
+            "layout": {"type": "pane", "title": "new"},
+        }))
+        try:
+            await asyncio.sleep(0.05)
+            assert writes == ["old"]
+        finally:
+            release.set()
+        responses = await asyncio.gather(old, new)
+        assert all(response.status_code == 204 for response in responses)
+    assert fake_workspace["dev"].layout["title"] == "new"
+    assert fake_workspace["dev"].path == real_workspace.normalize_root("/tmp/project")
 
 
 def _wait_for(predicate, timeout: float = 3.0) -> None:

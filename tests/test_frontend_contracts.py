@@ -361,11 +361,12 @@ def test_two_windows_can_never_own_one_workspace():
     assert (FRONTEND_JS / "windows.js").exists()
     assert 'from "./windows.js"' in main
 
-    # The claim is taken before anything is saved, discarded or torn down, and a
-    # refusal is a visible banner rather than a silent no-op.
+    # Save while still owning the outgoing workspace, then claim before teardown.
     start = main.index("  async function switchWorkspace(")
     switch = main[start:main.index("\n  // Which scratch terminals", start)]
-    assert switch.index("await claimWorkspaceFor(target)") < switch.index("transitioning = true;")
+    assert switch.index("await workspace.save(") < switch.index("await claimWorkspaceFor(target)")
+    assert switch.index("await claimWorkspaceFor(target)") < switch.index("await discardScratch();")
+    assert "if (transitioning) return false;" in switch
     assert "showError(refusal);" in switch
 
     # Boot claims before restoring: this window autosaves the layout on every
@@ -419,6 +420,8 @@ def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     assert "fetch(`/api/windows/${encodeURIComponent(windowId)}`, {" in exiting
     assert exiting.count("keepalive: true") >= 2
     assert '"DELETE"' in exiting
+    assert ".finally(release)" in exiting
+    assert "/api/sessions/cleanup" not in exiting
 
 
 def test_a_window_registers_under_the_id_its_shell_gave_it():

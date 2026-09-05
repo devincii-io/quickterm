@@ -2,6 +2,18 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## Unreleased
+
+- Show two workspaces in one window from the sidebar or Alt+K. Each view has
+  a colored border and workspace name, with a draggable divider, vertical
+  stacking, and hide/show controls. Closing the second view saves its layout
+  and leaves terminals running.
+- Serialize workspace saves so older writes cannot replace a newer layout.
+  Finish the outgoing save before transferring its workspace claim, and reject
+  overlapping workspace switches.
+- Window close no longer unconditionally kills unassigned scratch terminals.
+  Safe idle cleanup remains the backend reaper's responsibility.
+
 ## QuickTerm 3.7.0
 
 ### Open the folder you are in

@@ -8,7 +8,8 @@ import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
-import { terminalMayFocus } from "./focus.js";
+import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
+import { WorkspaceViews } from "./workspace_views.js";
 import {
   claimOutcome, claimRefusalMessage, conflictHolder, describeHolder, newWindowUrl,
   normalizeWindows, windowChoiceMessage, windowChoices, workspaceHolder,
@@ -21,6 +22,7 @@ const ACTIVE_WORKSPACE_KEY = "quickterm.activeWorkspace";
 const SCRATCH_ACTIVE_KEY = "quickterm.scratchActive";
 const SCRATCH_WS = "scratch";
 const WINDOW_ID_KEY = "qt.windowId";
+const embedded = window.parent !== window && new URLSearchParams(location.search).get("embedded") === "1";
 // Well inside whatever the registry uses to expire a silent window: a missed
 // beat must never look like a crashed window, because expiry is what hands this
 // window's workspace to someone else.
@@ -41,6 +43,7 @@ function storedScratchActive() {
 // run (tray close and reopen) the scratch file still exists and wins, and on
 // a fresh start it is gone and the named workspace comes back.
 function rememberWorkspace(name) {
+  if (embedded) return;
   try {
     if (name === SCRATCH_WS) {
       localStorage.setItem(SCRATCH_ACTIVE_KEY, "1");
@@ -126,10 +129,12 @@ function captureWindowIdentity() {
 // claim are then two facts about the same window instead of a race between a
 // dying one and a new one over the same workspace.
 function rememberedWindowId() {
+  if (embedded) return null;
   try { return sessionStorage.getItem(WINDOW_ID_KEY) || null; } catch (_) { return null; }
 }
 
 function rememberWindowId(id) {
+  if (embedded) return;
   try { sessionStorage.setItem(WINDOW_ID_KEY, id); } catch (_) { /* storage may be disabled */ }
 }
 
@@ -230,6 +235,32 @@ async function boot() {
   let scratchRoot = cfg.scratch_dir || null;
   let fontSize = clampFont(cfg.font_size);
   let fontSaveTimer = null;
+  let exiting = false;
+  let suspended = false;
+  const views = embedded ? null : new WorkspaceViews({
+    current: () => currentWorkspace,
+    focus: () => layout.focused?.focusSoon(),
+    fit: () => layout.fitAll(),
+    error: showError,
+  });
+  function suspendView(value) {
+    if (suspended === value) return;
+    suspended = value;
+    if (value) claimFocus("inactive-view"); else releaseFocus("inactive-view");
+  }
+  if (embedded) {
+    suspendView(true);
+    document.addEventListener("pointerdown", () => {
+      window.parent.quicktermViews?.activate(true);
+      suspendView(false);
+    }, true);
+    window.addEventListener("focus", () => {
+      window.parent.quicktermViews?.activate(true);
+      suspendView(false);
+    });
+  } else {
+    window.quicktermViews = views;
+  }
 
   function ownSession(id) {
     if (!id) return;
@@ -1091,6 +1122,7 @@ async function boot() {
   }
 
   async function switchWorkspace(name, scratchCwd = null, { replaceScratch = false } = {}) {
+    if (transitioning) return false;
     if ((name || null) === currentWorkspace) return true;
     // The scratch sidebar row reports itself as null, but once scratch has been
     // adopted currentWorkspace is the string "scratch", so the guard above
@@ -1103,16 +1135,6 @@ async function boot() {
     // restored, not replaced; only the confirmed "New scratch" action replaces.
     const target = name
       || (!replaceScratch && workspaceNames.includes(SCRATCH_WS) ? SCRATCH_WS : null);
-    // Ask the registry first, before anything is saved, discarded or torn down.
-    // A refused switch must leave this window exactly where it was, with the
-    // reason on screen instead of a silent no-op.
-    if (target) {
-      const refusal = await claimWorkspaceFor(target);
-      if (refusal) {
-        showError(refusal);
-        return false;
-      }
-    }
     const leavingWorkspace = currentWorkspace;
     transitioning = true;
     clearTimeout(workspaceSaveTimer);
@@ -1127,13 +1149,19 @@ async function boot() {
         );
       } catch (_) {
         transitioning = false;
-        // The claim was moved a moment ago for a switch that is not happening.
-        // Put it back on the workspace this window is still sitting on.
-        if (target) await claimWorkspaceFor(currentWorkspace);
         showError(`Could not save “${currentWorkspace}”. The workspace was not switched and nothing was closed.`);
         return false;
       }
-    } else if (name) {
+    }
+    if (target) {
+      const refusal = await claimWorkspaceFor(target);
+      if (refusal) {
+        transitioning = false;
+        showError(refusal);
+        return false;
+      }
+    }
+    if (!currentWorkspace && name) {
       // A never-adopted scratch has no workspace file; leaving it is the one
       // time we clean up its disposable sessions immediately.
       await discardScratch();
@@ -1674,6 +1702,8 @@ async function boot() {
       currentWorkspace,
     ),
     openNewWindow,
+    openWorkspaceBeside: (name) => views?.open(name),
+    canShowWorkspaceBeside: () => !embedded,
     explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
     windowRegistryAvailable: () => registryAvailable,
     // Set when RegisterHotKey failed at startup (another program owns the
@@ -1904,6 +1934,8 @@ async function boot() {
   });
 
   function buildLauncher() {
+    views?.update();
+    if (embedded) window.parent.quicktermViews?.update();
     launcherView = initLauncher($("launcher"), {
       profiles,
       inventory: terminalInventory,
@@ -1945,6 +1977,10 @@ async function boot() {
       // sit here AND directly above as "Manage workspaces", pixel-identical
       // once the sidebar is collapsed.
       chrome: [
+        ...(!embedded ? [["two workspaces", () => {
+          panels.close();
+          palette.newWindowMode(true);
+        }]] : []),
         // The discoverable half of the palette's "new window…" row. Both land
         // in the same picker, because which workspace a second window opens on
         // is a choice and the free/taken list only exists in one place. No
@@ -1975,6 +2011,8 @@ async function boot() {
   }
 
   function persistOnExit() {
+    if (exiting) return;
+    exiting = true;
     launchLoopStopped = true;
     clearInterval(windowHeartbeatTimer);
     // keepalive, for the same reason the layout PUT below needs it: the
@@ -1982,13 +2020,14 @@ async function boot() {
     // release would never leave and this window's workspace would stay claimed
     // until the registry expired the heartbeat. That is the difference between
     // the other window opening it now and the user waiting out a timeout.
-    if (windowId) {
-      fetch(`/api/windows/${encodeURIComponent(windowId)}`, {
+    const release = () => {
+      if (!windowId) return;
+      return fetch(`/api/windows/${encodeURIComponent(windowId)}`, {
         method: "DELETE",
         headers: { ...api.authHeaders() },
         keepalive: true,
       }).catch(() => {});
-    }
+    };
     if (currentWorkspace && layout.root && !transitioning) {
       fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
         method: "PUT",
@@ -1999,15 +2038,9 @@ async function boot() {
           session_ids: [...ownedSessionIds()],
         }),
         keepalive: true,
-      }).catch(() => {});
-    } else if (scratchSessionIds.size) {
-      fetch("/api/sessions/cleanup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...api.authHeaders() },
-        body: JSON.stringify({ session_ids: [...scratchSessionIds] }),
-        keepalive: true,
-      }).catch(() => {});
-    }
+      }).catch(() => {}).finally(release);
+    } else release();
+    // The idle reaper has fresh activity data; pagehide must never kill scratch.
   }
   window.addEventListener("pagehide", persistOnExit);
 
@@ -2043,9 +2076,37 @@ async function boot() {
   // before this window and intentionally have no saved workspace yet. The
   // backend idle reaper already removes only safe, untouched, non-busy shells.
   transitioning = false;
+  window.quicktermView = {
+    workspace: () => currentWorkspace,
+    suspend: suspendView,
+    close: async () => {
+      if (transitioning) return false;
+      transitioning = true;
+      clearTimeout(workspaceSaveTimer);
+      clearTimeout(workspaceRetryTimer);
+      try {
+        if (currentWorkspace) {
+          await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo,
+            [...ownedSessionIds()], workspacePath);
+        }
+        for (const id of scratchSessionIds) {
+          await api.retainSession(id).catch((error) => { if (!sessionAlreadyGone(error)) throw error; });
+        }
+        if (windowId) await api.unregisterWindow(windowId);
+        exiting = true;
+        clearInterval(windowHeartbeatTimer);
+        launchLoopStopped = true;
+        return true;
+      } catch (error) {
+        transitioning = false;
+        scheduleWorkspaceSave();
+        throw error;
+      }
+    },
+  };
   buildLauncher();
   refreshStatus();
-  claimLaunchLoop();
+  if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
   if (cachedInventory) {
     setTimeout(() => {
