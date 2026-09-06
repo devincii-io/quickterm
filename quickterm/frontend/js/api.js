@@ -9,8 +9,8 @@ export function token() { return authToken; }
 export function authHeaders() { return authToken ? { "X-QuickTerm-Token": authToken } : {}; }
 export function wsSubprotocols() { return authToken ? [`qtauth.${authToken}`] : []; }
 
-async function req(method, path, body) {
-  const opts = { method, headers: { ...authHeaders() } };
+async function req(method, path, body, { keepalive = false } = {}) {
+  const opts = { method, headers: { ...authHeaders() }, ...(keepalive ? { keepalive } : {}) };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
@@ -56,13 +56,13 @@ export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURICom
 // `path` is deliberately three-valued: undefined omits the key so the server
 // keeps the stored folder (every layout autosave takes this branch), null
 // clears it, a string sets it.
-export const putWorkspace = (name, layout, logo, sessionIds = [], path) =>
+export const putWorkspace = (name, layout, logo, sessionIds = [], path, options) =>
   req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
     layout,
     logo: logo ?? null,
     session_ids: [...new Set(sessionIds || [])],
     ...(path === undefined ? {} : { path }),
-  });
+  }, options);
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
 // Directory-only listing for the in-app folder browser. A blank path lets the
 // backend choose the home folder, so the caller never has to know one.

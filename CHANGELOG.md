@@ -2,7 +2,7 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
-## Unreleased
+## QuickTerm 3.8.0
 
 - Show two workspaces in one window from the sidebar or Alt+K. Each view has
   a colored border and workspace name, with a draggable divider, vertical
@@ -13,6 +13,11 @@ Release history is also available on the [GitHub Releases page](https://github.c
   overlapping workspace switches.
 - Window close no longer unconditionally kills unassigned scratch terminals.
   Safe idle cleanup remains the backend reaper's responsibility.
+- Final page-exit saves use the autosave queue, so a pending older snapshot
+  cannot arrive afterward. Closing the second view marks its terminals retained,
+  including untouched shells in named workspaces.
+- Quitting while a viewer's WebSocket is already closing no longer interrupts
+  server shutdown with a duplicate-close error.
 
 ## QuickTerm 3.7.0
 

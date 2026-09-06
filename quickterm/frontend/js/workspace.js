@@ -6,8 +6,8 @@ import * as api from "./api.js";
 const saves = new Map();
 
 // `path` omitted preserves the stored workspace folder; null clears it.
-export async function save(name, layoutTree, logo, sessionIds = [], path) {
-  const snapshot = structuredClone([layoutTree, logo, sessionIds, path]);
+export async function save(name, layoutTree, logo, sessionIds = [], path, options) {
+  const snapshot = structuredClone([layoutTree, logo, sessionIds, path, options]);
   const previous = saves.get(name) || Promise.resolve();
   const pending = previous.catch(() => {}).then(() => api.putWorkspace(name, ...snapshot));
   saves.set(name, pending);

@@ -635,7 +635,7 @@ async function boot() {
   }
 
   async function persistCurrentWorkspace() {
-    if (!currentWorkspace || transitioning || !layout.root) return true;
+    if (exiting || !currentWorkspace || transitioning || !layout.root) return true;
     clearTimeout(workspaceSaveTimer);
     clearTimeout(workspaceRetryTimer);
     workspaceRetryTimer = null;
@@ -681,7 +681,7 @@ async function boot() {
   }
 
   function scheduleWorkspaceSave() {
-    if (!currentWorkspace || transitioning) return;
+    if (exiting || !currentWorkspace || transitioning) return;
     clearTimeout(workspaceSaveTimer);
     clearTimeout(workspaceRetryTimer);
     workspaceRetryTimer = null;
@@ -2029,16 +2029,12 @@ async function boot() {
       }).catch(() => {});
     };
     if (currentWorkspace && layout.root && !transitioning) {
-      fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...api.authHeaders() },
-        body: JSON.stringify({
-          layout: layout.serialize(),
-          logo: workspaceLogo,
-          session_ids: [...ownedSessionIds()],
-        }),
-        keepalive: true,
-      }).catch(() => {}).finally(release);
+      // Use the same queue as autosave: a queued older snapshot must never
+      // arrive after this one. Unload remains best-effort; explicit view close
+      // awaits the save while its document is still alive.
+      workspace.save(currentWorkspace, layout.serialize(), workspaceLogo,
+        [...ownedSessionIds()], undefined, { keepalive: true })
+        .catch(() => {}).finally(release);
     } else release();
     // The idle reaper has fresh activity data; pagehide must never kill scratch.
   }
@@ -2089,7 +2085,7 @@ async function boot() {
           await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo,
             [...ownedSessionIds()], workspacePath);
         }
-        for (const id of scratchSessionIds) {
+        for (const id of ownedSessionIds()) {
           await api.retainSession(id).catch((error) => { if (!sessionAlreadyGone(error)) throw error; });
         }
         if (windowId) await api.unregisterWindow(windowId);

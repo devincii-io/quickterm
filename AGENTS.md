@@ -18,6 +18,7 @@ uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
 uv run --no-sync python scripts/smoke_packaged.py                  # frozen PTY/auth/replay/routes smoke
+uv run --no-sync python scripts/smoke_workspace_views.py           # isolated native dual-view/close smoke
 python scripts/bench_throughput.py 20                             # output throughput
 ```
 

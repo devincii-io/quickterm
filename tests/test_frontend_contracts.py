@@ -419,6 +419,7 @@ def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     # expired.
     assert "fetch(`/api/windows/${encodeURIComponent(windowId)}`, {" in exiting
     assert exiting.count("keepalive: true") >= 2
+    assert "workspace.save(currentWorkspace" in exiting
     assert '"DELETE"' in exiting
     assert ".finally(release)" in exiting
     assert "/api/sessions/cleanup" not in exiting
