@@ -243,6 +243,10 @@ async function boot() {
     fit: () => layout.fitAll(),
     error: showError,
   });
+  // The view manager this document talks to: its own when it is the window,
+  // the parent's when it is one view inside a window. A view names itself to
+  // the parent by its own `window`, which is the iframe's contentWindow.
+  const viewHost = () => (embedded ? window.parent?.quicktermViews || null : views);
   function suspendView(value) {
     if (suspended === value) return;
     suspended = value;
@@ -251,15 +255,32 @@ async function boot() {
   if (embedded) {
     suspendView(true);
     document.addEventListener("pointerdown", () => {
-      window.parent.quicktermViews?.activate(true);
+      viewHost()?.activate(window);
       suspendView(false);
     }, true);
     window.addEventListener("focus", () => {
-      window.parent.quicktermViews?.activate(true);
+      viewHost()?.activate(window);
       suspendView(false);
     });
   } else {
     window.quicktermViews = views;
+  }
+  // Every saved workspace's folder, so the sidebar can tell whether the
+  // folder the focused terminal is in already belongs to a workspace. Filled
+  // off the boot path and refreshed whenever the list or a folder changes.
+  const workspaceRoots = new Map();
+  let workspaceRootsRefresh = null;
+  function refreshWorkspaceRoots() {
+    if (workspaceRootsRefresh) return workspaceRootsRefresh;
+    workspaceRootsRefresh = Promise.all(workspaceNames.map(async (name) => {
+      const saved = await workspace.details(name).catch(() => null);
+      return [name, saved ? saved.path || null : null];
+    })).then((entries) => {
+      workspaceRoots.clear();
+      for (const [name, root] of entries) workspaceRoots.set(name, root);
+      launcherView?.updateHere(hereState());
+    }).finally(() => { workspaceRootsRefresh = null; });
+    return workspaceRootsRefresh;
   }
 
   function ownSession(id) {
@@ -325,11 +346,6 @@ async function boot() {
     return { cmd: usable.executable, args, name: usable.label, terminalType: usable.id };
   }
 
-  function autoDir(pane) {
-    const rect = pane.el.getBoundingClientRect();
-    return rect.width > rect.height * 1.8 ? "h" : "v";
-  }
-
   // Where a new terminal should start when the caller has no directory of its
   // own. Inside a named workspace the answer is "let the backend resolve the
   // workspace folder"; in scratch it is the disposable scratch folder; a
@@ -384,6 +400,118 @@ async function boot() {
     if (paneCwd && paneCwd !== scratchRoot) return paneCwd;
     if (currentWorkspace && currentWorkspace !== SCRATCH_WS) return workspacePath;
     return null;
+  }
+
+  // Paths compare the way the file system does: separators unified, a
+  // trailing separator ignored, and case folded on Windows drives and shares.
+  function pathKey(value) {
+    if (!value) return "";
+    let key = String(value).replace(/\\/g, "/").replace(/\/+$/, "");
+    if (/^[A-Za-z]:|^\/\//.test(key)) key = key.toLowerCase();
+    return key;
+  }
+  const samePath = (a, b) => Boolean(a) && Boolean(b) && pathKey(a) === pathKey(b);
+  const insidePath = (child, parent) => Boolean(child) && Boolean(parent)
+    && pathKey(child).startsWith(`${pathKey(parent)}/`);
+  const baseName = (value) => pathKey(value).split("/").filter(Boolean).pop() || "";
+
+  // The sidebar's "workspace here" offer. The focused terminal is somewhere
+  // that is not this workspace's folder (or is in scratch), and that folder
+  // either already is a workspace's root, in which case the offer is to open
+  // that workspace, or is not, in which case the offer is to make it one
+  // named after the folder. Inside the workspace's own tree there is no
+  // offer: every `cd src` would otherwise grow a button.
+  function hereState() {
+    const folder = layout.focused?.bestKnownCwd?.() || null;
+    if (!folder || samePath(folder, scratchRoot)) return null;
+    const home = currentWorkspace && currentWorkspace !== SCRATCH_WS ? usableWorkspacePath() : null;
+    if (home && (samePath(folder, home) || insidePath(folder, home))) return null;
+    for (const [name, root] of workspaceRoots) {
+      if (name === SCRATCH_WS || !samePath(root, folder)) continue;
+      return name === currentWorkspace ? null : { folder, name, action: "open" };
+    }
+    const name = baseName(folder);
+    if (!name) return null;
+    return { folder, name, action: workspaceNames.includes(name) ? "clash" : "create" };
+  }
+
+  // The layout JSON is the same split tree layout.js serializes, so a leaf
+  // can be docked beside a saved layout without loading it into a manager.
+  function layoutWith(saved, extra) {
+    if (!extra) return saved || { type: "pane" };
+    if (!saved || !saved.type) return extra;
+    return { type: "split", dir: "h", ratio: 0.5, children: [saved, extra] };
+  }
+
+  // Make the focused terminal's folder a workspace (or open the one it already
+  // belongs to) and take the terminal along. The terminal is what the user
+  // was looking at when they asked, so it leads: it is written into the
+  // target's layout first, then detached here, then the window switches and
+  // the restore attaches it again. Nothing is killed at any step.
+  async function createWorkspaceHere() {
+    const here = hereState();
+    if (!here || transitioning) return false;
+    const { folder, name } = here;
+    if (here.action === "clash") {
+      showError(`A workspace named “${name}” already exists with a different folder. Name this one in the Dashboard.`);
+      return false;
+    }
+    const problem = app.validateWorkspaceName(name);
+    if (problem) {
+      showError(`“${name}” cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it in the Dashboard.`);
+      return false;
+    }
+    const holder = workspaceHolder(await listWindowsSafe(), windowId, name);
+    if (holder) {
+      showError(`“${name}” is open in ${describeHolder(holder)}. Use “move here” from that view to take this terminal along.`);
+      return false;
+    }
+    const pane = layout.focused;
+    const session = pane?.session && pane.state === "attached" ? pane.session : null;
+    let saved = null;
+    if (here.action === "open") {
+      saved = await workspace.details(name).catch(() => null);
+      if (!saved) {
+        showError(`Workspace “${name}” could not be read.`);
+        return false;
+      }
+    }
+    let carried = null;
+    if (session) {
+      carried = { type: "pane", session_id: session.id, cwd: folder };
+      if (pane.profileName) carried.profile = pane.profileName;
+      if (pane.launchSpec) carried.launch_spec = pane.launchSpec;
+      if (pane.title) carried.title = pane.title;
+    }
+    const ids = new Set(saved?.session_ids || []);
+    if (session) ids.add(session.id);
+    try {
+      // A new workspace gets the folder; an existing one keeps its own (an
+      // absent path preserves it, see PUT /api/workspaces).
+      await workspace.save(name, layoutWith(saved?.layout, carried), saved?.logo || null, [...ids],
+        saved ? undefined : folder);
+    } catch (error) {
+      showError(error?.detail || `Could not ${saved ? "update" : "create"} workspace “${name}”.`);
+      return false;
+    }
+    if (session) {
+      try {
+        await api.retainSession(session.id);
+      } catch (error) {
+        if (!sessionAlreadyGone(error)) {
+          showError("Could not detach that terminal safely. Nothing was moved.");
+          return false;
+        }
+      }
+      forgetSession(session.id);
+      layout.closePane(pane, { animate: false });
+    }
+    if (!workspaceNames.includes(name)) {
+      workspaceNames.push(name);
+      workspaceNames.sort((a, b) => a.localeCompare(b));
+    }
+    workspaceRoots.set(name, saved ? saved.path || null : folder);
+    return switchWorkspace(name);
   }
 
   function profileByName(name) {
@@ -541,7 +669,7 @@ async function boot() {
 
   async function runProfile(profile) {
     let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     await spawnInto(pane, profile.name, contextCwd(null));
@@ -549,7 +677,7 @@ async function boot() {
 
   async function runClaudeMode(profile, claudeMode) {
     let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     await spawnInto(pane, profile.name, contextCwd(null), { claudeMode });
@@ -557,7 +685,7 @@ async function boot() {
 
   async function splitClaudeAgentView(profile) {
     const source = layout.focused || layout.init();
-    const pane = layout.splitPane(source, autoDir(source));
+    const pane = layout.splitPane(source, layout.autoDir(source));
     if (!pane) return null;
     layout.focusPane(pane);
     return spawnInto(pane, profile.name, contextCwd(null), { claudeMode: "agents" });
@@ -565,7 +693,7 @@ async function boot() {
 
   async function runSystemTerminal(system) {
     let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     await spawnSpecInto(pane, {
@@ -623,7 +751,7 @@ async function boot() {
       return false;
     }
     let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
     pane.terminalType = info.profile ? profileTerminalType(info.profile) : pane.terminalType;
@@ -1065,6 +1193,7 @@ async function boot() {
     const savedLayout = saved.layout;
     workspaceLogo = saved.logo || null;
     workspacePath = saved.path || null;
+    workspaceRoots.set(name, workspacePath);
     workspacePathExists = saved.path ? saved.path_exists !== false : true;
     if (saved.path && saved.path_exists === false) {
       showError(`The folder for “${name}” is missing: ${saved.path}. New terminals open in your home folder until you pick another.`);
@@ -1275,7 +1404,7 @@ async function boot() {
       }
     }
     let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return false;
     layout.focusPane(pane);
     const started = await spawnDefaultInto(pane, cwd);
@@ -1439,7 +1568,7 @@ async function boot() {
     },
     newTerminal: () => {
       let pane = layout.focused || layout.init();
-      if (!pane.canReplace) pane = layout.splitPane(pane, autoDir(pane));
+      if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
       if (pane) spawnDefaultInto(pane);
     },
     // Renaming from the sidebar row; a pane showing the terminal takes the
@@ -1643,6 +1772,7 @@ async function boot() {
       }
       if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
       workspaceNames.sort((a, b) => a.localeCompare(b));
+      workspaceRoots.set(cleanName, folder);
       clearError();
       buildLauncher();
       refreshStatusSoon();
@@ -1680,6 +1810,7 @@ async function boot() {
         workspaceSessionIds = new Set();
       }
       workspaceNames = workspaceNames.filter((item) => item !== name);
+      workspaceRoots.delete(name);
       buildLauncher();
       refreshStatusSoon();
       scheduleWorkspaceSave(); // live layout continues as scratch
@@ -1688,6 +1819,7 @@ async function boot() {
     onWorkspacesChanged: async () => {
       workspaceNames = await api.listWorkspaces().catch(() => workspaceNames);
       buildLauncher();
+      refreshWorkspaceRoots();
     },
     currentWorkspace: () => currentWorkspace,
     // Second-window support. The picker offers scratch plus every named
@@ -1702,8 +1834,14 @@ async function boot() {
       currentWorkspace,
     ),
     openNewWindow,
-    openWorkspaceBeside: (name) => views?.open(name),
-    canShowWorkspaceBeside: () => !embedded,
+    // Another workspace tiled into this window, beside the view that asked.
+    // Works from inside a view too: the parent window owns the tiling.
+    openWorkspaceBeside: (name) => viewHost()?.open(name, { anchorWindow: window }) ?? Promise.resolve(false),
+    canShowWorkspaceBeside: () => Boolean(viewHost()),
+    shownViews: () => viewHost()?.list() || [],
+    focusShownWorkspace: (name) => Boolean(viewHost()?.focusWorkspace(name)),
+    createWorkspaceHere,
+    hereState,
     explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
     windowRegistryAvailable: () => registryAvailable,
     // Set when RegisterHotKey failed at startup (another program owns the
@@ -1734,6 +1872,7 @@ async function boot() {
         showError(error?.detail || `That folder could not be saved for “${name}”.`);
         return false;
       }
+      workspaceRoots.set(name, (folder || "").trim() || null);
       clearError();
       return true;
     },
@@ -1755,6 +1894,7 @@ async function boot() {
         showError(error?.detail || "That folder could not be saved for this workspace.");
         return false;
       }
+      workspaceRoots.set(currentWorkspace, next);
       clearError();
       buildLauncher();
       refreshStatusSoon();
@@ -1934,8 +2074,7 @@ async function boot() {
   });
 
   function buildLauncher() {
-    views?.update();
-    if (embedded) window.parent.quicktermViews?.update();
+    viewHost()?.update();
     launcherView = initLauncher($("launcher"), {
       profiles,
       inventory: terminalInventory,
@@ -1966,6 +2105,16 @@ async function boot() {
       // moveSessionHere re-checks the session is alive and takes it out of the
       // old workspace's saved ownership before attaching.
       onMoveSession: (session, fromWorkspace) => app.moveSessionHere(session, fromWorkspace),
+      // Tiling: which workspaces the window already shows (with their view
+      // colours), how to add one beside this view, and the "workspace here"
+      // offer for the focused terminal's folder.
+      shownViews: () => app.shownViews(),
+      canOpenBeside: () => app.canShowWorkspaceBeside(),
+      onOpenBeside: (name) => app.openWorkspaceBeside(name),
+      onFocusView: (name) => app.focusShownWorkspace(name),
+      workspaceRoots: () => workspaceRoots,
+      here: hereState(),
+      onWorkspaceHere: () => createWorkspaceHere(),
       onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
       onOpenFolder: openHere,
       sessions: lastSessions,
@@ -1977,10 +2126,12 @@ async function boot() {
       // sit here AND directly above as "Manage workspaces", pixel-identical
       // once the sidebar is collapsed.
       chrome: [
-        ...(!embedded ? [["two workspaces", () => {
+        // Tile another workspace into this window. From inside a view this
+        // still works, because the parent window does the tiling.
+        ["workspace beside", () => {
           panels.close();
           palette.newWindowMode(true);
-        }]] : []),
+        }],
         // The discoverable half of the palette's "new window…" row. Both land
         // in the same picker, because which workspace a second window opens on
         // is a choice and the free/taken list only exists in one place. No
@@ -1999,6 +2150,10 @@ async function boot() {
 
   function refreshStatus() {
     if (document.hidden) return;
+    // The focused terminal's folder changes with every cd and focus change,
+    // so the "workspace here" offer is patched here, not rebuilt with the
+    // sidebar.
+    launcherView?.updateHere(hereState());
     api.getSessions({ metrics: false }).then((list) => {
       lastSessions = list;
       launcherView?.updateSessions(list, [...app.attachedSessionIds()], [...app.ownedSessionIds()]);
@@ -2104,6 +2259,8 @@ async function boot() {
   refreshStatus();
   if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
+  // Off the boot path: one small request per saved workspace.
+  setTimeout(() => refreshWorkspaceRoots(), 1200);
   if (cachedInventory) {
     setTimeout(() => {
       api.getTerminalOptions().then((fresh) => {

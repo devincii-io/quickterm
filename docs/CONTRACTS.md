@@ -562,22 +562,66 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   The rule it exists to enforce: two windows must never own one workspace,
   because the layout autosaves on every pane change and the loser's panes would
   be overwritten in silence.
-- `workspace_views.js` optionally encloses the primary viewer and a same-origin
-  iframe in two colored, labelled regions. The sidebar's **two workspaces** and
-  the palette's **show two workspaces…** use the existing workspace picker.
-  The second view reserves its own registry ID before loading
-  `?workspace=<name>&window=<id>&embedded=1`; authentication stays in `#t=`.
-  It never changes the primary viewer's sessionStorage window ID or remembered
-  workspace, and it never consumes Explorer launch requests. Each document has
-  its own LayoutManager, focus ownership, autosave, and heartbeat. No nested
-  second views. A workspace already claimed elsewhere remains unavailable.
-  Borders and labels appear only while two views are open. The divider supports
-  pointer drag, arrow keys, Home/End, and double-click balance; each view keeps
-  25–75% of the available extent. Narrow windows stack the views vertically.
-  Hiding preserves the iframe and sessions; closing waits for a successful save
-  and marks every owned terminal retained before releasing its registry entry
-  and removing it. Save failures keep the
-  view open. This arrangement is window-local and not restored at startup.
+- `split_tree.js` is the binary split tree under both the panes and the
+  workspace views: `insertBeside` (a new leaf takes half of its anchor),
+  `removeLeaf` (the split collapses into the sibling), `layoutRects` (pixel
+  boxes for every leaf and divider) and `dwindleDir` (cut along the longer
+  side, so repeated opens spiral inward like a tiling window manager).
+  `pane_move.js` builds its drag surgery on it and serves both kinds of leaf.
+  A new terminal with no direction of its own (`Alt+N`, attach, run profile)
+  uses `LayoutManager.autoDir`, which is dwindle. Splits, closes, moves and
+  rebalances slide: app.css transitions `flex-grow` on the children of a
+  split carrying `.sliding`, never during a splitter drag, and
+  `prefers-reduced-motion` turns it off.
+- `workspace_views.js` tiles any number of workspaces into one window. The
+  primary view is this document; every other view is a same-origin iframe
+  running the same app on another workspace. Views are leaves of a
+  `split_tree.js` tree and share the pane rules: a new view takes half of the
+  view that asked, cut along its longer side; a header drag docks it beside
+  another view or swaps the two; each divider drags, answers arrow keys and
+  Home/End, and double-clicks to balance, keeping 15–85% of its split and at
+  least 160 px per side where there is room; **zoom** shows one view alone
+  and again brings the rest back. Every view has its own colour, and the
+  sidebar's workspace menu marks a workspace shown in another view with that
+  colour (choosing it focuses the view). Views are never re-parented: an
+  iframe that moves in the DOM reloads, so every view and divider is
+  absolutely positioned and a layout change only writes its box, which is
+  also what the slide animation transitions. The sidebar's **workspace
+  beside**, the palette's **show workspace beside…**, the workspace menu's
+  row action and the foreign terminal's **show … beside** choice all open
+  one, from inside a view too (`window.parent.quicktermViews` owns the
+  tiling; a view names itself to it by its own `window`). A view reserves its
+  own registry ID before loading `?workspace=<name>&window=<id>&embedded=1`;
+  authentication stays in `#t=`. It never changes the primary document's
+  sessionStorage window ID or remembered workspace, and never consumes
+  Explorer launch requests. Each document has its own LayoutManager, focus
+  ownership, autosave and heartbeat. A workspace already claimed elsewhere
+  remains unavailable, and one already shown in this window is focused
+  instead of opened twice. Borders and headers appear only with two or more
+  views. Closing a view waits for a successful save and marks every owned
+  terminal retained before releasing its registry entry and removing it;
+  save failures keep the view open. The arrangement is window-local and not
+  restored at startup.
+- `menu.js` is the one popover menu behind every chooser in the chrome (the
+  terminal picker, the workspace menu). Fixed-position under its anchor,
+  clamped inside the viewport (`menuPosition`, pure), it claims the keyboard
+  in `focus.js` while open, walks with arrows/Home/End/typeahead
+  (`stepIndex`, `typeaheadIndex`, pure), runs on Enter or click, closes on
+  Escape, Tab, an outside press, resize or blur, and hands the keyboard back
+  through `onClose`. Rows carry a label, a detail line, a hint, a check or a
+  colour dot, and optional row actions shown while the row is active.
+  `toggleMenu` is for a trigger's click handler: the press that closes an
+  open menu does not reopen it.
+- The sidebar offers **workspace here** (`hereState()` in `main.js`,
+  patched through `launcherView.updateHere` on every status refresh) when
+  the focused terminal's folder is outside the current workspace's folder
+  or in scratch: a folder that already is a workspace's root offers to open
+  that workspace, any other offers to create one named after the folder.
+  `createWorkspaceHere()` writes the terminal into the target's layout
+  first, retains and detaches it here, then switches, so the restore
+  attaches it again; a name clash, an invalid folder name or a workspace
+  held elsewhere is reported and nothing moves. Folder roots come from one
+  `GET /api/workspaces/{name}` per saved workspace, off the boot path.
 - Workspace saves are serialized per name in `workspace.js`, with argument
   snapshots taken at invocation. Server workspace PUTs serialize their
   read/preserve-path/write/ownership-sync sequence without blocking the event
@@ -612,14 +656,18 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `.pane-tab`/`.pane-actions` there. Headers return with a second pane and
   their actions draw only on hover, focus, or while armed.
 - Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
-  chevron beside it is a native `<select>` over Personal profiles, System
+  chevron beside it opens a `menu.js` menu over Personal profiles, System
   shells and the built-in Claude choices (`claude:continue|new|resume`, the
-  CLI plus one flag, no profile needed); the workspace row is a native
-  `<select>` whose last option is **+ new scratch**, with the folder under it,
-  two buttons that open the focused terminal's folder in Explorer / VS Code
-  (`onOpenFolder`; also Alt+Shift+E / Alt+Shift+C and two palette rows) and
-  the `#sb-save` dot beside it; the terminal list; five icons (two workspaces, new window,
-  dashboard, settings, help) and the collapse chevron. Double-click on a
+  CLI plus one flag, no profile needed); the workspace row is a menu button
+  (scratch, every saved workspace with its folder, the ones shown in another
+  view marked in that view's colour, a **show beside** row action, the
+  **workspace here** offer when applicable, **new scratch**), with the folder
+  under it, the **workspace here** button when the focused terminal is
+  elsewhere, two buttons that open the focused terminal's folder in Explorer
+  / VS Code (`onOpenFolder`; also Alt+Shift+E / Alt+Shift+C and two palette
+  rows) and the `#sb-save` dot beside it; the terminal list; five icons
+  (workspace beside, new window, dashboard, settings, help) and the collapse
+  chevron. No native `<select>` anywhere in the sidebar. Double-click on a
   terminal row renames it (`onRenameSession` → `PATCH /api/sessions/{id}`,
   then `Pane.setTitle`). Three modes, remembered in `quickterm.sidebarMode`:
   `full` (resizable, 150 to 400 px), `rail` (30 px: plus, one dot per terminal,

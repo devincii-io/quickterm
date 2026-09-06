@@ -78,14 +78,28 @@ starts a replacement shell under the old identity. Claude-oriented profiles
 also offer explicit **Continue latest** and **Choose session** recovery
 actions.
 
-To see two projects at once, choose **two workspaces** in the sidebar footer,
-or **show two workspaces…** in `Alt+K`, then select another saved workspace.
-The gold and blue enclosures keep each workspace separate, including its own
-terminal splits and autosave. Drag the divider (or use its arrow keys), choose
-**Stack vertically**, or **Hide second workspace** to regain space temporarily.
-**Close view** saves the second workspace and leaves its terminals running.
-The second view is opened on demand and is not automatically reopened after
-restarting QuickTerm.
+To see several projects at once, tile more workspaces into the window: choose
+**workspace beside** in the sidebar footer, **show workspace beside…** in
+`Alt+K`, the tile action on a row of the workspace menu, or **show … beside**
+under a terminal that belongs to another workspace. Each new view takes half
+of the view you asked from, cut along its longer side, the way a tiling
+window manager places a window, and there is no limit on how many you open.
+Every view has its own colour, its own sidebar, its own terminal splits and
+its own autosave. Drag a view's header onto another view to dock it on that
+side or swap the two, drag a divider (or use its arrow keys) to resize,
+**zoom** to see one view alone, and **close** to save that workspace and
+leave its terminals running. The arrangement is not reopened after restarting
+QuickTerm.
+
+`Alt+N` places a new terminal the same way: it takes half of the focused pane
+along its longer side, so repeated presses spiral inward instead of stacking
+slivers, and every split, close and rebalance slides into place.
+
+When the focused terminal has `cd`'d somewhere outside the workspace's
+folder, the sidebar offers **workspace here: <folder>**. One click makes that
+folder a workspace named after it, moves the terminal into it and switches
+there; if the folder already is a workspace's root the offer reads
+**open <name>** and takes the terminal along instead.
 
 **Scratch** is the disposable mode. It opens in a throwaway folder under your
 system temp directory, and the moment you type into a scratch layout it starts
@@ -130,7 +144,7 @@ arguments) and the `Alt+B`/`F` word motions all pass through untouched.
 |---|---|
 | `Alt+K` | Command palette (profiles, actions, snippets, workspaces, sessions, file viewer) |
 | `Alt+G` / `Alt+S` / `Alt+I` | Open or close the Dashboard / Settings / Help panel |
-| `Alt+N` | Open a new default terminal beside the focused pane |
+| `Alt+N` | Open a new default terminal in half of the focused pane, cut along its longer side |
 | `Alt+Shift+Left` / `Alt+Shift+Up` | Cycle previous / next profile used by new terminals |
 | `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |
 | `Alt+Shift+S` | Sidebar: full, rail, hidden |

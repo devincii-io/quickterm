@@ -74,17 +74,6 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   font-variant-numeric: tabular-nums;
 }
 .sidebar-empty { padding: 6px 8px; color: var(--muted); font-size: 9.5px; }
-.launcher.sidebar select {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.launcher.sidebar option, .launcher.sidebar optgroup { background: var(--surface); color: var(--text); }
 
 /* ---------- new terminal ---------- */
 
@@ -117,26 +106,28 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .sidebar-new .icon { flex: none; }
 .sidebar-new:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .sidebar-new:disabled { color: var(--muted); background: var(--surface-raised); cursor: default; }
-.sidebar-new:focus-visible, .sidebar-admin:focus-visible, .sidebar-terminal-select:focus-visible {
+.sidebar-new:focus-visible, .sidebar-admin:focus-visible, .sidebar-terminal-pick:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-/* The select shows no text of its own; the name is on the button beside it.
-   What is left is a 20px chevron drawn by the background, so the row reads as
-   one control with a menu, not a button next to a form field. */
-.launcher.sidebar .sidebar-terminal-select {
+/* The chevron opens the list of choices as a menu (menu.js) under the whole
+   row, so the row reads as one control with a menu, not a button next to a
+   form field. */
+.launcher.sidebar .sidebar-terminal-pick {
   flex: none;
   width: 20px;
   height: 26px;
+  display: grid;
+  place-items: center;
   padding: 0;
+  border: 0;
   border-radius: 3px;
-  color: transparent;
-  text-indent: -999px;
-  background:
-    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9.5 12 15.5 18 9.5"/></svg>')
-    center / 12px no-repeat;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
 }
-.sidebar-terminal-select:hover { background-color: var(--surface-raised); }
+.sidebar-terminal-pick:hover, .sidebar-terminal-pick[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
+.sidebar-terminal-pick:disabled { opacity: .4; cursor: default; }
 .sidebar-admin {
   flex: none;
   width: 22px;
@@ -162,21 +153,50 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   padding: 2px 5px 6px 7px;
   border-bottom: 1px solid var(--line);
 }
-.sidebar-where-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; }
-.sidebar-workspace-select {
+.sidebar-where-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: stretch; }
+/* The workspace name is the menu's trigger: plain text with a chevron, the
+   same weight the select had, so the row does not read as a form. */
+.sidebar-workspace-button {
   width: 100%;
+  min-width: 0;
   height: 20px;
-  padding: 0 14px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 1px 0 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  background:
-    url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9.5 12 15.5 18 9.5"/></svg>')
-    right 1px center / 10px no-repeat;
+  font: 600 11px var(--mono);
+  text-align: left;
+  cursor: pointer;
 }
-.sidebar-workspace-select:hover { color: var(--accent); }
-.sidebar-workspace-select:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.sidebar-workspace-button .sidebar-label { flex: 1 1 auto; min-width: 0; }
+.sidebar-workspace-button .icon { color: var(--muted); }
+.sidebar-workspace-button:hover, .sidebar-workspace-button[aria-expanded="true"] { color: var(--accent); }
+.sidebar-workspace-button:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* "workspace here": shown only while the focused terminal sits outside this
+   workspace's folder. Same fill as "+" above, because it also opens
+   something, and gone the moment the terminal is back home. */
+.sidebar-here {
+  margin-top: 3px;
+  min-height: 18px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 4px;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font: 9.5px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-here .sidebar-label { min-width: 0; }
+.sidebar-here:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.sidebar-here:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .sidebar-folder {
   overflow: hidden;
   color: var(--muted);
@@ -421,7 +441,7 @@ body.sidebar-wide .session-where { display: block; }
 body.sidebar-collapsed .sidebar-launch { padding: 4px 2px 2px; }
 body.sidebar-collapsed .sidebar-new { height: 26px; padding: 0; justify-content: center; gap: 0; }
 body.sidebar-collapsed .sidebar-new .sidebar-label,
-body.sidebar-collapsed .sidebar-terminal-select,
+body.sidebar-collapsed .sidebar-terminal-pick,
 body.sidebar-collapsed .sidebar-admin,
 body.sidebar-collapsed .sidebar-where,
 body.sidebar-collapsed .session-name,
