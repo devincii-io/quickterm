@@ -1,34 +1,94 @@
-.workspace-views { height: 100vh; display: flex; min-width: 0; min-height: 0; }
-.workspace-view { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+/* Workspace views (js/workspace_views.js): the primary document and any
+   number of iframes tiled in one window. Every view and divider is
+   absolutely positioned and only ever moved by writing its box, because an
+   iframe that changes parent reloads. The transition on the box is the
+   whole animation: a split, a drag or a close slides the neighbours over. */
+
+.workspace-views { position: relative; height: 100vh; overflow: hidden; background: var(--bg); }
+.workspace-view {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  transition:
+    left .24s cubic-bezier(.2, .8, .2, 1), top .24s cubic-bezier(.2, .8, .2, 1),
+    width .24s cubic-bezier(.2, .8, .2, 1), height .24s cubic-bezier(.2, .8, .2, 1),
+    opacity .2s ease, transform .2s ease, border-color .14s ease;
+}
+.workspace-view-divider {
+  position: absolute;
+  touch-action: none;
+  transition: left .24s cubic-bezier(.2, .8, .2, 1), top .24s cubic-bezier(.2, .8, .2, 1),
+    width .24s cubic-bezier(.2, .8, .2, 1), height .24s cubic-bezier(.2, .8, .2, 1);
+}
+/* No sliding while a divider or a header is being dragged, or on a window
+   resize: the pointer is the animation then. */
+.workspace-views.resizing .workspace-view, .workspace-views.still .workspace-view,
+.workspace-views.resizing .workspace-view-divider, .workspace-views.still .workspace-view-divider { transition: none; }
+.workspace-view.entering { opacity: 0; transform: scale(.985); }
+.workspace-view.leaving { opacity: 0; transform: scale(.97); pointer-events: none; }
 .workspace-view > #app { height: 100%; min-height: 0; flex: 1; }
 .workspace-view .launcher.sidebar { height: 100%; }
 body:not(.sidebar-collapsed):not(.sidebar-hidden) .workspace-view #app { grid-template-columns: min(var(--sidebar-w, 200px), 40%) minmax(0, 1fr); }
-.workspace-view-heading { display: none; }
-.workspace-views.multiple { padding: 6px; gap: 0; }
-.multiple > .workspace-view { border: 2px solid var(--workspace-color); border-radius: 7px; }
-.workspace-view-primary { --workspace-color: #d4ad63; }
-.workspace-view-secondary { --workspace-color: #6daedb; }
-.multiple .workspace-view-heading { display: flex; align-items: center; gap: 7px; flex: none; min-height: 31px; padding: 4px 8px; background: var(--surface); color: var(--workspace-color); font: 11px var(--mono); border-bottom: 1px solid var(--workspace-color); }
-.workspace-view-heading strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-view-heading button { color: var(--text); background: transparent; border: 1px solid var(--line-strong); border-radius: 4px; padding: 3px 6px; font: inherit; cursor: pointer; }
-.workspace-view-heading button:hover, .workspace-view-heading button:focus-visible { border-color: var(--workspace-color); }
-.workspace-view-heading button:disabled { opacity: .5; }
-.multiple > .workspace-view-primary { flex: 0 0 calc(var(--view-ratio, 50%) - 5px); }
 .workspace-view iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--bg); }
-.workspace-view-divider { flex: 0 0 10px; cursor: col-resize; position: relative; touch-action: none; }
-.workspace-view-divider::after { content: ""; position: absolute; inset: 40% 3px; border-radius: 2px; background: var(--line-strong); }
-.workspace-view-divider:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.workspace-views.resizing iframe { pointer-events: none; }
-.workspace-views.stacked { flex-direction: column; }
-.stacked > .workspace-view-divider { cursor: row-resize; }
-.stacked > .workspace-view-divider::after { inset: 3px 40%; }
-.workspace-views.companion-hidden > .workspace-view-primary { flex: 1; }
-.workspace-views [hidden] { display: none; }
-@media (max-width: 899px) {
-  .workspace-views { flex-direction: column; }
-  .workspace-view-divider { cursor: row-resize; }
-  .workspace-view-divider::after { inset: 3px 40%; }
+
+/* A lone view is the plain app: no border, no header. */
+.workspace-view-heading { display: none; }
+.multiple > .workspace-view {
+  border: 2px solid color-mix(in srgb, var(--workspace-color) 45%, var(--surface));
+  border-radius: 7px;
 }
+.multiple > .workspace-view.active { border-color: var(--workspace-color); }
+.multiple .workspace-view-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  min-height: 27px;
+  padding: 3px 4px 3px 9px;
+  background: var(--surface);
+  color: var(--workspace-color);
+  font: 11px var(--mono);
+  border-bottom: 1px solid color-mix(in srgb, var(--workspace-color) 40%, var(--surface));
+  cursor: grab;
+}
+body.pane-dragging .workspace-view-heading { cursor: grabbing; }
+.workspace-view-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--workspace-color); }
+.workspace-view-heading strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.workspace-view-heading button {
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: 10px var(--mono);
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.workspace-view-heading button:hover, .workspace-view-heading button:focus-visible {
+  border-color: color-mix(in srgb, var(--workspace-color) 50%, transparent);
+  background: var(--surface-raised);
+  color: var(--text);
+  outline: 0;
+}
+.workspace-view-heading button:disabled { opacity: .5; cursor: default; }
+
+/* The divider: a hairline that brightens on hover, the same language as the
+   pane splitter. Pointer events on the iframes are switched off while one is
+   being dragged so the capture keeps receiving moves. */
+.workspace-view-divider.h { cursor: col-resize; }
+.workspace-view-divider.v { cursor: row-resize; }
+.workspace-view-divider::after { content: ""; position: absolute; border-radius: 2px; background: var(--line-strong); transition: background .12s ease; }
+.workspace-view-divider.h::after { inset: 40% 4px; }
+.workspace-view-divider.v::after { inset: 4px 40%; }
+.workspace-view-divider:hover::after, .workspace-view-divider:focus-visible::after { background: var(--accent); }
+.workspace-view-divider:focus-visible { outline: 0; }
+.workspace-views.resizing iframe { pointer-events: none; }
+.workspace-views [hidden] { display: none; }
 @media (forced-colors: active) {
   .multiple > .workspace-view, .workspace-view-heading { border-color: CanvasText; }
 }

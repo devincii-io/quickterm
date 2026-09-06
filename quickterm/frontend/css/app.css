@@ -844,3 +844,13 @@ body.pane-dragging, body.pane-dragging .pane-tab { cursor: grabbing; }
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 .pane-drop-hint[data-zone="center"] { border-style: dashed; }
+
+/* Tiling motion (layout.js). A split container carries `.sliding` for one
+   transition while a pane arrives, leaves or is rebalanced, and flex-grow is
+   the animated property: the neighbour shrinks or grows in the same motion.
+   The splitter drag never slides, the pointer is the motion there. */
+.split.sliding > * { transition: flex-grow .22s cubic-bezier(.2, .8, .2, 1); }
+body.dragging .split > * { transition: none; }
+.pane-enter { animation: pane-in .22s ease-out both; }
+.pane-leave { opacity: 0; transition: opacity .16s ease; pointer-events: none; }
+@keyframes pane-in { from { opacity: 0; } to { opacity: 1; } }

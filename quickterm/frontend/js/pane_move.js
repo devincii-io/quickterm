@@ -1,7 +1,11 @@
 // Rearranging panes by drag. Pure on purpose: which part of a pane the
 // pointer is over, and the tree surgery that moves one leaf beside another,
 // are the parts worth testing and neither needs a DOM. layout.js owns the
-// pointer events and renders the result.
+// pointer events and renders the result; workspace_views.js reuses the same
+// functions for whole workspace views, which are leaves of the same kind of
+// tree (split_tree.js).
+
+import { findLeaf, parentOf, replaceChild } from "./split_tree.js";
 
 // The outer band of a pane docks the dragged pane on that side; the middle
 // swaps the two. `band` is the share of each dimension the edges take, so a
@@ -36,31 +40,6 @@ export function zoneRect(rect, zone) {
     case "bottom": return { left, top: top + height / 2, width, height: height / 2 };
     default: return { left, top, width, height };
   }
-}
-
-function findLeaf(node, pane, parent = null) {
-  if (!node) return null;
-  if (node.type === "pane") return node.pane === pane ? { node, parent } : null;
-  for (const child of node.children) {
-    const hit = findLeaf(child, pane, node);
-    if (hit) return hit;
-  }
-  return null;
-}
-
-// null for the root, undefined when the node is not in the tree.
-function parentOf(node, target, parent = null) {
-  if (node === target) return parent;
-  if (!node || node.type !== "split") return undefined;
-  for (const child of node.children) {
-    const found = parentOf(child, target, node);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
-
-function replaceChild(parent, oldNode, newNode) {
-  parent.children[parent.children.indexOf(oldNode)] = newNode;
 }
 
 // Move `source` beside `target` (zone left/right/top/bottom) or swap the two

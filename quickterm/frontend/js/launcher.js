@@ -1,4 +1,5 @@
 import { icon } from "./icons.js";
+import { toggleMenu } from "./menu.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
 
 // The sidebar is the whole chrome. Three modes, one hotkey (Alt+Shift+S)
@@ -321,10 +322,9 @@ function iconButton(className, iconName, title, onClick) {
   return button;
 }
 
-// Overlays claim the keyboard in focus.js; a native <select> does not need to,
-// because the pane only re-asserts focus on its own gestures. What it does need
-// is to hand the keyboard back once a choice is made, or the next keystroke
-// changes the selection again instead of reaching the shell.
+// Hand the keyboard back to the terminal once a choice is made, or the next
+// keystroke lands on the control that was just used instead of the shell. The
+// menus claim the keyboard in focus.js while open and call this on close.
 function handBack(options) {
   requestAnimationFrame(() => options.onLaunchComplete?.());
 }
@@ -457,9 +457,9 @@ export function initLauncher(el, options) {
   };
 
   // New terminal -----------------------------------------------------------
-  // One button that opens whatever is selected, and a native <select> beside
-  // it for changing the selection. The select is the one control here that is
-  // not a button: it draws the OS list, which costs nothing to keep open.
+  // One button that opens whatever is selected, and a chevron beside it that
+  // opens the list of choices as a menu (menu.js): personal profiles, system
+  // shells and the built-in Claude choices, grouped, the current one marked.
   const launch = make("div", "sidebar-launch");
   const choices = terminalChoices(options);
   let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
@@ -488,45 +488,47 @@ export function initLauncher(el, options) {
     Promise.resolve(launched).finally(() => options.onLaunchComplete?.());
   });
 
-  const select = make("select", "sidebar-terminal-select");
-  select.setAttribute("aria-label", "Terminal for new panes");
-  select.title = "Choose what a new terminal runs";
-  const grouped = new Map();
-  for (const choice of choices) {
-    if (!grouped.has(choice.group)) grouped.set(choice.group, []);
-    grouped.get(choice.group).push(choice);
-  }
-  for (const [label, items] of grouped) {
-    const group = document.createElement("optgroup");
-    group.label = label;
-    for (const choice of items) {
-      const option = make("option", "", choice.label);
-      option.value = choice.key;
-      option.title = choice.detail;
-      group.append(option);
+  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Choose what a new terminal runs");
+  pick.setAttribute("aria-haspopup", "menu");
+  pick.setAttribute("aria-expanded", "false");
+  pick.disabled = !choices.length;
+  const openTerminalMenu = () => {
+    if (!choices.length) return;
+    const items = [];
+    let group = null;
+    for (const choice of choices) {
+      if (choice.group !== group) {
+        group = choice.group;
+        items.push({ heading: group });
+      }
+      items.push({
+        label: choice.label,
+        detail: choice.detail,
+        selected: choice === selected,
+        run: () => {
+          selected = choice;
+          options.onSelectTerminal?.(selected);
+          describeOpen();
+        },
+      });
     }
-    select.append(group);
-  }
-  if (selected) {
-    select.value = selected.key;
-    options.onSelectTerminal?.(selected);
-  } else {
-    select.disabled = true;
-  }
-  select.addEventListener("change", () => {
-    selected = choices.find((choice) => choice.key === select.value) || null;
-    if (selected) options.onSelectTerminal?.(selected);
-    describeOpen();
-    handBack(options);
-  });
+    toggleMenu({
+      anchor: launch,
+      trigger: pick,
+      items,
+      label: "Terminal for new panes",
+      onClose: () => handBack(options),
+    });
+  };
+  pick.addEventListener("click", openTerminalMenu);
+  if (selected) options.onSelectTerminal?.(selected);
   // Right-clicking "+" is the fast way to the same list.
   open.addEventListener("contextmenu", (event) => {
     event.preventDefault();
-    if (typeof select.showPicker === "function") { try { select.showPicker(); return; } catch (_) { /* fall through */ } }
-    select.focus();
+    openTerminalMenu();
   });
   describeOpen();
-  launch.append(open, select);
+  launch.append(open, pick);
   if (!options.elevated) {
     // Elevation spawns a separate process, so success is invisible here and a
     // declined UAC prompt is indistinguishable from a dead button. Hold the
@@ -544,31 +546,76 @@ export function initLauncher(el, options) {
   el.append(launch);
 
   // Workspace --------------------------------------------------------------
-  // One row: the workspace as a native select, the folder under it, and the
-  // save dot main.js drives through #sb-save. "New scratch" is an option in
-  // the same list rather than a button of its own; choosing it is the explicit
-  // act, and main.js confirms before anything running is replaced.
+  // One row: the workspace name as a menu button, the folder under it, the
+  // "workspace here" offer when the focused terminal is somewhere else, and
+  // the save dot main.js drives through #sb-save. The menu lists scratch and
+  // every saved workspace with its folder, marks the ones this window already
+  // shows in another view in that view's colour (choosing one focuses that
+  // view), offers to tile any other beside this one, and ends with "new
+  // scratch", which main.js confirms before anything running is replaced.
   const where = make("div", "sidebar-where");
-  const workspaceSelect = make("select", "sidebar-workspace-select");
-  workspaceSelect.setAttribute("aria-label", "Workspace");
-  const NEW_SCRATCH = "__new-scratch__";
-  const addWorkspaceOption = (value, label) => {
-    const option = make("option", "", label);
-    option.value = value;
-    workspaceSelect.append(option);
+  const workspaceButton = make("button", "sidebar-workspace-button");
+  workspaceButton.type = "button";
+  workspaceButton.setAttribute("aria-haspopup", "menu");
+  workspaceButton.setAttribute("aria-expanded", "false");
+  workspaceButton.setAttribute("aria-label", `Workspace: ${workspaceName}`);
+  workspaceButton.append(make("span", "sidebar-label", workspaceName), icon("chevron-down", 11));
+  let here = options.here || null;
+  const hereLabel = () => (here.action === "open" ? `open ${here.name}` : `workspace here: ${here.name}`);
+  const hereTitle = () => (here.action === "open"
+    ? `${here.folder} is the folder of workspace ${here.name}. Switch to it and take this terminal along.`
+    : `Make ${here.folder} a workspace named ${here.name} and move this terminal into it`);
+  const workspaceItems = () => {
+    const shown = typeof options.shownViews === "function" ? options.shownViews() : [];
+    const roots = typeof options.workspaceRoots === "function" ? options.workspaceRoots() : new Map();
+    const canBeside = typeof options.onOpenBeside === "function" && options.canOpenBeside?.() !== false;
+    const entry = (name, value) => {
+      const current = name === workspaceName;
+      const view = current ? null : shown.find((each) => each.name === name);
+      const root = roots.get(name) || null;
+      const item = {
+        label: name,
+        detail: current || !root ? undefined : folderName(root),
+        title: root || undefined,
+        selected: current,
+        color: view ? view.color : undefined,
+        hint: view ? "shown here" : undefined,
+        run: () => {
+          if (current) return;
+          if (view) options.onFocusView?.(name);
+          else options.onWorkspace?.(value);
+        },
+      };
+      if (!current && !view && canBeside && value) {
+        item.actions = [{
+          icon: "workspaces",
+          title: `Show ${name} beside ${workspaceName}`,
+          run: () => options.onOpenBeside(name),
+        }];
+      }
+      return item;
+    };
+    const named = (options.workspaces || []).filter((name) => name !== "scratch");
+    const items = [entry("scratch", null)];
+    if (named.length) items.push({ separator: true });
+    for (const name of named) items.push(entry(name, name));
+    items.push({ separator: true });
+    if (here) {
+      items.push({ label: hereLabel(), icon: "plus", detail: folderName(here.folder), title: hereTitle(),
+        run: () => options.onWorkspaceHere?.() });
+    }
+    items.push({ label: "new scratch", icon: "plus", detail: "a fresh disposable layout",
+      run: () => options.onNewScratch?.() });
+    return items;
   };
-  addWorkspaceOption("scratch", "scratch");
-  for (const name of options.workspaces || []) {
-    if (name !== "scratch") addWorkspaceOption(name, name);
-  }
-  addWorkspaceOption(NEW_SCRATCH, "+ new scratch");
-  workspaceSelect.value = workspaceName;
-  workspaceSelect.addEventListener("change", () => {
-    const value = workspaceSelect.value;
-    workspaceSelect.value = workspaceName;
-    if (value === NEW_SCRATCH) options.onNewScratch?.();
-    else if (value !== workspaceName) options.onWorkspace?.(value === "scratch" ? null : value);
-    handBack(options);
+  workspaceButton.addEventListener("click", () => {
+    toggleMenu({
+      anchor: where,
+      trigger: workspaceButton,
+      items: workspaceItems(),
+      label: "Workspace",
+      onClose: () => handBack(options),
+    });
   });
   // "scratch / scratch" says nothing twice: the folder line is dropped when it
   // only repeats the workspace name.
@@ -583,13 +630,34 @@ export function initLauncher(el, options) {
   } else {
     folderLine.title = "This workspace has no folder. Terminals open in your home folder.";
   }
-  workspaceSelect.title = folderLine.title;
+  workspaceButton.title = folderLine.title;
+  // The offer to make the focused terminal's folder a workspace. main.js
+  // patches it through updateHere() on every focus and folder change; the
+  // row itself is only rebuilt on config changes.
+  const hereButton = make("button", "sidebar-here");
+  hereButton.type = "button";
+  hereButton.hidden = true;
+  const hereText = make("span", "sidebar-label");
+  hereButton.append(icon("plus", 11), hereText);
+  hereButton.addEventListener("click", () => {
+    options.onWorkspaceHere?.();
+    handBack(options);
+  });
+  const updateHere = (state) => {
+    here = state || null;
+    hereButton.hidden = !here;
+    if (!here) return;
+    hereText.textContent = hereLabel();
+    hereButton.title = hereTitle();
+    hereButton.setAttribute("aria-label", hereTitle());
+  };
+  updateHere(here);
   const save = make("span", "sidebar-save");
   save.id = "sb-save";
   save.setAttribute("role", "status");
   save.setAttribute("aria-live", "polite");
   const whereCopy = make("div", "sidebar-where-copy");
-  whereCopy.append(workspaceSelect, folderLine);
+  whereCopy.append(workspaceButton, folderLine, hereButton);
   where.append(whereCopy);
   // Two buttons for the folder this row is about: Explorer and VS Code. The
   // folder is resolved by main.js at click time, so it is where the focused
@@ -626,7 +694,7 @@ export function initLauncher(el, options) {
   footer.setAttribute("aria-label", "Application");
   const navIcons = {
     dashboard: "dashboard", settings: "settings", help: "help",
-    commands: "terminal", "new window": "new-window", "two workspaces": "workspaces",
+    commands: "terminal", "new window": "new-window", "workspace beside": "workspaces",
   };
   for (const [label, onClick, shortcut] of options.chrome || []) {
     const button = iconButton("sidebar-nav-button", navIcons[label] || "terminal",
@@ -895,6 +963,21 @@ export function initLauncher(el, options) {
       () => options.onWorkspace?.(target));
     openThere.dataset.rowKey = `${session.id}:open`;
     choices.append(openThere);
+    // The third way: keep this window where it is and tile that workspace
+    // beside it. If the window already shows it, the choice focuses that view.
+    if (target && typeof options.onOpenBeside === "function" && options.canOpenBeside?.() !== false) {
+      const shown = (typeof options.shownViews === "function" ? options.shownViews() : [])
+        .find((each) => each.name === group.name);
+      const beside = shown
+        ? choiceButton("workspaces", `focus ${group.name}`,
+          `${group.name} is already shown in this window. Focus that view.`,
+          () => { setArmed(null); options.onFocusView?.(group.name); })
+        : choiceButton("workspaces", `show ${group.name} beside`,
+          `Tile ${group.name} beside ${workspaceName} in this window; this terminal stays where it is`,
+          () => { setArmed(null); options.onOpenBeside(target); });
+      beside.dataset.rowKey = `${session.id}:beside`;
+      choices.append(beside);
+    }
     if (typeof options.onMoveSession === "function") {
       const move = choiceButton("arrow-up-right", "move here",
         `Take this terminal out of ${group.name} and attach it in ${workspaceName}`,
@@ -998,11 +1081,11 @@ export function initLauncher(el, options) {
   updateSessions(options.sessions, options.attachedSessionIds, options.ownedSessionIds);
   return {
     updateSessions,
+    updateHere,
     cycleTerminal(delta = 1) {
       if (!choices.length) return null;
       const current = Math.max(0, choices.indexOf(selected));
       selected = choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length];
-      select.value = selected.key;
       options.onSelectTerminal?.(selected);
       describeOpen();
       handBack(options);

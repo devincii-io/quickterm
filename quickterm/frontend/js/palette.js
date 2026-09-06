@@ -244,7 +244,7 @@ export class Palette {
         keepOpen: true, run: () => this._newWindowMode(),
       },
       ...(a.canShowWorkspaceBeside?.() ? [{
-        kind: "view", label: "show two workspaces…", hint: "colored, resizable views in this window",
+        kind: "view", label: "show workspace beside…", hint: "tile another workspace into this window",
         keepOpen: true, run: () => this._newWindowMode(true),
       }] : []),
       // Saving and loading are name-exact operations, and a free-text prompt
@@ -348,7 +348,7 @@ export class Palette {
     this.foreignMode = false;
     this.prompt = null;
     this.input.value = "";
-    this.input.placeholder = beside ? "Show a workspace beside this one…" : "Open a second window on…";
+    this.input.placeholder = beside ? "Tile a workspace beside this one…" : "Open a second window on…";
     const request = ++this.requestId;
     this.items = [
       { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
@@ -372,8 +372,10 @@ export class Palette {
         kind: "window",
         label: `${beside ? "show beside" : "new window"}: ${row.name}`,
         hint: row.hint,
+        // A workspace this window already shows in another view is focused,
+        // not explained: it is one click away, not busy elsewhere.
         run: () => (row.taken
-          ? this.app.explainWindowChoice(row)
+          ? (beside && this.app.focusShownWorkspace?.(row.name)) || this.app.explainWindowChoice(row)
           : beside ? this.app.openWorkspaceBeside(row.name) : this.app.openNewWindow(row.name)),
       });
     }

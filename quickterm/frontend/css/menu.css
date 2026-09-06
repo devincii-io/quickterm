@@ -1,0 +1,73 @@
+/* The popover menu behind every chooser in the chrome (js/menu.js). Fixed,
+   clamped inside the viewport, and drawn in the same monospace voice as the
+   sidebar so it reads as part of the trigger, not a dialog. */
+
+.qt-menu {
+  position: fixed;
+  z-index: 60;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  color: var(--text);
+  font: 11px var(--mono);
+  outline: 0;
+  transform-origin: top left;
+  animation: qt-menu-in .12s ease-out both;
+}
+.qt-menu.above { transform-origin: bottom left; }
+@keyframes qt-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+.qt-menu-heading {
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: 8.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.qt-menu-heading:first-child { padding-top: 3px; }
+.qt-menu-sep { height: 1px; margin: 4px 3px; background: var(--line-strong); }
+.qt-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 25px;
+  padding: 2px 5px 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.qt-menu-item.active { background: var(--surface-soft); }
+.qt-menu-item.disabled { color: var(--muted); cursor: default; }
+.qt-menu-item.danger { color: var(--danger); }
+.qt-menu-item.danger.active { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+.qt-menu-mark { flex: none; width: 12px; display: grid; place-items: center; color: var(--accent); }
+.qt-menu-item.disabled .qt-menu-mark { color: var(--muted); }
+.qt-menu-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--menu-color, var(--accent)); }
+.qt-menu-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.qt-menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qt-menu-detail { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.qt-menu-hint { flex: none; max-width: 45%; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+/* A second verb on the row, visible only while the row is the active one,
+   so the list stays a list until the pointer or the keyboard lands on it. */
+.qt-menu-actions { flex: none; display: flex; gap: 1px; opacity: 0; transition: opacity .1s ease; }
+.qt-menu-item.active .qt-menu-actions { opacity: 1; }
+.qt-menu-action {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.qt-menu-action:hover, .qt-menu-action:focus-visible { background: var(--surface-raised); color: var(--text); outline: 0; }
+@media (forced-colors: active) {
+  .qt-menu { border-color: CanvasText; }
+  .qt-menu-item.active { outline: 1px solid CanvasText; }
+}

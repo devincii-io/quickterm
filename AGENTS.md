@@ -141,6 +141,19 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   on hover. Before adding a control, ask whether the palette (Alt+K) or a
   tooltip already carries it. The shell inventory is cached in localStorage
   and served from a 60 s server-side cache, so boot never waits for it.
+- Every chooser in the chrome is a `menu.js` menu, never a native `<select>`
+  (the OS list cannot show a folder under a name, a colour dot, or a second
+  action on a row). A trigger's click handler calls `toggleMenu`, not
+  `openMenu`, or the press that closes the menu reopens it. Menus claim the
+  keyboard in `focus.js` and hand it back through `onClose`.
+- Panes and workspace views are leaves of the same split tree
+  (`split_tree.js`), and a new one with no direction of its own takes half of
+  the focused leaf along its longer side (`dwindleDir`). Workspace views are
+  iframes and MUST NOT be re-parented: an iframe that moves in the DOM
+  reloads its document. `workspace_views.js` positions every view and divider
+  absolutely and only ever writes their boxes; the CSS transition on the box
+  is the animation. Pane motion is the `.sliding` class on a split (app.css
+  transitions `flex-grow`); a splitter drag never slides.
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),

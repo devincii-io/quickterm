@@ -2,6 +2,47 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.9.0
+
+### Tile as many workspaces as you want
+
+- Workspace views are leaves of the same split tree as terminal panes. A
+  new view takes half of the view you asked from, cut along its longer side,
+  so repeated opens spiral inward the way a tiling window manager places
+  windows. There is no limit on how many you open.
+- Drag a view by its header onto another view to dock it on that side or
+  swap the two. Dividers drag, answer the arrow keys and Home/End, and
+  double-click to balance. **zoom** shows one view alone; **close** saves it
+  and leaves its terminals running.
+- Every view has its own colour. Opening one works from inside a view too:
+  the sidebar footer, `Alt+K`, the tile action on a workspace menu row, or
+  **show … beside** under a terminal that belongs to another workspace.
+- Views slide into place. An iframe that moves in the DOM reloads, so views
+  are never re-parented; a layout change writes their boxes and the
+  transition on the box is the animation.
+
+### Menus instead of native selects
+
+- The terminal picker and the workspace row are QuickTerm's own menus. The
+  workspace menu shows each workspace's folder, marks the ones shown in
+  another view with that view's colour (choosing one focuses the view), and
+  tiles any other beside the current one from a hover action. Menus walk
+  with the arrows and typeahead, and hand the keyboard back to the terminal.
+
+### A workspace from the folder you are in
+
+- When the focused terminal sits outside the workspace folder, the sidebar
+  offers **workspace here: <folder>**. One click makes the folder a
+  workspace named after it, moves the terminal into it and switches there.
+  A folder that already is a workspace's root offers **open <name>** and
+  takes the terminal along.
+
+### New terminals tile too
+
+- `Alt+N` cuts the focused pane along its longer side, and splits, closes,
+  moves and rebalances slide instead of jumping. Splitter drags never
+  animate, and `prefers-reduced-motion` turns the motion off.
+
 ## QuickTerm 3.8.0
 
 - Show two workspaces in one window from the sidebar or Alt+K. Each view has

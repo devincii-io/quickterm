@@ -7,11 +7,19 @@
 
 import { Pane } from "./pane.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
+import { dwindleDir } from "./split_tree.js";
 
 const MIN_PANE_PX = 90;
 // Pointer travel before a press on a header becomes a drag. Below it, the
 // press is a click (focus) or half of a double-click (rename).
 const DRAG_START_PX = 6;
+// How long the flex transition in app.css takes a pane to slide into place.
+// The DOM catches up with the tree once it has finished.
+const SLIDE_MS = 220;
+
+function reducedMotion() {
+  try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_) { return false; }
+}
 
 export class LayoutManager {
   constructor(gridEl, zoomHostEl, opts = {}) {
@@ -90,6 +98,14 @@ export class LayoutManager {
 
   // ---- structural ops ----
 
+  // Where a new pane goes when nobody said: it takes half of `pane` along
+  // its longer side, the dwindle rule of a tiling window manager, so
+  // repeated Alt+N spirals inward instead of stacking slivers.
+  autoDir(pane = this.focused) {
+    if (!pane) return "h";
+    return dwindleDir(pane.el.getBoundingClientRect());
+  }
+
   splitPane(pane, dir) {
     if (!pane) return null;
     if (this.zoomed) this.toggleZoom();
@@ -112,6 +128,7 @@ export class LayoutManager {
     };
     this._replaceNode(hit.node, split, hit.parent);
     this.render();
+    this._animateEnter(split, fresh);
     this.focusPane(fresh);
     this._changed();
     return fresh;
@@ -129,12 +146,23 @@ export class LayoutManager {
     if (!root) return false;
     this.root = root;
     this.render();
+    const hit = this._findLeaf(pane);
+    if (zone === "center") {
+      this._flashEnter(pane);
+      this._flashEnter(target);
+    } else if (hit?.parent) {
+      this._animateEnter(hit.parent, pane);
+    }
     this.focusPane(pane);
     this._changed();
     return true;
   }
 
-  closePane(pane = this.focused) {
+  // The tree changes at once, so panes(), serialize() and the autosave are
+  // right immediately; only the DOM waits while the closing pane collapses
+  // and its sibling slides over it (`animate: false` skips that for callers
+  // that need the DOM settled now).
+  closePane(pane = this.focused, { animate = true } = {}) {
     if (!pane) return;
     if (this.zoomed) this.toggleZoom();
     const hit = this._findLeaf(pane);
@@ -152,10 +180,73 @@ export class LayoutManager {
     const sibling = hit.parent.children.find((c) => c !== hit.node);
     const gp = this._parentOf(hit.parent);
     this._replaceNode(hit.parent, sibling, gp === undefined ? null : gp);
-    this.render();
+    if (!(animate && this._animateLeave(hit.parent, pane))) this.render();
     const next = this.panes(sibling)[0] || this.panes()[0] || null;
     if (next) this.focusPane(next);
     this._changed();
+  }
+
+  // ---- motion ----
+  //
+  // A split container is a flex row or column and app.css transitions
+  // flex-grow on its children while it carries `.sliding`. Both children are
+  // freshly placed in a new split element by render(), so the transition has
+  // nothing to run from; these give it a start state one frame earlier.
+
+  _animateEnter(split, fresh) {
+    const el = split.el;
+    if (!el || !el.isConnected || reducedMotion()) return;
+    const freshEl = fresh.el;
+    const otherEl = el.children[0] === freshEl ? el.children[2] : el.children[0];
+    if (!freshEl || !otherEl) return;
+    el.classList.add("sliding");
+    freshEl.classList.add("pane-enter");
+    freshEl.style.flex = "0 1 0px";
+    otherEl.style.flex = "1 1 0px";
+    void el.offsetWidth; // commit the start state before the slide
+    this._applyRatio(split, el);
+    setTimeout(() => {
+      el.classList.remove("sliding");
+      freshEl.classList.remove("pane-enter");
+      this.fitAll();
+    }, SLIDE_MS);
+  }
+
+  _animateLeave(split, leaving) {
+    const el = split.el;
+    if (!el || !el.isConnected || reducedMotion()) return false;
+    const leavingEl = leaving.el;
+    const otherEl = el.children[0] === leavingEl ? el.children[2] : el.children[0];
+    if (!leavingEl || !otherEl) return false;
+    el.classList.add("sliding");
+    leavingEl.classList.add("pane-leave");
+    leavingEl.style.flex = "0 1 0px";
+    otherEl.style.flex = "1 1 0px";
+    setTimeout(() => {
+      // Only if nothing else has redrawn in the meantime: a later structural
+      // change already rendered the tree without this pane.
+      if (leavingEl.isConnected) this.render();
+      if (this.focused) this.focusPane(this.focused);
+    }, SLIDE_MS);
+    return true;
+  }
+
+  // A swap keeps both boxes, so the only thing to show is the pane arriving.
+  _flashEnter(pane) {
+    if (reducedMotion()) return;
+    pane.el.classList.add("pane-enter");
+    setTimeout(() => pane.el.classList.remove("pane-enter"), SLIDE_MS);
+  }
+
+  // A ratio change from the keyboard or a double-click slides too; the
+  // splitter drag applies its ratio directly, the pointer is the motion.
+  _slideRatio(node, splitEl) {
+    if (!reducedMotion()) {
+      splitEl.classList.add("sliding");
+      setTimeout(() => { splitEl.classList.remove("sliding"); this.fitAll(); }, SLIDE_MS);
+    }
+    this._applyRatio(node, splitEl);
+    this.fitAll();
   }
 
   toggleZoom() {
@@ -248,8 +339,7 @@ export class LayoutManager {
   // panes"). Falls back to a full render if this split has no live element.
   _commitRatio(node) {
     if (node.el && node.el.isConnected) {
-      this._applyRatio(node, node.el);
-      this.fitAll();
+      this._slideRatio(node, node.el);
     } else {
       this.render();
       if (this.focused) this.focusPane(this.focused);
@@ -355,15 +445,13 @@ export class LayoutManager {
       node.ratio = event.key === "Home"
         ? 0.5
         : Math.min(0.9, Math.max(0.1, node.ratio + (increase ? 0.05 : -0.05)));
-      this._applyRatio(node, splitEl);
-      this.fitAll();
+      this._slideRatio(node, splitEl);
       this._changed();
     });
     sp.addEventListener("dblclick", (event) => {
       event.preventDefault();
       node.ratio = 0.5;
-      this._applyRatio(node, splitEl);
-      this.fitAll();
+      this._slideRatio(node, splitEl);
       this._changed();
     });
     sp.addEventListener("pointerdown", (e) => {

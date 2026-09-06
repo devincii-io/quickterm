@@ -550,3 +550,104 @@ def test_panes_move_by_dragging_their_header():
     assert 'title="Drag to move · double-click to rename"' in pane
     assert ".pane-drop-hint" in app_css and ".pane-drag-ghost" in app_css
     assert ".pane-drag-ghost {" in app_css and "pointer-events: none;" in app_css
+
+
+def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
+    """Any number of workspaces in one window, placed like panes.
+
+    Views and panes are leaves of the same split tree, a new one takes half of
+    the focused leaf along its longer side (dwindle), and a header drag uses the
+    pane drop zones. The one rule the DOM has to keep: an iframe that changes
+    parent reloads its document, so views are absolutely positioned and a
+    layout change only writes their boxes. That box transition is also the
+    animation, and it is off during drags and under reduced motion.
+    """
+    views = (FRONTEND_JS / "workspace_views.js").read_text(encoding="utf-8")
+    views_css = (
+        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "workspace_views.css"
+    ).read_text(encoding="utf-8")
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+    tree = (FRONTEND_JS / "split_tree.js").read_text(encoding="utf-8")
+    move = (FRONTEND_JS / "pane_move.js").read_text(encoding="utf-8")
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+    main = MAIN_JS.read_text(encoding="utf-8")
+
+    assert "export function dwindleDir(rect)" in tree
+    assert 'import { findLeaf, parentOf, replaceChild } from "./split_tree.js";' in move
+    assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in views
+    assert (
+        'import { dwindleDir, insertBeside, layoutRects, leaves, removeLeaf } from "./split_tree.js";'
+        in views
+    )
+    assert "this.root = insertBeside(this.root, beside, view, dwindleDir(from));" in views
+    # Never re-parented: appended once, then only its box is written.
+    assert "this.stage.append(view.el);" in views
+    assert "applyRect(view.el, box);" in views
+    assert "this.stage.textContent" not in views and "this.stage.innerHTML" not in views
+    assert "position: absolute;" in views_css
+    assert ".workspace-views.resizing .workspace-view," in views_css
+    # Panes: the same placement rule, and the same motion rules.
+    assert "autoDir(pane = this.focused)" in layout and "return dwindleDir(" in layout
+    assert "layout.autoDir(pane)" in main and "function autoDir(" not in main
+    assert ".split.sliding > * { transition: flex-grow" in app_css
+    assert "body.dragging .split > * { transition: none; }" in app_css
+    assert "prefers-reduced-motion" in app_css and "function reducedMotion()" in layout
+    # A view can open another view: the parent window owns the tiling.
+    assert "const viewHost = () => (embedded ? window.parent?.quicktermViews || null : views);" in main
+    assert "viewHost()?.open(name, { anchorWindow: window })" in main
+    assert "viewHost()?.activate(window);" in main
+
+
+def test_the_sidebar_has_menus_not_native_selects():
+    """Every chooser in the chrome is menu.js: the OS list cannot show a folder
+    under a workspace name, a colour dot for a view, or a second action on a
+    row. Menus own the keyboard while open and hand it back on close, and a
+    trigger toggles rather than reopening on the press that closed it.
+    """
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    menu = (FRONTEND_JS / "menu.js").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "quickterm" / "frontend" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    sidebar_css = (
+        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "sidebar.css"
+    ).read_text(encoding="utf-8")
+
+    assert 'make("select"' not in launcher and "<select" not in launcher
+    assert "showPicker" not in launcher
+    assert 'import { toggleMenu } from "./menu.js";' in launcher
+    assert "openMenu(" not in launcher
+    assert 'claimFocus("menu")' in menu and 'releaseFocus("menu")' in menu
+    assert "export function toggleMenu(options)" in menu
+    assert '<link rel="stylesheet" href="/css/menu.css">' in html
+    assert ".launcher.sidebar select" not in sidebar_css
+    # The save dot and the rail rules survive the swap.
+    assert 'save.id = "sb-save";' in launcher
+    assert "body.sidebar-collapsed .sidebar-terminal-pick," in sidebar_css
+
+
+def test_workspace_here_moves_the_terminal_before_switching():
+    """The sidebar's offer to make the focused terminal's folder a workspace.
+
+    Order matters: the target workspace is written with the terminal first,
+    the terminal is retained and detached here second, and only then does the
+    window switch, so the restore attaches it again and no step can kill it.
+    A workspace held by another window or view stops the flow before anything
+    is written. The offer is patched on every status refresh, never rebuilt.
+    """
+    main = MAIN_JS.read_text(encoding="utf-8")
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+
+    start = main.index("  async function createWorkspaceHere() {")
+    body = main[start : main.index("\n  }\n", start)]
+    holder = body.index("workspaceHolder(await listWindowsSafe(), windowId, name)")
+    save = body.index("await workspace.save(name, layoutWith(")
+    retain = body.index("await api.retainSession(session.id)")
+    close = body.index("layout.closePane(pane, { animate: false })")
+    switch = body.index("return switchWorkspace(name)")
+    assert holder < save < retain < close < switch
+    assert "killSession" not in body and "cleanupSessions" not in body
+    assert "launcherView?.updateHere(hereState());" in main
+    assert "updateHere," in launcher and 'make("button", "sidebar-here")' in launcher
