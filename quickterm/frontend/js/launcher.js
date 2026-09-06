@@ -626,7 +626,7 @@ export function initLauncher(el, options) {
   footer.setAttribute("aria-label", "Application");
   const navIcons = {
     dashboard: "dashboard", settings: "settings", help: "help",
-    commands: "terminal", "new window": "new-window",
+    commands: "terminal", "new window": "new-window", "two workspaces": "workspaces",
   };
   for (const [label, onClick, shortcut] of options.chrome || []) {
     const button = iconButton("sidebar-nav-button", navIcons[label] || "terminal",

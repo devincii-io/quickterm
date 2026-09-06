@@ -54,6 +54,7 @@ export function workspaceHolder(list, selfId, name) {
 export function describeHolder(entry) {
   if (entry && entry.primary) return "the main window";
   const label = entry && entry.label ? String(entry.label).trim() : "";
+  if (label.startsWith("Side view: ")) return `a second workspace view (${label.slice(11)})`;
   return label ? `another window (${label})` : "another window";
 }
 

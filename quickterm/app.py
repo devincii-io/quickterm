@@ -307,6 +307,7 @@ async def _serve(
     open_window: Callable[[str | None, str | None], str] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
+    from quickterm.ws_protocol import WebSocketProtocol
 
     from quickterm import auth
 
@@ -327,7 +328,7 @@ async def _serve(
             port=cfg.port,
             loop="asyncio",
             http="h11",
-            ws="websockets-sansio",
+            ws=WebSocketProtocol,
             lifespan="on",
             log_config=None,
             access_log=False,

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -160,7 +161,8 @@ def test_workspace_path_roundtrips_and_normalizes(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setenv("QT_TEST_ROOT", str(project))
-    save_workspace(Workspace(name="dev", layout=LAYOUT, path="%QT_TEST_ROOT%"))
+    variable = "%QT_TEST_ROOT%" if os.name == "nt" else "$QT_TEST_ROOT"
+    save_workspace(Workspace(name="dev", layout=LAYOUT, path=variable))
     loaded = load_workspace("dev")
     assert loaded is not None
     assert loaded.path == str(project)

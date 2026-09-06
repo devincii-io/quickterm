@@ -562,6 +562,32 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   The rule it exists to enforce: two windows must never own one workspace,
   because the layout autosaves on every pane change and the loser's panes would
   be overwritten in silence.
+- `workspace_views.js` optionally encloses the primary viewer and a same-origin
+  iframe in two colored, labelled regions. The sidebar's **two workspaces** and
+  the palette's **show two workspaces…** use the existing workspace picker.
+  The second view reserves its own registry ID before loading
+  `?workspace=<name>&window=<id>&embedded=1`; authentication stays in `#t=`.
+  It never changes the primary viewer's sessionStorage window ID or remembered
+  workspace, and it never consumes Explorer launch requests. Each document has
+  its own LayoutManager, focus ownership, autosave, and heartbeat. No nested
+  second views. A workspace already claimed elsewhere remains unavailable.
+  Borders and labels appear only while two views are open. The divider supports
+  pointer drag, arrow keys, Home/End, and double-click balance; each view keeps
+  25–75% of the available extent. Narrow windows stack the views vertically.
+  Hiding preserves the iframe and sessions; closing waits for a successful save
+  and marks every owned terminal retained before releasing its registry entry
+  and removing it. Save failures keep the
+  view open. This arrangement is window-local and not restored at startup.
+- Workspace saves are serialized per name in `workspace.js`, with argument
+  snapshots taken at invocation. Server workspace PUTs serialize their
+  read/preserve-path/write/ownership-sync sequence without blocking the event
+  loop. Switching saves the outgoing workspace while its claim is still held,
+  then claims the destination before replacing the layout. Concurrent switches
+  are refused. On pagehide, the final PUT uses the same save queue with
+  `keepalive`, then releases the claim. Unload delivery is best-effort because
+  the browser may destroy the document before queued work finishes; explicit
+  view close awaits saving before removing its document. Scratch is
+  left to the backend idle reaper instead of being unconditionally killed.
 - The sidebar footer is built from the `chrome` array `main.js` passes to
   `initLauncher`, each entry `[label, onClick, shortcut?]`. `launcher.js` maps
   the label to a glyph in `navIcons`; an unmapped label falls back to the
@@ -592,7 +618,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `<select>` whose last option is **+ new scratch**, with the folder under it,
   two buttons that open the focused terminal's folder in Explorer / VS Code
   (`onOpenFolder`; also Alt+Shift+E / Alt+Shift+C and two palette rows) and
-  the `#sb-save` dot beside it; the terminal list; four icons (new window,
+  the `#sb-save` dot beside it; the terminal list; five icons (two workspaces, new window,
   dashboard, settings, help) and the collapse chevron. Double-click on a
   terminal row renames it (`onRenameSession` → `PATCH /api/sessions/{id}`,
   then `Pane.setTitle`). Three modes, remembered in `quickterm.sidebarMode`:

@@ -184,14 +184,14 @@ export class Palette {
   // land here, so exactly one place decides what a second window may open on.
   // Opening the picker directly skips the command list the button's user never
   // asked for.
-  newWindowMode() {
+  newWindowMode(beside = false) {
     if (!this.open) {
       this.open = true;
       this.requestId++;
       claimFocus("palette");
       this.overlay.hidden = false;
     }
-    this._newWindowMode();
+    this._newWindowMode(beside);
   }
 
   // The input is the palette: every path that shows it, opening or stepping
@@ -243,6 +243,10 @@ export class Palette {
         kind: "action", label: "new window…", hint: "a second window on another workspace",
         keepOpen: true, run: () => this._newWindowMode(),
       },
+      ...(a.canShowWorkspaceBeside?.() ? [{
+        kind: "view", label: "show two workspaces…", hint: "colored, resizable views in this window",
+        keepOpen: true, run: () => this._newWindowMode(true),
+      }] : []),
       // Saving and loading are name-exact operations, and a free-text prompt
       // here used to tear the whole layout down on a typo. Loading is offered
       // only as enumerated "load workspace: <name>" rows (added in
@@ -339,20 +343,20 @@ export class Palette {
   // workspace is gone", and the user needs to know where it went. Choosing one
   // explains the refusal instead of opening a window that would fight over the
   // same layout file.
-  async _newWindowMode() {
+  async _newWindowMode(beside = false) {
     this.windowMode = true;
     this.foreignMode = false;
     this.prompt = null;
     this.input.value = "";
-    this.input.placeholder = "Open a second window on…";
+    this.input.placeholder = beside ? "Show a workspace beside this one…" : "Open a second window on…";
     const request = ++this.requestId;
     this.items = [
       { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
-      {
+      ...(!beside ? [{
         kind: "window", label: "new window: scratch",
         hint: "a disposable layout of its own",
         run: () => this.app.openNewWindow(null),
-      },
+      }] : []),
     ];
     this._refilter();
     this.focusInput();
@@ -361,16 +365,16 @@ export class Palette {
     if (!this.app.windowRegistryAvailable()) {
       // Say so rather than let every workspace look free: the list below is
       // this window's guess, not the registry's answer.
-      this.input.placeholder = "Open a second window on… (cannot check what other windows hold)";
+      this.input.placeholder = "Cannot check which workspaces are already open";
     }
     for (const row of rows) {
       this.items.push({
         kind: "window",
-        label: `new window: ${row.name}`,
+        label: `${beside ? "show beside" : "new window"}: ${row.name}`,
         hint: row.hint,
         run: () => (row.taken
           ? this.app.explainWindowChoice(row)
-          : this.app.openNewWindow(row.name)),
+          : beside ? this.app.openWorkspaceBeside(row.name) : this.app.openNewWindow(row.name)),
       });
     }
     this._refilter(false);

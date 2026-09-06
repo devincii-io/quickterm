@@ -78,6 +78,15 @@ starts a replacement shell under the old identity. Claude-oriented profiles
 also offer explicit **Continue latest** and **Choose session** recovery
 actions.
 
+To see two projects at once, choose **two workspaces** in the sidebar footer,
+or **show two workspaces…** in `Alt+K`, then select another saved workspace.
+The gold and blue enclosures keep each workspace separate, including its own
+terminal splits and autosave. Drag the divider (or use its arrow keys), choose
+**Stack vertically**, or **Hide second workspace** to regain space temporarily.
+**Close view** saves the second workspace and leaves its terminals running.
+The second view is opened on demand and is not automatically reopened after
+restarting QuickTerm.
+
 **Scratch** is the disposable mode. It opens in a throwaway folder under your
 system temp directory, and the moment you type into a scratch layout it starts
 autosaving as the special `scratch` workspace, replacing the previous one. It
