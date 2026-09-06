@@ -806,12 +806,17 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
    output. Headers come back the moment there are two panes, because then a
    name is the thing that tells them apart, and even then the actions only
    draw on hover. The lone-pane case is pure CSS: the layout mounts a single
-   pane as the direct child of #grid (or #zoom-host while zoomed). */
-#grid > .pane > .pane-tab, #zoom-host > .pane > .pane-tab,
-#grid > .pane > .pane-actions, #zoom-host > .pane > .pane-actions { display: none; }
-#grid > .pane > .term-host, #zoom-host > .pane > .term-host { inset: 3px 1px 2px 6px; }
-#grid > .pane.drop-target::after, #zoom-host > .pane.drop-target::after { inset: 2px 1px 2px 2px; }
+   pane as the direct child of #grid. A zoomed pane is not a lone pane: it
+   hides its siblings, so it keeps the header, and the zoom control on it is
+   the way back and stays drawn without hover. */
+#grid > .pane > .pane-tab, #grid > .pane > .pane-actions { display: none; }
+#grid > .pane > .term-host { inset: 3px 1px 2px 6px; }
+#grid > .pane.drop-target::after { inset: 2px 1px 2px 2px; }
 #grid > .pane { border-width: 0; }
+.pane.zoomed .pane-actions { opacity: 1; }
+.pane.zoomed .pane-actions > :not([data-action="zoom"]) { opacity: 0; transition: opacity .1s ease; }
+.pane.zoomed:hover .pane-actions > *, .pane.zoomed .pane-actions:focus-within > * { opacity: 1; }
+.pane-action.active { color: var(--accent); }
 .pane-tab { height: 20px; padding: 0 8px 0 7px; font-size: 9.5px; cursor: grab; }
 .term-host { inset: 21px 1px 2px 6px; }
 .pane.drop-target::after { inset: 21px 1px 2px 2px; }

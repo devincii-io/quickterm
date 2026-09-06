@@ -83,7 +83,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   separately; clients must remove only verified kills and leave failures
   visible. Destructive confirmation triggers must remain visible, their
   popovers must be clamped inside the viewport and follow a scrolling panel,
-  and **Cancel** owns the initial focus.
+  and **Cancel** owns the initial focus when a pointer opened the bar. The
+  keyboard path (Alt+W, the palette) asked for the bar, so it opens with Kill
+  focused, a second Alt+W or Enter completes it, and Escape cancels from
+  anywhere in the pane; the bar claims the keyboard in `focus.js` while up.
 - Panels (Dashboard/Settings/Help) are a centred, bounded sheet, never
   full-bleed: the dense styling is about the rows inside, not the frame.
   Stretching `.panel-overlay` edge to edge removes the click-outside-to-close
@@ -138,8 +141,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   workspace, the terminals and the panel icons all live in `launcher.js`, and
   a lone pane has no header (`#grid > .pane > .pane-tab { display: none }`;
   the sidebar row names it). Headers return with a second pane, actions only
-  on hover. Before adding a control, ask whether the palette (Alt+K) or a
-  tooltip already carries it. The shell inventory is cached in localStorage
+  on hover. A zoomed pane is not a lone pane: it hides its siblings, so it
+  keeps its header and its zoom control stays drawn, because that control is
+  the way back (Alt+Z on one pane only says so). Focusing a pane the zoom
+  hides, from the sidebar or Alt+arrows, unzooms first. Before adding a
+  control, ask whether the palette (Alt+K) or a tooltip already carries it.
+  The shell inventory is cached in localStorage
   and served from a 60 s server-side cache, so boot never waits for it.
 - Every chooser in the chrome is a `menu.js` menu, never a native `<select>`
   (the OS list cannot show a folder under a name, a colour dot, or a second
@@ -153,7 +160,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   reloads its document. `workspace_views.js` positions every view and divider
   absolutely and only ever writes their boxes; the CSS transition on the box
   is the animation. Pane motion is the `.sliding` class on a split (app.css
-  transitions `flex-grow`); a splitter drag never slides.
+  transitions `flex-grow`); a splitter drag never slides. The layout owns the
+  pane DOM: `closePane` disposes with `keepElement: true` and `_animateLeave`
+  removes the box after the slide, then re-renders unless a later render
+  already did. Removing the element in `dispose()` first handed the closed
+  pane's space to the splitter and never redrew (3.9.0).
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),

@@ -7,7 +7,7 @@
 import * as api from "./api.js";
 import { getTheme, DEFAULT_THEME } from "./themes.js";
 import { PaneAttachProtocol } from "./pane_protocol.js";
-import { terminalMayFocus } from "./focus.js";
+import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
 
 const ENC = new TextEncoder();
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
@@ -266,6 +266,21 @@ export class Pane {
   setFocused(focused) {
     this.el.classList.toggle("focused", focused);
     if (focused) this.focusSoon();
+    // An armed confirmation belongs to the pane the user is in. Moving to
+    // another pane drops it, so no bar waits armed on a terminal nobody is
+    // looking at and no later Enter lands on it by surprise.
+    else if (this._confirmation) this.cancelConfirmation();
+  }
+
+  // The zoomed pane keeps its header, because it is the only place the way
+  // back can live; the zoom control flips to "show all" while it is.
+  setZoomed(zoomed) {
+    this.el.classList.toggle("zoomed", zoomed);
+    const button = this.el.querySelector('.pane-action[data-action="zoom"]');
+    if (!button) return;
+    button.textContent = zoomed ? "▣" : "□";
+    button.title = zoomed ? "Show all panes (Alt+Z)" : "Zoom pane (Alt+Z)";
+    button.classList.toggle("active", zoomed);
   }
 
   focusSoon() {
@@ -557,7 +572,10 @@ export class Pane {
     }, 2000);
   }
 
-  confirmAction(message, action, confirmLabel = "Kill") {
+  // `focusConfirm` is for the keyboard path: Alt+W is the user asking for
+  // this bar, so Enter or a second Alt+W completes it. A bar that appeared
+  // from a pointer press keeps Cancel first (see AGENTS.md).
+  confirmAction(message, action, confirmLabel = "Kill", { focusConfirm = false } = {}) {
     this.cancelConfirmation();
     clearTimeout(this._noticeTimer);
     // Alt+W arms this bar without the pointer ever touching the header, so mark
@@ -602,6 +620,9 @@ export class Pane {
     };
     confirm.addEventListener("click", run);
     cancel.addEventListener("click", () => this.cancelConfirmation(true));
+    // Escape cancels from anywhere in the pane, not only while a button has
+    // focus: a click back into the terminal used to leave the bar armed and
+    // send the Escape to the shell. Capture runs before xterm sees the key.
     const keyHandler = (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -609,11 +630,27 @@ export class Pane {
         this.cancelConfirmation(true);
       }
     };
-    this.exitBar.addEventListener("keydown", keyHandler);
-    this._confirmation = { confirm, cancel, keyHandler };
-    // Cancel owns the initial focus: a reflexive Enter on a bar the user did
-    // not expect must never complete a destructive action.
-    requestAnimationFrame(() => cancel.focus());
+    this.el.addEventListener("keydown", keyHandler, true);
+    this._confirmation = { confirm, cancel, keyHandler, label: confirmLabel };
+    // The bar owns the keyboard while it is up, or the pane's deferred
+    // term.focus() calls take it back a frame later (focus.js).
+    claimFocus("pane-confirm");
+    // A bar the user did not ask for keeps Cancel first, so a reflexive Enter
+    // never completes a destructive action. The keyboard path asked for it.
+    requestAnimationFrame(() => (focusConfirm ? confirm : cancel).focus());
+  }
+
+  // The label of the armed confirmation ("Kill", "Run", ...) or null.
+  confirmationLabel() {
+    return this._confirmation ? this._confirmation.label : null;
+  }
+
+  // Complete the armed confirmation, as Enter on its button would.
+  acceptConfirmation() {
+    const bar = this._confirmation;
+    if (!bar || bar.confirm.disabled) return false;
+    bar.confirm.click();
+    return true;
   }
 
   cancelConfirmation(refocus = false) {
@@ -622,8 +659,9 @@ export class Pane {
       this._armedAction = null;
     }
     if (!this._confirmation) return;
-    this.exitBar.removeEventListener("keydown", this._confirmation.keyHandler);
+    this.el.removeEventListener("keydown", this._confirmation.keyHandler, true);
     this._confirmation = null;
+    releaseFocus("pane-confirm");
     this.exitBar.classList.remove("confirming");
     if (this.state !== "exited") this.exitBar.hidden = true;
     if (refocus && this.term) this.term.focus();
@@ -766,7 +804,9 @@ export class Pane {
     if (this.session) api.killSession(this.session.id).catch(() => {});
   }
 
-  dispose() {
+  // `keepElement` leaves the box in the DOM for the layout's leave animation;
+  // the layout removes it once the neighbours have slid over it.
+  dispose({ keepElement = false } = {}) {
     this._disposed = true;
     this._stopActivityTicker();
     this.detach();
@@ -780,7 +820,7 @@ export class Pane {
     if (this._linkProvider) { try { this._linkProvider.dispose(); } catch (e) {} this._linkProvider = null; }
     if (this._webgl) { try { this._webgl.dispose(); } catch (e) {} this._webgl = null; }
     if (this.term) { try { this.term.dispose(); } catch (e) {} this.term = null; }
-    this.el.remove();
+    if (!keepElement) this.el.remove();
   }
 
   // ---- internals ----

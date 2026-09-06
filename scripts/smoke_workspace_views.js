@@ -53,8 +53,20 @@ for (const [doc, win, label] of [[document, window, 'PRIMARY'], [child.document,
   await pause();
   doc.querySelector('[data-action="zoom"]').click();
   check(doc.body.classList.contains('zoomed'), `zoom ${label}`);
+  const zoomedTab = doc.querySelector('#zoom-host .pane > .pane-tab');
+  check(zoomedTab && win.getComputedStyle(zoomedTab).display !== 'none', `zoomed pane keeps its header ${label}`);
+  check(doc.querySelector('#zoom-host [data-action="zoom"]').title.startsWith('Show all panes'), `zoom control offers the way back ${label}`);
+  await pause();
+  check(doc.activeElement?.classList.contains('xterm-helper-textarea'), `zoom keeps the keyboard in the terminal ${label}`);
   doc.querySelector('#zoom-host [data-action="zoom"]').click();
   check(!doc.body.classList.contains('zoomed'), `unzoom ${label}`);
+  // Closing the first pane hands its space to the survivor, which is a lone
+  // pane again: direct child of #grid, no splitter and no header left behind.
+  doc.querySelector('#grid .split > .pane [data-action="detach"]').click();
+  await wait(() => doc.querySelector('#grid > .pane') && !doc.querySelector('#grid .splitter'), `closed pane hands its space over ${label}`);
+  const survivor = doc.querySelector('#grid > .pane').getBoundingClientRect();
+  const grid = doc.getElementById('grid').getBoundingClientRect();
+  check(Math.abs(survivor.width - grid.width) <= 2 && Math.abs(survivor.height - grid.height) <= 2, `survivor fills the grid ${label}`);
 }
 child.document.querySelector('.xterm-helper-textarea').dispatchEvent(new child.PointerEvent('pointerdown', {bubbles: true}));
 child.document.querySelector('.xterm-helper-textarea').focus();

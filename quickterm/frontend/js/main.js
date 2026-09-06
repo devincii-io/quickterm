@@ -1591,6 +1591,7 @@ async function boot() {
       return choice;
     },
     zoom: () => layout.toggleZoom(),
+    isZoomed: () => layout.zoomed,
     // D/Alt+D is a true detach: retain the process first, then remove only its
     // viewer. It must never share the kill semantics of X/Alt+W.
     closePane: async () => {
@@ -1623,25 +1624,35 @@ async function boot() {
       scheduleWorkspaceSave();
       refreshStatusSoon();
     },
-    killFocusedSession: async () => {
+    // `keyboard` marks Alt+W and the palette: the bar then opens with Kill
+    // focused and a second Alt+W completes it, so a terminal can be killed
+    // without reaching for the mouse. The header button keeps Cancel first.
+    killFocusedSession: async ({ keyboard = false } = {}) => {
       const pane = layout.focused;
-      if (pane && pane.session) {
-        pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
-          const sessionId = pane.session.id;
-          try {
-            await api.killSession(sessionId);
-          } catch (error) {
-            // Rethrowing a real failure keeps it on the confirmation bar. A
-            // forgotten session must fall through and close, or the pane can
-            // never be removed at all.
-            if (!sessionAlreadyGone(error)) throw error;
-          }
-          forgetSession(sessionId);
-          layout.closePane(pane);
-          scheduleWorkspaceSave();
-          refreshStatusSoon();
-        });
+      if (!pane) return;
+      if (keyboard && pane.confirmationLabel() === "Kill") {
+        pane.acceptConfirmation();
+        return;
       }
+      if (!pane.session) {
+        pane.flashNotice("[no terminal to kill · Alt+D closes the pane]");
+        return;
+      }
+      pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
+        const sessionId = pane.session.id;
+        try {
+          await api.killSession(sessionId);
+        } catch (error) {
+          // Rethrowing a real failure keeps it on the confirmation bar. A
+          // forgotten session must fall through and close, or the pane can
+          // never be removed at all.
+          if (!sessionAlreadyGone(error)) throw error;
+        }
+        forgetSession(sessionId);
+        layout.closePane(pane);
+        scheduleWorkspaceSave();
+        refreshStatusSoon();
+      }, "Kill", { focusConfirm: keyboard });
     },
     killAllSessions: async () => {
       const result = await api.killAllSessions();
@@ -2060,7 +2071,7 @@ async function boot() {
     cycleTerminal: app.cycleTerminal,
     zoom: app.zoom,
     closePane: app.closePane,
-    killSession: app.killFocusedSession,
+    killSession: () => app.killFocusedSession({ keyboard: true }),
     focusDir: (direction) => layout.focusDir(direction),
     toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
     toggleSettings: () => { palette.close(); panels.toggle("settings"); },

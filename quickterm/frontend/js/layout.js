@@ -29,6 +29,10 @@ export class LayoutManager {
     this.root = null;
     this.focused = null;
     this.zoomed = false;
+    this.zoomedPane = null;
+    // Bumped by every render(), so a deferred "catch the DOM up" step can
+    // tell whether a later structural change already did that work.
+    this._renderGeneration = 0;
   }
 
   newPane(profile, cwd, sessionId, launchSpec, title) {
@@ -67,6 +71,7 @@ export class LayoutManager {
   }
 
   render() {
+    this._renderGeneration += 1;
     if (this.zoomed) this._unzoomDom();
     this.gridEl.textContent = "";
     if (this.root) {
@@ -167,12 +172,17 @@ export class LayoutManager {
     if (this.zoomed) this.toggleZoom();
     const hit = this._findLeaf(pane);
     if (!hit) return;
-    pane.dispose();
+    // The layout owns the DOM: dispose tears down the terminal and its socket
+    // but leaves the element in place, so the leave animation still has a box
+    // to collapse. Taking it out here first was the 3.9.0 bug where the
+    // splitter inherited the space and the survivor never grew.
+    pane.dispose({ keepElement: true });
     if (this.focused === pane) this.focused = null;
     if (!hit.parent) {
       const fresh = this.newPane();
       this.root = { type: "pane", pane: fresh };
       this.render();
+      pane.el.remove();
       this.focusPane(fresh);
       this._changed();
       return;
@@ -180,7 +190,10 @@ export class LayoutManager {
     const sibling = hit.parent.children.find((c) => c !== hit.node);
     const gp = this._parentOf(hit.parent);
     this._replaceNode(hit.parent, sibling, gp === undefined ? null : gp);
-    if (!(animate && this._animateLeave(hit.parent, pane))) this.render();
+    if (!(animate && this._animateLeave(hit.parent, pane))) {
+      this.render();
+      pane.el.remove();
+    }
     const next = this.panes(sibling)[0] || this.panes()[0] || null;
     if (next) this.focusPane(next);
     this._changed();
@@ -216,16 +229,22 @@ export class LayoutManager {
     const el = split.el;
     if (!el || !el.isConnected || reducedMotion()) return false;
     const leavingEl = leaving.el;
+    // Only a direct child can slide shut. After an earlier close whose slide
+    // is still running, the DOM lags the tree and the leaving pane may sit in
+    // a nested split; the caller then renders at once instead.
+    if (!leavingEl || leavingEl.parentElement !== el) return false;
     const otherEl = el.children[0] === leavingEl ? el.children[2] : el.children[0];
-    if (!leavingEl || !otherEl) return false;
+    if (!otherEl || otherEl === leavingEl) return false;
     el.classList.add("sliding");
     leavingEl.classList.add("pane-leave");
     leavingEl.style.flex = "0 1 0px";
     otherEl.style.flex = "1 1 0px";
+    const generation = this._renderGeneration;
     setTimeout(() => {
-      // Only if nothing else has redrawn in the meantime: a later structural
-      // change already rendered the tree without this pane.
-      if (leavingEl.isConnected) this.render();
+      // The DOM catches up with the tree now, unless a later structural
+      // change already rendered it without this pane.
+      if (this._renderGeneration === generation) this.render();
+      leavingEl.remove();
       if (this.focused) this.focusPane(this.focused);
     }, SLIDE_MS);
     return true;
@@ -257,18 +276,31 @@ export class LayoutManager {
       return;
     }
     if (!this.focused) return;
+    // One pane has nothing to hide. Zooming it would still move the element
+    // and change nothing on screen, an invisible state with an invisible exit.
+    if (this.panes().length < 2) {
+      if (this.focused.flashNotice) this.focused.flashNotice("[only one pane]");
+      return;
+    }
     this.zoomed = true;
+    this.zoomedPane = this.focused;
     this.gridEl.hidden = true;
     this.zoomHostEl.hidden = false;
     this.zoomHostEl.textContent = "";
     this.focused.el.style.flex = "1 1 auto";
     this.zoomHostEl.appendChild(this.focused.el);
     document.body.classList.add("zoomed");
+    this.focused.setZoomed(true);
     this.focused.fitSoon();
+    // Moving the element blurred xterm's textarea. Without this, the next
+    // keystrokes went to <body> and nowhere else.
+    this.focused.focusSoon();
   }
 
   _unzoomDom() {
     this.zoomed = false;
+    if (this.zoomedPane) this.zoomedPane.setZoomed(false);
+    this.zoomedPane = null;
     this.zoomHostEl.hidden = true;
     this.zoomHostEl.textContent = "";
     this.gridEl.hidden = false;
@@ -278,6 +310,9 @@ export class LayoutManager {
   // ---- focus ----
 
   focusPane(pane) {
+    // A pane the zoom hides must not take the keyboard while it is invisible:
+    // the sidebar row would light up and the typing would land off screen.
+    if (this.zoomed && pane && pane !== this.zoomedPane) this.toggleZoom();
     if (this.focused && this.focused !== pane) this.focused.setFocused(false);
     const changed = this.focused !== pane;
     this.focused = pane;
@@ -287,6 +322,8 @@ export class LayoutManager {
 
   focusDir(dir) {
     if (!this.focused) return;
+    // Leaving the zoomed pane means seeing the others again first.
+    if (this.zoomed) this.toggleZoom();
     const cur = this.focused.el.getBoundingClientRect();
     const cx = cur.left + cur.width / 2;
     const cy = cur.top + cur.height / 2;
