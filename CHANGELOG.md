@@ -2,6 +2,38 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.9.1
+
+### Closing a pane gives its space back
+
+- Closing a pane in a split (Alt+D, the × button, Alt+W, kill all) left
+  the layout broken since 3.9.0: when the first pane went, the splitter took
+  two thirds of the window and the survivor kept one third; when the second
+  went, a stale splitter and a header stayed on the lone survivor. Neither a
+  resize nor waiting repaired it, only the next split did. The leave
+  animation now collapses the element it was meant to and redraws the tree
+  when it ends.
+
+### Zoom you can see and leave
+
+- Alt+Z dropped the keyboard: the zoomed pane lost focus and the next
+  keystrokes went nowhere. The terminal keeps focus now.
+- The zoomed pane keeps its header. Its zoom control turns into ▣ "Show
+  all panes" and stays visible without hover; the palette row reads "show
+  all panes" while zoomed. Alt+Z on a lone pane says "[only one pane]"
+  instead of changing nothing visible.
+- Focusing a hidden pane while zoomed, from the sidebar or with Alt+arrows,
+  shows every pane again first instead of putting the keyboard into a
+  terminal you cannot see.
+
+### Kill from the keyboard
+
+- Alt+W opens the kill bar with **Kill** focused; Alt+W or Enter again
+  kills, Escape cancels. Clicking Kill in the header still puts Cancel first.
+- Escape cancels the bar from anywhere in the pane, not only while one of its
+  buttons has focus.
+- Alt+W on a pane with no running terminal says so.
+
 ## QuickTerm 3.9.0
 
 ### Tile as many workspaces as you want

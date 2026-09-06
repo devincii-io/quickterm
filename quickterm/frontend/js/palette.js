@@ -222,14 +222,14 @@ export class Palette {
       { kind: "action", label: "next new-terminal profile", hint: "Alt+Shift+Up", run: () => a.cycleTerminal(1) },
       { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH() },
       { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV() },
-      { kind: "action", label: "zoom pane", hint: "Alt+Z", run: () => a.zoom() },
+      { kind: "action", label: a.isZoomed?.() ? "show all panes" : "zoom pane", hint: "Alt+Z", run: () => a.zoom() },
       { kind: "view", label: "text size: smaller", hint: "Ctrl+−", run: () => a.fontSmaller() },
       { kind: "view", label: "text size: bigger", hint: "Ctrl++", run: () => a.fontBigger() },
       { kind: "view", label: "text size: reset", hint: "Ctrl+0", run: () => a.fontReset() },
       // Pane sizing lives on the splitter (drag / arrows / double-click) and in
       // Quick settings. Duplicating it as five palette rows only crowded the list.
       { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
-      { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession() },
+      { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession({ keyboard: true }) },
       { kind: "action", label: "open folder in Explorer", hint: folderHint("Alt+Shift+E"), run: () => a.openExplorer() },
       { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor() },
       {

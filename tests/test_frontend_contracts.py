@@ -526,8 +526,9 @@ def test_open_folder_actions_share_one_resolver_and_one_route():
 
 
 def test_panes_move_by_dragging_their_header():
-    """The header is the drag handle. It is only drawn with two or more panes
-    and never while zoomed, so a lone pane cannot start a drag. The geometry
+    """The header is the drag handle. It is only drawn with two or more panes,
+    and a zoomed pane draws it but refuses the drag, so a lone pane cannot
+    start one. The geometry
     and the tree surgery live in pane_move.js, pure and unit-tested; layout.js
     renders the result and autosaves it like any other structural change.
     """
@@ -651,3 +652,49 @@ def test_workspace_here_moves_the_terminal_before_switching():
     assert "killSession" not in body and "cleanupSessions" not in body
     assert "launcherView?.updateHere(hereState());" in main
     assert "updateHere," in launcher and 'make("button", "sidebar-here")' in launcher
+
+
+def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
+    """3.9.0 disposed the pane (removing its element) before the leave
+    animation looked for it, so the splitter inherited the closed pane's
+    space and the tree was never re-rendered. The layout owns the pane DOM.
+    Zoom keeps the header (the way back) and the keyboard, hidden panes cannot
+    be focused without unzooming, and the kill bar answers the keyboard.
+    """
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+    pane = PANE_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pane.dispose({ keepElement: true });" in layout
+    assert "if (!keepElement) this.el.remove();" in pane
+    leave = layout[layout.index("  _animateLeave(split, leaving) {"):]
+    leave = leave[:leave.index("\n  }\n") + 4]
+    assert "if (!leavingEl || leavingEl.parentElement !== el) return false;" in leave
+    assert "if (this._renderGeneration === generation) this.render();" in leave
+    assert "leavingEl.remove();" in leave
+    assert "leavingEl.isConnected" not in leave
+
+    # Zoom: header stays, terminal keeps the keyboard, one pane is not zoomable.
+    assert "#zoom-host > .pane > .pane-tab" not in app_css
+    assert ".pane.zoomed .pane-actions { opacity: 1; }" in app_css
+    zoom = layout[layout.index("  toggleZoom() {"):]
+    zoom = zoom[:zoom.index("\n  }\n") + 4]
+    assert "this.focused.setZoomed(true);" in zoom
+    assert "this.focused.focusSoon();" in zoom
+    assert "if (this.panes().length < 2) {" in zoom
+    assert "if (this.zoomed && pane && pane !== this.zoomedPane) this.toggleZoom();" in layout
+    assert 'label: a.isZoomed?.() ? "show all panes" : "zoom pane"' in palette
+
+    # Kill from the keyboard: Alt+W arms with Kill focused and Alt+W again
+    # kills; the header button keeps Cancel first; Escape works pane-wide.
+    assert "killSession: () => app.killFocusedSession({ keyboard: true })," in main
+    assert 'else if (action === "kill") app.killFocusedSession();' in main
+    assert 'if (keyboard && pane.confirmationLabel() === "Kill") {' in main
+    assert '}, "Kill", { focusConfirm: keyboard });' in main
+    assert "requestAnimationFrame(() => (focusConfirm ? confirm : cancel).focus());" in pane
+    assert 'this.el.addEventListener("keydown", keyHandler, true);' in pane
+    assert 'claimFocus("pane-confirm");' in pane and 'releaseFocus("pane-confirm");' in pane

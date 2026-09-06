@@ -7,11 +7,11 @@ export function renderHelp() {
     const shortcuts = [
       ["Alt K", "Open command palette"], ["Alt Shift →", "Split selected profile right in current folder"],
       ["Alt Shift ↓", "Split selected profile below in current folder"], ["Alt arrows", "Move between panes"],
-      ["Alt N", "New default terminal"], ["Alt Z", "Focus one pane"],
+      ["Alt N", "New default terminal"], ["Alt Z", "Zoom the focused pane; again shows all panes"],
       ["Alt Shift ← / ↑", "Previous / next new-terminal profile"],
       ["Alt Shift E", "Open the focused terminal's folder in Explorer"],
       ["Alt Shift C", "Open the focused terminal's folder in VS Code"],
-      ["Alt D", "Detach current pane"], ["Alt W", "Confirm kill and close"],
+      ["Alt D", "Detach current pane"], ["Alt W", "Arm the kill bar; Alt W or Enter again kills, Escape cancels"],
       ["Ctrl +", "Bigger terminal text"], ["Ctrl -", "Smaller terminal text"],
       ["Ctrl 0", "Reset terminal text size"],
       ["Ctrl C", "Copy selection (otherwise interrupt)"], ["Ctrl V", "Paste into terminal"],

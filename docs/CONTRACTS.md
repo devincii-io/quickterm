@@ -652,9 +652,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   terminals remain fully readable.
 - Chrome: the sidebar is the whole chrome. There is no status bar, no top bar
   and no quick-settings drawer. A lone pane has no header: the layout mounts
-  it as the direct child of `#grid` (or `#zoom-host` while zoomed) and CSS hides
-  `.pane-tab`/`.pane-actions` there. Headers return with a second pane and
-  their actions draw only on hover, focus, or while armed.
+  it as the direct child of `#grid` and CSS hides `.pane-tab`/`.pane-actions`
+  there. Headers return with a second pane and their actions draw only on
+  hover, focus, or while armed. A zoomed pane (mounted in `#zoom-host`) keeps
+  its header; its zoom control reads "Show all panes" and stays drawn, the
+  palette row reads "show all panes", and the terminal keeps the keyboard.
+  Focusing a pane the zoom hides unzooms first. Alt+Z on a lone pane only
+  flashes "[only one pane]".
 - Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
   chevron beside it opens a `menu.js` menu over Personal profiles, System
   shells and the built-in Claude choices (`claude:continue|new|resume`, the
@@ -721,7 +725,14 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   unit-tested; `LayoutManager.movePane` renders and autosaves the result
   through `onLayoutChange` like a split. A drag starts after 6 px of travel,
   so click-to-focus and double-click-to-rename are unchanged; Escape cancels
-  it; a lone or zoomed pane has no header and so cannot be dragged.
+  it; a lone pane has no header and a zoomed one refuses the drag.
+- Closing a pane (detach, kill, kill all) collapses its split into the
+  sibling: the tree changes at once, the box slides shut, and the DOM is
+  re-rendered when the slide ends. The survivor always gets the space.
+- The kill bar (`Pane.confirmAction`): opened from the keyboard (Alt+W, the
+  palette) it focuses **Kill**, and Alt+W or Enter again completes it; opened
+  from the header button it focuses **Cancel**. Escape cancels from anywhere
+  in the pane. Alt+W on a pane without a live terminal flashes a notice.
 - Starting folders are shell-native: blank Windows profiles use the Windows
   user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
   are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
