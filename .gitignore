@@ -24,3 +24,5 @@ nul
 
 # Local agent tool state: Claude Code keeps scratch worktrees here.
 .claude/
+# Playwright MCP console captures from local UI debugging
+.playwright-mcp/

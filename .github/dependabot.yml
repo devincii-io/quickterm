@@ -1,12 +1,7 @@
 version: 2
 updates:
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: monthly
-    groups:
-      actions:
-        patterns: ["*"]
+  # No github-actions entry: CI is intentionally manual (scripts/check.py) and
+  # the repository has no .github/workflows, so that ecosystem fails every run.
   - package-ecosystem: uv
     directory: /
     schedule:
