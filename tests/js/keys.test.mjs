@@ -166,3 +166,65 @@ test("Alt+Shift+E and Alt+Shift+C open the folder; plain Alt+E and Alt+C stay wi
   }
   assert.deepEqual(calls, ["openExplorer", "openEditor"]);
 });
+
+test("Ctrl+_ is readline's undo, not a zoom, on the Minus key it shares with -", async () => {
+  const { handler, calls } = await captureHandler();
+
+  // US layout: Ctrl+Shift+- reports "_" on the Minus key. The physical code
+  // used to be enough to claim it.
+  const undo = keyEvent({ key: "_", code: "Minus", ctrlKey: true, shiftKey: true });
+  handler(undo);
+  assert.equal(undo.defaultPrevented, false);
+
+  // QWERTZ: the same character sits on the Slash position.
+  const qwertz = keyEvent({ key: "_", code: "Slash", ctrlKey: true, shiftKey: true });
+  handler(qwertz);
+  assert.equal(qwertz.defaultPrevented, false);
+
+  assert.deepEqual(calls, []);
+});
+
+test("Ctrl+* is not a zoom key, from the digit row or the numpad", async () => {
+  const { handler, calls } = await captureHandler();
+
+  for (const code of ["Digit8", "NumpadMultiply", "BracketRight"]) {
+    const event = keyEvent({ key: "*", code, ctrlKey: true, shiftKey: code !== "NumpadMultiply" });
+    handler(event);
+    assert.equal(event.defaultPrevented, false, `Ctrl+* on ${code} must reach the shell`);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("a physical code zooms only when the layout named no character", async () => {
+  const { handler, calls } = await captureHandler();
+
+  // Characters that are not +, - or 0 on those positions stay with the shell:
+  // ")" is Ctrl+Shift+0 on US, "=" is Ctrl+Shift+0 on QWERTZ, "ß" is the
+  // QWERTZ Minus position and Insert is Numpad0 with NumLock off (copy).
+  const passing = [[")", "Digit0"], ["=", "Digit0"], ["ß", "Minus"], ["Insert", "Numpad0"], ["Dead", "Equal"]];
+  for (const [key, code] of passing) {
+    const event = keyEvent({ key, code, ctrlKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, false, `Ctrl+${key} on ${code} must reach the shell`);
+  }
+  assert.deepEqual(calls, []);
+
+  // A layout that reports nothing still gets the US positions.
+  for (const code of ["Equal", "Minus", "Digit0"]) {
+    const event = keyEvent({ key: "Unidentified", code, ctrlKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, true, `unnamed ${code} still zooms`);
+  }
+  assert.deepEqual(calls, ["fontBigger", "fontSmaller", "fontReset"]);
+});
+
+test("the numpad and the US = key still zoom", async () => {
+  const { handler, calls } = await captureHandler();
+
+  for (const [key, code] of [["+", "NumpadAdd"], ["-", "NumpadSubtract"], ["0", "Numpad0"], ["=", "Equal"]]) {
+    const event = keyEvent({ key, code, ctrlKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, true, `Ctrl+${key} on ${code} zooms`);
+  }
+  assert.deepEqual(calls, ["fontBigger", "fontSmaller", "fontReset", "fontBigger"]);
+});

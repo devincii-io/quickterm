@@ -33,13 +33,23 @@ export function initKeys(actions) {
     // "Slash" and "BracketRight" are the QWERTZ positions of -/+ (already
     // covered by the e.key tests) but are Ctrl+/ and Ctrl+] on ANSI layouts,
     // where readline undo and the vim tag jump must reach the shell.
+    // The same holds for the US positions: Ctrl+Shift+- is "_" on the Minus
+    // key, which is readline's undo, and Ctrl+Shift+8 is "*". So a code only
+    // stands in when the layout did not say which character it produced; the
+    // two numpad operators always produce + and -, so they need no guard.
+    // Numpad0 is guarded too: with NumLock off it is Insert, and Ctrl+Insert
+    // is copy.
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
       const key = e.key.toLowerCase();
-      const reset = key === "0" || e.code === "Digit0" || e.code === "Numpad0";
-      const smaller = key === "-" || key === "_" || e.code === "Minus"
-        || e.code === "NumpadSubtract";
-      const bigger = key === "+" || key === "=" || key === "*"
-        || e.code === "Equal" || e.code === "NumpadAdd";
+      const unnamed = !e.key || e.key === "Unidentified";
+      const reset = key === "0"
+        || (unnamed && (e.code === "Digit0" || e.code === "Numpad0"));
+      const smaller = key === "-" || e.code === "NumpadSubtract"
+        || (unnamed && e.code === "Minus");
+      // "=" counts only on the key whose shifted character is "+" (US and
+      // AZERTY); on QWERTZ it is Shift+0.
+      const bigger = key === "+" || (key === "=" && e.code === "Equal")
+        || e.code === "NumpadAdd" || (unnamed && e.code === "Equal");
       if (reset || smaller || bigger) {
         e.preventDefault();
         e.stopPropagation();
