@@ -1,14 +1,23 @@
-"""The Explorer folder handoff: a queue and the long-poll the primary window waits on."""
+"""Launch handoffs from outside the window: a queue and the long-poll the
+primary window waits on.
+
+Explorer's "Open QuickTerm here" queues a folder; the `quickterm` command line
+also queues a profile, a workspace, or both. Everything is checked here, so
+the window only ever receives a launch that could start.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from quickterm import launch
 from quickterm.api.common import checked_dir, read_json
+from quickterm.windows import normalize_workspace
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
@@ -20,7 +29,7 @@ _LAUNCH_WAIT_S = 20.0
 
 
 class LaunchQueue:
-    """Explorer folder handoffs waiting for the primary window to claim one.
+    """Launch handoffs waiting for the primary window to claim one.
 
     An asyncio.Queue hands an item to its oldest getter even when that getter's
     client has gone (a reload, a closed window), and the item then vanished
@@ -61,16 +70,49 @@ async def _wait_event(event: asyncio.Event, timeout: float) -> None:
         pass
 
 
+async def checked_launch(ctx: ApiContext, body: Any) -> dict:
+    """The queue item for one handoff body: only the fields it named, each checked.
+
+    Unknown keys are ignored, so an older window never sees a field it does
+    not understand as the reason a launch failed.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    item: dict[str, str] = {}
+    if body.get("cwd") is not None:
+        cwd = body["cwd"]
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise HTTPException(400, "cwd must be a non-empty string")
+        item["cwd"] = await checked_dir(cwd)
+    if body.get("profile") is not None:
+        try:
+            item["profile"] = launch.find_profile(ctx.cfg, body["profile"]).name
+        except launch.LaunchError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+    if body.get("workspace") is not None:
+        try:
+            name = normalize_workspace(body["workspace"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if name is None:
+            raise HTTPException(400, "workspace must be a non-empty string")
+        # Through sys.modules so tests can stub the store; reading a workspace
+        # file blocks, so it stays off the event loop.
+        workspace = importlib.import_module("quickterm.workspace")
+        if await asyncio.to_thread(workspace.load_workspace, name) is None:
+            raise HTTPException(404, f"no such workspace: {name}")
+        item["workspace"] = name
+    if not item:
+        raise HTTPException(400, "a launch needs cwd, profile or workspace")
+    return item
+
+
 def register(app: FastAPI, ctx: ApiContext) -> None:
     pending_launches = ctx.launches
 
     @app.post("/api/launches")
     async def queue_launch(request: Request) -> dict:
-        body = await read_json(request)
-        cwd = body.get("cwd") if isinstance(body, dict) else None
-        if not isinstance(cwd, str) or not cwd.strip():
-            raise HTTPException(400, "cwd must be a non-empty string")
-        item = {"cwd": await checked_dir(cwd)}
+        item = await checked_launch(ctx, await read_json(request))
         pending_launches.put(item)
         return item
 

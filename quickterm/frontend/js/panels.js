@@ -4,12 +4,43 @@ import {
 } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
 import { claimFocus, releaseFocus } from "./focus.js";
+import { closeMenu, menuIsOpen } from "./menu.js";
 import { renderGeneralSettings } from "./panel_settings_general.js";
 import { renderThemePicker, renderLogoPicker } from "./panel_settings_appearance.js";
 import { renderTerminalSettings } from "./panel_settings_terminals.js";
 import { renderSnippetSettings } from "./panel_settings_snippets.js";
 import { renderAboutSettings, renderVoiceSettings, renderAdvancedSettings } from "./panel_settings_about.js";
 import { renderHelp } from "./panel_help.js";
+
+// TERMINAL_TYPES is the Settings fallback inventory, which lists only what a
+// Windows machine may offer before it has been asked. Every other kind the
+// launcher knows is named here, or the dashboard called a Git Bash or a zsh
+// profile "Custom command".
+const OTHER_TYPE_LABELS = {
+  "git-bash": "Git Bash",
+  nushell: "Nushell",
+  bash: "Bash",
+  zsh: "Zsh",
+  fish: "Fish",
+};
+
+export function terminalTypeLabel(type) {
+  const known = TERMINAL_TYPES.find((item) => item.id === type);
+  if (known) return known.label;
+  return OTHER_TYPE_LABELS[type] || TERMINAL_TYPES.find((item) => item.id === "custom").label;
+}
+
+// Who gets Escape or Tab while the sheet is open. A menu opened from the
+// sheet (a Settings chooser) owns both while it is up, so Escape closes the
+// menu, never the sheet under it. The sheet listens in the capture phase,
+// before the menu's own listener, so it steps aside for a key headed into the
+// menu ("menu") and closes the menu itself when focus has left it
+// ("close-menu").
+export function sheetKeyRoute(key, { menuOpen, inMenu }) {
+  if (key !== "Escape" && key !== "Tab") return "none";
+  if (!menuOpen) return "sheet";
+  return inMenu ? "menu" : "close-menu";
+}
 
 // The Advanced tab hands back arbitrary JSON. "null", "42" and "[]" all parse
 // happily and then throw on the first property access, past the parse guard,
@@ -61,6 +92,17 @@ export class Panels {
     });
     overlay.querySelector(".panel-close").addEventListener("click", () => this.close());
     document.addEventListener("keydown", (event) => {
+      const route = this.open ? sheetKeyRoute(event.key, {
+        menuOpen: menuIsOpen(),
+        inMenu: Boolean(event.target?.closest?.(".qt-menu")),
+      }) : "none";
+      if (route === "menu") return;
+      if (route === "close-menu") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMenu("escape");
+        return;
+      }
       if (this.open && event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -377,8 +419,7 @@ export class Panels {
       const target = profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host;
       return `${type.toUpperCase()} · ${target}`;
     }
-    const fallback = TERMINAL_TYPES.find((item) => item.id === "custom");
-    return (TERMINAL_TYPES.find((item) => item.id === type) || fallback).label;
+    return terminalTypeLabel(type);
   }
 
   async _settings() {
@@ -396,7 +437,11 @@ export class Panels {
     }
     this.settingsDraft = JSON.parse(JSON.stringify(cfg));
     this.terminalInventory = inventory;
-    for (const profile of this.settingsDraft.profiles) profile.terminal_type = inferTerminalType(profile);
+    // No type is stamped here. A hand-edited profile without one launches as
+    // a plain command, and stamping the inferred type at load saved it with
+    // that type on the next Save, which changes how it starts (a bare `bash`
+    // becomes a login shell). The cards infer the type for display and set it
+    // only when the user picks a type or types a different command.
 
     const shell = make("div", "settings-shell");
     const nav = make("nav", "settings-tabs");

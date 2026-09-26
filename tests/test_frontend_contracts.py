@@ -303,7 +303,7 @@ def test_open_here_claims_one_folder_launch():
     """
     loop = LAUNCH_LOOP_JS.read_text(encoding="utf-8")
     assert "const launch = await api.claimLaunch()" in loop
-    assert "await openFolderInScratch(launch.cwd)" in loop
+    assert 'if (kind === "folder") return await openFolder(launch.cwd);' in loop
     assert "if (!embedded) claimLaunchLoop();" in MAIN_JS.read_text(encoding="utf-8")
 
 
@@ -568,9 +568,11 @@ def test_only_the_primary_window_claims_the_explorer_folder_handoff():
     start = launch.index("  async function claimLaunchLoop()")
     loop = launch[start:launch.index("\n  function stopLaunchLoop", start)]
     assert "if (!state.windowIsPrimary && state.registryAvailable) {" in loop
-    # Unchanged otherwise: one claim, opened as a folder in scratch.
-    assert "const launch = await api.claimLaunch()" in loop
-    assert "await openFolderInScratch(launch.cwd)" in loop
+    # Unchanged otherwise: one claim, and a folder alone opens in scratch
+    # (tests/js/launch_loop.test.mjs covers the other launch shapes).
+    assert "await claimOnce()" in loop
+    assert "const launch = await api.claimLaunch()" in launch
+    assert "opened = await openFolderInScratch(cwd)" in launch
     # The flag is read back from the registry, which promotes a new primary when
     # that window closes, not trusted from the launch URL for the whole run.
     assert 'if (info && "primary" in info) state.windowIsPrimary = Boolean(info.primary);' in registry
@@ -985,3 +987,25 @@ def test_search_and_export_are_palette_rows():
     # A hit outside this layout is attached the way "attach here" does it.
     assert "if (!attachSession(info)) return false;" in actions
     assert "...createTerminalActions({ api, layout, attachSession, restartSavedPane, showError })," in main
+
+
+def test_settings_infers_a_profile_type_for_display_only():
+    """Loading Settings must not stamp the inferred type onto every profile.
+
+    A hand-edited profile without a type launches as a plain command; the
+    stamp saved it with the inferred type on the next Save and changed how it
+    starts. Only the user's own choice in a card sets `terminal_type`.
+    """
+    panels = PANELS_JS.read_text(encoding="utf-8")
+    assert "profile.terminal_type = inferTerminalType(profile)" not in panels
+    assert "profile.terminal_type =" not in panels
+
+
+def test_menus_draw_above_the_sheet_and_below_the_error_banner():
+    css = (FRONTEND_JS.parent / "css" / "menu.css").read_text(encoding="utf-8")
+    rule = css[css.index(".qt-menu {"):]
+    rule = rule[: rule.index("}")]
+    assert "z-index: 130;" in rule
+    app_css = (FRONTEND_JS.parent / "css" / "app.css").read_text(encoding="utf-8")
+    assert ".panel-overlay { position: fixed; inset: 0; z-index: 100;" in app_css
+    assert "z-index: 140;" in app_css  # #app-error

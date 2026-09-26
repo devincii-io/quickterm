@@ -119,6 +119,25 @@ def test_git_bash_gets_the_bash_start_command_treatment():
     assert launch.resolve_profile(prof)[1] == ["--norc", "-lc", "make; exec bash -l"]
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+def test_posix_login_shells_keep_the_profile_arguments(shell):
+    # These used to drop the profile's own arguments at launch, so an
+    # --norc/--no-config set in Advanced silently did nothing.
+    prof = Prof(name="s", cmd=f"/usr/bin/{shell}", terminal_type=shell, args=["--norc", "-l"])
+    assert launch.resolve_profile(prof, "/tmp/x") == (
+        f"/usr/bin/{shell}", ["--norc", "-l"], "/tmp/x",
+    )
+    prof.start_command = "make"
+    # Ahead of -lc, which takes the next operand as the command; our own -l
+    # is not doubled by the profile's.
+    assert launch.resolve_profile(prof)[1] == [
+        "--norc", "-lc", f"make; exec /usr/bin/{shell} -l",
+    ]
+    prof.args = ["--login"]
+    assert launch.resolve_profile(prof)[1] == ["-lc", f"make; exec /usr/bin/{shell} -l"]
+    assert launch.resolve_profile(Prof(name="s", terminal_type=shell))[0] == shell
+
+
 def test_nushell_runs_the_start_command_and_stays_interactive():
     prof = Prof(name="nu", cmd="C:/nu/nu.exe", terminal_type="nushell", start_command="ls")
     assert launch.resolve_profile(prof) == ("C:/nu/nu.exe", ["-e", "ls"], None)

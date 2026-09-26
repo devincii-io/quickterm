@@ -345,7 +345,10 @@ async function boot() {
     switchWorkspace, newScratchWorkspace, hereState, openHere,
     createWorkspaceHere: actions.createWorkspaceHere,
   });
-  const { claimLaunchLoop, stopLaunchLoop } = createLaunchLoop({ api, state, openFolderInScratch, showError });
+  const { claimLaunchLoop, stopLaunchLoop } = createLaunchLoop({
+    api, state, layout, openFolderInScratch, spawnInto, spawnDefaultInto, switchWorkspace,
+    focusShownWorkspace: (name) => app.focusShownWorkspace(name), showError,
+  });
   const { persistOnExit, closeView } = createLifecycle({
     api, workspace, state, layout, ownedSessionIds,
     stopWindowHeartbeat: registry.stopWindowHeartbeat,
