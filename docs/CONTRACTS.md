@@ -517,14 +517,28 @@ Rules:
   copies of `WindowInfo` rather than the registry's own records. `server.py`
   imports it statically, so it needs no `hiddenimports` entry.
 
-## quickterm/server.py
+## quickterm/server.py and quickterm/api/
 
 ```python
 def create_app(manager: SessionManager, cfg: AppConfig, token: str = "",
                elevated: bool = False, *,
                windows: WindowRegistry | None = None,
                open_window: Callable[[str | None, str | None], str] | None = None) -> FastAPI
+def client_host(host: str) -> str      # URL host for a bind address, IPv6 bracketed
 ```
+
+`server.py` is only the composition root: it builds one `api.context.ApiContext`
+(manager, cfg, token, elevated, the window registry, `open_window`, the
+Host/Origin allowlists, the launch queue, the inventory cache, the workspace
+write lock), installs `api.guard.LocalGuard`, calls `register(app, ctx)` on
+every route module and mounts the frontend last. The routes live in
+`quickterm/api/`: `sessions`, `launches`, `windows`, `workspaces`, `config`,
+`system` (health, profiles, terminal inventory, elevate, update, open, file,
+folder browser), `assets`, and `attach` (the WebSocket route, the replay
+handshake, the output and input pumps and the close codes). `api.common`
+holds the shared request helpers (bounded JSON bodies, `resolve_request`).
+Route modules load `workspace`, `config`, `opener`, `update` and `assets`
+through `importlib.import_module("quickterm.X")` so tests can stub them.
 
 `windows` is the registry shared with `app.py`'s native side; omitted, the app
 builds a private one (headless, tests). `open_window(workspace, cwd) -> window
@@ -537,7 +551,7 @@ without asking for the token.
 
 ### Authentication
 
-Three layers, all in `server.py`. The HTTP side runs in a plain ASGI
+Three layers, in `api/guard.py`. The HTTP side runs in a plain ASGI
 middleware (`LocalGuard`), not `@app.middleware("http")`, whose wrapped
 `receive` hides a client disconnect from `request.is_disconnected()`; the
 WebSocket route checks the same rules itself before `accept`.
@@ -689,10 +703,8 @@ class _ViewerWindows:                       # the native windows this process ow
   native Edge WebView2 viewer. `--port` and an elevated instance record
   `{"port"}` in `cfg.runtime_overrides`. Every client URL (window, running
   instance probe, launch handoff) and the free-port probe follow `cfg.host`,
-  bracketing IPv6 (`server.client_host`).
-- An elevated instance calls `workspace.set_namespace("elevated")` before it
-  serves or discards scratch, so it never touches the normal instance's files. The viewer receives `_DesktopApi` as its
-  pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
+  bracketing IPv6 (`server.client_host`). The viewer receives `_DesktopApi` as
+  its pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
   one existing selected directory or `None` on Cancel/failure. It is the
   secondary picker now, offered from inside the in-app folder browser; its
   docstring's claim that "the browser frontend deliberately cannot learn
@@ -701,6 +713,8 @@ class _ViewerWindows:                       # the native windows this process ow
   bridge is for, not a new trust boundary: behind the same token
   `GET /api/file` already reads any file and `POST /api/sessions` already
   spawns arbitrary processes.
+- An elevated instance calls `workspace.set_namespace("elevated")` before it
+  serves or discards scratch, so it never touches the normal instance's files.
 - Spawn autostart profiles on startup. Autostart, global hotkeys and the
   elevated instance's first terminal resolve through `launch.resolve` like a
   REST spawn; a failure is logged and stored as `cfg.launch_error` instead of

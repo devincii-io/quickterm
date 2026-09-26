@@ -37,7 +37,8 @@ to a flat bytearray) whose front never starts mid-sequence and whose replay
 starts with a preamble restoring the DEC modes (alt screen, bracketed paste,
 mouse, ...) in effect there, byte-bounded per-subscriber fan-out queues
 (chunks merge up to 128 KB, overflow past 2 MiB triggers a clean
-replay/resync). → `server.py`: REST + WS attach (`replay_size` → scrollback
+replay/resync). → `quickterm/api/` (composed by `server.py`): REST + WS attach
+in `api/attach.py` (`replay_size` → scrollback
 frame → `replay_done` → live); the output pump coalesces queued chunks into one
 WS frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js`: one
 xterm.js + one WS per pane; write-callback backpressure; input only forwarded
@@ -285,7 +286,7 @@ keep shipping `QuickTerm-v*-Setup.exe` and `SHA256SUMS.txt` under those names.
 
 ## Security model
 
-Server binds 127.0.0.1. Three-layer guard in `server.py`: Host allowlist
+Server binds 127.0.0.1. Three-layer guard in `api/guard.py`: Host allowlist
 (DNS rebinding), Origin allowlist (cross-origin/WS), and a per-install token
 (`auth.py`), delivered via URL fragment `#t=`, sent as `X-QuickTerm-Token` on
 /api and as WS subprotocol `qtauth.<token>`. Exempt: `/api/health`,
