@@ -185,11 +185,12 @@ async function boot() {
   } = createHere({ api, workspace, state, layout, showError });
   const {
     profileTerminalType, spawnInto, spawnSpecInto, spawnDefaultInto, spawnSplitInto,
-    runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal,
+    runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal, runInstaller,
     elevateProfile, elevateSystemTerminal, attachSession, restartSavedPane, resumeClaudePane,
   } = createSpawner({
     api, state, layout, ownSession, scheduleWorkspaceSave, showError,
     refreshStatusSoon: () => refreshStatusSoon(),
+    refreshInventory: (options) => refreshInventory(options),
   });
   const { discardScratch, maybeAdoptScratch, ensureScratchWorkspace, newScratchWorkspace, openFolderInScratch } =
     createScratch({
@@ -286,12 +287,16 @@ async function boot() {
   };
 
   const {
-    reportLaunchError, checkLaunchError, onConfigSaved, previewTheme, appliedTheme, refreshCachedInventory,
+    reportLaunchError, checkLaunchError, onConfigSaved, previewTheme, appliedTheme,
+    refreshInventory, refreshCachedInventory,
   } = createConfigSync({
     api, state, app, layout, setFontSize, showError,
     buildLauncher: () => buildLauncher(),
   });
   app.onConfigSaved = onConfigSaved;
+  // The palette offers the same installs as the new-terminal menu.
+  app.shellInstalls = () => state.terminalInventory?.installs || [];
+  app.installShell = (install) => runInstaller(install);
 
   const palette = new Palette(app);
   const panels = new Panels(app);
@@ -341,7 +346,7 @@ async function boot() {
 
   const { buildLauncher, refreshStatus, refreshStatusSoon } = createSidebar({
     api, state, layout, app, panels, palette, viewHost, initialSessions,
-    runProfile, runSystemTerminal, elevateProfile, elevateSystemTerminal, attachSession,
+    runProfile, runSystemTerminal, runInstaller, elevateProfile, elevateSystemTerminal, attachSession,
     switchWorkspace, newScratchWorkspace, hereState, openHere,
     createWorkspaceHere: actions.createWorkspaceHere,
   });

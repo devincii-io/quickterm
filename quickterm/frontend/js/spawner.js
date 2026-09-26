@@ -56,7 +56,7 @@ export function claudeProfileForPane(profiles, pane) {
 }
 
 export function createSpawner({
-  api, state, layout, ownSession, scheduleWorkspaceSave, refreshStatusSoon, showError,
+  api, state, layout, ownSession, scheduleWorkspaceSave, refreshStatusSoon, refreshInventory, showError,
 }) {
   // An empty default_profile is Settings' explicit "System default shell"
   // choice, not "unset". Falling through to profiles[0] made that option a
@@ -251,6 +251,32 @@ export function createSpawner({
     });
   }
 
+  // Installing a missing shell (PowerShell 7 through winget) runs in an
+  // ordinary terminal, so the agreement prompt and the UAC request stay the
+  // user's to answer. Once it exits the shells are scanned again, past the
+  // server's cache, and the new one shows up in the menu.
+  async function runInstaller(install) {
+    if (!install.cmd) {
+      return api.openTarget(install.url).catch(() => showError(`could not open ${install.url}`));
+    }
+    let pane = layout.focused || layout.init();
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
+    if (!pane) return;
+    layout.focusPane(pane);
+    pane.onceExited(() => {
+      refreshInventory({ fresh: true }).then((inventory) => {
+        const ready = (inventory.types || []).some((type) =>
+          type.id === install.id && type.executable && type.available !== false);
+        if (ready) pane.flashNotice(`[${install.label} installed · it is in the new-terminal menu]`, 5000);
+      }).catch(() => {});
+    });
+    await spawnSpecInto(pane, {
+      cmd: install.cmd,
+      args: install.args || [],
+      name: `Install ${install.label}`,
+    });
+  }
+
   // Elevation opens a separate Administrator window, so nothing in this window
   // changes on success and every failure mode (non-Windows, unknown profile,
   // declined UAC) used to land in an empty catch. Always say what happened.
@@ -355,6 +381,7 @@ export function createSpawner({
     runClaudeMode,
     splitClaudeAgentView,
     runSystemTerminal,
+    runInstaller,
     elevateProfile,
     elevateSystemTerminal,
     attachSession,

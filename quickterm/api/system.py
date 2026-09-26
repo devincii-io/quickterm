@@ -54,14 +54,14 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return [asdict(p) for p in cfg.profiles]
 
     @app.get("/api/system/terminals")
-    async def get_system_terminals() -> dict:
+    async def get_system_terminals(fresh: bool = False) -> dict:
         # Probing every shell path and asking wsl.exe for its distributions
         # takes a third of a second, and installed shells do not change between
         # one sidebar rebuild and the next. Off the loop, and remembered for a
-        # minute.
+        # minute. `fresh` skips the cache: an install terminal just exited.
         now = time.monotonic()
         cached = inventory_cache.get("value")
-        if cached is not None and now - inventory_cache.get("at", 0.0) < 60.0:
+        if not fresh and cached is not None and now - inventory_cache.get("at", 0.0) < 60.0:
             return cached
         value = await asyncio.to_thread(_terminal_inventory)
         inventory_cache.update(value=value, at=time.monotonic())
@@ -268,6 +268,7 @@ def _terminal_inventory() -> dict:
             ]
         except (OSError, subprocess.SubprocessError):
             pass
+    pwsh = next(exe for type_id, _label, exe in shells if type_id == "powershell-core")
     return {
         "types": [
             {
@@ -279,7 +280,26 @@ def _terminal_inventory() -> dict:
             for type_id, label, executable in shells
         ] + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
         "wsl_distributions": distributions,
+        "installs": [] if pwsh else [_powershell_install()],
     }
+
+
+# Offered in the new-terminal menu while PowerShell 7 is missing: the built-in
+# 5.1 is what every Windows has, and 7 is the one worth using. winget runs in
+# an ordinary terminal, so its agreements and the UAC prompt are the user's to
+# answer; no --accept flag answers them on the user's behalf. Without winget
+# (Windows 10 without App Installer) the offer is the official release page.
+_PWSH_WINGET_ARGS = ["install", "--id", "Microsoft.PowerShell", "--exact", "--source", "winget"]
+_PWSH_RELEASES_URL = "https://github.com/PowerShell/PowerShell/releases/latest"
+
+
+def _powershell_install() -> dict:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    winget = _first_executable("winget.exe", local / "Microsoft" / "WindowsApps" / "winget.exe")
+    offer = {"id": "powershell-core", "label": "PowerShell 7"}
+    if winget:
+        return {**offer, "cmd": winget, "args": list(_PWSH_WINGET_ARGS), "url": None}
+    return {**offer, "cmd": None, "args": [], "url": _PWSH_RELEASES_URL}
 
 
 def _optional_str(path: Path | None) -> str | None:
@@ -322,4 +342,4 @@ def _posix_inventory() -> dict:
             "available": exe is not None,
         })
     types.append({"id": "custom", "label": "Custom command", "executable": None, "available": True})
-    return {"types": types, "wsl_distributions": []}
+    return {"types": types, "wsl_distributions": [], "installs": []}

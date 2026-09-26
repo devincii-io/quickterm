@@ -70,16 +70,22 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
     return { theme: state.cfg.theme, custom_theme: state.cfg.custom_theme || {} };
   }
 
+  // Scans the shells again and redraws the sidebar if anything changed.
+  // `fresh` skips the server's cache, for a shell that was just installed.
+  function refreshInventory({ fresh = false } = {}) {
+    return api.getTerminalOptions(fresh).then((inventory) => {
+      if (JSON.stringify(inventory) !== JSON.stringify(state.terminalInventory)) {
+        state.terminalInventory = saveInventoryCache(inventory);
+        buildLauncher();
+      }
+      return inventory;
+    });
+  }
+
   // Boot drew the sidebar from the inventory cached in localStorage; once the
   // first terminal is up, a fresh scan replaces it if anything changed.
   function refreshCachedInventory() {
-    setTimeout(() => {
-      api.getTerminalOptions().then((fresh) => {
-        if (JSON.stringify(fresh) === JSON.stringify(state.terminalInventory)) return;
-        state.terminalInventory = saveInventoryCache(fresh);
-        buildLauncher();
-      }).catch(() => {});
-    }, 1500);
+    setTimeout(() => { refreshInventory().catch(() => {}); }, 1500);
   }
 
   return {
@@ -88,6 +94,7 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
     onConfigSaved,
     previewTheme,
     appliedTheme,
+    refreshInventory,
     refreshCachedInventory,
   };
 }

@@ -210,6 +210,7 @@ export class Pane {
     this._resync = false; // last close was a 1013 overflow: reconnect to replay
     this._disposed = false;
     this._exitCode = null;
+    this._exitWatchers = [];
     this._keepScreen = false; // the next attach is a restart in place
     this._keepScreenGeneration = null;
     this._stateBeforeSpawn = null;
@@ -1379,6 +1380,16 @@ export class Pane {
     this._renderExitBar();
     this.onStateChange(this);
     this._runPendingReveal();
+    const watchers = this._exitWatchers;
+    this._exitWatchers = [];
+    for (const watcher of watchers) {
+      try { watcher(code); } catch (e) { console.warn("QuickTerm: exit watcher failed", e); }
+    }
+  }
+
+  // `callback(code)` runs once, when the session this pane shows next exits.
+  onceExited(callback) {
+    this._exitWatchers.push(callback);
   }
 
   _closed() {

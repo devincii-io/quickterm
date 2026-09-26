@@ -650,6 +650,63 @@ def test_terminal_inventory_marks_putty_missing(client):
     assert entries["ssh"]["executable"] is None
 
 
+def _inventory_with(monkeypatch, found: dict[str, str | None]) -> dict:
+    """The Windows inventory with only the programs in ``found`` on the machine."""
+    from quickterm.api import system as system_routes
+
+    def no_wsl(*_args, **_kwargs):
+        raise OSError("not asked in tests")
+
+    monkeypatch.setattr(system_routes.subprocess, "run", no_wsl)
+    monkeypatch.setattr(
+        system_routes, "_first_executable", lambda command, *_candidates: found.get(command)
+    )
+    return system_routes._terminal_inventory()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the PowerShell 7 offer is Windows-only")
+def test_missing_powershell_7_is_offered_through_winget(monkeypatch):
+    (offer,) = _inventory_with(monkeypatch, {"winget.exe": r"C:\apps\winget.exe"})["installs"]
+    assert offer == {
+        "id": "powershell-core",
+        "label": "PowerShell 7",
+        "cmd": r"C:\apps\winget.exe",
+        "args": ["install", "--id", "Microsoft.PowerShell", "--exact", "--source", "winget"],
+        "url": None,
+    }
+    # The agreements and the UAC prompt are the user's to answer, in the terminal.
+    assert not any(arg.startswith("--accept") or arg == "--silent" for arg in offer["args"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the PowerShell 7 offer is Windows-only")
+def test_without_winget_the_offer_is_the_release_page(monkeypatch):
+    (offer,) = _inventory_with(monkeypatch, {})["installs"]
+    assert offer["cmd"] is None
+    assert offer["url"] == "https://github.com/PowerShell/PowerShell/releases/latest"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the PowerShell 7 offer is Windows-only")
+def test_nothing_is_offered_once_powershell_7_is_installed(monkeypatch):
+    found = {"pwsh.exe": r"C:\ps\pwsh.exe", "winget.exe": r"C:\apps\winget.exe"}
+    assert _inventory_with(monkeypatch, found)["installs"] == []
+
+
+def test_fresh_inventory_skips_the_cache(client, monkeypatch):
+    from quickterm.api import system as system_routes
+
+    scans = []
+
+    def scan():
+        scans.append(1)
+        return {"types": [], "wsl_distributions": [], "installs": [], "scan": len(scans)}
+
+    monkeypatch.setattr(system_routes, "_terminal_inventory", scan)
+    assert client.get("/api/system/terminals").json()["scan"] == 1
+    assert client.get("/api/system/terminals").json()["scan"] == 1  # cached
+    assert client.get("/api/system/terminals?fresh=true").json()["scan"] == 2
+    assert client.get("/api/system/terminals").json()["scan"] == 2  # the fresh scan is cached
+
+
 def test_spawn_unknown_profile_404(client):
     assert client.post("/api/sessions", json={"profile": "nope"}).status_code == 404
 

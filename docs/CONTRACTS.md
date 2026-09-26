@@ -659,7 +659,7 @@ REST (JSON, under `/api`):
 | POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry) → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
 | PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. `port`, `host` and `summon_hotkey` need a restart and are not applied live; everything else, `scratch_dir` included, applies at once. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
-| GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
@@ -1105,7 +1105,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
   chevron beside it opens a `menu.js` menu over Personal profiles, System
   shells and the built-in Claude choices (`claude:continue|new|resume`, the
-  CLI plus one flag, no profile needed); the workspace row is a menu button
+  CLI plus one flag, no profile needed), and an **Install** group from the
+  inventory's `installs` (`install:powershell-core`). An install row is never
+  selected, cycled or remembered (`canLaunch`): it opens a terminal running
+  the installer (`spawner.runInstaller`, or the download page), and when that
+  session exits (`Pane.onceExited`) the inventory is fetched with
+  `fresh=true`, so the new shell appears; the palette offers the same
+  installs; the workspace row is a menu button
   (scratch, every saved workspace with its folder, the ones shown in another
   view marked in that view's colour, a **show beside** row action, the
   **workspace here** offer when applicable, **new scratch**), with the folder

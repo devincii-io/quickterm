@@ -103,7 +103,9 @@ export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
 export const getConfigHistory = () => req("GET", "/api/config/history");
 export const restoreConfigVersion = (id) =>
   req("POST", `/api/config/history/${encodeURIComponent(id)}/restore`, {});
-export const getTerminalOptions = () => req("GET", "/api/system/terminals");
+// `fresh` skips the server's one-minute cache: a shell was just installed.
+export const getTerminalOptions = (fresh = false) =>
+  req("GET", `/api/system/terminals${fresh ? "?fresh=true" : ""}`);
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
 export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);
 export const openTarget = (target) => req("POST", "/api/open", { target });

@@ -41,7 +41,7 @@ export function finishedAttachRecord(session) {
 
 export function createSidebar({
   api, state, layout, app, panels, palette, viewHost, initialSessions,
-  runProfile, runSystemTerminal, elevateProfile, elevateSystemTerminal, attachSession,
+  runProfile, runSystemTerminal, runInstaller, elevateProfile, elevateSystemTerminal, attachSession,
   switchWorkspace, newScratchWorkspace, hereState, createWorkspaceHere, openHere,
 }) {
   let lastSessions = initialSessions;
@@ -84,6 +84,7 @@ export function createSidebar({
       logoUrl: api.assetUrl(state.workspaceLogo || state.cfg.logo),
       onRunProfile: runProfile,
       onRunSystem: runSystemTerminal,
+      onInstall: runInstaller,
       onLaunchComplete: () => layout.focused?.focusSoon(),
       onElevateProfile: elevateProfile,
       onElevateSystem: elevateSystemTerminal,
