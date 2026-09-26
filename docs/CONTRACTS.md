@@ -407,7 +407,10 @@ Layout tree (JSON-serializable, shared with the frontend, SAME schema):
 ```
 
 Pane nodes may also contain `launch_spec` for system terminals opened without a
-saved profile. `session_id` is preferred when restoring. A missing/dead ID
+saved profile, and profile panes `launch_options: {claude_mode?,
+start_command?, args?}`, the options the pane was started with, so a restart
+in place or a workspace restore repeats that launch exactly (a Claude "new
+conversation" pane stays "new"). Layouts without it load as "no options". `session_id` is preferred when restoring. A missing/dead ID
 becomes an explicit transcript-free unavailable pane; only a user-selected
 recovery action may start a replacement or resume a Claude conversation.
 
@@ -643,6 +646,8 @@ REST (JSON, under `/api`):
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
 | POST | /api/elevate | same body as POST /api/sessions → `{launched: true}`. Windows only (else 400). Resolved by `launch.resolve` like an ordinary terminal (an explicit `cwd` wins over the workspace root), then started by a separate elevated QuickTerm through UAC; 500 when the launch fails. |
+| GET | /api/search?q=...&limit=... | → `[{session_id, name, workspace, alive, line, text, start}]`: case-insensitive substring search over every session's scrollback as plain text (`quickterm/transcript.py`: escape sequences, OSC 52 payloads and alternate-screen text dropped, carriage-return overwrites and ConPTY repaints resolved). One hit per line, in session then line order; `text` is at most 300 characters around the match, `start` counts code points, `line` is only a hint because xterm wraps lines. `limit` defaults to 200 and is clamped to 1..1000; 400 when `q` is blank or over 1 KiB. Snapshots are taken on the loop, the work runs in a thread. |
+| POST | /api/sessions/{id}/export | Write that terminal's scrollback as plain text to `<Downloads or home>/QuickTerm/<name>-<YYYYmmdd-HHMMSS>.txt` (UTC; `-2`, `-3` instead of overwriting) → `{path}`; 404 unknown id, 500 when the write fails. Only on this explicit request does terminal output reach the disk. |
 | GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Strips surrounding quotes and expands `~` like `/api/open`. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory or unreadable (`cannot read <path>: <reason>`). |
 | GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
