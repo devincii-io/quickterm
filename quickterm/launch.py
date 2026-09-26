@@ -125,6 +125,10 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]:
     return merged
 
 
+def _without_login_flags(args: list[str]) -> list[str]:
+    return [arg for arg in args if arg not in ("-l", "--login")]
+
+
 def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], str | None]:
     """Command, arguments and process folder for one profile.
 
@@ -179,10 +183,14 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
         return "wsl.exe", args, None
     if terminal_type in ("bash", "zsh", "fish"):
-        shell = prof.cmd or terminal_type
+        shell = configured or terminal_type
+        # Same rule as Git Bash below: the profile's own arguments go first,
+        # because the shell reads the operand after -c as the command, and the
+        # login flag is ours, so a profile that repeats it does not get two.
+        extra = _without_login_flags(existing_args)
         if start:
-            return shell, ["-lc", f"{start}; exec {shell} -l"], cwd
-        return shell, ["-l"], cwd
+            return shell, extra + ["-lc", f"{start}; exec {shell} -l"], cwd
+        return shell, extra + ["-l"], cwd
     if terminal_type == "git-bash":
         # `cmd` is a Windows path such as C:\Program Files\Git\bin\bash.exe;
         # inside the login shell plain `bash` is the same program, and it has
@@ -190,7 +198,7 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
         shell = configured or "bash"
         # The profile's own arguments first, as for cmd and nushell: bash
         # reads the operand after -c as the command. The login flag is ours.
-        extra = [arg for arg in existing_args if arg not in ("-l", "--login")]
+        extra = _without_login_flags(existing_args)
         if start:
             return shell, extra + ["-lc", f"{start}; exec bash -l"], cwd
         return shell, extra + ["-l"], cwd

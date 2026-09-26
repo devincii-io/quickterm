@@ -14,6 +14,7 @@ from quickterm.api import (
     attach,
     config,
     launches,
+    remote,
     sessions,
     system,
     windows as window_routes,
@@ -92,7 +93,9 @@ def create_app(
         launches=launches.LaunchQueue(),
     )
     app.add_middleware(LocalGuard, ctx=ctx)
-    for routes in (system, sessions, launches, window_routes, workspaces, config, assets, attach):
+    for routes in (
+        system, sessions, remote, launches, window_routes, workspaces, config, assets, attach
+    ):
         routes.register(app, ctx)
     _mount_frontend(app)
     return app
