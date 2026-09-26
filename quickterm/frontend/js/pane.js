@@ -8,8 +8,17 @@ import * as api from "./api.js";
 import { getTheme, DEFAULT_THEME } from "./themes.js";
 import { PaneAttachProtocol } from "./pane_protocol.js";
 import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
+import { RealInputGate } from "./broadcast.js";
+import { findInBuffer } from "./buffer_search.js";
 
 const ENC = new TextEncoder();
+// Written between a dead session's last output and its restart, which
+// attaches without the replay's reset. The dead program's input modes
+// (mouse reporting, bracketed paste, application cursor keys) would otherwise
+// shape what the new shell receives, and its colours would bleed into it.
+const RESTART_RESET = "\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l"
+  + "\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l";
+const RESTART_MARK = "\x1b[2m[restarted]\x1b[0m\r\n";
 const PENDING_LIMIT = 1 << 20; // ~1 MiB unwritten -> pause processing
 const CLIENT_QUEUE_LIMIT = 2 << 20; // reconnect before sustained output grows JS heap
 const OSC52_MAX_BYTES = 1 << 20; // clipboard writes from terminal output
@@ -164,11 +173,15 @@ export class Pane {
     this.onFocusRequest = opts.onFocusRequest || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
     this.onActionRequest = opts.onActionRequest || (() => {});
+    // Real input typed here, for broadcast (layout.js decides who else gets it).
+    this.onUserInput = opts.onUserInput || (() => {});
     this.profileName = opts.profile || null;
     this.cwd = opts.cwd || null;
     this.currentCwd = this.cwd;
     this.savedSessionId = opts.sessionId || null;
     this.launchSpec = opts.launchSpec || null;
+    // Claude mode, start command or args beyond the profile (launch_options.js).
+    this.launchOptions = opts.launchOptions || null;
     this.terminalType = opts.terminalType || null;
     this.title = opts.title || null; // user-given name, wins over session name
     this.userWrote = false;    // real keystrokes/paste in this pane
@@ -195,6 +208,12 @@ export class Pane {
     this._exited = false;
     this._resync = false; // last close was a 1013 overflow: reconnect to replay
     this._disposed = false;
+    this._exitCode = null;
+    this._keepScreen = false; // the next attach is a restart in place
+    this._keepScreenGeneration = null;
+    this._stateBeforeSpawn = null;
+    this._pendingReveal = null; // a search hit to show once the replay is in
+    this._inputGate = new RealInputGate();
 
     const el = document.createElement("div");
     el.className = "pane";
@@ -246,6 +265,12 @@ export class Pane {
     return !this.spawnPending && (this.state === "empty" || this.state === "exited");
   }
 
+  // An exited terminal, or a saved one that is no longer running: both can be
+  // started again with the launch this pane remembers.
+  get canRestart() {
+    return !this.spawnPending && (this.state === "exited" || this.state === "missing");
+  }
+
   get _phase() { return this._protocol.phase; }
   get _generation() { return this._protocol.generation; }
 
@@ -256,20 +281,37 @@ export class Pane {
     this.currentCwd = this.cwd;
   }
 
+  // The next attach continues below what is on screen instead of resetting
+  // it, so a restart keeps the dead session's last output (the reason it was
+  // restarted is usually right there). A later reattach replays as usual.
+  keepScreenOnNextAttach() {
+    this._keepScreen = Boolean(this.term);
+  }
+
   beginSpawn() {
     if (this.spawnPending) return false;
     this._clearRecovery();
+    this._stateBeforeSpawn = this.state;
     this.spawnPending = true;
     this.state = "spawning";
-    this.emptyEl.hidden = false;
-    this.emptyEl.textContent = "starting terminal…";
+    if (this._keepScreen) {
+      this.showNotice("[restarting…]");
+    } else {
+      this.emptyEl.hidden = false;
+      this.emptyEl.textContent = "starting terminal…";
+    }
     this._renderTab();
     return true;
   }
 
   endSpawn() {
     this.spawnPending = false;
-    if (this.state === "spawning") this.state = "empty";
+    this._keepScreen = false;
+    // A failed restart leaves an exited pane exited, so Enter can try again;
+    // "empty" would hide the output it still shows and drop the way back.
+    if (this.state === "spawning") {
+      this.state = this._stateBeforeSpawn === "exited" && this.term ? "exited" : "empty";
+    }
     this.emptyEl.textContent = "no session · alt+k";
     this._renderTab();
   }
@@ -430,10 +472,47 @@ export class Pane {
   showNotice(text) {
     if (this._confirmation) this.cancelConfirmation();
     this._clearRecovery();
+    this.exitBar.classList.remove("confirming", "exited");
     this.exitBar.textContent = text;
     this.exitBar.hidden = false;
     const live = document.getElementById("live-status");
     if (live) live.textContent = text.replace(/^\[|\]$/g, "");
+  }
+
+  // An exited pane keeps its final output and offers to start the same launch
+  // again. Enter does that from the keyboard (input is off here anyway), so
+  // the button never takes the keyboard from the terminal.
+  _renderExitBar() {
+    const text = this._exitCode === null ? "[exited]" : `[exited · code ${this._exitCode}]`;
+    const copy = document.createElement("span");
+    copy.className = "pane-confirm-copy";
+    copy.textContent = text;
+    const actions = document.createElement("span");
+    actions.className = "pane-confirm-actions";
+    const restart = document.createElement("button");
+    restart.type = "button";
+    restart.className = "pane-exit-restart";
+    restart.textContent = "Restart";
+    restart.title = "Start this terminal again the way it was started (Enter)";
+    restart.addEventListener("mousedown", (event) => event.preventDefault());
+    restart.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.requestRestart();
+    });
+    actions.append(restart);
+    this.exitBar.textContent = "";
+    this.exitBar.append(copy, actions);
+    this.exitBar.classList.add("confirming", "exited");
+    this.exitBar.hidden = false;
+    const live = document.getElementById("live-status");
+    if (live) live.textContent = text.replace(/^\[|\]$/g, "");
+  }
+
+  requestRestart() {
+    if (!this.canRestart) return false;
+    this.onFocusRequest(this);
+    this.onActionRequest("restart", this);
+    return true;
   }
 
   markUnavailable(opts = {}) {
@@ -566,7 +645,7 @@ export class Pane {
   }
 
   // Short-lived notice (e.g. "no room to split") that cleans up after itself.
-  flashNotice(text) {
+  flashNotice(text, ms = 2000) {
     if (this._recovery) {
       const live = document.getElementById("live-status");
       if (live) live.textContent = text.replace(/^\[|\]$/g, "");
@@ -579,8 +658,10 @@ export class Pane {
       // A confirmation or recovery bar rendered into the same element since
       // this timer was armed must never be hidden out from under the user.
       if (this._confirmation || this._recovery) return;
-      if (this.state !== "exited" && !this.closeArmed) this.exitBar.hidden = true;
-    }, 2000);
+      // The notice covered an exited pane's bar; put its Restart back.
+      if (this.state === "exited") this._renderExitBar();
+      else if (!this.closeArmed) this.exitBar.hidden = true;
+    }, ms);
   }
 
   // `focusConfirm` is for the keyboard path: Alt+W is the user asking for
@@ -674,7 +755,9 @@ export class Pane {
     this._confirmation = null;
     releaseFocus("pane-confirm");
     this.exitBar.classList.remove("confirming");
-    if (this.state !== "exited") this.exitBar.hidden = true;
+    // A dismissed bar on an exited pane left its buttons behind, still wired.
+    if (this.state === "exited") this._renderExitBar();
+    else this.exitBar.hidden = true;
     if (refocus && this.term) this.term.focus();
   }
 
@@ -750,6 +833,44 @@ export class Pane {
     return false;
   }
 
+  // Whether sendText would reach the PTY right now.
+  acceptsInput() {
+    return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN
+      && this._protocol.canSendInput() && !this._exited);
+  }
+
+  setBroadcasting(on) {
+    this.el.classList.toggle("broadcasting", Boolean(on));
+  }
+
+  // Scroll to a search hit and select it. Returns whether it was found.
+  revealMatch(match) {
+    if (!this.term) return false;
+    const found = findInBuffer(this.term.buffer.active, match);
+    if (!found) {
+      this.flashNotice("[that line is no longer in this terminal's scrollback]", 4000);
+      return false;
+    }
+    this.term.scrollToLine(Math.max(0, found.row - Math.floor(this.term.rows / 3)));
+    this.term.select(found.col, found.row, found.cells);
+    return true;
+  }
+
+  // A pane that was just attached for a search hit has no text until its
+  // replay has been parsed; the reveal waits for live (or for the exit of a
+  // replay-only session) instead of searching an empty buffer.
+  revealWhenReady(match) {
+    if (this._phase === "live" || this.state === "exited") return this.revealMatch(match);
+    this._pendingReveal = match;
+    return true;
+  }
+
+  _runPendingReveal() {
+    const match = this._pendingReveal;
+    this._pendingReveal = null;
+    if (match) this.revealMatch(match);
+  }
+
   // Every real input (a key, a native paste, sendText, a drop) comes through
   // here. It tells the backend once per connection, because the session's
   // `touched` flag keeps it from the idle reaper and keeps the app in the tray,
@@ -790,6 +911,7 @@ export class Pane {
 
   attach(info) {
     if (this._disposed) return;
+    const keepScreen = this._keepScreen && Boolean(this.term);
     this.endSpawn();
     clearTimeout(this._reconnectTimer);
     this._teardownWs();
@@ -804,9 +926,10 @@ export class Pane {
     this.exitBar.hidden = true;
     this.emptyEl.hidden = true;
     this.state = "attached";
+    this._exitCode = null;
     this._renderTab();
     if (!this.term) this._createTerm();
-    this._connect();
+    this._connect(keepScreen);
     // A split focuses the new pane before its terminal exists, so setFocused()
     // could not focus the xterm textarea (it was still null). Re-apply now that
     // the terminal is live, or the freshly-split pane swallows no keystrokes.
@@ -834,6 +957,7 @@ export class Pane {
     clearTimeout(this._closeArmTimer);
     clearTimeout(this._noticeTimer);
     clearTimeout(this._dropFallbackTimer);
+    this._pendingReveal = null;
     if (nativeDropPane === this) nativeDropPane = null;
     this.cancelConfirmation();
     this._ro.disconnect();
@@ -881,6 +1005,14 @@ export class Pane {
     // when xterm has a selection; otherwise it reaches the PTY as SIGINT.
     // Ctrl+Shift+C/V remain compatible aliases.
     this.term.attachCustomKeyEventHandler((e) => {
+      // Enter on an exited pane restarts it: stdin is off, so the key had no
+      // other meaning, and the terminal keeps the keyboard throughout.
+      if (e.type === "keydown" && e.key === "Enter" && this.state === "exited"
+        && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        this.requestRestart();
+        return false;
+      }
       if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
       const key = e.key.toLowerCase();
       if (key === "c") {
@@ -902,6 +1034,9 @@ export class Pane {
     // Real keystrokes only: onData also fires for xterm's automatic replies
     // to terminal queries (DA/DSR), which must not count as user activity.
     this.term.onKey(() => this._markWrote());
+    // The same events open the broadcast gate (broadcast.js): only data that
+    // follows one of them is the user's, never xterm's own query replies.
+    this.term.onKey(() => this._inputGate.arm());
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);
@@ -913,6 +1048,16 @@ export class Pane {
     };
     this.term.textarea?.addEventListener("paste", typed, true);
     this.term.textarea?.addEventListener("compositionend", typed, true);
+    // The broadcast gate opens on the host, in the capture phase, because
+    // xterm's own textarea listeners were registered first and a listener on
+    // the target runs in registration order: its capture listener for
+    // `input` (dead-key accents, dictation, injected text) emits the data
+    // before one added here on the textarea would run.
+    for (const type of ["paste", "compositionend", "input"]) {
+      this.termHost.addEventListener(type, () => {
+        this._inputGate.arm(type === "compositionend" ? 2 : 1);
+      }, true);
+    }
     // OSC 52: apps running inside the terminal (Claude Code, tmux, vim, etc.)
     // copy to the system clipboard by emitting ESC]52;c;<base64>. xterm.js has
     // no built-in OSC 52 handler, so without this the copy is silently dropped
@@ -990,6 +1135,7 @@ export class Pane {
     this.term.onData((d) => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN && !this._exited && this._protocol.canSendInput()) {
         this.ws.send(ENC.encode(d));
+        if (this._inputGate.open) this.onUserInput(d, this);
       }
     });
     this.term.onBinary((d) => {
@@ -1001,13 +1147,14 @@ export class Pane {
     try { this.fit.fit(); } catch (e) {}
   }
 
-  _connect() {
+  _connect(keepScreen = false) {
     if (this._disposed || this._detached || !this.session) return;
     this._queue.length = 0;
     this._pending = 0;
     this.term.options.disableStdin = true;
     this.showNotice("[restoring terminal…]");
     const generation = this._protocol.beginReplay();
+    this._keepScreenGeneration = keepScreen ? generation : null;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws/session/${encodeURIComponent(this.session.id)}`;
     const ws = new WebSocket(url, api.wsSubprotocols());
@@ -1030,6 +1177,13 @@ export class Pane {
   _control(msg) {
     switch (msg.type) {
       case "replay_size":
+        if (this._keepScreenGeneration === this._generation) {
+          // A restart in place: the fresh session's replay continues below
+          // the dead one's output, after a separator, instead of a reset.
+          this._keepScreenGeneration = null;
+          this.term.write(this._restartSeparator());
+          break;
+        }
         // Replay-then-resize: render scrollback at the size it was recorded.
         this.term.reset();
         if (msg.cols > 0 && msg.rows > 0) this.term.resize(msg.cols, msg.rows);
@@ -1089,6 +1243,15 @@ export class Pane {
     // Sidebar clicks and long scrollback replay can both outlive the original
     // focus event. Reassert focus only if this pane is still the chosen pane.
     this.focusSoon();
+    this._runPendingReveal();
+  }
+
+  // Leaving the alternate screen with 1047, not 1049: 1049 also restores a
+  // saved cursor, which would put the mark in the middle of old output.
+  _restartSeparator() {
+    const leaveAlt = this.term.buffer.active.type === "alternate" ? "\x1b[?1047l" : "";
+    const newline = this.term.buffer.normal.cursorX > 0 ? "\r\n" : "";
+    return leaveAlt + RESTART_RESET + newline + RESTART_MARK;
   }
 
   // Write queued output; when >PENDING_LIMIT bytes are unacknowledged by
@@ -1153,10 +1316,14 @@ export class Pane {
     this._flushQueue();
     this._protocol.exit();
     this.state = "exited";
+    this._exitCode = code;
     if (this.term) this.term.options.disableStdin = true;
     this._renderTab();
+    // showNotice first: it dismisses any confirmation or recovery bar.
     this.showNotice(code === null ? "[exited]" : `[exited · code ${code}]`);
+    this._renderExitBar();
     this.onStateChange(this);
+    this._runPendingReveal();
   }
 
   _closed() {

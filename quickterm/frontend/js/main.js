@@ -25,6 +25,7 @@ import { createScratch } from "./scratch.js";
 import { createSessionOwnership } from "./session_ownership.js";
 import { createSidebar } from "./sidebar.js";
 import { createSpawner } from "./spawner.js";
+import { createTerminalActions } from "./terminal_actions.js";
 import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
@@ -165,6 +166,7 @@ async function boot() {
       else if (action === "zoom") app.zoom();
       else if (action === "detach") app.closePane();
       else if (action === "kill") app.killFocusedSession();
+      else if (action === "restart") app.restartTerminal(pane);
     },
   });
 
@@ -228,6 +230,7 @@ async function boot() {
     runSystemTerminal,
     attachSession,
     ...paneCommands,
+    ...createTerminalActions({ api, layout, attachSession, restartSavedPane, showError }),
     moveSessionHere: actions.moveSessionHere,
     killWorkspaceSession: actions.killWorkspaceSession,
     hereFolder,

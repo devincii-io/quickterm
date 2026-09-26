@@ -3,6 +3,7 @@
 // confirmed kill, kill-all, snippets, and handing the keyboard back. The
 // returned object is spread into the app facade under these same names.
 
+import { broadcastNotice, broadcastTargets } from "./broadcast.js";
 import { terminalMayFocus } from "./focus.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 
@@ -48,6 +49,20 @@ export function createPaneCommands({
     },
     zoom: () => layout.toggleZoom(),
     isZoomed: () => layout.zoomed,
+    // Broadcast input to every live pane of this document; the layout owns
+    // the switch and turns it off on its own when a workspace is restored.
+    // Said once, with the count, because the accent outline alone does not
+    // say how far a keystroke goes.
+    toggleBroadcast: () => {
+      const on = layout.setBroadcast(!layout.broadcasting);
+      const pane = layout.focused;
+      if (pane) {
+        const others = on ? broadcastTargets(layout.panes(), pane).length : 0;
+        pane.flashNotice(broadcastNotice(on, others), on ? 4000 : 2000);
+      }
+      return on;
+    },
+    isBroadcasting: () => layout.broadcasting,
     // D/Alt+D is a true detach: retain the process first, then remove only its
     // viewer. It must never share the kill semantics of X/Alt+W.
     closePane: async () => {
