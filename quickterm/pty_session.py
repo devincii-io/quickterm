@@ -105,6 +105,11 @@ _k32.TerminateProcess.restype = wintypes.BOOL
 _k32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
 _k32.CloseHandle.restype = wintypes.BOOL
 _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+_FILETIME_P = ctypes.POINTER(wintypes.FILETIME)
+_k32.GetProcessTimes.restype = wintypes.BOOL
+_k32.GetProcessTimes.argtypes = (wintypes.HANDLE, _FILETIME_P, _FILETIME_P, _FILETIME_P, _FILETIME_P)
+_k32.GetSystemTimeAsFileTime.restype = None
+_k32.GetSystemTimeAsFileTime.argtypes = (_FILETIME_P,)
 
 
 def _system_root() -> str:
@@ -137,6 +142,43 @@ def _wait_until(handle: int, deadline: float) -> bool:
     return _k32.WaitForSingleObject(handle, remaining) == _WAIT_OBJECT_0
 
 
+def _is_dead(handle: int) -> bool:
+    return _k32.WaitForSingleObject(handle, 0) == _WAIT_OBJECT_0
+
+
+def _ticks(value: wintypes.FILETIME) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def _now_ticks() -> int:
+    now = wintypes.FILETIME()
+    _k32.GetSystemTimeAsFileTime(ctypes.byref(now))
+    return _ticks(now)
+
+
+def _created_ticks(handle: int) -> int | None:
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not _k32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+        return None
+    return _ticks(times[0])
+
+
+def _open_captured(pid: int, captured_at: int) -> int | None:
+    """A kill handle to ``pid``, only if it is the process that existed at ``captured_at``.
+
+    A PID seen in a snapshot can exit and be reused before OpenProcess; the
+    newcomer was created after the snapshot, which its creation time shows.
+    """
+    handle = _open_for_kill(pid)
+    if handle is None:
+        return None
+    created = _created_ticks(handle)
+    if created is not None and created > captured_at:
+        _k32.CloseHandle(handle)
+        return None
+    return handle
+
+
 class PtySession(PtyBase):
     def __init__(
         self,
@@ -156,6 +198,14 @@ class PtySession(PtyBase):
         self._proc_dead = threading.Event()
         self._exited = threading.Event()
         self._last_read = time.monotonic()
+        # kill() runs under this lock, and the watcher closes the root handle
+        # only under it, so a kill never outlives the handle it relies on.
+        self._kill_lock = threading.Lock()
+        self._kill_failed = False
+        # Survivors of the last failed kill: the handles still held to them,
+        # and the PIDs no handle could be opened for (with the capture time).
+        self._held: dict[int, int] = {}
+        self._unheld: dict[int, int] = {}
 
         merged = merge_environment(env)
         exe = shutil.which(cmd, path=path_value(merged))
@@ -177,9 +227,10 @@ class PtySession(PtyBase):
             # exception type (a missing folder, a blocked executable, ...).
             raise OSError(f"could not start {cmd}: {exc}") from exc
         self._pid: int = self._pty.pid or 0
-        self._hproc = _k32.OpenProcess(
-            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, self._pid
-        )
+        # Held from spawn until the process is dead and no kill can run: while
+        # it is open Windows cannot hand the root's PID to another process, so
+        # taskkill /PID never reaches a stranger's tree.
+        self._hproc = _open_for_kill(self._pid) if self._pid else None
 
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{self._pid}", daemon=True
@@ -232,50 +283,81 @@ class PtySession(PtyBase):
         ``taskkill /T`` stays the primary path, but it can fail for part of
         the tree without saying so (an elevated child denies it), and checking
         only the root then reported a verified kill while a descendant ran on.
-        So the tree is captured first, with a handle to each member: a handle
-        pins its PID, which rules out PID reuse fooling the check. Survivors
-        get TerminateProcess; any process still running makes this False.
+        So the tree is captured first, with a handle to each member whose
+        creation time predates the snapshot: a handle pins its PID, and the
+        creation time rules out a PID reused before it was opened. Every
+        captured process is verified through its handle, including one whose
+        parent died meanwhile and that taskkill /T can no longer reach.
+        Survivors get TerminateProcess; any process still running makes this
+        False.
+
+        A root that exited on its own before any kill leaves what outlived it
+        alone, and kill() returns True. After a failed kill the root is
+        usually dead while a descendant runs on, so every later kill()
+        terminates the survivors it still holds handles to and returns True
+        only once they are gone. The root is pinned by ``_hproc`` and never
+        addressed by PID number once it is known to be dead.
 
         Deliberately not a Job Object: a job would also take down GUI programs
         started from the terminal (``code .``, ``explorer .``) that detach from
         the tree and that taskkill has never touched.
         """
-        if not self._pid or self._proc_dead.is_set():
+        with self._kill_lock:
+            if not self._pid or (self._proc_dead.is_set() and not self._kill_failed):
+                self._stop_writer()
+                return True
+            survivors = self._kill_once()
+            if survivors:
+                self._kill_failed = True
+                log.warning("PTY process %s: kill left %s running", self._pid, survivors)
+                return False
+            self._kill_failed = False
             self._stop_writer()
             return True
 
+    def _kill_once(self) -> list[int]:
+        """One kill attempt under ``_kill_lock``; the PIDs still running afterwards."""
         root = self._pid
-        first = process_usage.process_identities()
-        captured = process_usage.descendants(first, root)
-        handles: dict[int, int] = {}
-        for pid in captured:
-            handle = _open_for_kill(pid)
-            if handle:
-                handles[pid] = handle
-        # A PID from the first snapshot may have exited and been reused before
-        # OpenProcess. The handle pins the PID now, so one that is still below
-        # the root in a second snapshot is the process that was captured.
-        second = process_usage.process_identities()
-        still_below = process_usage.descendants(second, root)
-        for pid in [p for p in handles if p not in still_below]:
-            _k32.CloseHandle(handles.pop(pid))
-        unopened = (captured & still_below) - set(handles)
-
-        root_handle = _open_for_kill(root)
+        root_handle = self._hproc  # None once the watcher has seen the root exit
+        owned, self._held = self._held, {}
+        unheld, self._unheld = self._unheld, {}
+        if root_handle is not None:
+            root_alive = not _is_dead(root_handle)
+        else:
+            # Either the root is known dead, or OpenProcess failed at spawn and
+            # only the unpinned PID is left to go by.
+            root_alive = not self._proc_dead.is_set() and self._pty_alive()
+        survivors: list[int] = []
         try:
-            try:
-                subprocess.run(
-                    _taskkill_command(root),
-                    capture_output=True,
-                    creationflags=_CREATE_NO_WINDOW,
-                    cwd=_system_root(),
-                    timeout=5,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                log.warning("taskkill failed for PTY process %s", root, exc_info=True)
+            if root_alive:
+                identities = process_usage.process_identities()
+                captured_at = _now_ticks()
+                for pid in process_usage.descendants(identities, root):
+                    if pid in owned:
+                        continue
+                    handle = _open_captured(pid, captured_at)
+                    if handle is None:
+                        unheld.setdefault(pid, captured_at)
+                    else:
+                        owned[pid] = handle
+                try:
+                    subprocess.run(
+                        _taskkill_command(root),
+                        capture_output=True,
+                        creationflags=_CREATE_NO_WINDOW,
+                        cwd=_system_root(),
+                        timeout=5,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    log.warning("taskkill failed for PTY process %s", root, exc_info=True)
+            for pid, captured_at in list(unheld.items()):
+                handle = _open_captured(pid, captured_at)
+                if handle is not None:
+                    del unheld[pid]
+                    owned[pid] = handle
 
-            targets = dict(handles)
-            if root_handle:
+            targets = dict(owned)
+            if root_alive and root_handle is not None:
                 targets[root] = root_handle
             deadline = time.monotonic() + _KILL_WAIT_S
             survivors = [pid for pid, h in targets.items() if not _wait_until(h, deadline)]
@@ -285,46 +367,43 @@ class PtySession(PtyBase):
                     _k32.TerminateProcess(targets[pid], 1)
                 deadline = time.monotonic() + _TERMINATE_WAIT_S
                 survivors = [pid for pid in survivors if not _wait_until(targets[pid], deadline)]
-            if not root_handle:
-                # OpenProcess fails once the root has already disappeared.
-                try:
-                    if self._pty.isalive():
-                        survivors.append(root)
-                except winpty.WinptyError:
-                    pass
-            if unopened:
+            if root_alive and root_handle is None and self._pty_alive():
+                survivors.append(root)
+            if unheld:
                 # No handle at all: fall back to the process table. A PID that
-                # is still listed counts as a survivor; were it reused in these
-                # two seconds, the error lands on the safe side.
-                after = {pid for pid, _parent in process_usage.process_identities()}
-                survivors.extend(sorted(unopened & after))
+                # is still listed counts as a survivor; were it reused, the
+                # error lands on the safe side.
+                listed = {pid for pid, _parent in process_usage.process_identities()}
+                self._unheld = {pid: t for pid, t in unheld.items() if pid in listed}
+                survivors.extend(self._unheld)
         finally:
-            for handle in handles.values():
-                _k32.CloseHandle(handle)
-            if root_handle:
-                _k32.CloseHandle(root_handle)
+            # Handles to survivors are kept for the next attempt; a retry
+            # verifies exactly these processes, whatever became of the root.
+            for pid, handle in owned.items():
+                if pid in survivors:
+                    self._held[pid] = handle
+                else:
+                    _k32.CloseHandle(handle)
+        return sorted(set(survivors))
 
-        if survivors:
-            log.warning("PTY process %s: kill left %s running", root, sorted(survivors))
+    def _pty_alive(self) -> bool:
+        try:
+            return bool(self._pty.isalive())
+        except winpty.WinptyError:
             return False
-        self._stop_writer()
-        return True
 
     def _watch_exit(self) -> None:
-        if self._hproc:
-            _k32.WaitForSingleObject(self._hproc, _INFINITE)
+        hproc = self._hproc
+        if hproc:
+            _k32.WaitForSingleObject(hproc, _INFINITE)
             code = wintypes.DWORD()
-            if _k32.GetExitCodeProcess(self._hproc, ctypes.byref(code)):
+            if _k32.GetExitCodeProcess(hproc, ctypes.byref(code)):
                 self._proc_exit_code = int(code.value)
-            _k32.CloseHandle(self._hproc)
         else:  # no handle: fall back to polling winpty
-            while True:
-                try:
-                    if not self._pty.isalive():
-                        break
-                except winpty.WinptyError:
-                    break
+            while self._pty_alive():
                 time.sleep(0.05)
+        # Before the handle is closed: from here on kill() treats the root as
+        # dead and never addresses its PID again.
         self._proc_dead.set()
         # let the reader drain trailing output before breaking its blocking read
         deadline = time.monotonic() + DRAIN_MAX_S
@@ -337,6 +416,10 @@ class PtySession(PtyBase):
             self._pty.cancel_io()
         except winpty.WinptyError:
             pass
+        if hproc:
+            with self._kill_lock:
+                self._hproc = None
+                _k32.CloseHandle(hproc)
 
     def _read_loop(self) -> None:
         pty = self._pty
