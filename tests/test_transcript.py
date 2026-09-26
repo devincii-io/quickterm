@@ -110,7 +110,58 @@ def test_an_escape_inside_an_unterminated_string_starts_a_new_sequence():
 
 def test_other_rows_end_the_line():
     assert lines(b"\x1b[1;1Hfirst\x1b[2;1Hsecond\x1b[3;5Hthird") == ["first", "second", "    third"]
-    assert lines(b"one\x1b[Atwo\x1b[2Jthree") == ["one", "two", "three"]
+    assert lines(b"one\r\ntwo\x1b[Aup\x1b[2Jcleared") == ["one", "two", "   up", "cleared"]
+    # The top row has nothing above it: the cursor stays in the line.
+    assert lines(b"one\x1b[Atwo") == ["onetwo"]
+
+
+PROMPT = "PS C:\\Users\\devincii\\AppData\\Local\\Temp\\QuickTerm\\scratch> "
+
+
+def test_conpty_psreadline_repaints_stay_one_line_on_a_wide_pane():
+    # Captured from ConPTY: PSReadLine redraws the input after every key by
+    # jumping back to where it starts on the prompt's row.
+    raw = (
+        PROMPT.encode()
+        + b"\x1b[?25l\x1b[1;60H\x1b[93me\x1b[39;49m\x1b[0m\x1b[1;61H\x1b[?25h"
+        + b"\x1b[?25l\x1b[1;60H\x1b[93mecho\x1b[39;49m \x1b[37mhi\x1b[39;49m\x1b[0m\x1b[1;67H"
+        + b"\x1b[?25h\x1b[1;67H\r\n\x1b[0m\x1b[0mhi\r\n"
+        + PROMPT.encode()
+    )
+    assert transcript.plain_lines((raw,), 120, 30) == [PROMPT + "echo hi", "hi", PROMPT.rstrip()]
+
+
+def test_conpty_repaints_on_a_wrapped_prompt_stay_one_line():
+    # The same in a 48-column pane: the 59-character prompt wraps, so the
+    # redraw jumps to row 2, column 12, which is still the prompt's line.
+    raw = (
+        PROMPT.encode()
+        + b"\x1b[?25l\x1b[2;12H\x1b[93me\x1b[39;49m\x1b[0m\x1b[2;13H\x1b[?25h"
+        + b"\x1b[?25l\x1b[2;12H\x1b[93mecho\x1b[39;49m \x1b[37mbcast-$\x1b[39;49m\x1b[0m\x1b[2;24H"
+        + b"\x1b[?25h\x1b[?25l\x1b[2;12H\x1b[2;10H\x1b[91m> \x1b[0m\x1b[93mecho\x1b[39;49m "
+        + b"\x1b[37mbcast-$(\x1b[39;49m\x1b[0m\x1b[2;25H\x1b[?25h\x1b[2;25H\r\n"
+        + b"\x1b[0m\x1b[0mbcast-42\r\n"
+        + PROMPT.encode()
+        + b"\x1b[?25l\x1b[5;12H\x1b[93mab\x1b[39;49m\x1b[0m\x1b[5;14H\x1b[?25h"
+    )
+    assert transcript.plain_lines((raw,), 48, 30) == [
+        PROMPT + "echo bcast-$(",
+        "bcast-42",
+        PROMPT + "ab",
+    ]
+
+
+def test_a_carriage_return_on_a_wrapped_row_returns_to_that_row():
+    # 10 columns: "0123456789" fills row one, "abc" is row two; the CR goes
+    # back to the start of row two, not of the whole line.
+    assert transcript.plain_lines((b"0123456789abc\rX\r\n",), 10, 5) == ["0123456789Xbc"]
+
+
+def test_the_bottom_row_scrolls_instead_of_growing():
+    # Three rows: after the screen is full, output keeps landing on row 3, so
+    # a jump to row 3 is the current line and not a new one.
+    raw = b"a\r\nb\r\nc\r\nd\r\n$ \x1b[3;3Hls"
+    assert transcript.plain_lines((raw,), 20, 3) == ["a", "b", "c", "d", "$ ls"]
 
 
 def test_the_alternate_screen_is_left_out():
@@ -282,9 +333,9 @@ def test_search_and_export_decode_off_the_event_loop(client, manager, monkeypatc
         threads["snapshot"] = threading.get_ident()
         return real_list()
 
-    def decode(chunks):
+    def decode(*args):
         threads["decode"] = threading.get_ident()
-        return real_lines(chunks)
+        return real_lines(*args)
 
     monkeypatch.setattr(manager, "list", listing)
     monkeypatch.setattr(transcript, "plain_lines", decode)

@@ -1,13 +1,18 @@
 """Plain text from a terminal's recorded output: the search and export backend.
 
 The ring holds raw PTY bytes, so the text a user saw has to be recovered from
-them. This is not a terminal emulator. It models one line at a time, which is
-enough for what a transcript is read for: escape sequences disappear, a
-carriage return lets the next text overwrite the line (prompts, progress bars),
-cursor-forward counts as spaces (ConPTY writes runs of blanks that way), and
-anything that moves to another row ends the current line. Full-screen programs
-draw on the alternate screen, which has no scrollback in xterm either, so text
-written there is left out: a search hit inside `vim` could never be scrolled to.
+them. This is not a terminal emulator. It keeps one logical line at a time and
+the screen rows it covers, which is enough for what a transcript is read for:
+escape sequences disappear, a carriage return lets the next text overwrite the
+row (prompts, progress bars), cursor-forward counts as spaces (ConPTY writes
+runs of blanks that way), and a cursor move stays in the line while it lands
+on one of the line's own rows. That last rule is what ConPTY needs: with
+PSReadLine it repaints the whole input after every key by jumping back to the
+row and column where the input starts, and a prompt longer than the pane
+wraps, so the jump lands on the line's second row. Any other row ends the
+line. Full-screen programs draw on the alternate screen, which has no
+scrollback in xterm either, so text written there is left out: a search hit
+inside `vim` could never be scrolled to.
 
 Pure and synchronous; callers run it through `asyncio.to_thread`.
 """
@@ -53,34 +58,84 @@ def _width(ch: str) -> int:
 
 
 class _Lines:
-    """The current line as cells plus a cursor, and every finished line.
+    """The current logical line as cells plus a cursor, and every finished line.
+
+    `top` is the screen row (1-based) the line starts on and `row` how many
+    rows below it the cursor is, so an absolute cursor position can be told
+    apart as "this line" or "somewhere else". With a known width a line wraps
+    like the terminal wrapped it; without one every line is a single row.
 
     A wide character takes two cells: its own and an empty continuation cell,
     so a carriage return followed by narrow text overwrites it the way the
     terminal did instead of shifting everything after it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cols: int = 0, rows: int = 0) -> None:
         self.done: list[str] = []
         self.cells: list[str] = []
         self.col = 0
         self.alt = False
+        self.cols = max(0, cols)
+        self.rows = max(0, rows)
+        self.top = 1
+        self.row = 0
 
     def text(self) -> str:
         return "".join(self.cells).rstrip(" ")
 
+    def cursor_row(self) -> int:
+        return self.top + self.row
+
+    def _row_start(self) -> int:
+        return self.row * self.cols
+
+    def _row_end(self) -> int:
+        return self._row_start() + self.cols if self.cols else len(self.cells)
+
+    def _last_row(self) -> int:
+        if not self.cols or not self.cells:
+            return self.row
+        return max(self.row, (len(self.cells) - 1) // self.cols)
+
+    def _clamp_screen_row(self, row: int) -> int:
+        row = max(1, row)
+        return min(row, self.rows) if self.rows else row
+
     def newline(self) -> None:
         self.done.append(self.text())
+        self.top = self._clamp_screen_row(self.cursor_row() + 1)
         self.cells = []
         self.col = 0
+        self.row = 0
 
-    def break_line(self) -> None:
-        # A move to another row. Only a line that holds something is kept, or
-        # every repaint would add blank lines.
+    def break_line(self, top: int | None = None) -> None:
+        # The cursor left this line's rows. Only a line that holds something
+        # is kept, or every repaint would add blank lines.
         if self.text():
             self.done.append(self.text())
+        self.top = self._clamp_screen_row(self.cursor_row() if top is None else top)
         self.cells = []
         self.col = 0
+        self.row = 0
+
+    def goto(self, row: int, col: int) -> None:
+        """Absolute cursor position: screen row (1-based), column (0-based)."""
+        row = self._clamp_screen_row(row)
+        if self.top <= row <= self.top + self._last_row():
+            self.row = row - self.top
+        else:
+            self.break_line(row)
+        self.move_in_row(col)
+
+    def move_in_row(self, col: int) -> None:
+        # The terminal stops the cursor at the right margin; without a known
+        # width only the sanity bound applies.
+        start = self._row_start()
+        width = min(self.cols, _MAX_COLUMN + 1) if self.cols else _MAX_COLUMN + 1
+        self.col = start + max(0, min(col, width - 1))
+
+    def column_in_row(self) -> int:
+        return self.col - self._row_start()
 
     def _free(self, index: int) -> None:
         # Overwriting either half of a wide character leaves the other half
@@ -98,6 +153,8 @@ class _Lines:
         if self.col == len(cells) and text.isascii():
             cells.extend(text)
             self.col += len(text)
+            if self.cols:
+                self.row = max(self.row, (self.col - 1) // self.cols)
             return
         for ch in text:
             width = _width(ch)
@@ -109,6 +166,9 @@ class _Lines:
                     cells[lead] += ch
                 continue
             col = self.col
+            # Writing past the end of a row wraps onto the next one.
+            if self.cols and col >= (self.row + 1) * self.cols:
+                self.row = col // self.cols
             if col > len(cells):
                 cells.extend(" " * (col - len(cells)))
             self._free(col)
@@ -125,18 +185,29 @@ class _Lines:
                     cells.append("")
             self.col = col + width
 
-    def erase_line(self, mode: int) -> None:
+    def _blank(self, start: int, end: int) -> None:
+        """Erase cells [start, end) of this line; at the end, drop them."""
         cells = self.cells
+        end = min(end, len(cells))
+        if start >= end:
+            return
+        self._free(start)
+        self._free(end - 1)
+        if end == len(cells):
+            del cells[start:]
+        else:
+            cells[start:end] = [" "] * (end - start)
+
+    def erase_line(self, mode: int) -> None:
         if mode == 0:
-            self._free(self.col)
-            del cells[self.col :]
+            self._blank(self.col, self._row_end())
         elif mode == 1:
-            end = min(self.col + 1, len(cells))
-            if end:
-                self._free(end - 1)
-            cells[:end] = [" "] * end
+            self._blank(self._row_start(), self.col + 1)
+            # Blanks before the cursor must stay: text written next lands after them.
+            if len(self.cells) < self.col:
+                self.cells.extend(" " * (self.col - len(self.cells)))
         elif mode == 2:
-            cells.clear()
+            self._blank(self._row_start(), self._row_end())
 
     def erase_chars(self, count: int) -> None:
         cells = self.cells
@@ -159,9 +230,6 @@ class _Lines:
             self._free(self.col)
             self.cells[self.col : self.col] = [" "] * count
 
-    def move_to(self, col: int) -> None:
-        self.col = max(0, min(col, _MAX_COLUMN))
-
 
 def _numbers(params: str) -> list[int]:
     out = []
@@ -182,12 +250,25 @@ def _csi(lines: _Lines, params: str, final: str) -> None:
     numbers = _numbers(params)
     first = numbers[0]
     count = max(1, first)
+    here = lines.column_in_row()
     if final in ("C", "a"):
-        lines.move_to(lines.col + count)
+        lines.move_in_row(here + count)
     elif final == "D":
-        lines.move_to(lines.col - count)
+        lines.move_in_row(here - count)
     elif final in ("G", "`"):
-        lines.move_to(count - 1)
+        lines.move_in_row(count - 1)
+    elif final in ("H", "f"):
+        lines.goto(count, (numbers[1] if len(numbers) > 1 else 1) - 1)
+    elif final == "d":
+        lines.goto(count, here)
+    elif final == "A":
+        lines.goto(lines.cursor_row() - count, here)
+    elif final == "B":
+        lines.goto(lines.cursor_row() + count, here)
+    elif final == "E":
+        lines.goto(lines.cursor_row() + count, 0)
+    elif final == "F":
+        lines.goto(lines.cursor_row() - count, 0)
     elif final == "K":
         lines.erase_line(first)
     elif final == "X":
@@ -196,10 +277,7 @@ def _csi(lines: _Lines, params: str, final: str) -> None:
         lines.delete_chars(count)
     elif final == "@":
         lines.insert_blanks(min(count, _MAX_COLUMN))
-    elif final in ("H", "f"):
-        lines.break_line()
-        lines.move_to((numbers[1] if len(numbers) > 1 else 1) - 1)
-    elif final in ("A", "B", "E", "F", "d") or (final == "J" and first in (2, 3)):
+    elif final == "J" and first in (2, 3):
         lines.break_line()
 
 
@@ -209,21 +287,24 @@ def _control(lines: _Lines, ch: str) -> None:
     if ch in "\n\x0b\x0c":
         lines.newline()
     elif ch == "\r":
-        lines.col = 0
+        lines.move_in_row(0)
     elif ch == "\b":
-        lines.move_to(lines.col - 1)
+        lines.move_in_row(lines.column_in_row() - 1)
     elif ch == "\t":
-        lines.move_to((lines.col // _TAB + 1) * _TAB)
+        lines.move_in_row((lines.column_in_row() // _TAB + 1) * _TAB)
 
 
-def plain_lines(chunks: Iterable[bytes]) -> list[str]:
+def plain_lines(chunks: Iterable[bytes], cols: int = 0, rows: int = 0) -> list[str]:
     """The transcript as lines of plain text, trailing blank lines removed.
 
-    The chunks are joined before decoding, so a character or an escape
-    sequence split across two chunks comes out whole.
+    `cols` and `rows` are the terminal size the ring was recorded at
+    (`Session.scrollback_chunks()` returns them); with them, prompts that
+    wrapped and cursor jumps back into them come out as one line. The chunks
+    are joined before decoding, so a character or an escape sequence split
+    across two chunks comes out whole.
     """
     data = b"".join(chunks).decode("utf-8", errors="replace")
-    lines = _Lines()
+    lines = _Lines(cols, rows)
     for match in _TOKENS.finditer(data):
         kind = match.lastgroup
         if kind == "text":
@@ -240,7 +321,7 @@ def plain_lines(chunks: Iterable[bytes]) -> list[str]:
             if final == "c":
                 # RIS resets the terminal, the alternate screen included.
                 lines.alt = False
-                lines.break_line()
+                lines.break_line(1)
             elif final in ("D", "E") and not lines.alt:
                 lines.newline()
         # osc and string tokens carry no visible text.
@@ -306,6 +387,8 @@ def safe_stem(name: str) -> str:
 def export_transcript(
     name: str,
     chunks: Iterable[bytes],
+    cols: int = 0,
+    rows: int = 0,
     *,
     folder: Path | None = None,
     now: datetime | None = None,
@@ -314,7 +397,7 @@ def export_transcript(
 
     Never overwrites: a second export in the same second gets a suffix.
     """
-    lines = plain_lines(chunks)
+    lines = plain_lines(chunks, cols, rows)
     target = folder if folder is not None else export_dir()
     target.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")

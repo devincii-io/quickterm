@@ -19,8 +19,9 @@ SEARCH_LIMIT_MAX = 1000
 def _search(snapshots: list[tuple[Any, ...]], query: str, limit: int) -> list[dict]:
     pattern = transcript.query_pattern(query)
     out: list[dict] = []
-    for sid, name, workspace, alive, chunks in snapshots:
-        for hit in transcript.search_lines(transcript.plain_lines(chunks), pattern):
+    for sid, name, workspace, alive, (chunks, cols, rows) in snapshots:
+        lines = transcript.plain_lines(chunks, cols, rows)
+        for hit in transcript.search_lines(lines, pattern):
             out.append(
                 {
                     "session_id": sid,
@@ -55,8 +56,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             session = manager.get(info.id)
             if session is None:
                 continue
-            chunks, _cols, _rows = session.scrollback_chunks()
-            snapshots.append((info.id, info.name, info.workspace, info.alive, chunks))
+            snapshot = session.scrollback_chunks()
+            snapshots.append((info.id, info.name, info.workspace, info.alive, snapshot))
         return await asyncio.to_thread(_search, snapshots, q, limit)
 
     @app.post("/api/sessions/{sid}/export")
@@ -64,10 +65,10 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         session = manager.get(sid)
         if session is None:
             raise HTTPException(404, "no such session")
-        chunks, _cols, _rows = session.scrollback_chunks()
+        chunks, cols, rows = session.scrollback_chunks()
         try:
             path = await asyncio.to_thread(
-                transcript.export_transcript, session.info.name, chunks
+                transcript.export_transcript, session.info.name, chunks, cols, rows
             )
         except OSError as exc:
             raise HTTPException(500, f"could not save the output: {exc}") from exc
