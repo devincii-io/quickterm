@@ -2,6 +2,38 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.12.0
+
+### Resizing
+
+- Text no longer breaks apart after you resize a pane or the window. The
+  terminal (now xterm.js 6.0) rewraps lines exactly as the Windows console
+  does, so a wrapped prompt stays in one piece and PowerShell no longer
+  redraws it over the output above.
+- Reopening a window or coming back to a workspace replays each terminal at
+  every size it went through, so its history comes back as it was instead of
+  scrambled.
+- The terminal scrollbar is xterm's own now; its rail stays visible, and it
+  shows no handle while there is nothing to scroll.
+
+### Terminals
+
+- QuickTerm talks to the Windows console directly instead of through
+  pywinpty. Characters no longer turn into "?" boxes when they arrive split
+  across two reads, an exit shows at once, and the app is about 5 MB smaller.
+- Without PowerShell 7, the list under **+** and the palette offer to
+  install it. winget runs in a new terminal, where you answer its prompts
+  and the administrator request yourself; without winget, the download page
+  opens. Afterwards PowerShell 7 is in the list.
+- Settings > Default terminal lists every detected shell, so Git Bash, WSL
+  or Command Prompt can be the default without a profile. **+** switches to
+  the new default as soon as you save.
+
+### Known issue
+
+- A prompt exactly as wide as the pane, followed by a resize, can still make
+  PowerShell redraw it one row too high.
+
 ## QuickTerm 3.11.0
 
 ### Terminals that need you
