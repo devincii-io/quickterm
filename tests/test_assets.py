@@ -22,6 +22,12 @@ def test_rejects_unsafe_asset_types(content_type):
         assets.save_asset(b"nope", content_type)
 
 
+def test_content_type_parameters_and_case_do_not_matter():
+    # save_asset is the only gate on the type now that the unused accepts()
+    # helper is gone, so it has to normalize the header itself.
+    assert assets.save_asset(b"x", "Image/SVG+XML; charset=utf-8").endswith(".svg")
+
+
 def test_rejects_oversized_and_traversal():
     with pytest.raises(ValueError, match="too large"):
         assets.save_asset(b"x" * (assets.MAX_ASSET_BYTES + 1), "image/webp")

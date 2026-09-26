@@ -36,7 +36,6 @@ async function req(method, path, body, { keepalive = false } = {}) {
 
 export const getConfig = () => req("GET", "/api/config");
 export const getProfiles = () => req("GET", "/api/profiles");
-export const getSnippets = () => req("GET", "/api/snippets");
 export const getSessions = (options = {}) =>
   req("GET", options.metrics === false ? "/api/sessions?metrics=false" : "/api/sessions");
 export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
@@ -46,10 +45,9 @@ export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeU
 export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
 export const killAllSessions = () => req("POST", "/api/sessions/kill-all", {});
 export const claimLaunch = () => req("GET", "/api/launches/next");
-// busy = the shell has a child process (ssh, build, editor) running right now
-export const sessionBusy = (id) =>
-  getSessions().then((list) => Boolean((list.find((s) => s.id === id) || {}).busy)).catch(() => false);
-// dot-prefixed workspaces (".scratch") are internal and never listed
+// Dot-prefixed names are reserved (validateWorkspaceName refuses them), so a
+// hand-made one stays out of the list. Scratch is not one of them: it is the
+// plain name "scratch" (SCRATCH_WS in main.js), returned like any other name.
 export const listWorkspaces = () =>
   req("GET", "/api/workspaces").then((names) => (names || []).filter((name) => !name.startsWith(".")));
 export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURIComponent(name)}`);
