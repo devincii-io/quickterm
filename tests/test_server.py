@@ -264,7 +264,7 @@ def putty_dir(no_putty_tools, monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(manager, cfg) -> TestClient:
-    # base_url must match the server's Host allowlist (see _local_guard)
+    # base_url must match the server's Host allowlist (see quickterm.api.guard)
     with TestClient(create_app(manager, cfg), base_url=f"http://127.0.0.1:{cfg.port}") as c:
         yield c
 
@@ -843,7 +843,7 @@ def fake_config_mod(monkeypatch, cfg):
     mod = types.ModuleType("quickterm.config")
     saved: list = []
     # The PERSISTED config, as distinct from the live one. app.py rewrites
-    # cfg.port at startup (--port 0, elevated instances), so server.py must
+    # cfg.port at startup (--port 0, elevated instances), so the config routes must
     # serve and preserve this one for port/host/summon_hotkey.
     mod.disk_config = dataclasses.replace(cfg)
 
@@ -1374,7 +1374,7 @@ async def test_handshake_buffer_drains_a_bounded_queue():
     (multi-round-trip) handshake were enough to mark the attachment overflowed,
     and the client reconnected into exactly the same window every time.
     """
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     attachment.queue = asyncio.Queue(maxsize=8)
@@ -1391,7 +1391,7 @@ async def test_handshake_buffer_drains_a_bounded_queue():
 
 
 async def test_handshake_buffer_stops_at_the_exit_sentinel():
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     buffer = _HandshakeBuffer(attachment)
@@ -1405,7 +1405,7 @@ async def test_handshake_buffer_stops_at_the_exit_sentinel():
 
 async def test_handshake_buffer_is_bounded():
     """It must not become the unbounded buffer the queue cap exists to prevent."""
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     buffer = _HandshakeBuffer(attachment)

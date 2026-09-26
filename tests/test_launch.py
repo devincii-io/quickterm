@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from quickterm import launch, putty_tools
-from quickterm import server as server_mod
+from quickterm.api import system as system_routes
 from quickterm import workspace as real_workspace
 
 
@@ -79,8 +79,8 @@ def test_the_pinned_ids_cover_the_windows_inventory(monkeypatch):
     def no_wsl(*_args, **_kwargs):
         raise OSError("not asked in tests")
 
-    monkeypatch.setattr(server_mod.subprocess, "run", no_wsl)
-    ids = {t["id"] for t in server_mod._terminal_inventory()["types"]}
+    monkeypatch.setattr(system_routes.subprocess, "run", no_wsl)
+    ids = {t["id"] for t in system_routes._terminal_inventory()["types"]}
     assert ids <= set(_inventory_type_ids())
 
 
