@@ -2,25 +2,36 @@
 
 `quickterm ls`, `new`, `open` and `send` talk to the backend of the running
 app with the per-install token, the same way the Explorer handoff does. Only
-the standard library, and nothing here starts the app: `app.main()` asks
-`is_command()` first and hands the rest to `run()`, which returns an exit code,
-or a `StartApp` when `new` found no app to hand its launch to.
+the standard library: `app.main()` asks `is_command()` first and hands the
+rest to `run()`, which returns the exit code. `new` with no app running starts
+one as a detached process, so the shell it was typed in is never tied to it.
 
 Exit codes: 0 success, 1 usage error (including a session name that matches
-nothing or more than one session), 2 the app is not running, 3 the app
-refused the request (its detail is printed).
+nothing or more than one session), 2 QuickTerm is not running (or something
+else answers on its port), 3 the app refused the request or the request
+failed after QuickTerm answered (the reason is printed).
+
+The token is sent only to a backend that has proved it holds it: the health
+check carries a fresh nonce, and the answer must include the HMAC of that
+nonce under the token. On a shared machine another user can bind the port
+first; that program then sees neither the token nor the text of a `send`.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import http.client
 import json
 import os
+import secrets
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
 from typing import Any, Callable, TextIO
 
 VERBS = ("ls", "new", "open", "send")
@@ -34,19 +45,26 @@ EXIT_REFUSED = 3
 # a queue put or a PTY enqueue.
 _TIMEOUT_S = 10.0
 _HEALTH_TIMEOUT_S = 1.0
+# How long `new` waits for an app it started to answer.
+_START_WAIT_S = 20.0
+_START_POLL_S = 0.25
+
+# What a health check found on the port.
+ABSENT = "absent"
+QUICKTERM = "quickterm"
+IMPOSTOR = "impostor"
+
+# Every call here goes to loopback, so no proxy may see it. Plain urlopen
+# honours HTTP_PROXY, and on Windows a system proxy whose override list is
+# only <local>, which CPython applies to dotless host names and not to
+# 127.0.0.1: an intercepting proxy then logged the token and every `send`,
+# and a corporate one made every verb look like "not running". update.py
+# keeps the default opener, because GitHub must go through the proxy.
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-@dataclass
-class StartApp:
-    """`new` found no running app: start it, and hand it this launch once it is up.
-
-    `argv` is what the app's own parser gets. A launch that is only a folder
-    rides the existing positional argument, exactly like Explorer's "Open
-    QuickTerm here"; anything else becomes `handoff`, queued after startup.
-    """
-
-    argv: list[str] = field(default_factory=list)
-    handoff: dict[str, str] | None = None
+def _open(request: str | urllib.request.Request, timeout: float) -> Any:
+    return _LOOPBACK.open(request, timeout=timeout)
 
 
 class _Exit(Exception):
@@ -69,57 +87,66 @@ class _Parser(argparse.ArgumentParser):
         raise _Exit(EXIT_USAGE)
 
 
-class NotRunning(Exception):
+class CliError(Exception):
     pass
 
 
-class Refused(Exception):
+class NotRunning(CliError):
+    """Nothing answered the health check: refused, or no answer in time."""
+
+
+class Impostor(CliError):
+    """Something answered on the port without proving it holds the token."""
+
+
+class Refused(CliError):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
 
 
+class Failed(CliError):
+    """QuickTerm answered the health check, then the request itself failed."""
+
+
 def is_command(argv: list[str]) -> bool:
     """True when argv is a verb or --version rather than the app's own arguments.
 
-    Explorer passes an absolute folder as the only argument, so a verb counts
-    only when it is not also an existing folder: a folder named "ls" opened
-    from Explorer still opens the folder.
+    Explorer always passes an absolute folder ("%V"), so a bare verb is never
+    a folder. Checking for a folder of that name in the current directory
+    made `quickterm new` in a project with a new/ folder start the app parser
+    instead.
     """
-    if not argv:
-        return False
-    first = argv[0]
-    if first == "--version":
-        return True
-    return first in VERBS and not os.path.isdir(first)
+    return bool(argv) and (argv[0] == "--version" or argv[0] in VERBS)
 
 
-def run(argv: list[str]) -> int | StartApp:
-    """Run one verb. Never raises; returns the exit code or a StartApp."""
+def run(argv: list[str]) -> int:
+    """Run one verb and return its exit code. Never raises."""
     release = _attach_parent_console()
     _utf8_streams()
     try:
-        outcome = _run(argv)
+        code = _run(argv)
     except _Exit as exc:
-        outcome = exc.code
+        code = exc.code
     except KeyboardInterrupt:
-        outcome = EXIT_USAGE
+        code = EXIT_USAGE
+    except Exception as exc:
+        # The last resort for a promise the exit codes make: something went
+        # wrong after the arguments parsed, which is a failed request.
+        print(f"quickterm: {exc}", file=sys.stderr)
+        code = EXIT_REFUSED
     finally:
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
             except (AttributeError, OSError, ValueError):
                 pass
-    if isinstance(outcome, StartApp):
-        # The app must not stay attached to the console the command was typed
-        # in: pty_session hides the console it finds (it expects its own
-        # hidden one), and closing that terminal would end the app.
         release()
-    return outcome
+    return code
 
 
-def _run(argv: list[str]) -> int | StartApp:
+def _run(argv: list[str]) -> int:
     if argv and argv[0] == "--version":
         from quickterm import __version__
 
@@ -131,15 +158,28 @@ def _run(argv: list[str]) -> int | StartApp:
     except ValueError as exc:
         print(f"quickterm: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    handler: Callable[[Client, argparse.Namespace], int | StartApp] = args.handler
+    handler: Callable[[Client, argparse.Namespace], int] = args.handler
     try:
         return handler(client, args)
     except NotRunning:
         print(f"quickterm: QuickTerm is not running on {client.base}.", file=sys.stderr)
         return EXIT_NOT_RUNNING
+    except Impostor:
+        print(_impostor_message(client.base), file=sys.stderr)
+        return EXIT_NOT_RUNNING
     except Refused as exc:
         print(f"quickterm: {exc.detail}", file=sys.stderr)
         return EXIT_REFUSED
+    except Failed as exc:
+        print(f"quickterm: the request failed: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+
+
+def _impostor_message(base: str) -> str:
+    return (
+        f"quickterm: something else answers on {base} and it is not this user's "
+        "QuickTerm, so nothing was sent to it."
+    )
 
 
 def _parser() -> _Parser:
@@ -166,7 +206,7 @@ def _parser() -> _Parser:
     )
     new.add_argument("--workspace", help="the workspace to open it in")
 
-    open_ = verb("open", "Show a workspace in the running app.", _open)
+    open_ = verb("open", "Show a workspace in the running app.", _open_workspace)
     open_.add_argument("workspace", help="the workspace name")
 
     send = verb("send", "Type text into a terminal.", _send)
@@ -231,20 +271,90 @@ def new_launch(args: argparse.Namespace) -> dict[str, str]:
     return body
 
 
-def _new(client: Client, args: argparse.Namespace) -> int | StartApp:
+def _new(client: Client, args: argparse.Namespace) -> int:
     body = new_launch(args)
     try:
         client.call("POST", "/api/launches", body)
     except NotRunning:
-        port = ["--port", str(args.port)] if args.port is not None else []
-        if set(body) == {"cwd"}:
-            return StartApp(argv=[body["cwd"], *port])
-        return StartApp(argv=port, handoff=body)
+        # Only a health check nobody answered lands here. A failure after
+        # QuickTerm answered is a Failed or a Refused: starting a second app
+        # then would repeat the launch.
+        return _start_app(client, app_arguments(body, args.port))
     _summon()
     return EXIT_OK
 
 
-def _open(client: Client, args: argparse.Namespace) -> int:
+def app_arguments(body: dict[str, str], port: int | None) -> list[str]:
+    """What the started app's own parser gets for this launch.
+
+    A folder alone rides the positional argument, exactly like Explorer's
+    "Open QuickTerm here", so it opens as the first terminal instead of beside
+    one. Anything else goes through the hidden --handoff, which the app queues
+    through its own /api/launches once its backend is up.
+    """
+    argv = [body["cwd"]] if set(body) == {"cwd"} else ["--handoff", json.dumps(body)]
+    if port is not None:
+        argv += ["--port", str(port)]
+    return argv
+
+
+def app_command(argv: list[str]) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *argv]
+    return [sys.executable, "-c", "from quickterm.app import main; main()", *argv]
+
+
+def _spawn_app(command: list[str]) -> Any:
+    """Start the app detached from this process, its console and its signals.
+
+    Running it inside the command-line process tied it to the shell: `start
+    /wait` or a PowerShell pipe blocked for the app's lifetime, and Ctrl+C or
+    closing the tab of a console launcher ended QuickTerm and every session.
+    """
+    options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        options["start_new_session"] = True
+    return subprocess.Popen(command, **options)
+
+
+def _start_app(client: Client, argv: list[str]) -> int:
+    try:
+        process = _spawn_app(app_command(argv))
+    except OSError as exc:
+        print(f"quickterm: could not start QuickTerm: {exc}", file=sys.stderr)
+        return EXIT_NOT_RUNNING
+    deadline = time.monotonic() + _START_WAIT_S
+    while True:
+        state = client.probe()
+        if state == QUICKTERM:
+            _summon()
+            return EXIT_OK
+        if state == IMPOSTOR:
+            print(_impostor_message(client.base), file=sys.stderr)
+            return EXIT_NOT_RUNNING
+        # An app that exits has either handed the launch to one that came up
+        # meanwhile (the probe above finds it next time) or failed to start.
+        exited = process.poll() is not None
+        if exited or time.monotonic() >= deadline:
+            if client.probe() == QUICKTERM:
+                return EXIT_OK
+            print(
+                f"quickterm: QuickTerm did not start on {client.base}.", file=sys.stderr
+            )
+            return EXIT_NOT_RUNNING
+        time.sleep(_START_POLL_S)
+
+
+def _open_workspace(client: Client, args: argparse.Namespace) -> int:
     client.call("POST", "/api/launches", {"workspace": args.workspace})
     _summon()
     return EXIT_OK
@@ -315,6 +425,10 @@ def _client_host(host: str) -> str:
     return host
 
 
+def base_url(port: int, host: str = "127.0.0.1") -> str:
+    return f"http://{_client_host(host)}:{port}"
+
+
 def configured_endpoint() -> tuple[str, int]:
     """Host and port from config.json, read only.
 
@@ -337,10 +451,54 @@ def configured_endpoint() -> tuple[str, int]:
     return host, port
 
 
+def health_proof(token: str, nonce: str) -> str:
+    """What /api/health?challenge=<nonce> must answer as `proof`."""
+    return hmac.new(token.encode("utf-8"), nonce.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _local_token() -> str:
+    from quickterm import auth
+
+    return auth.get_or_create_token()
+
+
+def probe(base: str, token: Callable[[], str] = _local_token, timeout: float | None = None) -> str:
+    """ABSENT, QUICKTERM or IMPOSTOR for whatever listens at `base`.
+
+    ABSENT is only a refused connection or no answer in time. Anything that
+    answers but cannot prove it holds this user's token is an IMPOSTOR, and
+    it never receives the token: the proof is checked here, locally.
+    """
+    nonce = secrets.token_urlsafe(24)
+    url = f"{base}/api/health?challenge={nonce}"
+    try:
+        with _open(url, _HEALTH_TIMEOUT_S if timeout is None else timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError:
+        return IMPOSTOR
+    except http.client.HTTPException:
+        return IMPOSTOR
+    except OSError:
+        return ABSENT
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return IMPOSTOR
+    if not isinstance(data, dict) or data.get("app") != "quickterm":
+        return IMPOSTOR
+    proof = data.get("proof")
+    if not isinstance(proof, str) or not hmac.compare_digest(proof, health_proof(token(), nonce)):
+        return IMPOSTOR
+    return QUICKTERM
+
+
 class Client:
-    def __init__(self, base: str, token: Callable[[], str]) -> None:
+    def __init__(
+        self, base: str, token: Callable[[], str] = _local_token, timeout: float = _TIMEOUT_S
+    ) -> None:
         self.base = base
         self._token = token
+        self._timeout = timeout
         self._checked = False
 
     @classmethod
@@ -348,28 +506,21 @@ class Client:
         host, configured = configured_endpoint()
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("--port must be between 1 and 65535")
+        return cls(base_url(port or configured, host))
 
-        def token() -> str:
-            from quickterm import auth
-
-            return auth.get_or_create_token()
-
-        return cls(f"http://{_client_host(host)}:{port or configured}", token)
+    def probe(self) -> str:
+        state = probe(self.base, self._token)
+        self._checked = state == QUICKTERM
+        return state
 
     def _ensure_running(self) -> None:
-        # The port may belong to something else entirely, which would answer
-        # the token-gated call with its own 404 and read as a refusal.
         if self._checked:
             return
-        try:
-            health = f"{self.base}/api/health"
-            with urllib.request.urlopen(health, timeout=_HEALTH_TIMEOUT_S) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except (OSError, ValueError) as exc:
-            raise NotRunning() from exc
-        if not isinstance(data, dict) or data.get("app") != "quickterm":
+        state = self.probe()
+        if state == ABSENT:
             raise NotRunning()
-        self._checked = True
+        if state == IMPOSTOR:
+            raise Impostor()
 
     def call(self, method: str, path: str, body: Any = None) -> Any:
         self._ensure_running()
@@ -382,12 +533,12 @@ class Client:
             f"{self.base}{path}", data=data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=_TIMEOUT_S) as resp:
+            with _open(request, self._timeout) as resp:
                 payload = resp.read()
         except urllib.error.HTTPError as exc:
             raise Refused(exc.code, _detail(exc)) from None
-        except OSError as exc:
-            raise NotRunning() from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise Failed(str(exc) or type(exc).__name__) from exc
         if not payload:
             return None
         try:
@@ -399,7 +550,7 @@ class Client:
 def _detail(exc: urllib.error.HTTPError) -> str:
     try:
         raw = exc.read().decode("utf-8", "replace")
-    except OSError:
+    except (OSError, http.client.HTTPException):
         raw = ""
     try:
         payload = json.loads(raw)
@@ -410,21 +561,26 @@ def _detail(exc: urllib.error.HTTPError) -> str:
     return raw.strip() or f"the app answered {exc.code}"
 
 
-def post_launch(port: int, launch: dict, host: str = "127.0.0.1") -> str | None:
+def post_launch(
+    port: int, launch: dict, host: str = "127.0.0.1", timeout: float = _TIMEOUT_S
+) -> str | None:
     """Queue one launch on the app at host:port. None on success, else why not.
 
-    app.py uses it to queue a `new` it was started for, once its own backend
-    is up, so the launch goes through the same checks as every other one.
+    app.py uses it for the Explorer folder and for a `new` it was started
+    with, so every launch goes through the same checks and the same verified,
+    proxy-free connection.
     """
-    from quickterm import auth
-
-    client = Client(f"http://{_client_host(host)}:{port}", auth.get_or_create_token)
+    client = Client(base_url(port, host), timeout=timeout)
     try:
         client.call("POST", "/api/launches", launch)
     except NotRunning:
         return "the app did not answer"
+    except Impostor:
+        return "something else answers on that port"
     except Refused as exc:
         return exc.detail
+    except Failed as exc:
+        return str(exc)
     return None
 
 

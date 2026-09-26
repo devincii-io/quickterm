@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import sys
 import threading
 import types
@@ -184,3 +186,80 @@ def test_a_full_input_queue_is_reported_not_touched(client, manager, monkeypatch
     response = client.post(f"/api/sessions/{info.id}/input", json={"text": "x"})
     assert response.status_code == 503
     assert manager.touched == []
+
+
+def test_a_terminal_that_exits_while_the_body_is_read_gets_409(client, manager):
+    info = manager.add_session()
+
+    def body():
+        yield b'{"text": '
+        info.alive = False  # the shell exits mid-request
+        yield b'"x"}'
+
+    response = client.post(
+        f"/api/sessions/{info.id}/input", content=body(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 409
+    assert manager.writes == []
+    assert manager.touched == []
+
+
+def test_a_write_the_terminal_did_not_take_is_409_not_204(client, manager, monkeypatch):
+    info = manager.add_session()
+
+    def gone(sid, _data):
+        # SessionManager.write drops input for a terminal that is gone,
+        # without saying so; the route has to notice.
+        manager.sessions.pop(sid)
+
+    monkeypatch.setattr(manager, "write", gone)
+    response = client.post(f"/api/sessions/{info.id}/input", json={"text": "x"})
+    assert response.status_code == 409
+    assert manager.touched == []
+
+
+# --- the health challenge ------------------------------------------------------------
+
+
+def test_health_proves_the_token_for_a_challenge_and_is_unchanged_without_one(manager):
+    cfg = FakeConfig()
+    with TestClient(create_app(manager, cfg, "s3cret"), base_url=BASE) as c:
+        plain = c.get("/api/health")
+        assert plain.status_code == 200
+        assert set(plain.json()) == {"app", "version"}
+        nonce = "abcDEF_123-xyz456"
+        answer = c.get(f"/api/health?challenge={nonce}")
+        # Still open: no token was sent, and the proof reveals nothing of it.
+        assert answer.status_code == 200
+        expected = hmac.new(b"s3cret", nonce.encode(), hashlib.sha256).hexdigest()
+        assert answer.json()["proof"] == expected
+        assert answer.json()["app"] == "quickterm"
+
+
+@pytest.mark.parametrize("nonce", ["short", "x" * 65, "has spaces in it, too", "a/b" * 8])
+def test_a_malformed_challenge_is_refused(client, nonce):
+    assert client.get("/api/health", params={"challenge": nonce}).status_code == 400
+
+
+def test_the_command_line_trusts_the_real_route_and_nothing_else(manager, monkeypatch):
+    from quickterm import cli
+
+    with TestClient(create_app(manager, FakeConfig(), "s3cret"), base_url=BASE) as c:
+
+        class Answer:
+            def __init__(self, response):
+                self.content = response.content
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.content
+
+        monkeypatch.setattr(cli, "_open", lambda url, timeout: Answer(c.get(url[len(BASE):])))
+        assert cli.probe(BASE, lambda: "s3cret") == cli.QUICKTERM
+        assert cli.probe(BASE, lambda: "another-users-token") == cli.IMPOSTOR

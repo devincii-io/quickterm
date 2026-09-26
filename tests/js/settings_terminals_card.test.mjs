@@ -265,3 +265,36 @@ test("the More disclosure survives a redraw", () => {
   const again = byClass(host, "terminal-profile-card")[0];
   assert.equal(byClass(again, "profile-more")[0].hidden, false);
 });
+
+test("an untyped profile takes its inferred type once a type-bound field is edited", () => {
+  // Settings no longer stamps the inferred type at load, so a hand-edited
+  // profile keeps launching as a plain command until the user fills in a
+  // field that only means something for that type.
+  const pwsh = profile({ name: "Hand", cmd: "pwsh.exe" });
+  const plink = profile({ name: "Remote", cmd: "plink.exe" });
+  const { cards } = render([pwsh, plink]);
+  assert.equal(pwsh.terminal_type, null, "drawing the card stamps nothing");
+  assert.equal(plink.terminal_type, null);
+  const byName = (wanted) => cards.find((card) => controlOf(fieldNamed(card, "Profile name")).value === wanted);
+
+  const start = controlOf(fieldNamed(byName("Hand"), "Start command"));
+  start.value = "uv run dev";
+  start.fire("input");
+  assert.equal(pwsh.terminal_type, "powershell-core", "the start command runs only for that type");
+  assert.equal(pwsh.start_command, "uv run dev");
+
+  const port = controlOf(fieldNamed(byName("Remote"), "Port"));
+  port.value = "2222";
+  port.fire("input");
+  assert.equal(plink.terminal_type, "ssh");
+  assert.equal(plink.ssh_port, 2222);
+});
+
+test("a profile that already has a type keeps it when its fields are edited", () => {
+  const custom = profile({ name: "Mine", cmd: "pwsh.exe", terminal_type: "custom" });
+  const { cards } = render([custom]);
+  const shortcut = controlOf(fieldNamed(cards[0], "Global shortcut"));
+  shortcut.value = "ctrl+alt+9";
+  shortcut.fire("input");
+  assert.equal(custom.terminal_type, "custom");
+});

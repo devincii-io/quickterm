@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import socket
 import sys
 import threading
 import types
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from quickterm import cli
+
+_REAL_SPAWN = cli._spawn_app
 
 SESSIONS = [
     {
@@ -31,11 +36,18 @@ SESSIONS = [
 
 
 class Backend:
-    """What the app answers: /api/health, the session list, launches, input."""
+    """What the app answers: /api/health, the session list, launches, input.
 
-    def __init__(self) -> None:
+    `token` is what it proves it holds when asked; an impostor is a Backend
+    with the wrong one. Every request except the health check is recorded.
+    """
+
+    def __init__(self, token: str) -> None:
+        self.token = token
         self.requests: list[tuple[str, str, dict | None, str | None]] = []
+        self.health_checks: list[str] = []
         self.refuse: tuple[int, dict | str] | None = None
+        self.drop_after_health = False
         backend = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -57,16 +69,26 @@ class Backend:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length)) if length else None
                 token = self.headers.get("X-QuickTerm-Token")
-                if self.path == "/api/health":
-                    return self._answer(200, {"app": "quickterm", "version": "x"})
+                url = urllib.parse.urlsplit(self.path)
+                if url.path == "/api/health":
+                    backend.health_checks.append(self.path)
+                    answer = {"app": "quickterm", "version": "x"}
+                    nonce = urllib.parse.parse_qs(url.query).get("challenge", [""])[0]
+                    if nonce:
+                        answer["proof"] = cli.health_proof(backend.token, nonce)
+                    return self._answer(200, answer)
                 backend.requests.append((method, self.path, body, token))
+                if backend.drop_after_health:
+                    # Accept the request, then hang up without an answer.
+                    self.close_connection = True
+                    return None
                 if backend.refuse is not None:
                     return self._answer(*backend.refuse)
-                if self.path.startswith("/api/sessions") and method == "GET":
+                if url.path.startswith("/api/sessions") and method == "GET":
                     return self._answer(200, SESSIONS)
-                if self.path == "/api/launches":
+                if url.path == "/api/launches":
                     return self._answer(200, body)
-                if self.path.endswith("/input"):
+                if url.path.endswith("/input"):
                     return self._answer(204)
                 return self._answer(404, {"detail": "Not Found"})
 
@@ -98,12 +120,30 @@ def isolated(monkeypatch, tmp_path):
     # Windows retries a refused loopback connect for about two seconds; the
     # "not running" answers need not wait for that here.
     monkeypatch.setattr(cli, "_HEALTH_TIMEOUT_S", 0.2)
+    # Never start a real app from a test.
+    def no_spawn(command):
+        raise AssertionError(f"a test tried to start the app: {command}")
+
+    monkeypatch.setattr(cli, "_spawn_app", no_spawn)
     return summoned
+
+
+def _token() -> str:
+    from quickterm import auth
+
+    return auth.get_or_create_token()
 
 
 @pytest.fixture
 def backend():
-    server = Backend()
+    server = Backend(_token())
+    yield server
+    server.close()
+
+
+@pytest.fixture
+def impostor():
+    server = Backend("not-this-users-token")
     yield server
     server.close()
 
@@ -123,7 +163,7 @@ def _run(capsys, *argv):
 # --- when argv is a verb ---------------------------------------------------------------
 
 
-def test_only_verbs_and_version_are_commands(tmp_path, monkeypatch):
+def test_only_verbs_and_version_are_commands(tmp_path):
     assert cli.is_command(["ls"])
     assert cli.is_command(["send", "x", "y"])
     assert cli.is_command(["--version"])
@@ -131,13 +171,16 @@ def test_only_verbs_and_version_are_commands(tmp_path, monkeypatch):
     assert not cli.is_command([str(tmp_path)])
     assert not cli.is_command(["--port", "8641"])
     assert not cli.is_command(["list"])
+    assert not cli.is_command(["--handoff", "{}"])
 
 
-def test_a_folder_named_like_a_verb_still_opens_the_folder(tmp_path, monkeypatch):
-    (tmp_path / "open").mkdir()
+def test_a_verb_stays_a_verb_beside_a_folder_of_that_name(tmp_path, monkeypatch):
+    # Explorer always passes an absolute folder, so a project with a new/
+    # folder must not turn `quickterm new` into "open the folder new".
+    (tmp_path / "new").mkdir()
     monkeypatch.chdir(tmp_path)
-    assert not cli.is_command(["open"])
-    assert cli.is_command(["ls"])
+    assert cli.is_command(["new", "--profile", "x"])
+    assert not cli.is_command([str(tmp_path / "new")])
 
 
 def test_version(capsys):
@@ -162,6 +205,16 @@ def test_help_exits_0(capsys):
     assert "--profile" in out
 
 
+def test_run_never_raises(monkeypatch, capsys):
+    def boom(_client, _args):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(cli, "_ls", boom)
+    code, _out, err = _run(capsys, "ls", "--port", "1")
+    assert code == cli.EXIT_REFUSED
+    assert "unexpected" in err
+
+
 # --- ls -------------------------------------------------------------------------------
 
 
@@ -177,9 +230,7 @@ def test_ls_prints_one_line_per_session(capsys, backend):
     assert lines[0].index("live") == lines[1].index("busy")
     method, path, _body, token = backend.requests[0]
     assert (method, path) == ("GET", "/api/sessions")
-    from quickterm import auth
-
-    assert token == auth.get_or_create_token()
+    assert token == _token()
 
 
 def test_ls_json_prints_the_raw_list(capsys, backend):
@@ -190,7 +241,7 @@ def test_ls_json_prints_the_raw_list(capsys, backend):
 
 def test_the_port_comes_from_the_config(capsys, backend, tmp_path):
     folder = tmp_path / "appdata" / "quickterm"
-    folder.mkdir(parents=True)
+    folder.mkdir(parents=True, exist_ok=True)
     (folder / "config.json").write_text(json.dumps({"port": backend.port}), encoding="utf-8")
     assert _run(capsys, "ls")[0] == 0
     assert backend.requests
@@ -202,6 +253,89 @@ def test_a_verb_with_no_app_running_exits_2(capsys):
         code, _out, err = _run(capsys, *argv, "--port", port)
         assert code == cli.EXIT_NOT_RUNNING, argv
         assert "not running" in err
+
+
+# --- who answers on the port ---------------------------------------------------------------
+
+
+def test_a_port_that_does_not_prove_the_token_gets_nothing(capsys, impostor):
+    # Another local user can bind the port first. The health answer looks
+    # right but its proof is not ours, so neither the token nor the text of a
+    # send may reach it, and `new` does not start an app that cannot bind.
+    port = str(impostor.port)
+    for argv in (["ls"], ["open", "dev"], ["send", "a1", "secret"], ["new", "--profile", "x"]):
+        code, _out, err = _run(capsys, *argv, "--port", port)
+        assert code == cli.EXIT_NOT_RUNNING, argv
+        assert "something else answers" in err
+    assert impostor.requests == []
+    assert impostor.health_checks
+    assert all("challenge=" in path for path in impostor.health_checks)
+    assert cli.post_launch(impostor.port, {"cwd": "x"}) == "something else answers on that port"
+
+
+@pytest.mark.parametrize("answer", [
+    {"app": "quickterm", "version": "x"},
+    {"app": "quickterm", "version": "x", "proof": 7},
+    {"app": "quickterm", "version": "x", "proof": "0" * 64},
+    {"app": "other", "proof": "x"},
+    "not json",
+])
+def test_a_health_answer_without_a_valid_proof_is_an_impostor(answer, monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return (answer if isinstance(answer, str) else json.dumps(answer)).encode()
+
+    monkeypatch.setattr(cli, "_open", lambda url, timeout: Response())
+    assert cli.probe("http://127.0.0.1:1") == cli.IMPOSTOR
+
+
+def test_every_nonce_is_fresh_and_the_proof_is_the_hmac(backend):
+    base = f"http://127.0.0.1:{backend.port}"
+    assert cli.probe(base) == cli.QUICKTERM
+    assert cli.probe(base) == cli.QUICKTERM
+    nonces = [
+        urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["challenge"][0]
+        for path in backend.health_checks
+    ]
+    assert nonces[0] != nonces[1]
+    assert all(16 <= len(nonce) <= 64 for nonce in nonces)
+    expected = hmac.new(b"tok", b"n" * 16, hashlib.sha256).hexdigest()
+    assert cli.health_proof("tok", "n" * 16) == expected
+
+
+def test_a_proxy_in_the_environment_is_never_used(capsys, backend, monkeypatch):
+    # An intercepting proxy would log the token and every send; a corporate
+    # one would make every verb look like "not running".
+    proxy = Backend("proxy")
+    try:
+        for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy.port}")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        assert _run(capsys, "ls", "--port", str(backend.port))[0] == 0
+        assert cli.post_launch(backend.port, {"cwd": "x"}) is None
+    finally:
+        proxy.close()
+    assert proxy.requests == []
+    assert proxy.health_checks == []
+    assert len(backend.requests) == 2
+
+
+def test_a_failure_after_quickterm_answered_is_exit_3(capsys, backend):
+    # Only an unanswered health check means "not running": anything later is
+    # a failed request, and `new` must not start a second app and repeat it
+    # (the autouse fixture fails the test if it tries).
+    backend.drop_after_health = True
+    for argv in (["ls"], ["new", "--profile", "pwsh"]):
+        code, _out, err = _run(capsys, *argv, "--port", str(backend.port))
+        assert code == cli.EXIT_REFUSED, argv
+        assert "the request failed" in err
 
 
 def test_a_refusal_exits_3_with_the_servers_detail(capsys, backend):
@@ -238,15 +372,73 @@ def test_open_asks_for_the_workspace(capsys, backend, isolated):
     assert isolated == [True]
 
 
-def test_new_with_no_app_starts_it_with_the_launch(tmp_path, monkeypatch):
-    port = _free_port()
+def test_the_started_app_gets_the_launch_as_arguments():
+    # A folder alone rides the positional argument, like Explorer's handoff;
+    # anything more is queued by the app once its backend is up.
+    assert cli.app_arguments({"cwd": "/p"}, None) == ["/p"]
+    assert cli.app_arguments({"cwd": "/p"}, 8641) == ["/p", "--port", "8641"]
+    handoff = cli.app_arguments({"profile": "pwsh", "workspace": "dev"}, None)
+    assert handoff[0] == "--handoff"
+    assert json.loads(handoff[1]) == {"profile": "pwsh", "workspace": "dev"}
+
+
+def test_the_app_command_for_a_frozen_and_a_source_install(monkeypatch):
+    monkeypatch.setattr(sys, "executable", "/x/python")
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert cli.app_command(["--handoff", "{}"]) == [
+        "/x/python", "-c", "from quickterm.app import main; main()", "--handoff", "{}",
+    ]
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "C:/QuickTerm/QuickTerm.exe")
+    assert cli.app_command(["/p"]) == ["C:/QuickTerm/QuickTerm.exe", "/p"]
+
+
+def test_the_app_is_started_detached_from_the_shell(monkeypatch):
+    seen = {}
+
+    def fake_popen(command, **options):
+        seen.update(command=command, options=options)
+        return types.SimpleNamespace(poll=lambda: None)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    # The autouse fixture replaced cli._spawn_app; this is the real one.
+    _REAL_SPAWN(["prog", "--handoff", "{}"])
+    options = seen["options"]
+    assert seen["command"] == ["prog", "--handoff", "{}"]
+    assert options["stdin"] == options["stdout"] == options["stderr"] == cli.subprocess.DEVNULL
+    assert "cwd" not in options
+    if sys.platform == "win32":
+        flags = cli.subprocess.DETACHED_PROCESS | cli.subprocess.CREATE_NEW_PROCESS_GROUP
+        assert options["creationflags"] == flags
+    else:
+        assert options["start_new_session"] is True
+
+
+def test_new_with_no_app_starts_one_and_waits_for_it(capsys, tmp_path, monkeypatch, isolated):
     monkeypatch.chdir(tmp_path)
-    folder_only = cli.run(["new", "--port", str(port)])
-    # A folder alone rides the positional argument, like Explorer's handoff.
-    assert folder_only == cli.StartApp(argv=[str(tmp_path), "--port", str(port)])
-    # Anything more is queued once the app is up.
-    outcome = cli.run(["new", "--profile", "pwsh", "--port", str(port)])
-    assert outcome == cli.StartApp(argv=["--port", str(port)], handoff={"profile": "pwsh"})
+    port = _free_port()
+    started = []
+    states = iter([cli.ABSENT, cli.ABSENT, cli.QUICKTERM])
+
+    def spawn(command):
+        started.append(command)
+        return types.SimpleNamespace(poll=lambda: None)
+
+    monkeypatch.setattr(cli, "_spawn_app", spawn)
+    monkeypatch.setattr(cli.Client, "probe", lambda self: next(states))
+    monkeypatch.setattr(cli, "_START_POLL_S", 0)
+    code, _out, _err = _run(capsys, "new", "--port", str(port))
+    assert code == 0
+    assert started == [cli.app_command([str(tmp_path), "--port", str(port)])]
+    assert isolated == [True]
+
+
+def test_new_reports_an_app_that_never_came_up(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_spawn_app", lambda command: types.SimpleNamespace(poll=lambda: 1))
+    monkeypatch.setattr(cli, "_START_POLL_S", 0)
+    code, _out, err = _run(capsys, "new", "--profile", "pwsh", "--port", str(_free_port()))
+    assert code == cli.EXIT_NOT_RUNNING
+    assert "did not start" in err
 
 
 # --- send ------------------------------------------------------------------------------
@@ -307,6 +499,14 @@ def test_post_launch_says_why_not(backend):
     assert cli.post_launch(_free_port(), {"cwd": "x"}) == "the app did not answer"
 
 
+def test_the_app_checks_the_proof_before_calling_it_running(backend, impostor):
+    from quickterm import app as app_mod
+
+    assert app_mod._already_running(backend.port) is True
+    assert app_mod._already_running(impostor.port) is False
+    assert app_mod._already_running(_free_port()) is False
+
+
 def test_the_app_runs_a_verb_and_exits_with_its_code(monkeypatch):
     from quickterm import app as app_mod
 
@@ -317,24 +517,34 @@ def test_the_app_runs_a_verb_and_exits_with_its_code(monkeypatch):
     assert raised.value.code == 2
 
 
-def test_an_app_that_came_up_meanwhile_still_gets_the_launch(monkeypatch, tmp_path):
+def _quiet_main(monkeypatch):
     from quickterm import app as app_mod
-
-    posted = []
-    monkeypatch.setattr(sys, "argv", ["quickterm", "new", "--profile", "pwsh"])
-    monkeypatch.setattr(
-        app_mod.cli, "run",
-        lambda argv: cli.StartApp(argv=["--port", "8655"], handoff={"profile": "pwsh"}),
-    )
-    monkeypatch.setattr(app_mod.cli, "post_launch", lambda *args: posted.append(args))
-    monkeypatch.setattr(app_mod, "_harden_program_lookup", lambda: None)
-    monkeypatch.setattr(app_mod, "_already_running", lambda port, host: True)
-    monkeypatch.setattr(app_mod, "_launch_window", lambda *a, **k: None)
     from quickterm import hotkeys
 
+    monkeypatch.setattr(app_mod, "_harden_program_lookup", lambda: None)
+    monkeypatch.setattr(app_mod, "_launch_window", lambda *a, **k: None)
     monkeypatch.setattr(hotkeys, "summon_window", lambda: None)
+    return app_mod
+
+
+def test_an_app_that_came_up_meanwhile_still_gets_the_launch(monkeypatch):
+    app_mod = _quiet_main(monkeypatch)
+    posted = []
+    handoff = json.dumps({"profile": "pwsh"})
+    monkeypatch.setattr(sys, "argv", ["quickterm", "--handoff", handoff, "--port", "8655"])
+    monkeypatch.setattr(app_mod.cli, "post_launch", lambda *args: posted.append(args))
+    monkeypatch.setattr(app_mod, "_already_running", lambda port, host: True)
     app_mod.main()
     assert posted == [(8655, {"profile": "pwsh"}, "127.0.0.1")]
+
+
+@pytest.mark.parametrize("text", ["[]", "{}", '{"cmd": "x"}', '{"cwd": 3}', "nope"])
+def test_a_bad_handoff_is_a_usage_error_of_the_app(text, monkeypatch):
+    app_mod = _quiet_main(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["quickterm", "--handoff", text])
+    with pytest.raises(SystemExit) as raised:
+        app_mod.main()
+    assert raised.value.code == 2
 
 
 async def test_a_launch_the_app_was_started_for_is_queued_once_it_is_up(monkeypatch):
@@ -358,9 +568,9 @@ async def test_a_launch_the_app_was_started_for_is_queued_once_it_is_up(monkeypa
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the console attach exists only on Windows")
-def test_a_console_build_keeps_its_own_streams(monkeypatch):
-    # Under pytest stdout exists and the process is not frozen: nothing is
-    # attached, and letting go changes nothing.
+def test_a_console_build_keeps_its_own_streams():
+    # Under pytest stdout exists: nothing is attached, and letting go
+    # changes nothing.
     before = (sys.stdout, sys.stderr)
     release = cli._attach_parent_console()
     assert (sys.stdout, sys.stderr) == before
@@ -369,7 +579,7 @@ def test_a_console_build_keeps_its_own_streams(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the console attach exists only on Windows")
-def test_a_windowed_build_with_no_parent_console_prints_nowhere(monkeypatch, capsys):
+def test_a_windowed_build_with_no_parent_console_prints_nowhere(monkeypatch):
     import ctypes
 
     freed = []
@@ -385,15 +595,3 @@ def test_a_windowed_build_with_no_parent_console_prints_nowhere(monkeypatch, cap
     release()
     assert sys.stdout is None
     assert freed == []  # nothing was attached, so nothing is freed
-
-
-def test_a_new_that_starts_the_app_lets_go_of_the_console(monkeypatch):
-    released = []
-    monkeypatch.setattr(cli, "_attach_parent_console", lambda: lambda: released.append(True))
-    monkeypatch.setattr(cli, "_HEALTH_TIMEOUT_S", 0.2)
-    outcome = cli.run(["new", "--profile", "pwsh", "--port", str(_free_port())])
-    assert isinstance(outcome, cli.StartApp)
-    # pty_session would otherwise hide the terminal the command was typed in.
-    assert released == [True]
-    assert cli.run(["--version"]) == 0
-    assert released == [True]
