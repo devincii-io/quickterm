@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import importlib
 import json
 import os
 import shutil
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.websockets import WebSocketDisconnect
 
-from quickterm import browse, putty_tools
+from quickterm import browse, launch, putty_tools
 from quickterm.windows import (
     KEEP,
     WindowError,
@@ -38,6 +41,35 @@ FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 # Max bytes merged into one live output frame. Bounds per-send loop time so the
 # input pump interleaves; big enough to collapse bursts into few frames.
 _SEND_COALESCE_BYTES = 128 * 1024
+INPUT_FRAME_MAX = 256 * 1024
+# A long-poll re-checks its client this often. Starlette does not cancel a
+# plain HTTP endpoint when the client goes away, so the waiter has to ask.
+_LAUNCH_POLL_S = 0.5
+_LAUNCH_WAIT_S = 20.0
+
+
+def client_host(host: str) -> str:
+    """The host part of a URL that reaches a server bound to `host`.
+
+    An IPv6 literal needs brackets in a URL and a Host header, and a wildcard
+    bind is reached through loopback.
+    """
+    if host in ("", "0.0.0.0"):
+        return "127.0.0.1"
+    if host == "::":
+        return "[::1]"
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _request_workspace(body: dict) -> str | None:
+    name = body.get("workspace")
+    if name is not None and not isinstance(name, str):
+        raise HTTPException(400, "workspace must be a string")
+    return (name or "").strip() or None
+
+
 def _asdict(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
@@ -67,8 +99,50 @@ def _claim_conflict(exc: WorkspaceClaimed) -> JSONResponse:
 def _allowed_origins(cfg: "AppConfig") -> tuple[set[str], set[str]]:
     hosts = {f"127.0.0.1:{cfg.port}", f"localhost:{cfg.port}", f"[::1]:{cfg.port}"}
     if cfg.host not in ("127.0.0.1", "localhost", "0.0.0.0", "::"):
-        hosts.add(f"{cfg.host}:{cfg.port}")
+        hosts.add(f"{client_host(cfg.host)}:{cfg.port}")
     return hosts, {f"http://{h}" for h in hosts}
+
+
+class _LaunchQueue:
+    """Explorer folder handoffs waiting for the primary window to claim one.
+
+    An asyncio.Queue hands an item to its oldest getter even when that getter's
+    client has gone (a reload, a closed window), and the item then vanished
+    into a closed socket. Here a waiter takes an item only while its client is
+    still there, and puts it back at the front if the client left meanwhile.
+    """
+
+    MAX_ITEMS = 32
+
+    def __init__(self) -> None:
+        self._items: deque[dict] = deque()
+        # Replaced on every change, so a waiter holds the event for the state
+        # it last looked at and a change during its own checks still wakes it.
+        self.arrived = asyncio.Event()
+
+    def put(self, item: dict) -> None:
+        if len(self._items) >= self.MAX_ITEMS:
+            self._items.popleft()
+        self._items.append(item)
+        self._wake()
+
+    def requeue(self, item: dict) -> None:
+        self._items.appendleft(item)
+        self._wake()
+
+    def pop(self) -> dict | None:
+        return self._items.popleft() if self._items else None
+
+    def _wake(self) -> None:
+        event, self.arrived = self.arrived, asyncio.Event()
+        event.set()
+
+
+async def _wait_event(event: asyncio.Event, timeout: float) -> None:
+    try:
+        await asyncio.wait_for(event.wait(), timeout)
+    except TimeoutError:
+        pass
 
 
 def create_app(
@@ -84,8 +158,10 @@ def create_app(
     workspace_write_lock = asyncio.Lock()
     from quickterm import auth
 
-    app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None)
-    pending_launches: asyncio.Queue[dict] = asyncio.Queue(maxsize=32)
+    # No docs and no schema: /openapi.json listed every route without asking
+    # for the token, the only non-static answer besides /api/health that did.
+    app = FastAPI(title="QuickTerm", docs_url=None, redoc_url=None, openapi_url=None)
+    pending_launches = _LaunchQueue()
     # Several viewer windows share this one backend, so somebody has to say
     # which window owns which workspace; quickterm/windows.py holds that rule
     # and these routes are only its wire. `open_window` exists only in the
@@ -93,40 +169,65 @@ def create_app(
     registry = windows if windows is not None else WindowRegistry()
     allowed_hosts, allowed_origins = _allowed_origins(cfg)
 
-    def _token_required(request: Request) -> bool:
+    def _token_required(method: str, path: str) -> bool:
         # Sensitive routes = everything under /api that isn't a public probe or a
         # logo loaded by <img> (which can't send headers). Static frontend files
         # carry no secrets and stay open so the shell can bootstrap.
-        path = request.url.path
         if not path.startswith("/api/") or path == "/api/health":
             return False
-        return not (request.method == "GET" and path.startswith("/api/assets/"))
+        return not (method == "GET" and path.startswith("/api/assets/"))
+
+    def _refusal(headers: Headers, method: str, path: str) -> str | None:
+        if headers.get("host", "") not in allowed_hosts:
+            return "forbidden: bad host"
+        origin = headers.get("origin")
+        if origin is not None and origin not in allowed_origins:
+            return "forbidden: bad origin"
+        if token and _token_required(method, path) and headers.get(auth.HEADER) != token:
+            return "forbidden: bad token"
+        return None
 
     # Local-only trust boundary: the API answers the QuickTerm window and
     # nothing else. The Host allowlist defeats DNS-rebinding (a hostile page
     # pointing its own domain at 127.0.0.1), and the Origin allowlist defeats
     # cross-origin requests from other sites in the same browser, including
     # WebSocket connections, which browsers allow cross-origin by default.
-    @app.middleware("http")
-    async def _local_guard(request: Request, call_next):
-        if request.headers.get("host", "") not in allowed_hosts:
-            return Response("forbidden: bad host", status_code=403)
-        origin = request.headers.get("origin")
-        if origin is not None and origin not in allowed_origins:
-            return Response("forbidden: bad origin", status_code=403)
-        if token and _token_required(request) and request.headers.get(auth.HEADER) != token:
-            return Response("forbidden: bad token", status_code=403)
-        path = request.url.path
-        response = await call_next(request)
-        if path.startswith("/api/"):
-            response.headers.setdefault("Cache-Control", "no-store")
-        # Frontend assets carry ETag/Last-Modified but no Cache-Control, so
-        # browsers cache them heuristically and can serve a stale UI after the
-        # app updates. Force revalidation for the shell (the immutable, hashed
-        # /api/assets responses set their own long-lived caching).
-        if not path.startswith("/api") and not path.startswith("/ws"):
-            response.headers.setdefault("Cache-Control", "no-cache")
-        return response
+    #
+    # A plain ASGI middleware, not @app.middleware("http"): Starlette's
+    # BaseHTTPMiddleware wraps `receive`, and through that wrapper
+    # request.is_disconnected() never reported a client that had gone, which
+    # the launch long-poll depends on.
+    class LocalGuard:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope["type"] != "http":
+                await self.inner(scope, receive, send)
+                return
+            path = scope["path"]
+            refusal = _refusal(Headers(scope=scope), scope["method"], path)
+            if refusal is not None:
+                await Response(refusal, status_code=403)(scope, receive, send)
+                return
+
+            async def send_with_caching(message: Any) -> None:
+                if message["type"] == "http.response.start":
+                    headers = MutableHeaders(scope=message)
+                    if path.startswith("/api/"):
+                        headers.setdefault("Cache-Control", "no-store")
+                    # Frontend assets carry ETag/Last-Modified but no
+                    # Cache-Control, so browsers cache them heuristically and
+                    # can serve a stale UI after the app updates. Force
+                    # revalidation for the shell (the immutable /api/assets
+                    # responses set their own caching).
+                    if not path.startswith("/api") and not path.startswith("/ws"):
+                        headers.setdefault("Cache-Control", "no-cache")
+                await send(message)
+
+            await self.inner(scope, receive, send_with_caching)
+
+    app.add_middleware(LocalGuard)
 
     def _ws_allowed(ws: WebSocket) -> bool:
         if ws.headers.get("host", "") not in allowed_hosts:
@@ -167,138 +268,80 @@ def create_app(
             out.append(d)
         return out
 
+    async def checked_dir(value: str, label: str | None = None) -> str:
+        """launch.validate_dir off the loop: a cold network share can stall."""
+        try:
+            return await asyncio.to_thread(launch.validate_dir, value, label)
+        except launch.LaunchError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    async def resolve_request(body: dict, *, append_tools: bool = True) -> launch.LaunchSpec:
+        """The one path from a request body to a LaunchSpec (spawn and elevate)."""
+        workspace_name = _request_workspace(body)
+        cwd = body.get("cwd")
+        if cwd is not None and not isinstance(cwd, str):
+            raise HTTPException(400, "cwd must be a string")
+        # A workspace is a folder: every session it owns starts there unless
+        # the request names a directory itself (Explorer handoff, or a split
+        # inheriting the source pane's cwd). Profiles contribute nothing here.
+        request_cwd = cwd if cwd and cwd.strip() else None
+        root = None
+        if request_cwd is None:
+            root = await asyncio.to_thread(launch.workspace_start, workspace_name)
+        try:
+            return await asyncio.to_thread(
+                functools.partial(
+                    launch.resolve,
+                    cfg,
+                    profile=body.get("profile"),
+                    cmd=body.get("cmd"),
+                    args=body.get("args"),
+                    env=body.get("env"),
+                    name=body.get("name"),
+                    start_command=body.get("start_command"),
+                    claude_mode=body.get("claude_mode"),
+                    request_cwd=request_cwd,
+                    workspace_root=root,
+                    append_tools=append_tools,
+                )
+            )
+        except launch.LaunchError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:
         body = await _read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
-        profile_name = body.get("profile")
-        cmd = body.get("cmd")
-        args = body.get("args")
-        cwd = body.get("cwd")
-        env = body.get("env")
-        start_command = body.get("start_command")
-        claude_mode = body.get("claude_mode")
-        workspace_name = body.get("workspace")
-        if workspace_name is not None and not isinstance(workspace_name, str):
-            raise HTTPException(400, "workspace must be a string")
-        workspace_name = (workspace_name or "").strip() or None
-        # A workspace is a folder: every session it owns starts there unless
-        # the request names a directory itself (Explorer handoff, or a split
-        # inheriting the source pane's cwd). Profiles contribute nothing here.
-        request_cwd = cwd if isinstance(cwd, str) and cwd.strip() else None
-
-        async def workspace_cwd() -> str | None:
-            if not workspace_name:
-                return None
-            workspace_mod = importlib.import_module("quickterm.workspace")
-
-            def read() -> str | None:
-                saved = workspace_mod.load_workspace(workspace_name)
-                if saved is None:
-                    return None
-                return workspace_mod.resolve_start_dir(getattr(saved, "path", None))
-
-            return await asyncio.to_thread(read)
-
-        prof = None
-        if profile_name is not None:
-            if not isinstance(profile_name, str) or not profile_name.strip():
-                raise HTTPException(400, "profile must be a non-empty string")
-            prof = next((p for p in cfg.profiles if p.name == profile_name), None)
-            if prof is None:
-                raise HTTPException(404, f"unknown profile: {profile_name}")
-            if start_command is not None:
-                if not isinstance(start_command, str) or len(start_command) > 8192:
-                    raise HTTPException(400, "start_command must be a string of at most 8192 characters")
-                prof = dataclasses.replace(prof, start_command=start_command)
-            if claude_mode is not None:
-                if getattr(prof, "terminal_type", None) != "claude-code":
-                    raise HTTPException(400, "claude_mode requires a Claude Code profile")
-                if claude_mode not in {"new", "continue", "resume", "agents"}:
-                    raise HTTPException(400, "claude_mode must be new, continue, resume, or agents")
-                prof = dataclasses.replace(prof, claude_mode=claude_mode)
-            # Profiles carry no folder at all, so the order is short: an
-            # explicit request directory, else the workspace root.
-            effective_cwd = request_cwd or await workspace_cwd()
-            try:
-                resolved_cmd, resolved_args, resolved_cwd = _resolve_profile(prof, effective_cwd)
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-            cmd = cmd or resolved_cmd
-            args = args if args is not None else resolved_args
-            # _resolve_profile incorporates the request override.  WSL embeds
-            # it in `--cd` and deliberately returns no Windows process cwd.
-            cwd = resolved_cwd
-            env = env if env is not None else dict(prof.env)
-        elif start_command is not None or claude_mode is not None:
-            raise HTTPException(400, "start_command and claude_mode require a profile")
-        else:
-            # System shells carry no profile, so the workspace root is the only
-            # thing that can place them.
-            cwd = request_cwd or await workspace_cwd()
-        if not isinstance(cmd, str) or not cmd.strip():
-            raise HTTPException(400, "either 'profile' or 'cmd' is required")
-        cmd = cmd.strip()
-        if args is not None and (
-            not isinstance(args, list) or len(args) > 1024
-            or any(not isinstance(arg, str) for arg in args)
-        ):
-            raise HTTPException(400, "args must be a list of at most 1024 strings")
-        if env is not None:
-            config_mod = importlib.import_module("quickterm.config")
-            try:
-                env = config_mod.validate_environment(env)
-            except ValueError as exc:
-                raise HTTPException(400, f"invalid env: {exc}") from exc
-        if cwd is not None and not isinstance(cwd, str):
-            raise HTTPException(400, "cwd must be a string")
-        if cwd:
-            resolved_cwd = Path(os.path.expandvars(os.path.expanduser(str(cwd))))
-            if not resolved_cwd.is_dir():
-                label = profile_name or body.get("name") or cmd
-                raise HTTPException(
-                    400,
-                    f'Terminal profile "{label}": starting folder does not exist: {cwd}',
-                )
-            cwd = str(resolved_cwd)
-        name = body.get("name")
-        if name is not None and not isinstance(name, str):
-            raise HTTPException(400, "name must be a string")
         cols = _bounded_int(body.get("cols", 120), "cols", 2, 1000)
         rows = _bounded_int(body.get("rows", 30), "rows", 1, 1000)
-        tools = putty_tools.tools_dir()
-        if tools is not None:
-            # Appended (not prepended) so a user-installed plink/pscp still wins.
-            env = dict(env or {})
-            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
-            base_path = env.get(path_key) or os.environ.get("PATH", "")
-            env[path_key] = f"{base_path}{os.pathsep}{tools}" if base_path else str(tools)
+        spec = await resolve_request(body)
+        from quickterm.session_manager import SessionLimitError, SpawnError
+
         try:
-            info = manager.spawn(
-                name=name.strip()[:80] if name and name.strip() else None,
-                profile=profile_name,
-                cmd=cmd,
-                args=args or [],
-                cwd=cwd,
-                env=env or {},
+            # spawn_async builds the PTY in a worker thread: PATHEXT scan,
+            # CreatePseudoConsole and CreateProcess all block.
+            info = await manager.spawn_async(
+                **spec.spawn_kwargs(),
                 cols=cols,
                 rows=rows,
-                workspace=workspace_name,
+                workspace=_request_workspace(body),
             )
-        except Exception as exc:
-            from quickterm.session_manager import SessionLimitError
-
-            if isinstance(exc, SessionLimitError):
-                raise HTTPException(409, str(exc)) from exc
-            raise
+        except SessionLimitError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except SpawnError as exc:
+            raise HTTPException(400, launch.describe_failure(spec.label, exc)) from exc
         return _asdict(info)
 
     @app.delete("/api/sessions/{sid}")
     def kill_session(sid: str) -> Response:
-        if manager.get(sid) is None:
-            raise HTTPException(404, "no such session")
-        if manager.kill(sid) is False:
+        try:
+            stopped = manager.kill(sid)
+        except KeyError:
+            # Gone already (the reaper or a grace timer dropped it): there is
+            # nothing left running, so the pane may close.
+            raise HTTPException(404, "no such session") from None
+        if not stopped:
             raise HTTPException(500, "terminal process could not be stopped")
         return Response(status_code=204)
 
@@ -317,26 +360,31 @@ def create_app(
         cwd = body.get("cwd") if isinstance(body, dict) else None
         if not isinstance(cwd, str) or not cwd.strip():
             raise HTTPException(400, "cwd must be a non-empty string")
-        resolved = Path(os.path.expandvars(os.path.expanduser(cwd)))
-        if not resolved.is_dir():
-            raise HTTPException(400, "launch folder does not exist")
-        launch = {"cwd": str(resolved)}
-        if pending_launches.full():
-            try:
-                pending_launches.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        pending_launches.put_nowait(launch)
-        return launch
+        item = {"cwd": await checked_dir(cwd)}
+        pending_launches.put(item)
+        return item
 
     @app.get("/api/launches/next", response_model=None)
-    async def next_launch(wait: bool = True) -> Any:
-        try:
-            return await asyncio.wait_for(
-                pending_launches.get(), timeout=20.0 if wait else 0.001
-            )
-        except TimeoutError:
-            return Response(status_code=204)
+    async def next_launch(request: Request, wait: bool = True) -> Any:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (_LAUNCH_WAIT_S if wait else 0.0)
+        while True:
+            # Taken before looking, so an item queued while this waiter is
+            # busy checking its client still wakes it.
+            arrived = pending_launches.arrived
+            item = pending_launches.pop()
+            if item is not None:
+                if await request.is_disconnected():
+                    # The window that asked is gone (reload, close). Its 200
+                    # would land in a closed socket and the folder would be
+                    # lost, so the next live poll gets it instead.
+                    pending_launches.requeue(item)
+                    return Response(status_code=204)
+                return item
+            remaining = deadline - loop.time()
+            if remaining <= 0 or await request.is_disconnected():
+                return Response(status_code=204)
+            await _wait_event(arrived, min(_LAUNCH_POLL_S, remaining))
 
     @app.get("/api/windows")
     def list_windows() -> dict:
@@ -422,10 +470,7 @@ def create_app(
         if cwd is not None:
             if not isinstance(cwd, str) or not cwd.strip():
                 raise HTTPException(400, "cwd must be a non-empty string")
-            resolved = Path(os.path.expandvars(os.path.expanduser(cwd)))
-            if not resolved.is_dir():
-                raise HTTPException(400, "launch folder does not exist")
-            cwd = str(resolved)
+            cwd = await checked_dir(cwd)
         if name is not None:
             owner = registry.owner_of(name)
             if owner is not None:
@@ -459,18 +504,13 @@ def create_app(
     async def cleanup_sessions(request: Request) -> Response:
         body = await _read_json(request)
         session_ids = body.get("session_ids", []) if isinstance(body, dict) else []
-
-        def _kill_all() -> list[str]:
-            # manager.kill spawns taskkill and waits on process handles; on the
-            # event loop that freezes every pane for the duration.
-            missed: list[str] = []
-            for sid in session_ids:
-                if isinstance(sid, str) and manager.get(sid) is not None:
-                    if manager.kill(sid) is False:
-                        missed.append(sid)
-            return missed
-
-        failed = await asyncio.to_thread(_kill_all)
+        if not isinstance(session_ids, list):
+            session_ids = []
+        # manager.kill spawns taskkill and waits on process handles; on the
+        # event loop that freezes every pane for the duration.
+        _killed, failed = await asyncio.to_thread(
+            _kill_each, manager, [sid for sid in session_ids if isinstance(sid, str)]
+        )
         if failed:
             raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
         return Response(status_code=204)
@@ -478,13 +518,7 @@ def create_app(
     @app.post("/api/sessions/kill-all")
     def kill_all_sessions() -> dict:
         session_ids = [info.id for info in manager.list() if info.alive]
-        killed: list[str] = []
-        failed: list[str] = []
-        for sid in session_ids:
-            if manager.kill(sid) is False:
-                failed.append(sid)
-            else:
-                killed.append(sid)
+        killed, failed = _kill_each(manager, session_ids)
         # A partial result is still actionable: clients must remove only the
         # sessions the backend verified as stopped and keep failures visible
         # for retry. Returning a generic 500 previously discarded that detail
@@ -494,10 +528,6 @@ def create_app(
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:
         return [_asdict(p) for p in cfg.profiles]
-
-    @app.get("/api/snippets")
-    def list_snippets() -> list[dict]:
-        return [_asdict(s) for s in cfg.snippets]
 
     @app.get("/api/workspaces")
     def list_workspaces() -> list[str]:
@@ -526,26 +556,39 @@ def create_app(
         body = await _read_json(request)
         if not isinstance(body, dict) or "layout" not in body:
             raise HTTPException(400, "body must be {'layout': ...}")
-        logo = body.get("logo")
+        if body.get("logo") is not None and not isinstance(body["logo"], str):
+            raise HTTPException(400, "logo must be a string or null")
         raw_session_ids = body.get("session_ids")
-        session_ids = (
-            [sid for sid in raw_session_ids if isinstance(sid, str) and sid]
-            if isinstance(raw_session_ids, list)
-            else sorted(_layout_session_ids(body["layout"]))
-        )
+        if raw_session_ids is not None and not isinstance(raw_session_ids, list):
+            raise HTTPException(400, "session_ids must be a list or null")
         async with workspace_write_lock:
-            # The workspace folder is edited from one place but autosaved from
-            # several. An ABSENT "path" key preserves the stored folder; an
-            # explicit null clears it. Without that rule every layout autosave
-            # would silently drop the folder the user just chose.
+            # A workspace is edited from one place but autosaved from several,
+            # so `path`, `logo` and `session_ids` are three-valued: an ABSENT
+            # key preserves the stored value, an explicit null clears it, a
+            # value sets it. Without that rule a layout autosave silently
+            # dropped the folder, the logo, and the detached sessions the
+            # workspace owns (which the reaper then took).
+            existing = None
+            if any(key not in body for key in ("path", "logo", "session_ids")):
+                existing = await asyncio.to_thread(workspace.load_workspace, name)
             if "path" in body:
                 try:
                     path = workspace.normalize_root(body.get("path"))
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
             else:
-                existing = await asyncio.to_thread(workspace.load_workspace, name)
-                path = getattr(existing, "path", None) if existing is not None else None
+                path = getattr(existing, "path", None)
+            logo = body["logo"] if "logo" in body else getattr(existing, "logo", None)
+            if "session_ids" in body:
+                session_ids = sorted(
+                    {sid for sid in raw_session_ids or [] if isinstance(sid, str) and sid}
+                )
+            else:
+                # The panes in the layout are owned by definition; the stored
+                # list adds the detached ones the layout no longer shows.
+                owned = workspace.layout_session_ids(body["layout"])
+                owned.update(getattr(existing, "session_ids", None) or [])
+                session_ids = sorted(owned)
             # The layout autosaves on every pane change, and save_workspace fsyncs.
             # Left on the event loop that stalls every PTY pump for the duration of
             # a durable write.
@@ -563,30 +606,34 @@ def create_app(
         return Response(status_code=204)
 
     @app.delete("/api/workspaces/{name}")
-    def remove_workspace(name: str) -> Response:
+    async def remove_workspace(name: str) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
-        saved = workspace.load_workspace(name)
-        if saved is not None:
-            # Reap the workspace's background sessions, but never one a client
-            # is attached to right now. Deleting a workspace must not kill
-            # terminals that are open in someone's current layout.
-            owned = set(getattr(saved, "session_ids", []) or [])
-            owned.update(_layout_session_ids(saved.layout))
-            failed: list[str] = []
-            for sid in owned:
-                session = manager.get(sid)
-                # Workspace files can contain a stale duplicate after an old
-                # client failure. The live owner is authoritative: deleting A
-                # must never kill a terminal that has since moved to B.
-                owns_live_session = session is not None and session.info.workspace == name
-                if owns_live_session and not manager.has_attachments(sid):
-                    if manager.kill(sid) is False:
-                        failed.append(sid)
-            if failed:
-                raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
-        manager.sync_workspace(name, set())
-        workspace.delete_workspace(name)
+        # Under the same lock as PUT: an autosave already inside save_workspace
+        # would otherwise write the file back after the unlink, and the deleted
+        # workspace reappeared on the next list, folder included.
+        async with workspace_write_lock:
+            saved = await asyncio.to_thread(workspace.load_workspace, name)
+            if saved is not None:
+                # Reap the workspace's background sessions, but never one a
+                # client is attached to right now. Deleting a workspace must not
+                # kill terminals that are open in someone's current layout.
+                owned = set(getattr(saved, "session_ids", []) or [])
+                owned.update(workspace.layout_session_ids(saved.layout))
+                doomed: list[str] = []
+                for sid in sorted(owned):
+                    session = manager.get(sid)
+                    # Workspace files can contain a stale duplicate after an old
+                    # client failure. The live owner is authoritative: deleting
+                    # A must never kill a terminal that has since moved to B.
+                    owns_live_session = session is not None and session.info.workspace == name
+                    if owns_live_session and not manager.has_attachments(sid):
+                        doomed.append(sid)
+                _killed, failed = await asyncio.to_thread(_kill_each, manager, doomed)
+                if failed:
+                    raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
+            await asyncio.to_thread(workspace.delete_workspace, name)
+            manager.sync_workspace(name, set())
         return Response(status_code=204)
 
     @app.get("/api/config")
@@ -615,6 +662,9 @@ def create_app(
             # combination). Settings shows it next to the shortcut field
             # instead of leaving the user with a silently dead shortcut.
             "hotkey_error": getattr(cfg, "hotkey_error", None),
+            # Latest autostart, hotkey or elevated first-terminal failure. Those
+            # launches have no request to answer, so this is how they are heard.
+            "launch_error": getattr(cfg, "launch_error", None),
         }
 
     @app.get("/api/config/full")
@@ -623,12 +673,13 @@ def create_app(
         # cfg.port at startup (--port 0, and unconditionally for an elevated
         # instance), and Settings PUTs this whole object straight back, which
         # wrote the ephemeral port into config.json and destroyed the
-        # configured one for every later launch.
+        # configured one for every later launch. For the same reason a read
+        # failure is a 500, never the live config as a fallback.
         config_mod = importlib.import_module("quickterm.config")
         try:
             return _asdict(config_mod.load_config())
-        except Exception:
-            return _asdict(cfg)
+        except Exception as exc:
+            raise HTTPException(500, "could not read the saved configuration") from exc
 
     @app.get("/api/system/terminals")
     async def get_system_terminals() -> dict:
@@ -651,58 +702,26 @@ def create_app(
         body = await _read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
-        profile_name = body.get("profile")
-        # An administrator terminal opened from a workspace belongs in that
-        # workspace's folder, exactly like an ordinary one.
-        requested_workspace = body.get("workspace")
-        workspace_cwd = None
-        if isinstance(requested_workspace, str) and requested_workspace.strip():
-            workspace_mod = importlib.import_module("quickterm.workspace")
-
-            def _elevated_cwd(name: str) -> str | None:
-                saved = workspace_mod.load_workspace(name)
-                if saved is None:
-                    return None
-                return workspace_mod.resolve_start_dir(getattr(saved, "path", None))
-
-        if profile_name is not None:
-            prof = next((p for p in cfg.profiles if p.name == profile_name), None)
-            if prof is None:
-                raise HTTPException(404, f"unknown profile: {profile_name}")
-            if isinstance(requested_workspace, str) and requested_workspace.strip():
-                workspace_cwd = await asyncio.to_thread(
-                    _elevated_cwd, requested_workspace.strip()
-                )
-            try:
-                cmd, args, cwd = _resolve_profile(prof, workspace_cwd)
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-            spec = {
-                "cmd": cmd,
-                "args": args,
-                "cwd": cwd,
-                "env": dict(prof.env),
-                "name": prof.name,
-            }
-        else:
-            spec = dict(body)
-            spec.pop("workspace", None)
-            if not (isinstance(spec.get("cwd"), str) and spec["cwd"].strip()) and (
-                isinstance(requested_workspace, str) and requested_workspace.strip()
-            ):
-                resolved = await asyncio.to_thread(
-                    _elevated_cwd, requested_workspace.strip()
-                )
-                if resolved:
-                    spec["cwd"] = resolved
+        # Resolved exactly like an ordinary terminal, so an administrator
+        # terminal opened from a workspace starts in that workspace's folder.
+        # The PuTTY tools stay off PATH here: the elevated instance resolves
+        # the spec once more and appends them itself.
+        resolved = await resolve_request(body, append_tools=False)
+        spec = {
+            "cmd": resolved.cmd,
+            "args": resolved.args,
+            "cwd": resolved.cwd,
+            "env": resolved.env,
+            "name": resolved.name or resolved.label,
+        }
         try:
-            from quickterm.elevation import launch
+            from quickterm.elevation import launch as launch_elevated
 
             # ShellExecuteW(..., "runas", ...) does not return until the UAC
             # consent dialog is resolved, up to minutes if the user walks
             # away. On the event loop that parks every PTY pump long enough to
             # overflow the fan-out queues and force every pane to resync.
-            await asyncio.to_thread(launch, spec)
+            await asyncio.to_thread(launch_elevated, spec)
         except (OSError, ValueError) as exc:
             raise HTTPException(500, str(exc)) from exc
         return {"launched": True}
@@ -757,28 +776,39 @@ def create_app(
     async def put_config(request: Request) -> Response:
         config_mod = importlib.import_module("quickterm.config")
 
+        body = await _read_json(request)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "invalid config: config must be a JSON object")
+        # load_config and save_config fsync, and DPAPI runs once per protected
+        # env value: all of it off the loop.
         try:
-            new_cfg = config_mod.config_from_dict(await _read_json(request))
-            # Belt to /api/config/full's braces: a client holding a page that
-            # was rendered from the LIVE config (an older build, or a window
-            # opened before this fix) would otherwise write the runtime port
-            # back to disk. A value identical to the runtime one was not
-            # edited by the user, so the persisted value wins.
-            try:
-                on_disk = config_mod.load_config()
-            except Exception:
-                on_disk = None
-            if on_disk is not None:
-                for name in ("port", "host", "summon_hotkey"):
-                    if getattr(new_cfg, name, None) == getattr(cfg, name, None):
-                        setattr(new_cfg, name, getattr(on_disk, name))
-            config_mod.save_config(new_cfg)
+            on_disk = await asyncio.to_thread(config_mod.load_config)
+        except Exception as exc:
+            raise HTTPException(500, "could not read the saved configuration") from exc
+        # Settings sends the whole object, but config_from_dict fills every
+        # omitted key with its default, so a partial body from any other
+        # client wiped the profiles (and their protected env) and snippets.
+        # Omitted top-level keys keep their saved value instead.
+        merged = {**_asdict(on_disk), **body}
+        try:
+            new_cfg = config_mod.config_from_dict(merged)
+            # A client holding a page rendered from the LIVE config (an older
+            # build, or a window opened before /api/config/full served the
+            # saved one) would write a runtime-only value back to disk. Only
+            # the names app.py really overrode at runtime are guarded, and only
+            # when the submitted value is that runtime value; everything else
+            # is the user's edit, including a revert to the running port.
+            for name in sorted(getattr(cfg, "runtime_overrides", None) or ()):
+                if getattr(new_cfg, name, None) == getattr(cfg, name, None):
+                    setattr(new_cfg, name, getattr(on_disk, name))
+            await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
         # Apply live-updatable fields in place; port and global hotkeys need a restart.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice", "update_check",
+            "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice",
+            "update_check", "scratch_dir",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
@@ -792,14 +822,21 @@ def create_app(
 
     @app.get("/api/file")
     def read_file(path: str) -> dict:
-        p = Path(path)
-        if p.is_dir():
-            raise HTTPException(400, "path is a directory")
-        if not p.is_file():
-            raise HTTPException(404, "file not found")
-        size = p.stat().st_size
-        with p.open("rb") as f:
-            data = f.read(FILE_READ_CAP)
+        # Same cleanup as opener.open_target, so a Ctrl+clicked path behaves
+        # the same whether it opens in the viewer or in Explorer.
+        p = Path(os.path.expanduser(path.strip().strip('"').strip("'")))
+        try:
+            if p.is_dir():
+                raise HTTPException(400, "path is a directory")
+            if not p.is_file():
+                raise HTTPException(404, "file not found")
+            size = p.stat().st_size
+            with p.open("rb") as f:
+                data = f.read(FILE_READ_CAP)
+        except OSError as exc:
+            # An ACL-denied folder, a file another program holds exclusively,
+            # a dead share: a sentence for the viewer, not a 500 traceback.
+            raise HTTPException(400, f"cannot read {p}: {exc.strerror or exc}") from exc
         return {
             "path": str(p),
             "size": size,
@@ -843,7 +880,7 @@ def create_app(
         maximum = int(getattr(assets, "MAX_ASSET_BYTES", 1024 * 1024))
         data = await _read_body(request, maximum)
         try:
-            asset_id = assets.save_asset(data, content_type)
+            asset_id = await asyncio.to_thread(assets.save_asset, data, content_type)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"id": asset_id, "url": f"/api/assets/{asset_id}"}
@@ -890,6 +927,10 @@ def create_app(
             # the ring. Serve the scrollback, report the exit, accept no input.
             try:
                 if await _send_replay(ws, session):
+                    # This path never calls attach(), which is what normally
+                    # marks background output as read. Without it the reaper
+                    # keeps an exited session with "unread" output forever.
+                    manager.acknowledge(sid)
                     await _send_exit(ws, session)
             except (WebSocketDisconnect, asyncio.CancelledError):
                 pass
@@ -897,10 +938,16 @@ def create_app(
         # Subscribe before taking the replay snapshot. Both calls are
         # synchronous on the event-loop thread, so output cannot slip between
         # the snapshot and the live queue (the old order permanently lost it).
-        attachment = manager.attach(sid)
+        try:
+            attachment = manager.attach(sid)
+        except KeyError:
+            # Reaped or killed during the accept above: same answer as a
+            # session that was never there.
+            await ws.close(code=4404)
+            return
         # ...and start draining that subscription immediately: nothing consumed
         # the queue until the live phase began, so a busy session could fill
-        # its 8-item queue during the (multi-round-trip) handshake and be
+        # its bounded queue during the (multi-round-trip) handshake and be
         # closed 1013 the instant it went live, and the client then reconnected
         # into exactly the same trap, forever.
         buffer = _HandshakeBuffer(attachment)
@@ -924,12 +971,12 @@ def create_app(
 class _HandshakeBuffer:
     """Consume a fresh subscription while the replay handshake is in flight.
 
-    The fan-out queue counts items, not bytes, so eight PTY reader callbacks
-    are enough to mark an attachment overflowed. The handshake is several
-    round trips (one per 128 KiB replay frame, each awaiting an ack), which is
-    ample time for a verbose build to produce them, and the reconnect landed
-    in the same window every time. Draining here keeps the subscription alive;
-    everything collected is handed to the live pump in order.
+    The fan-out queue overflows once its pending bytes pass a cap (2 MiB), and
+    the handshake is several round trips (one per 128 KiB replay frame, each
+    awaiting an ack), which is ample time for a verbose build to get there;
+    the reconnect then landed in the same window every time. Draining here
+    keeps the subscription alive; everything collected is handed to the live
+    pump in order.
     """
 
     # Bounded so this cannot become the unbounded buffer the queue cap exists
@@ -976,24 +1023,21 @@ class _HandshakeBuffer:
 
 async def _send_replay(ws: WebSocket, session: Any) -> bool:
     """Run the replay handshake. Returns False if the socket was closed."""
-    chunks_fn = getattr(session, "scrollback_chunks", None)
-    if chunks_fn is not None:
-        replay_chunks, cols, rows = chunks_fn()
-    else:  # test fakes and third-party managers implementing the old interface
-        data, cols, rows = session.scrollback()
-        replay_chunks = (data,) if data else ()
+    replay_chunks, cols, rows = session.scrollback_chunks()
     await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
     sent_replay = False
     for frame in _coalesce_replay(replay_chunks):
         sent_replay = True
         await ws.send_bytes(frame)
+        # receive(), not receive_text(): the latter indexes message["text"] and
+        # a binary frame here escaped as a KeyError and a 1011 close.
         try:
-            ack_text = await asyncio.wait_for(ws.receive_text(), timeout=30)
-            ack = json.loads(ack_text)
-        except (asyncio.TimeoutError, TypeError, json.JSONDecodeError):
-            await ws.close(code=1002, reason="invalid replay acknowledgement")
+            message = await asyncio.wait_for(ws.receive(), timeout=30)
+        except TimeoutError:
+            message = None
+        if message is not None and message["type"] == "websocket.disconnect":
             return False
-        if not isinstance(ack, dict) or ack.get("type") != "replay_ack":
+        if message is None or not _is_replay_ack(message):
             await ws.close(code=1002, reason="invalid replay acknowledgement")
             return False
     # Keep the original wire shape for empty terminals.  The empty frame has
@@ -1003,6 +1047,34 @@ async def _send_replay(ws: WebSocket, session: Any) -> bool:
         await ws.send_bytes(b"")
     await ws.send_text(json.dumps({"type": "replay_done"}))
     return True
+
+
+def _is_replay_ack(message: Any) -> bool:
+    text = message.get("text")
+    if not isinstance(text, str):
+        return False
+    try:
+        ack = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(ack, dict) and ack.get("type") == "replay_ack"
+
+
+def _kill_each(manager: Any, session_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Kill several sessions; returns (stopped, still running). Blocking.
+
+    An id the registry no longer holds counts as stopped: the reaper or a kill
+    grace timer got there first, and nothing of it is left running.
+    """
+    killed: list[str] = []
+    failed: list[str] = []
+    for sid in session_ids:
+        try:
+            stopped = manager.kill(sid)
+        except KeyError:
+            stopped = True
+        (killed if stopped else failed).append(sid)
+    return killed, failed
 
 
 def _coalesce_replay(chunks: Any):
@@ -1040,90 +1112,6 @@ def _scratch_dir(cfg: Any) -> str:
         return config_mod.scratch_root(getattr(cfg, "scratch_dir", "") or "")
     except (OSError, AttributeError):
         return ""
-
-
-def _resolve_profile(prof: Any, cwd_override: str | None = None) -> tuple[str, list[str], str | None]:
-    terminal_type = getattr(prof, "terminal_type", None)
-    start = (getattr(prof, "start_command", None) or "").strip()
-    # The caller resolved this from the request or the workspace root. Profiles
-    # have no folder of their own to fall back to.
-    cwd = cwd_override
-    existing_args = list(getattr(prof, "args", []) or [])
-
-    if terminal_type == "claude-code":
-        executable = (getattr(prof, "cmd", None) or "").strip()
-        if not executable:
-            executable = shutil.which("claude") or ("claude.exe" if os.name == "nt" else "claude")
-        mode = getattr(prof, "claude_mode", None) or "continue"
-        if not isinstance(cwd, str) or not cwd.strip():
-            raise ValueError("Claude Code profile requires a project folder")
-        mode_args = {
-            "new": [], "continue": ["--continue"], "resume": ["--resume"],
-            "agents": ["agents", "--cwd", cwd],
-        }
-        return executable, mode_args.get(mode, ["--continue"]) + existing_args, cwd
-    if terminal_type == "powershell-core":
-        args = ["-NoLogo"]
-        if start:
-            args += ["-NoExit", "-Command", start]
-        return "pwsh.exe", args, cwd
-    if terminal_type == "windows-powershell":
-        args = ["-NoLogo"]
-        if start:
-            args += ["-NoExit", "-Command", start]
-        return "powershell.exe", args, cwd
-    if terminal_type == "command-prompt":
-        return "cmd.exe", (["/K", start] if start else []), cwd
-    if terminal_type == "wsl":
-        args: list[str] = []
-        distro = (getattr(prof, "wsl_distro", None) or "").strip()
-        if distro:
-            args += ["-d", distro]
-        # wsl.exe otherwise inherits QuickTerm's Windows process directory and
-        # opens under /mnt/c.  A blank profile belongs in the distro's own
-        # home; explicit Linux and Windows paths are both accepted by --cd.
-        args += ["--cd", cwd or "~"]
-        if start:
-            args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
-        return "wsl.exe", args, None
-    if terminal_type in ("bash", "zsh", "fish"):
-        shell = prof.cmd or terminal_type
-        if start:
-            return shell, ["-lc", f"{start}; exec {shell} -l"], cwd
-        return shell, ["-l"], cwd
-    if terminal_type in ("ssh", "sftp"):
-        tool = putty_tools.plink_path() if terminal_type == "ssh" else putty_tools.psftp_path()
-        if tool is None:
-            raise HTTPException(
-                400, "PuTTY tools are not installed (run scripts/fetch_putty.py)"
-            )
-        host = (getattr(prof, "ssh_host", None) or "").strip()
-        user = (getattr(prof, "ssh_user", None) or "").strip()
-        port = getattr(prof, "ssh_port", None)
-        key = (getattr(prof, "ssh_key", None) or "").strip()
-        args = ["-ssh"] if terminal_type == "ssh" else []
-        if port:
-            args += ["-P", str(port)]
-        if key:
-            args += ["-i", key]
-        args.append(f"{user}@{host}" if user else host)
-        # plink runs a trailing command on the remote host instead of a shell.
-        if terminal_type == "ssh" and start:
-            args.append(start)
-        return str(tool), args, cwd
-    return prof.cmd, existing_args, cwd
-
-
-def _layout_session_ids(node: Any) -> set[str]:
-    if not isinstance(node, dict):
-        return set()
-    if node.get("type") == "split":
-        found: set[str] = set()
-        for child in node.get("children", []):
-            found.update(_layout_session_ids(child))
-        return found
-    sid = node.get("session_id")
-    return {sid} if isinstance(sid, str) and sid else set()
 
 
 def _terminal_inventory() -> dict:
@@ -1359,7 +1347,7 @@ async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> Non
             return
         if msg.get("bytes") is not None:
             data = msg["bytes"]
-            if len(data) > 256 * 1024:
+            if len(data) > INPUT_FRAME_MAX:
                 await ws.close(code=1009, reason="input frame too large")
                 return
             try:
@@ -1372,7 +1360,14 @@ async def _pump_input(ws: WebSocket, manager: "SessionManager", sid: str) -> Non
                 ctrl = json.loads(msg["text"])
             except (TypeError, json.JSONDecodeError):
                 continue
-            if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
+            if not isinstance(ctrl, dict):
+                continue
+            if ctrl.get("type") == "touch":
+                # The client's word that a person typed or pasted. Input bytes
+                # alone cannot say it: xterm answers DA/DSR/CPR queries and
+                # focus reports through the same stream.
+                manager.touch(sid)
+            elif ctrl.get("type") == "resize":
                 try:
                     cols = _bounded_int(ctrl.get("cols"), "cols", 2, 1000)
                     rows = _bounded_int(ctrl.get("rows"), "rows", 1, 1000)
