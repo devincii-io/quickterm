@@ -2,142 +2,45 @@ import * as api from "./api.js";
 import { LayoutManager } from "./layout.js";
 import { Palette } from "./palette.js";
 import { Panels } from "./panels.js";
-import { initLauncher } from "./launcher.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
-import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
-import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
-import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
+import { claimFocus, releaseFocus } from "./focus.js";
 import { WorkspaceViews } from "./workspace_views.js";
+import { windowChoiceMessage, windowChoices } from "./windows.js";
+import { createAppState } from "./app_state.js";
+import { createAutosave } from "./autosave.js";
 import {
-  claimOutcome, claimRefusalMessage, conflictHolder, describeHolder, newWindowUrl,
-  normalizeWindows, windowChoiceMessage, windowChoices, workspaceHolder,
-} from "./windows.js";
+  SCRATCH_WS, captureOpenDir, captureToken, captureWindowIdentity, embedded, loadInventoryCache,
+  rememberWorkspace, saveInventoryCache, storedScratchActive, storedWorkspace,
+} from "./boot_context.js";
+import { createConfigSync } from "./config_sync.js";
+import { clearError, setWorkspaceSaveState, showError } from "./feedback.js";
+import { DEFAULT_FONT, clampFont, createFontSize } from "./fonts.js";
+import { createHere } from "./here.js";
+import { createLaunchLoop } from "./launch_loop.js";
+import { createLifecycle } from "./lifecycle.js";
+import { createPaneCommands } from "./pane_commands.js";
+import { createScratch } from "./scratch.js";
+import { createSessionOwnership } from "./session_ownership.js";
+import { createSidebar } from "./sidebar.js";
+import { createSpawner } from "./spawner.js";
+import { watchUpdates } from "./updates.js";
+import { createWindowRegistry } from "./window_registry.js";
+import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
+import { createWorkspaceSwitch } from "./workspace_switch.js";
 
 document.title = "QuickTerm";
 
 const $ = (id) => document.getElementById(id);
-const ACTIVE_WORKSPACE_KEY = "quickterm.activeWorkspace";
-const SCRATCH_ACTIVE_KEY = "quickterm.scratchActive";
-const SCRATCH_WS = "scratch";
-const WINDOW_ID_KEY = "qt.windowId";
-const embedded = window.parent !== window && new URLSearchParams(location.search).get("embedded") === "1";
-// Well inside whatever the registry uses to expire a silent window: a missed
-// beat must never look like a crashed window, because expiry is what hands this
-// window's workspace to someone else.
-const WINDOW_HEARTBEAT_MS = 5000;
 
-function storedWorkspace() {
-  try { return localStorage.getItem(ACTIVE_WORKSPACE_KEY); } catch (_) { return null; }
-}
-
-function storedScratchActive() {
-  try { return localStorage.getItem(SCRATCH_ACTIVE_KEY) === "1"; } catch (_) { return false; }
-}
-
-// The remembered workspace and "scratch is the current one" are two different
-// facts. Writing "scratch" into the durable key erased the user's real last
-// workspace, and the backend deletes the scratch file at startup, so nothing
-// was auto-restored on the next launch. Scratch gets its own flag; within a
-// run (tray close and reopen) the scratch file still exists and wins, and on
-// a fresh start it is gone and the named workspace comes back.
-function rememberWorkspace(name) {
-  if (embedded) return;
-  try {
-    if (name === SCRATCH_WS) {
-      localStorage.setItem(SCRATCH_ACTIVE_KEY, "1");
-      return;
-    }
-    localStorage.removeItem(SCRATCH_ACTIVE_KEY);
-    if (name) localStorage.setItem(ACTIVE_WORKSPACE_KEY, name);
-    else localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
-  } catch (_) { /* storage may be disabled */ }
-}
-
-function sessionIdsInLayout(node, out = new Set()) {
-  if (!node) return out;
-  if (node.type === "split") {
-    for (const child of node.children || []) sessionIdsInLayout(child, out);
-  } else if (node.session_id) {
-    out.add(node.session_id);
-  }
-  return out;
-}
-
-const MIN_FONT = 9;
-const MAX_FONT = 30;
-const DEFAULT_FONT = 14;
-const clampFont = (px) => Math.max(MIN_FONT, Math.min(MAX_FONT, Math.round(px || DEFAULT_FONT)));
-
-// The window is launched at .../#t=<token>. Capture it before any API call,
-// stash it in sessionStorage so a reload (which loses the fragment) still works,
-// then scrub it from the URL so it does not linger in history. sessionStorage is
-// per-tab and same-origin, so other local programs cannot read it.
-function captureToken() {
-  const match = /[#&]t=([^&]+)/.exec(location.hash || "");
-  let value = match ? decodeURIComponent(match[1]) : "";
-  if (!value) { try { value = sessionStorage.getItem("qt.token") || ""; } catch (_) { /* ignore */ } }
-  if (value) {
-    api.setToken(value);
-    try { sessionStorage.setItem("qt.token", value); } catch (_) { /* ignore */ }
-  }
-  if (match) {
-    try { history.replaceState(null, "", location.pathname + location.search); } catch (_) { /* ignore */ }
-  }
-}
-
-// Explorer "Open QuickTerm here" passes the folder as ?cwd=... (app.py). Read
-// it before captureToken scrubs the fragment; the query itself is preserved.
-function captureOpenDir() {
-  try {
-    const value = new URLSearchParams(location.search).get("cwd");
-    return value || null;
-  } catch (_) { return null; }
-}
-
-// Who this window is, from the launch URL app.py built (`_window_url`).
-//
-// `window` is the id the desktop shell already assigned: it must be reused when
-// registering, because that is the id the shell forgets when the native window
-// closes, and a registration under any other id would keep the workspace
-// claimed until the heartbeat expired. `primary` marks the one window the
-// Explorer handoff and the summon hotkey aim at.
-//
-// `workspace` is three-valued, like `path` on the workspace PUT. A name is an
-// instruction. Absent normally means "restore what you remember", which is what
-// the primary window and a plain browser tab want. Absent in a *secondary*
-// shell window means scratch: that window was asked for a scratch window, and
-// localStorage is shared across every window on this origin, so restoring the
-// remembered workspace there would collide with the window that opened it. The
-// browser fallback says the same thing explicitly with an empty value.
-function captureWindowIdentity() {
-  try {
-    const params = new URLSearchParams(location.search);
-    const id = params.get("window") || null;
-    const primary = params.get("primary") === "1";
-    const raw = params.get("workspace");
-    const workspace = raw === null
-      ? (id && !primary ? null : undefined)
-      : (raw || null);
-    return { id, primary, workspace };
-  } catch (_) { return { id: null, primary: false, workspace: undefined }; }
-}
-
-// sessionStorage is per window and survives a reload, so a reloaded window asks
-// the registry for the id it just had. Its release on pagehide and its new
-// claim are then two facts about the same window instead of a race between a
-// dying one and a new one over the same workspace.
-function rememberedWindowId() {
-  if (embedded) return null;
-  try { return sessionStorage.getItem(WINDOW_ID_KEY) || null; } catch (_) { return null; }
-}
-
-function rememberWindowId(id) {
-  if (embedded) return;
-  try { sessionStorage.setItem(WINDOW_ID_KEY, id); } catch (_) { /* storage may be disabled */ }
-}
-
+// The composition root. Each module is a factory that is handed what it uses;
+// the state several of them share is one object (app_state.js). Where a module
+// built early calls one built later (almost everything rebuilds the sidebar,
+// which is built last from almost everything), it is handed an arrow that
+// resolves the later name when it runs. Everything from the layout to the
+// sidebar is composed synchronously, before the first restore awaits, so no
+// such arrow can run early.
 async function boot() {
   const openDir = captureOpenDir();
   const identity = captureWindowIdentity();
@@ -159,86 +62,60 @@ async function boot() {
       : api.getTerminalOptions().then(saveInventoryCache).catch(() => ({ types: [], wsl_distributions: [] })),
   ]);
   if (loadedConfig) cfg = loadedConfig;
-  let profiles = loadedProfiles || cfg.profiles || [];
-  let snippets = cfg.snippets || [];
-  let workspaceNames = loadedWorkspaces || [];
-  let terminalInventory = loadedInventory;
-  // This window's identity in the registry, and the workspace it is allowed to
-  // own. Declared before the workspace is resolved because resolving it is
-  // already a claim decision.
-  let windowId = null;
-  let claimedWorkspace = null;
-  let registryAvailable = true;
-  let windowHeartbeatTimer = null;
-  // Exactly one live window is primary, and the registry promotes the oldest
-  // survivor when it closes, so this is read back from the registry rather than
-  // trusted from the launch URL for the rest of the run.
-  let windowIsPrimary = identity.primary;
+  const state = createAppState({
+    cfg,
+    profiles: loadedProfiles || cfg.profiles || [],
+    snippets: cfg.snippets || [],
+    workspaceNames: loadedWorkspaces || [],
+    terminalInventory: loadedInventory,
+    windowIsPrimary: identity.primary,
+  });
 
   const remembered = storedWorkspace();
-  let currentWorkspace = null;
   if (requestedWorkspace !== undefined) {
     // Opened by another window: the URL is the instruction and shared
     // localStorage is not consulted at all.
-    currentWorkspace = requestedWorkspace && workspaceNames.includes(requestedWorkspace)
+    state.currentWorkspace = requestedWorkspace && state.workspaceNames.includes(requestedWorkspace)
       ? requestedWorkspace
       : null;
-  } else if (storedScratchActive() && workspaceNames.includes(SCRATCH_WS)) currentWorkspace = SCRATCH_WS;
-  else if (remembered && workspaceNames.includes(remembered)) currentWorkspace = remembered;
+  } else if (storedScratchActive() && state.workspaceNames.includes(SCRATCH_WS)) state.currentWorkspace = SCRATCH_WS;
+  else if (remembered && state.workspaceNames.includes(remembered)) state.currentWorkspace = remembered;
   // Only a window that resolved its own workspace may rewrite the shared
   // memory of which one that is. A second window landing on scratch must not
   // erase the first window's last real workspace.
-  if (!currentWorkspace && requestedWorkspace === undefined) rememberWorkspace(null);
+  if (!state.currentWorkspace && requestedWorkspace === undefined) rememberWorkspace(null);
   // "Open QuickTerm here" opens this window as a scratch window whose first
   // terminal starts in the given folder, regardless of any remembered
   // workspace. Decided here rather than just before the restore, so this window
   // never claims a workspace it is not going to open.
-  if (openDir) currentWorkspace = null;
+  if (openDir) state.currentWorkspace = null;
+
+  const registry = createWindowRegistry({
+    api, state, identity, showError,
+    cancelWorkspaceSave: () => cancelWorkspaceSave(),
+    buildLauncher: () => buildLauncher(),
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
+  const { acquireWindowId, listWindowsSafe, claimWorkspaceFor, openNewWindow } = registry;
 
   // Claim before restoring, never after. This window autosaves the layout on
   // every pane change, so restoring a workspace another window holds would
   // start overwriting its file within the first second, before anyone could
   // read a warning. A refused claim drops this window into scratch and says so.
   await acquireWindowId();
-  const refusal = await claimWorkspaceFor(currentWorkspace);
+  const refusal = await claimWorkspaceFor(state.currentWorkspace);
   if (refusal) {
     // The remembered name is deliberately left alone: the workspace is not
     // lost, it is busy, and it must come back the next time this window is the
     // only one on it.
-    currentWorkspace = null;
+    state.currentWorkspace = null;
     showError(refusal);
   }
-  startWindowHeartbeat();
+  registry.startWindowHeartbeat();
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
-  let lastSessions = initialSessions;
-  const scratchSessionIds = new Set();
-  let workspaceSessionIds = new Set();
-  let statusTimer = null;
-  let workspaceSaveTimer = null;
-  let workspaceRetryTimer = null;
-  let workspaceStatusTimer = null;
-  let workspaceSaveInFlight = false;
-  let workspaceSavePending = false;
-  let transitioning = true;
-  let panels;
-  let launcherView = null;
-  let workspaceLogo = null;
-  // A workspace is a folder: this is the root every session it owns starts in.
-  // null means "no folder chosen": the backend falls back to the profile's own
-  // directory and finally the home folder.
-  let workspacePath = null;
-  let workspacePathExists = true;
-  // Scratch is disposable, so its terminals start in a disposable folder
-  // instead of the user's home directory. Re-read whenever settings are saved,
-  // because scratch_dir is configurable.
-  let scratchRoot = cfg.scratch_dir || null;
-  let fontSize = clampFont(cfg.font_size);
-  let fontSaveTimer = null;
-  let exiting = false;
-  let suspended = false;
   const views = embedded ? null : new WorkspaceViews({
-    current: () => currentWorkspace,
+    current: () => state.currentWorkspace,
     focus: () => layout.focused?.focusSoon(),
     fit: () => layout.fitAll(),
     error: showError,
@@ -247,6 +124,7 @@ async function boot() {
   // the parent's when it is one view inside a window. A view names itself to
   // the parent by its own `window`, which is the iframe's contentWindow.
   const viewHost = () => (embedded ? window.parent?.quicktermViews || null : views);
+  let suspended = false;
   function suspendView(value) {
     if (suspended === value) return;
     suspended = value;
@@ -265,48 +143,14 @@ async function boot() {
   } else {
     window.quicktermViews = views;
   }
-  // Every saved workspace's folder, so the sidebar can tell whether the
-  // folder the focused terminal is in already belongs to a workspace. Filled
-  // off the boot path and refreshed whenever the list or a folder changes.
-  const workspaceRoots = new Map();
-  let workspaceRootsRefresh = null;
-  function refreshWorkspaceRoots() {
-    if (workspaceRootsRefresh) return workspaceRootsRefresh;
-    workspaceRootsRefresh = Promise.all(workspaceNames.map(async (name) => {
-      const saved = await workspace.details(name).catch(() => null);
-      return [name, saved ? saved.path || null : null];
-    })).then((entries) => {
-      workspaceRoots.clear();
-      for (const [name, root] of entries) workspaceRoots.set(name, root);
-      launcherView?.updateHere(hereState());
-    }).finally(() => { workspaceRootsRefresh = null; });
-    return workspaceRootsRefresh;
-  }
 
-  function ownSession(id) {
-    if (!id) return;
-    if (currentWorkspace) workspaceSessionIds.add(id);
-    else scratchSessionIds.add(id);
-  }
-
-  function forgetSession(id) {
-    workspaceSessionIds.delete(id);
-    scratchSessionIds.delete(id);
-  }
-
-  function ownedSessionIds() {
-    const ids = new Set(currentWorkspace ? workspaceSessionIds : scratchSessionIds);
-    sessionIdsInLayout(layout.serialize(), ids);
-    return ids;
-  }
-
-  applyChromeTheme(cfg.theme, cfg.custom_theme);
-  if (cfg.elevated) document.body.classList.add("elevated");
+  applyChromeTheme(state.cfg.theme, state.cfg.custom_theme);
+  if (state.cfg.elevated) document.body.classList.add("elevated");
 
   const layout = new LayoutManager($("grid"), $("zoom-host"), {
-    fontFamily: cfg.font_family || "JetBrains Mono",
-    fontSize,
-    theme: getTheme(cfg.theme, cfg.custom_theme).xterm,
+    fontFamily: state.cfg.font_family || "JetBrains Mono",
+    fontSize: clampFont(state.cfg.font_size),
+    theme: getTheme(state.cfg.theme, state.cfg.custom_theme).xterm,
     onFocusChange: () => refreshStatusSoon(),
     onPaneState: (pane) => {
       refreshStatusSoon();
@@ -324,1542 +168,87 @@ async function boot() {
     },
   });
 
-  // An empty default_profile is Settings' explicit "System default shell"
-  // choice, not "unset". Falling through to profiles[0] made that option a
-  // no-op and handed every new pane the first personal profile instead.
-  function defaultProfile() {
-    if (cfg.default_profile === "") return null;
-    return profiles.find((profile) => profile.name === cfg.default_profile)
-      || profiles[0]
-      || null;
-  }
-
-  // With no personal profiles, fall back to the first available system shell.
-  function defaultSystemSpec() {
-    const types = (terminalInventory && terminalInventory.types) || [];
-    const usable = types.find((type) => type.executable && type.available !== false
-      && !["custom", "claude-code", "ssh", "sftp"].includes(type.id));
-    if (!usable) return null;
-    const args = usable.id === "powershell-core" || usable.id === "windows-powershell"
-      ? ["-NoLogo"]
-      : usable.id === "wsl" ? ["--cd", "~"] : [];
-    return { cmd: usable.executable, args, name: usable.label, terminalType: usable.id };
-  }
-
-  // Where a new terminal should start when the caller has no directory of its
-  // own. Inside a named workspace the answer is "let the backend resolve the
-  // workspace folder"; in scratch it is the disposable scratch folder; a
-  // profile pinned to a fixed folder always keeps it.
-  // Profiles carry no folder, so there is nothing here to defer to: an
-  // explicit directory wins, scratch supplies its own throwaway root, and a
-  // named workspace is resolved by the backend from its stored path.
-  function contextCwd(explicit) {
-    if (explicit) return explicit;
-    if (!currentWorkspace || currentWorkspace === SCRATCH_WS) return scratchRoot || null;
-    return null;
-  }
-
-  // The workspace folder only counts if it is still there; a deleted folder
-  // must fall back instead of failing every spawn.
-  function usableWorkspacePath() {
-    return workspacePath && workspacePathExists ? workspacePath : null;
-  }
-
-  // "Here" for the sidebar's folder buttons, Alt+Shift+E/C and the palette:
-  // the focused terminal's current directory (OSC 7, else its launch folder),
-  // else the workspace folder. Scratch resolves to its throwaway root, which
-  // is the honest answer: that is where the shell is.
-  function hereFolder() {
-    return layout.focused?.bestKnownCwd?.() || usableWorkspacePath() || null;
-  }
-
-  async function openHere(appName) {
-    const label = appName === "vscode" ? "VS Code" : "Explorer";
-    const folder = hereFolder();
-    if (!folder) {
-      showError(`Nothing to open in ${label}: focus a terminal or give this workspace a folder.`);
-      return false;
-    }
-    try {
-      await api.openFolder(folder, appName);
-      return true;
-    } catch (error) {
-      const why = error?.detail ? `: ${error.detail}` : "";
-      showError(`Could not open ${folder} in ${label}${why}.`);
-      return false;
-    }
-  }
-
-  // What to pre-fill when the user names a workspace. The folder the focused
-  // terminal is actually in is the best answer: a scratch shell the user cd'd
-  // into their project names that project. The disposable scratch root is
-  // never suggested: pinning a saved workspace to a temp folder is exactly the
-  // mistake this box exists to prevent.
-  function suggestedWorkspaceFolder() {
-    const paneCwd = layout.focused?.bestKnownCwd?.() || null;
-    if (paneCwd && paneCwd !== scratchRoot) return paneCwd;
-    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) return workspacePath;
-    return null;
-  }
-
-  // Paths compare the way the file system does: separators unified, a
-  // trailing separator ignored, and case folded on Windows drives and shares.
-  function pathKey(value) {
-    if (!value) return "";
-    let key = String(value).replace(/\\/g, "/").replace(/\/+$/, "");
-    if (/^[A-Za-z]:|^\/\//.test(key)) key = key.toLowerCase();
-    return key;
-  }
-  const samePath = (a, b) => Boolean(a) && Boolean(b) && pathKey(a) === pathKey(b);
-  const insidePath = (child, parent) => Boolean(child) && Boolean(parent)
-    && pathKey(child).startsWith(`${pathKey(parent)}/`);
-  const baseName = (value) => pathKey(value).split("/").filter(Boolean).pop() || "";
-
-  // The sidebar's "workspace here" offer. The focused terminal is somewhere
-  // that is not this workspace's folder (or is in scratch), and that folder
-  // either already is a workspace's root, in which case the offer is to open
-  // that workspace, or is not, in which case the offer is to make it one
-  // named after the folder. Inside the workspace's own tree there is no
-  // offer: every `cd src` would otherwise grow a button.
-  function hereState() {
-    const folder = layout.focused?.bestKnownCwd?.() || null;
-    if (!folder || samePath(folder, scratchRoot)) return null;
-    const home = currentWorkspace && currentWorkspace !== SCRATCH_WS ? usableWorkspacePath() : null;
-    if (home && (samePath(folder, home) || insidePath(folder, home))) return null;
-    for (const [name, root] of workspaceRoots) {
-      if (name === SCRATCH_WS || !samePath(root, folder)) continue;
-      return name === currentWorkspace ? null : { folder, name, action: "open" };
-    }
-    const name = baseName(folder);
-    if (!name) return null;
-    return { folder, name, action: workspaceNames.includes(name) ? "clash" : "create" };
-  }
-
-  // The layout JSON is the same split tree layout.js serializes, so a leaf
-  // can be docked beside a saved layout without loading it into a manager.
-  function layoutWith(saved, extra) {
-    if (!extra) return saved || { type: "pane" };
-    if (!saved || !saved.type) return extra;
-    return { type: "split", dir: "h", ratio: 0.5, children: [saved, extra] };
-  }
-
-  // Make the focused terminal's folder a workspace (or open the one it already
-  // belongs to) and take the terminal along. The terminal is what the user
-  // was looking at when they asked, so it leads: it is written into the
-  // target's layout first, then detached here, then the window switches and
-  // the restore attaches it again. Nothing is killed at any step.
-  async function createWorkspaceHere() {
-    const here = hereState();
-    if (!here || transitioning) return false;
-    const { folder, name } = here;
-    if (here.action === "clash") {
-      showError(`A workspace named “${name}” already exists with a different folder. Name this one in the Dashboard.`);
-      return false;
-    }
-    const problem = app.validateWorkspaceName(name);
-    if (problem) {
-      showError(`“${name}” cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it in the Dashboard.`);
-      return false;
-    }
-    const holder = workspaceHolder(await listWindowsSafe(), windowId, name);
-    if (holder) {
-      showError(`“${name}” is open in ${describeHolder(holder)}. Use “move here” from that view to take this terminal along.`);
-      return false;
-    }
-    const pane = layout.focused;
-    const session = pane?.session && pane.state === "attached" ? pane.session : null;
-    let saved = null;
-    if (here.action === "open") {
-      saved = await workspace.details(name).catch(() => null);
-      if (!saved) {
-        showError(`Workspace “${name}” could not be read.`);
-        return false;
-      }
-    }
-    let carried = null;
-    if (session) {
-      carried = { type: "pane", session_id: session.id, cwd: folder };
-      if (pane.profileName) carried.profile = pane.profileName;
-      if (pane.launchSpec) carried.launch_spec = pane.launchSpec;
-      if (pane.title) carried.title = pane.title;
-    }
-    const ids = new Set(saved?.session_ids || []);
-    if (session) ids.add(session.id);
-    try {
-      // A new workspace gets the folder; an existing one keeps its own (an
-      // absent path preserves it, see PUT /api/workspaces).
-      await workspace.save(name, layoutWith(saved?.layout, carried), saved?.logo || null, [...ids],
-        saved ? undefined : folder);
-    } catch (error) {
-      showError(error?.detail || `Could not ${saved ? "update" : "create"} workspace “${name}”.`);
-      return false;
-    }
-    if (session) {
-      try {
-        await api.retainSession(session.id);
-      } catch (error) {
-        if (!sessionAlreadyGone(error)) {
-          showError("Could not detach that terminal safely. Nothing was moved.");
-          return false;
-        }
-      }
-      forgetSession(session.id);
-      layout.closePane(pane, { animate: false });
-    }
-    if (!workspaceNames.includes(name)) {
-      workspaceNames.push(name);
-      workspaceNames.sort((a, b) => a.localeCompare(b));
-    }
-    workspaceRoots.set(name, saved ? saved.path || null : folder);
-    return switchWorkspace(name);
-  }
-
-  function profileByName(name) {
-    return profiles.find((profile) => profile.name === name) || null;
-  }
-
-  function serializableSpec(spec) {
-    const out = {
-      cmd: spec.cmd,
-      args: [...(spec.args || [])],
-      cwd: spec.cwd || null,
-      env: { ...(spec.env || {}) },
-      name: spec.name || spec.label || spec.cmd,
-    };
-    if (spec.terminalType || spec.terminal_type) {
-      out.terminal_type = spec.terminalType || spec.terminal_type;
-    }
-    return out;
-  }
-
-  function profileTerminalType(name) {
-    return profiles.find((profile) => profile.name === name)?.terminal_type || null;
-  }
-
-  function commandTerminalType(spec) {
-    if (spec.terminal_type || spec.terminalType) return spec.terminal_type || spec.terminalType;
-    const command = String(spec.cmd || "").toLowerCase();
-    if (/(^|[\\/])wsl(?:\.exe)?$/.test(command)) return "wsl";
-    if (/(^|[\\/])psftp(?:\.exe)?$/.test(command)) return "sftp";
-    if (/(^|[\\/])plink(?:\.exe)?$/.test(command)) return "ssh";
-    return null;
-  }
-
-  // Tag new sessions with their named workspace. Scratch remains untagged
-  // because it is disposable and may be promoted under a different name.
-  function spawnWorkspaceTag() {
-    return currentWorkspace && currentWorkspace !== SCRATCH_WS ? currentWorkspace : undefined;
-  }
-
-  async function spawnInto(pane, profileName, cwd, options = {}) {
-    if (!pane.beginSpawn()) return null;
-    try {
-      const info = await api.createSession({
-        profile: profileName,
-        cwd: cwd || undefined,
-        workspace: spawnWorkspaceTag(),
-        ...(options.startCommand !== undefined ? { start_command: options.startCommand } : {}),
-        ...(options.claudeMode !== undefined ? { claude_mode: options.claudeMode } : {}),
-        ...(options.args !== undefined ? { args: options.args } : {}),
-      });
-      pane.profileName = profileName;
-      pane.terminalType = profileTerminalType(profileName);
-      pane.launchSpec = null;
-      // The backend resolves the workspace folder, so its answer, not the
-      // hint we sent, is what this pane actually opened in.
-      pane.setLaunchCwd(info.cwd || cwd || profileByName(profileName)?.cwd || null);
-      pane.attach(info);
-      pane.spawnedFresh = true;
-      ownSession(info.id);
-      scheduleWorkspaceSave();
-      refreshStatusSoon();
-      return info;
-    } catch (error) {
-      pane.endSpawn();
-      pane.showNotice(`[${error.detail || `spawn failed: ${profileName}`}]`);
-      return null;
-    }
-  }
-
-  async function spawnSpecInto(pane, spec) {
-    if (!pane.beginSpawn()) return null;
-    const launchSpec = serializableSpec(spec);
-    try {
-      // workspace tags the request only (not the persisted launchSpec).
-      const info = await api.createSession({ ...launchSpec, workspace: spawnWorkspaceTag() });
-      pane.profileName = null;
-      pane.terminalType = commandTerminalType(launchSpec);
-      pane.setLaunchCwd(info.cwd || launchSpec.cwd);
-      pane.launchSpec = launchSpec;
-      pane.attach(info);
-      pane.spawnedFresh = true;
-      ownSession(info.id);
-      scheduleWorkspaceSave();
-      refreshStatusSoon();
-      return info;
-    } catch (error) {
-      pane.endSpawn();
-      pane.showNotice(`[${error.detail || `spawn failed: ${launchSpec.name}`}]`);
-      return null;
-    }
-  }
-
-  // Whatever the launcher's "New terminal" dropdown currently shows is what
-  // splits and fresh panes open.
-  let selectedTerminal = null;
-
-  function spawnDefaultInto(pane, cwdOverride) {
-    if (selectedTerminal) {
-      if (selectedTerminal.kind === "profile") {
-        return spawnInto(pane, selectedTerminal.profile.name, contextCwd(cwdOverride));
-      }
-      return spawnSpecInto(pane, {
-        cmd: selectedTerminal.cmd,
-        args: selectedTerminal.args || [],
-        cwd: contextCwd(cwdOverride),
-        name: selectedTerminal.label,
-        terminalType: selectedTerminal.id,
-      });
-    }
-    const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride));
-    const system = defaultSystemSpec();
-    if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
-    pane.showNotice("[no shell found, add one in settings]");
-    return Promise.resolve(null);
-  }
-
-  function splitCwd(source, choice) {
-    return splitDirectory(
-      source?.bestKnownCwd?.() || null,
-      source?.terminalType || null,
-      choice,
-      /Windows/i.test(navigator.userAgent),
-    );
-  }
-
-  function spawnSplitInto(pane, source) {
-    if (selectedTerminal) {
-      const cwd = splitCwd(source, selectedTerminal);
-      if (selectedTerminal.kind === "profile") {
-        const profile = selectedTerminal.profile;
-        const claudeMode = normalClaudeSplitMode(profile);
-        return spawnInto(pane, profile.name, contextCwd(cwd), { claudeMode });
-      }
-      return spawnSpecInto(pane, {
-        cmd: selectedTerminal.cmd,
-        args: selectedTerminal.args || [],
-        cwd,
-        name: selectedTerminal.label,
-        terminalType: selectedTerminal.id,
-      });
-    }
-    const profile = defaultProfile();
-    if (profile) {
-      const choice = { kind: "profile", profile };
-      return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice)), {
-        claudeMode: normalClaudeSplitMode(profile),
-      });
-    }
-    const system = defaultSystemSpec();
-    if (!system) return spawnDefaultInto(pane);
-    const choice = { kind: "system", id: system.terminalType, ...system };
-    return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice)) });
-  }
-
-  async function runProfile(profile) {
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return;
-    layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null));
-  }
-
-  async function runClaudeMode(profile, claudeMode) {
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return;
-    layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null), { claudeMode });
-  }
-
-  async function splitClaudeAgentView(profile) {
-    const source = layout.focused || layout.init();
-    const pane = layout.splitPane(source, layout.autoDir(source));
-    if (!pane) return null;
-    layout.focusPane(pane);
-    return spawnInto(pane, profile.name, contextCwd(null), { claudeMode: "agents" });
-  }
-
-  async function runSystemTerminal(system) {
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return;
-    layout.focusPane(pane);
-    await spawnSpecInto(pane, {
-      cmd: system.cmd,
-      args: system.args || [],
-      name: system.label,
-      terminalType: system.id,
+  const { ownSession, forgetSession, ownedSessionIds, attachedSessionIds } =
+    createSessionOwnership({ state, layout });
+  const { persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave, cancelWorkspaceRetry } =
+    createAutosave({ state, layout, workspace, ownedSessionIds, setWorkspaceSaveState });
+  const {
+    refreshWorkspaceRoots, usableWorkspacePath, hereFolder, openHere, suggestedWorkspaceFolder, hereState,
+  } = createHere({ api, workspace, state, layout, showError });
+  const {
+    profileTerminalType, spawnInto, spawnSpecInto, spawnDefaultInto, spawnSplitInto,
+    runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal,
+    elevateProfile, elevateSystemTerminal, attachSession, restartSavedPane, resumeClaudePane,
+  } = createSpawner({
+    api, state, layout, ownSession, scheduleWorkspaceSave, showError,
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
+  const { discardScratch, maybeAdoptScratch, ensureScratchWorkspace, newScratchWorkspace, openFolderInScratch } =
+    createScratch({
+      api, state, layout,
+      claimWorkspaceFor, persistCurrentWorkspace, scheduleWorkspaceSave, attachedSessionIds, spawnDefaultInto,
+      switchWorkspace: (...args) => switchWorkspace(...args),
+      buildLauncher: () => buildLauncher(),
+      refreshStatusSoon: () => refreshStatusSoon(),
     });
-  }
+  const { restoreWorkspace, startScratch, switchWorkspace } = createWorkspaceSwitch({
+    api, workspace, state, layout,
+    claimWorkspaceFor, discardScratch, ownedSessionIds, usableWorkspacePath,
+    spawnInto, spawnSpecInto, spawnDefaultInto, profileTerminalType, restartSavedPane, resumeClaudePane,
+    cancelWorkspaceSave, scheduleWorkspaceSave, showError, clearError,
+    buildLauncher: () => buildLauncher(),
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
+  const actions = createWorkspaceActions({
+    api, workspace, state, layout,
+    claimWorkspaceFor, listWindowsSafe, switchWorkspace, ensureScratchWorkspace, attachSession, hereState,
+    persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
+    ownedSessionIds, attachedSessionIds, forgetSession, refreshWorkspaceRoots, showError, clearError,
+    buildLauncher: () => buildLauncher(),
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
+  const paneCommands = createPaneCommands({
+    api, state, layout,
+    spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
+    removeSessionsFromSavedWorkspaces: actions.removeSessionsFromSavedWorkspaces,
+    scheduleWorkspaceSave, showError,
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
+  const { setFontSize, fontSize, scopedFontSize, setScopedFontSize, resetScopedFontSize } =
+    createFontSize({ api, state, layout });
 
-  // Elevation opens a separate Administrator window, so nothing in this window
-  // changes on success and every failure mode (non-Windows, unknown profile,
-  // declined UAC) used to land in an empty catch. Always say what happened.
-  function elevate(spec, label) {
-    const notify = (text) => {
-      if (layout.focused) layout.focused.flashNotice(`[${text}]`);
-      else showError(text);
-    };
-    return api.elevateTerminal(spec).then(
-      () => { notify(`administrator terminal opening · ${label}`); return true; },
-      (error) => {
-        showError(error?.detail || `could not start an administrator terminal (${label})`);
-        return false;
-      },
-    );
-  }
-
-  function elevateProfile(profile) {
-    return elevate(
-      { profile: profile.name, workspace: spawnWorkspaceTag() },
-      profile.name,
-    );
-  }
-
-  function elevateSystemTerminal(system) {
-    return elevate({
-      cmd: system.cmd,
-      args: system.args || [],
-      name: system.label,
-      cwd: contextCwd(null) || undefined,
-      workspace: spawnWorkspaceTag(),
-    }, system.label);
-  }
-
-  function attachSession(info) {
-    // Session cards can become stale between a dashboard refresh and a click.
-    // Never create a pane for an API record already known to have exited.
-    if (!info || !info.id || info.alive === false) {
-      refreshStatusSoon();
-      return false;
-    }
-    const targetOwner = currentWorkspace || null;
-    if (info.workspace && info.workspace !== targetOwner) {
-      showError(`That terminal belongs to workspace “${info.workspace}”. Use “Move here & attach”.`);
-      return false;
-    }
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return;
-    layout.focusPane(pane);
-    pane.terminalType = info.profile ? profileTerminalType(info.profile) : pane.terminalType;
-    pane.attach(info);
-    ownSession(info.id);
-    scheduleWorkspaceSave();
-    refreshStatusSoon();
-    return true;
-  }
-
-  async function persistCurrentWorkspace() {
-    if (exiting || !currentWorkspace || transitioning || !layout.root) return true;
-    clearTimeout(workspaceSaveTimer);
-    clearTimeout(workspaceRetryTimer);
-    workspaceRetryTimer = null;
-    if (workspaceSaveInFlight) {
-      workspaceSavePending = true;
-      return true;
-    }
-    workspaceSaveInFlight = true;
-    workspaceSavePending = false;
-    const targetWorkspace = currentWorkspace;
-    setWorkspaceSaveState("saving");
-    let saved = false;
-    try {
-      await workspace.save(
-        targetWorkspace,
-        layout.serialize(),
-        workspaceLogo,
-        [...ownedSessionIds()],
-        workspacePath,
-      );
-      saved = true;
-      if (currentWorkspace === targetWorkspace) {
-        setWorkspaceSaveState("saved");
-        clearTimeout(workspaceStatusTimer);
-        workspaceStatusTimer = setTimeout(() => setWorkspaceSaveState(""), 1400);
-      }
-    } catch (_) {
-      if (currentWorkspace === targetWorkspace) {
-        workspaceSavePending = true;
-        setWorkspaceSaveState("save failed · retrying", "error");
-        workspaceRetryTimer = setTimeout(() => {
-          workspaceRetryTimer = null;
-          persistCurrentWorkspace();
-        }, 2000);
-      }
-    } finally {
-      workspaceSaveInFlight = false;
-      if (saved && workspaceSavePending && currentWorkspace === targetWorkspace) {
-        setTimeout(() => persistCurrentWorkspace(), 0);
-      }
-    }
-    return saved;
-  }
-
-  function scheduleWorkspaceSave() {
-    if (exiting || !currentWorkspace || transitioning) return;
-    clearTimeout(workspaceSaveTimer);
-    clearTimeout(workspaceRetryTimer);
-    workspaceRetryTimer = null;
-    workspaceSavePending = true;
-    workspaceSaveTimer = setTimeout(() => persistCurrentWorkspace(), 300);
-  }
-
-  // #sb-save owns the saving/saved lifecycle only. It is a 9 px span that
-  // collapses when empty and disappears under the panel overlay, so it is the
-  // wrong place for anything the user has to act on.
-  // #sb-save is the save dot on the sidebar's workspace row: data-state drives
-  // the colour, the title carries the words. It is the saving/saved lifecycle
-  // and nothing else.
-  function setWorkspaceSaveState(text, state = "") {
-    const status = $("sb-save");
-    if (!status) return;
-    const key = state || text;
-    status.title = text;
-    if (key) status.dataset.state = key;
-    else delete status.dataset.state;
-  }
-
-  // The single visible failure path: a dismissible banner above the status
-  // bar, drawn over the panel overlay so a Dashboard/Settings gesture that
-  // fails is still readable.
-  function showError(text) {
-    const banner = $("app-error");
-    const body = $("app-error-text");
-    if (!banner || !body) return;
-    body.textContent = text;
-    banner.hidden = false;
-    const live = $("live-status");
-    if (live) live.textContent = text;
-  }
-
-  function clearError() {
-    const banner = $("app-error");
-    if (banner) banner.hidden = true;
-  }
-
-  // Autostart and global-hotkey launches run in the backend with no pane to
-  // report into, so app.py keeps the latest failure on the config as
-  // `launch_error`. It is shown once when it first appears and again only
-  // when it changes, and only by the primary top-level window: every
-  // workspace view and every second window reads the same config.
-  // A banner already up (a refused workspace claim at boot) keeps its text.
-  let shownLaunchError = null;
-  function reportLaunchError(value) {
-    const text = typeof value === "string" && value.trim() ? value : null;
-    if (text && text !== shownLaunchError && !embedded && windowIsPrimary) {
-      const banner = $("app-error");
-      const current = banner && !banner.hidden ? $("app-error-text")?.textContent : "";
-      showError(current ? `${current} ${text}` : text);
-    }
-    shownLaunchError = text;
-  }
-
-  // ---- this window in the registry ---------------------------------------
-  //
-  // The invariant: two windows must never own the same workspace, because both
-  // of them autosave the whole layout on every pane change and the loser's
-  // panes disappear without a trace. Every path that changes what this window
-  // owns goes through claimWorkspaceFor().
-
-  // The id in the launch URL wins: app.py's viewer bookkeeping forgets a window
-  // by exactly that id when its native shell closes, so registering under any
-  // other one would leave the workspace claimed until the heartbeat expired.
-  // The remembered id is the fallback for a plain browser tab, where a reload
-  // otherwise looks like a second window fighting its own claim.
-  //
-  // No workspace key: registering is also how a reloaded page says hello, and
-  // an omitted key preserves the claim it already holds instead of dropping it
-  // for the moment it takes to ask for it back.
-  async function acquireWindowId() {
-    try {
-      const info = await api.registerWindow({
-        id: identity.id || rememberedWindowId(),
-        primary: identity.primary,
-      });
-      windowId = info && info.id ? String(info.id) : null;
-      registryAvailable = Boolean(windowId);
-      if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);
-      if (windowId) rememberWindowId(windowId);
-    } catch (_) {
-      // An older backend without the registry, one still starting up, or the
-      // window cap. The app is fully usable without it; only the guarantee is
-      // missing, and pretending otherwise would be the worse failure.
-      windowId = null;
-      registryAvailable = false;
-    }
-    return windowId;
-  }
-
-  async function listWindowsSafe() {
-    try {
-      const list = normalizeWindows(await api.listWindows());
-      registryAvailable = true;
-      return list;
-    } catch (_) {
-      registryAvailable = false;
-      return [];
-    }
-  }
-
-  // Returns null when this window may own `name` (and now does), or the message
-  // to show when it may not. `name` null means scratch, which is nobody's:
-  // an unadopted scratch layout has no file to overwrite.
-  //
-  // A registry that cannot answer degrades to "carry on": blocking the user out
-  // of their own workspace because a route 404'd is a worse failure than the
-  // one being prevented. It never degrades to pretending the claim worked,
-  // which is why claimedWorkspace stays null on that path.
-  async function claimWorkspaceFor(name) {
-    if (!windowId) {
-      claimedWorkspace = null;
-      return null;
-    }
-    try {
-      if (!name) {
-        await api.releaseWindowWorkspace(windowId);
-        claimedWorkspace = null;
-        return null;
-      }
-      await api.claimWindowWorkspace(windowId, name);
-      claimedWorkspace = name;
-      return null;
-    } catch (error) {
-      claimedWorkspace = null;
-      if (claimOutcome(error) === "unavailable") {
-        registryAvailable = false;
-        return null;
-      }
-      // Refused. The 409 body names the window that holds it, so "taken" is
-      // actionable; the registry listing is only the fallback.
-      const holder = conflictHolder(error)
-        || workspaceHolder(await listWindowsSafe(), windowId, name);
-      return claimRefusalMessage(name, holder);
-    }
-  }
-
-  // The registry expires a window that stops answering; that is how a crashed
-  // or force-killed window lets go of its workspace. It answers a beat from an
-  // expired window with 404 rather than reviving it silently, and that 404 is
-  // the one heartbeat failure that matters: this window is autosaving a
-  // workspace it no longer owns.
-  function startWindowHeartbeat() {
-    if (!windowId || windowHeartbeatTimer) return;
-    windowHeartbeatTimer = setInterval(() => {
-      api.heartbeatWindow(windowId).then(
-        (info) => {
-          registryAvailable = true;
-          if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);
-        },
-        (error) => { if (error?.status === 404) recoverWindowRegistration(); },
-      );
-    }, WINDOW_HEARTBEAT_MS);
-  }
-
-  // Say hello again and ask for the same workspace back. If it has been taken
-  // in the meantime this window must stop owning it, and it lets go the same
-  // way deleting the current workspace already does: the layout and every
-  // terminal in it stay exactly as they are and carry on as an unnamed scratch
-  // layout. Nothing is killed, nothing is saved over.
-  async function recoverWindowRegistration() {
-    const wanted = currentWorkspace;
-    let refused = null;
-    try {
-      const info = await api.registerWindow({
-        id: windowId,
-        workspace: wanted || null,
-        primary: identity.primary,
-      });
-      if (info && info.id) {
-        windowId = String(info.id);
-        rememberWindowId(windowId);
-        if ("primary" in info) windowIsPrimary = Boolean(info.primary);
-      }
-      claimedWorkspace = wanted || null;
-      registryAvailable = true;
-      return;
-    } catch (error) {
-      claimedWorkspace = null;
-      if (claimOutcome(error) !== "refused") {
-        registryAvailable = false;
-        return;
-      }
-      refused = `“${wanted}” was taken over by ${describeHolder(conflictHolder(error))} `
-        + "while this window was unreachable. Nothing here was closed: your terminals "
-        + "keep running and this layout carries on as an unnamed scratch layout.";
-    }
-    clearTimeout(workspaceSaveTimer);
-    for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
-    workspaceSessionIds = new Set();
-    currentWorkspace = null;
-    showError(refused);
-    buildLauncher();
-    refreshStatusSoon();
-  }
-
-  // Opening a window is the desktop shell's job: it owns the native window and
-  // knows the launch URL, token fragment included. The backend route is for a
-  // viewer that is not the shell but is talking to a backend that has one. A
-  // plain browser window is the last resort, so the button is never dead.
-  async function openNewWindow(name) {
-    const target = name || null;
-    const bridge = globalThis.pywebview?.api?.open_window;
-    if (typeof bridge === "function") {
-      // The bridge never rejects: a refusal is ordinary, so it answers
-      // {opened:false, error}. Only "unavailable" means "there is no shell
-      // here, ask someone else"; every other error is this window's answer.
-      const result = await bridge(target || "", "").catch(() => null);
-      if (result && result.opened) return true;
-      if (result && result.error === "workspace_claimed") {
-        // The bridge answers with the owner's id; the listing turns it into
-        // something the user can point at.
-        const holder = (await listWindowsSafe()).find((entry) => entry.id === result.owner) || null;
-        showError(claimRefusalMessageForOpen(target, holder));
-        return false;
-      }
-      if (result && result.error && result.error !== "unavailable") {
-        showError(result.detail || "Could not open a second window.");
-        return false;
-      }
-    }
-    try {
-      const result = await api.requestWindow({ workspace: target });
-      if (result && result.opened) return true;
-    } catch (error) {
-      if (claimOutcome(error) === "refused") {
-        showError(claimRefusalMessageForOpen(target, conflictHolder(error)));
-        return false;
-      }
-      // Anything else means no shell answered, which is exactly what a plain
-      // browser looks like. Fall through rather than leave a dead button.
-    }
-    const opened = window.open(
-      newWindowUrl(location.pathname, target, api.token()),
-      "_blank",
-      "noopener",
-    );
-    if (!opened) {
-      showError("Could not open a second window. Your browser blocked the pop-up.");
-      return false;
-    }
-    return true;
-  }
-
-  // Same refusal, different consequence: nothing was switched here, the second
-  // window simply did not open.
-  function claimRefusalMessageForOpen(name, holder) {
-    return `“${name}” is already open in ${describeHolder(holder)}, `
-      + "so no second window was opened. Two windows on one workspace overwrite "
-      + "each other's saved layout.";
-  }
-
-  // Tear down the current scratch layout before leaving it: scratch is
-  // disposable, so its sessions are killed and its file dropped. Handles both
-  // pre-adoption scratch (tracked in scratchSessionIds) and the adopted
-  // "scratch" workspace (whose sessions are the live layout's).
-  //
-  // `force` separates the two callers. Replacing scratch on purpose is
-  // confirmed by the user first (newScratchWorkspace names what will die), so
-  // it kills everything. Merely LEAVING scratch for another workspace was never
-  // confirmed by anyone, and /api/sessions/cleanup kills whatever it is handed,
-  // so a busy or already-used terminal is spared and left running in the
-  // background instead. It shows up under "Unassigned" on the dashboard, where
-  // it can be reattached or stopped deliberately. The rule is the backend's own
-  // ("never expire a shell the user typed into", reap_idle), applied at the one
-  // call site that was bypassing it.
-  async function discardScratch({ force = false } = {}) {
-    const ids = new Set(scratchSessionIds);
-    scratchSessionIds.clear();
-    if (currentWorkspace === SCRATCH_WS) {
-      for (const sid of workspaceSessionIds) ids.add(sid);
-      workspaceSessionIds.clear();
-      await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
-    }
-    if (!ids.size) return;
-    let doomed = [...ids];
-    if (!force) {
-      const sessions = await api.getSessions().catch(() => null);
-      // No answer means no proof of idleness, and an unprovable kill is the one
-      // we do not make: keep them all rather than guess.
-      if (!sessions) return;
-      const byId = new Map(sessions.map((session) => [session.id, session]));
-      doomed = doomed.filter((sid) => {
-        const session = byId.get(sid);
-        if (!session) return false;
-        return session.busy === false && !session.touched;
-      });
-    }
-    if (doomed.length) await api.cleanupSessions(doomed).catch(() => {});
-  }
-
-  // Ephemeral scratch: the first real keystroke in an unsaved scratch layout
-  // adopts it as the workspace literally named "scratch", replacing the
-  // previous one (whose background sessions die with it). From then on it
-  // autosaves like any workspace. The backend deletes the "scratch" file at
-  // app start and exit, so it never survives a run; within a run it survives
-  // window close (tray) and can be reopened from the workspace menu.
-  let scratchAdoption = null;
-  async function maybeAdoptScratch(pane) {
-    if (currentWorkspace || transitioning) return;
-    if (!pane || !pane.userWrote) return;
-    if (scratchAdoption) return scratchAdoption;
-    scratchAdoption = (async () => {
-    try {
-      // Defensive guard for an externally opened viewer sharing this backend.
-      // If another window already adopted "scratch", stay in pure scratch here
-      // rather than fighting over the file (its sessions stay disposable).
-      const names = await api.listWorkspaces().catch(() => null);
-      if (names && names.includes(SCRATCH_WS)) return;
-      // The same reasoning one step earlier: the registry knows about a window
-      // that has adopted scratch but has not written the file yet, so ask it
-      // before taking the name. Refused means stay in pure scratch.
-      if (await claimWorkspaceFor(SCRATCH_WS)) return;
-      currentWorkspace = SCRATCH_WS;
-      workspacePath = scratchRoot || null;
-      workspacePathExists = true;
-      workspaceSessionIds = new Set(scratchSessionIds);
-      for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
-      scratchSessionIds.clear(); // these sessions are workspace-managed now
-      rememberWorkspace(SCRATCH_WS);
-      await persistCurrentWorkspace();
-      if (!workspaceNames.includes(SCRATCH_WS)) {
-        workspaceNames.push(SCRATCH_WS);
-        workspaceNames.sort((a, b) => a.localeCompare(b));
-      }
-      buildLauncher();
-      refreshStatusSoon();
-    } finally {
-      scratchAdoption = null;
-    }
-    })();
-    return scratchAdoption;
-  }
-
-  async function ensureScratchWorkspace() {
-    if (currentWorkspace) return true;
-    const names = await api.listWorkspaces().catch(() => []);
-    if (names.includes(SCRATCH_WS)) return false;
-    if (await claimWorkspaceFor(SCRATCH_WS)) return false;
-    currentWorkspace = SCRATCH_WS;
-    workspacePath = scratchRoot || null;
-    workspacePathExists = true;
-    workspaceSessionIds = new Set(scratchSessionIds);
-    for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
-    scratchSessionIds.clear();
-    rememberWorkspace(SCRATCH_WS);
-    if (!workspaceNames.includes(SCRATCH_WS)) workspaceNames.push(SCRATCH_WS);
-    workspaceNames.sort((a, b) => a.localeCompare(b));
-    await persistCurrentWorkspace();
-    buildLauncher();
-    return true;
-  }
-
-  function claudeProfileForPane(pane) {
-    const profile = profiles.find((item) => item.name === pane.profileName) || null;
-    if (!profile) return null;
-    if (profile.terminal_type === "claude-code") return profile;
-    const hint = [profile.name, profile.cmd, profile.start_command, pane.title]
-      .filter(Boolean).join(" ");
-    const mentionsClaude = /\bclaude(?:\.cmd|\.exe)?\b/i.test(hint);
-    const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
-    const resumableShell = [
-      "powershell-core", "windows-powershell", "command-prompt", "wsl", "bash", "zsh", "fish",
-    ].includes(profile.terminal_type);
-    return mentionsClaude && (directClaude || resumableShell) ? profile : null;
-  }
-
-  async function restartSavedPane(pane) {
-    if (pane.profileName) return spawnInto(pane, pane.profileName, pane.cwd);
-    if (pane.launchSpec) return spawnSpecInto(pane, pane.launchSpec);
-    return spawnDefaultInto(pane, pane.cwd);
-  }
-
-  async function resumeClaudePane(pane, mode = "continue") {
-    const profile = claudeProfileForPane(pane);
-    if (!profile) return null;
-    // Explicit recovery only: continue the latest project conversation or let
-    // Claude present its own native picker. Neither path impersonates the old PTY.
-    if (profile.terminal_type === "claude-code") {
-      return spawnInto(pane, profile.name, pane.cwd, { claudeMode: mode });
-    }
-    const flag = mode === "resume" ? "--resume" : "--continue";
-    const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
-    if (directClaude) {
-      return spawnInto(pane, profile.name, pane.cwd, {
-        args: [...(profile.args || []), flag],
-      });
-    }
-    return spawnInto(pane, profile.name, pane.cwd, { startCommand: `claude ${flag}` });
-  }
-
-  async function restoreWorkspace(name) {
-    const saved = await workspace.details(name).catch(() => null);
-    if (!saved || !saved.layout) return false;
-    const savedLayout = saved.layout;
-    workspaceLogo = saved.logo || null;
-    workspacePath = saved.path || null;
-    workspaceRoots.set(name, workspacePath);
-    workspacePathExists = saved.path ? saved.path_exists !== false : true;
-    if (saved.path && saved.path_exists === false) {
-      showError(`The folder for “${name}” is missing: ${saved.path}. New terminals open in your home folder until you pick another.`);
-    }
-    const knownSessions = await api.getSessions({ metrics: false }).catch(() => []);
-    const knownById = new Map(knownSessions.map((session) => [session.id, session]));
-    const byId = new Map(knownSessions.filter((session) => session.alive).map((session) => [session.id, session]));
-    workspaceSessionIds = new Set(saved.session_ids || []);
-    for (const sessionId of sessionIdsInLayout(savedLayout)) {
-      if (byId.has(sessionId)) workspaceSessionIds.add(sessionId);
-    }
-    const panes = layout.restore(savedLayout);
-    for (const pane of panes) {
-      if (pane.profileName) pane.terminalType = profileTerminalType(pane.profileName);
-      else if (pane.launchSpec) pane.terminalType = commandTerminalType(pane.launchSpec);
-      const live = pane.savedSessionId && byId.get(pane.savedSessionId);
-      if (live) {
-        pane.attach(live);
-      } else if (pane.savedSessionId) {
-        const prior = knownById.get(pane.savedSessionId);
-        pane.markUnavailable({
-          exitCode: typeof prior?.exit_code === "number" ? prior.exit_code : null,
-          onRestart: () => restartSavedPane(pane),
-          onResumeClaude: claudeProfileForPane(pane) ? () => resumeClaudePane(pane) : null,
-          onPickClaude: claudeProfileForPane(pane) ? () => resumeClaudePane(pane, "resume") : null,
-        });
-      } else if (pane.profileName) {
-        // With a workspace folder the root is authoritative: move the
-        // workspace and every restored terminal follows it. Without one the
-        // pane's own remembered directory still wins.
-        await spawnInto(pane, pane.profileName, usableWorkspacePath() ? null : pane.cwd);
-      } else if (pane.launchSpec) {
-        await spawnSpecInto(pane, usableWorkspacePath()
-          ? { ...pane.launchSpec, cwd: null }
-          : pane.launchSpec);
-      } else {
-        await spawnDefaultInto(pane);
-      }
-    }
-    if (panes.length) layout.focusPane(panes[0]);
-    return true;
-  }
-
-  async function startScratch(cwdOverride = null) {
-    currentWorkspace = null;
-    workspaceLogo = null;
-    workspacePath = scratchRoot || null;
-    workspacePathExists = true;
-    workspaceSessionIds = new Set();
-    rememberWorkspace(null);
-    const pane = layout.restore(null)[0];
-    const started = await spawnDefaultInto(pane, cwdOverride);
-    layout.focusPane(pane);
-    return Boolean(started);
-  }
-
-  async function switchWorkspace(name, scratchCwd = null, { replaceScratch = false } = {}) {
-    if (transitioning) return false;
-    if ((name || null) === currentWorkspace) return true;
-    // The scratch sidebar row reports itself as null, but once scratch has been
-    // adopted currentWorkspace is the string "scratch", so the guard above
-    // missed and a click on the row drawn as "current" fell through to
-    // discardScratch(), killing every live scratch terminal without asking.
-    // Replacing scratch is the explicit, confirmed "New scratch" action only.
-    if (!name && currentWorkspace === SCRATCH_WS && !replaceScratch) return true;
-    // What this call really lands on. The sidebar's scratch row passes null,
-    // but an adopted scratch is a workspace file like any other and is
-    // restored, not replaced; only the confirmed "New scratch" action replaces.
-    const target = name
-      || (!replaceScratch && workspaceNames.includes(SCRATCH_WS) ? SCRATCH_WS : null);
-    const leavingWorkspace = currentWorkspace;
-    transitioning = true;
-    clearTimeout(workspaceSaveTimer);
-    if (currentWorkspace) {
-      try {
-        await workspace.save(
-          currentWorkspace,
-          layout.serialize(),
-          workspaceLogo,
-          [...ownedSessionIds()],
-          workspacePath,
-        );
-      } catch (_) {
-        transitioning = false;
-        showError(`Could not save “${currentWorkspace}”. The workspace was not switched and nothing was closed.`);
-        return false;
-      }
-    }
-    if (target) {
-      const refusal = await claimWorkspaceFor(target);
-      if (refusal) {
-        transitioning = false;
-        showError(refusal);
-        return false;
-      }
-    }
-    if (!currentWorkspace && name) {
-      // A never-adopted scratch has no workspace file; leaving it is the one
-      // time we clean up its disposable sessions immediately.
-      await discardScratch();
-    }
-
-    let opened = true;
-    if (name) {
-      currentWorkspace = name;
-      rememberWorkspace(name);
-      const restored = await restoreWorkspace(name);
-      if (!restored) opened = await startScratch();
-    } else if (!replaceScratch && workspaceNames.includes(SCRATCH_WS)) {
-      // Going *to* scratch. An adopted scratch is restored exactly like any
-      // other workspace, terminals and all: the old code deleted the file here
-      // and built an empty one, so simply navigating to scratch from another
-      // workspace destroyed the scratch layout the user had left running. Only
-      // the confirmed "New scratch" action below may replace it.
-      currentWorkspace = SCRATCH_WS;
-      rememberWorkspace(SCRATCH_WS); // scratch has its own flag, not the durable key
-      const restored = await restoreWorkspace(SCRATCH_WS);
-      if (!restored) opened = await startScratch(scratchCwd);
-    } else {
-      // Explicit replacement, or there is no adopted scratch to go back to.
-      // newScratchWorkspace() has already named what dies and asked.
-      if (leavingWorkspace === SCRATCH_WS) await discardScratch({ force: true });
-      else if (workspaceNames.includes(SCRATCH_WS)) await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
-      workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
-      opened = await startScratch(scratchCwd);
-    }
-    // Sync the claim to where this window actually ended up. A window on an
-    // unadopted scratch owns nothing, so the workspace it just left is free for
-    // another window at once instead of after a heartbeat timeout, and a failed
-    // restore that fell back to scratch does not keep holding a name.
-    if (currentWorkspace !== claimedWorkspace) await claimWorkspaceFor(currentWorkspace);
-    transitioning = false;
-    clearError();
-    buildLauncher();
-    refreshStatusSoon();
-    scheduleWorkspaceSave();
-    return opened;
-  }
-
-  // Which scratch terminals would lose real work if scratch were replaced.
-  //
-  // The backend is no help here: POST /api/sessions/cleanup kills every id it
-  // is handed without asking, because the "never expire a shell the user typed
-  // into" rule lives in reap_idle and nowhere else. So the judgement is made
-  // here, and it is made from the backend's own two facts about a session:
-  // `busy` (a foreground process beyond the shell, so an ssh login, a dev
-  // server or a build) and `touched` (the user has written to it at least
-  // once). A pane's local `userWrote` is checked too, because a keystroke this
-  // window has seen may not have reached a /api/sessions poll yet.
-  //
-  // Every unknown counts as at risk. A wrong "ask" costs one click; a wrong
-  // kill costs whatever was running.
-  async function scratchTerminalsAtRisk() {
-    const panes = layout.panes().filter((pane) => pane.session && pane.state === "attached");
-    if (!panes.length) return [];
-    const sessions = await api.getSessions().catch(() => null);
-    const byId = new Map((sessions || []).map((session) => [session.id, session]));
-    const atRisk = [];
-    for (const pane of panes) {
-      const session = byId.get(pane.session.id);
-      const busy = session ? session.busy !== false : true;
-      const used = session ? Boolean(session.touched) : true;
-      if (!busy && !used && !pane.userWrote) continue;
-      atRisk.push({ name: pane.title || pane.session.name || pane.session.id, busy });
-    }
-    return atRisk;
-  }
-
-  function discardScratchWarning(atRisk) {
-    const names = atRisk.slice(0, 3).map((item) => item.name).join(", ");
-    const rest = atRisk.length > 3 ? ` and ${atRisk.length - 3} more` : "";
-    const busy = atRisk.filter((item) => item.busy).length;
-    const what = busy
-      ? `${busy} of them ${busy === 1 ? "is" : "are"} still running something`
-      : "you have typed in them";
-    return `Discard scratch and stop ${atRisk.length} terminal${atRisk.length === 1 ? "" : "s"} (${names}${rest})? ${what[0].toUpperCase()}${what.slice(1)}.`;
-  }
-
-  // Explicit replacement of the live scratch layout. A scratch full of
-  // untouched, idle shells is exactly what scratch is for, so replacing it goes
-  // through without a prompt. The moment one terminal is busy or has been used,
-  // the confirmation names what would be lost instead of counting panes.
-  async function newScratchWorkspace() {
-    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) return switchWorkspace(null);
-    const replace = async () => {
-      // A never-adopted scratch has no workspace file, so switchWorkspace has
-      // no discard branch for it and its terminals would quietly survive as
-      // background shells although this action just said it would stop them.
-      if (!currentWorkspace) await discardScratch({ force: true });
-      return switchWorkspace(null, null, { replaceScratch: true });
-    };
-    const atRisk = await scratchTerminalsAtRisk();
-    if (!atRisk.length) return replace();
-    const pane = layout.focused || layout.panes()[0];
-    if (!pane) return replace();
-    pane.confirmAction(discardScratchWarning(atRisk), replace, "Discard");
-    return false;
-  }
-
-  async function openFolderInScratch(cwd) {
-    if (!cwd || transitioning) return false;
-    if (currentWorkspace && currentWorkspace !== SCRATCH_WS) {
-      if (workspaceNames.includes(SCRATCH_WS)) {
-        if (!(await switchWorkspace(SCRATCH_WS)) || currentWorkspace !== SCRATCH_WS) return false;
-      }
-      else {
-        return switchWorkspace(null, cwd);
-      }
-    }
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return false;
-    layout.focusPane(pane);
-    const started = await spawnDefaultInto(pane, cwd);
-    if (!started) return false;
-    scheduleWorkspaceSave();
-    refreshStatusSoon();
-    return true;
-  }
-
-  let launchLoopStopped = false;
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  // A folder handoff that cannot be satisfied (max_sessions reached, no shell
-  // configured) used to retry twice a second forever, which also meant no
-  // later "Open QuickTerm here" was ever claimed again.
-  const LAUNCH_MAX_ATTEMPTS = 5;
-  const LAUNCH_MAX_WAITS = 100; // 10 s of "transitioning" before giving up
-
-  async function claimLaunchLoop() {
-    while (!launchLoopStopped) {
-      try {
-        // One folder, one window. The queue behind GET /api/launches/next hands
-        // each launch to a single waiter, so with several windows waiting the
-        // folder used to land in whichever one happened to poll first. The
-        // registry already names the window this is meant for: `primary` is the
-        // same window the summon hotkey raises and the one whose native title
-        // hotkeys.py matches, and it is re-promoted when that window closes.
-        // A window with no registry to ask still claims, because a lost folder
-        // handoff is worse than an unlikely double claim.
-        if (!windowIsPrimary && registryAvailable) {
-          await sleep(1000);
-          continue;
-        }
-        let waits = 0;
-        while (transitioning && !launchLoopStopped && waits++ < LAUNCH_MAX_WAITS) await sleep(100);
-        const launch = await api.claimLaunch();
-        if (launch?.cwd) {
-          let opened = false;
-          let attempts = 0;
-          let waited = 0;
-          while (!opened && !launchLoopStopped && attempts < LAUNCH_MAX_ATTEMPTS) {
-            if (transitioning) {
-              if (waited++ >= LAUNCH_MAX_WAITS) break;
-              await sleep(100);
-              continue;
-            }
-            attempts += 1;
-            opened = await openFolderInScratch(launch.cwd);
-            if (!opened && attempts < LAUNCH_MAX_ATTEMPTS) await sleep(Math.min(500 * attempts, 4000));
-          }
-          if (!opened && !launchLoopStopped) {
-            showError(`Could not open “${launch.cwd}” in a terminal. The request was dropped.`);
-          }
-        }
-      } catch (_) {
-        await sleep(1000);
-      }
-    }
-  }
-
-  function removeSessionFromLayout(node, sessionId) {
-    if (!node) return false;
-    if (node.type === "split") {
-      return (node.children || []).reduce((changed, child) =>
-        removeSessionFromLayout(child, sessionId) || changed, false);
-    }
-    if (node.session_id !== sessionId) return false;
-    delete node.session_id;
-    return true;
-  }
-
-  async function removeWorkspaceOwnership(name, sessionId) {
-    if (name === currentWorkspace) {
-      workspaceSessionIds.delete(sessionId);
-      await persistCurrentWorkspace();
-      return;
-    }
-    const saved = await workspace.details(name).catch(() => null);
-    if (!saved) return;
-    const ids = new Set(saved.session_ids || []);
-    const removedOwnership = ids.delete(sessionId);
-    const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
-    const changed = removedOwnership || removedLayoutReference;
-    // No path argument: the folder of a workspace we are only fixing up
-    // ownership for must survive untouched.
-    if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
-  }
-
-  async function removeSessionsFromSavedWorkspaces(sessionIds) {
-    if (!sessionIds.size) return;
-    const names = await api.listWorkspaces().catch(() => []);
-    await Promise.all(names.map(async (name) => {
-      const saved = await workspace.details(name).catch(() => null);
-      if (!saved) return;
-      const ids = new Set(saved.session_ids || []);
-      let changed = false;
-      for (const sessionId of sessionIds) {
-        const removedOwnership = ids.delete(sessionId);
-        const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
-        changed = removedOwnership || removedLayoutReference || changed;
-      }
-      if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
-    }));
-  }
-
-  async function moveSessionHere(info, fromWorkspace) {
-    if (!info || !info.id) return;
-    const current = await api.getSessions().catch(() => []);
-    const fresh = current.find((session) => session.id === info.id && session.alive);
-    if (!fresh) {
-      if (fromWorkspace) await removeWorkspaceOwnership(fromWorkspace, info.id);
-      forgetSession(info.id);
-      showError("That terminal has already exited.");
-      refreshStatusSoon();
-      return false;
-    }
-    if (!currentWorkspace && !(await ensureScratchWorkspace())) return;
-    if (fromWorkspace && fromWorkspace !== currentWorkspace) {
-      await removeWorkspaceOwnership(fromWorkspace, info.id);
-    }
-    workspaceSessionIds.add(info.id);
-    await persistCurrentWorkspace();
-    return attachSession(fresh);
-  }
-
-  async function killWorkspaceSession(info, workspaceName) {
-    if (!info || !info.id) return false;
-    try {
-      await api.killSession(info.id);
-    } catch (error) {
-      // A session the backend has already forgotten is not a kill that failed.
-      // There is no process left to protect, so remove it like any verified stop.
-      if (!sessionAlreadyGone(error)) {
-        showError("Could not stop that terminal. It is still running.");
-        return false;
-      }
-    }
-    forgetSession(info.id);
-    if (workspaceName) await removeWorkspaceOwnership(workspaceName, info.id);
-    refreshStatusSoon();
-    return true;
-  }
-
+  // The one object the palette, the panels and the pane header talk to.
   const app = {
-    profiles,
-    snippets,
-    idleTimeoutSeconds: cfg.idle_timeout_s ?? 300,
+    profiles: state.profiles,
+    snippets: state.snippets,
+    idleTimeoutSeconds: state.cfg.idle_timeout_s ?? 300,
     runProfile,
     runClaudeMode,
     splitClaudeAgentView,
     runSystemTerminal,
     attachSession,
-    splitH: () => {
-      const source = layout.focused;
-      const pane = layout.splitFocused("h");
-      if (pane) spawnSplitInto(pane, source);
-    },
-    splitV: () => {
-      const source = layout.focused;
-      const pane = layout.splitFocused("v");
-      if (pane) spawnSplitInto(pane, source);
-    },
-    newTerminal: () => {
-      let pane = layout.focused || layout.init();
-      if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-      if (pane) spawnDefaultInto(pane);
-    },
-    // Renaming from the sidebar row; a pane showing the terminal takes the
-    // new name too, and the workspace autosaves it like a header rename.
-    renameSession: async (sessionId, name) => {
-      let info = null;
-      try {
-        info = await api.renameSession(sessionId, name);
-      } catch (error) {
-        showError(error.detail || "rename failed");
-        return;
-      }
-      const pane = layout.panes().find((item) => item.session?.id === sessionId);
-      if (pane) pane.setTitle(name, info);
-      refreshStatusSoon();
-    },
-    cycleTerminal: (delta) => {
-      const choice = launcherView?.cycleTerminal(delta);
-      if (choice) layout.focused?.flashNotice(`[new terminal: ${choice.label}]`);
-      return choice;
-    },
-    zoom: () => layout.toggleZoom(),
-    isZoomed: () => layout.zoomed,
-    // D/Alt+D is a true detach: retain the process first, then remove only its
-    // viewer. It must never share the kill semantics of X/Alt+W.
-    closePane: async () => {
-      const pane = layout.focused;
-      if (!pane) return;
-      const session = pane.session;
-      if (session) {
-        let forgotten = false;
-        try {
-          await api.retainSession(session.id);
-        } catch (error) {
-          // Nothing to retain once the backend has dropped the session, and
-          // closing the view is then the whole job. Any other failure means the
-          // terminal may still be alive, so the pane stays visible.
-          if (!sessionAlreadyGone(error)) {
-            pane.flashNotice("[could not retain terminal, pane left open]");
-            return;
-          }
-          forgotten = true;
-          forgetSession(session.id);
-        }
-        if (!forgotten && !currentWorkspace) {
-          const adopted = await ensureScratchWorkspace().catch(() => false);
-          // Another window may already own Scratch. Retain still guarantees
-          // this process lives; exclude it from this viewer's exit cleanup.
-          if (!adopted) scratchSessionIds.delete(session.id);
-        }
-      }
-      layout.closePane(pane);
-      scheduleWorkspaceSave();
-      refreshStatusSoon();
-    },
-    // `keyboard` marks Alt+W and the palette: the bar then opens with Kill
-    // focused and a second Alt+W completes it, so a terminal can be killed
-    // without reaching for the mouse. The header button keeps Cancel first.
-    killFocusedSession: async ({ keyboard = false } = {}) => {
-      const pane = layout.focused;
-      if (!pane) return;
-      if (keyboard && pane.confirmationLabel() === "Kill") {
-        pane.acceptConfirmation();
-        return;
-      }
-      if (!pane.session) {
-        pane.flashNotice("[no terminal to kill · Alt+D closes the pane]");
-        return;
-      }
-      pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
-        const sessionId = pane.session.id;
-        try {
-          await api.killSession(sessionId);
-        } catch (error) {
-          // Rethrowing a real failure keeps it on the confirmation bar. A
-          // forgotten session must fall through and close, or the pane can
-          // never be removed at all.
-          if (!sessionAlreadyGone(error)) throw error;
-        }
-        forgetSession(sessionId);
-        layout.closePane(pane);
-        scheduleWorkspaceSave();
-        refreshStatusSoon();
-      }, "Kill", { focusConfirm: keyboard });
-    },
-    killAllSessions: async () => {
-      const result = await api.killAllSessions();
-      const killedIds = new Set(result?.killed_ids || []);
-      for (const pane of [...layout.panes()]) {
-        if (!pane.session || !killedIds.has(pane.session.id)) continue;
-        forgetSession(pane.session.id);
-        layout.closePane(pane);
-      }
-      for (const sessionId of killedIds) forgetSession(sessionId);
-      await removeSessionsFromSavedWorkspaces(killedIds);
-      scheduleWorkspaceSave();
-      refreshStatusSoon();
-      const failed = result?.failed_ids || [];
-      if (failed.length) {
-        showError(`${failed.length} terminal${failed.length === 1 ? "" : "s"} could not be stopped and ${failed.length === 1 ? "is" : "are"} still running.`);
-      }
-      return { killed: result?.killed || 0, failed: failed.length };
-    },
-    moveSessionHere,
-    killWorkspaceSession,
-    focusedPaneName: () => layout.focused?.displayName() || null,
+    ...paneCommands,
+    moveSessionHere: actions.moveSessionHere,
+    killWorkspaceSession: actions.killWorkspaceSession,
     hereFolder,
     openExplorer: () => openHere("explorer"),
     openEditor: () => openHere("vscode"),
-    // Snippets type straight into the focused terminal. Say where they went,
-    // say when they went nowhere, and confirm anything multi-line first. One
-    // Enter in the palette should never run three commands unannounced.
-    sendSnippet: (snippet) => {
-      const pane = layout.focused;
-      if (!pane) {
-        showError("Focus a terminal first. Snippets are typed into the focused pane.");
-        return;
-      }
-      const body = displaySnippet(snippet.text);
-      const send = () => {
-        if (pane.sendText(snippet.text)) pane.flashNotice(`[sent: ${snippet.name}]`);
-        else showError(`“${snippet.name}” was not sent. That pane has no live terminal.`);
-      };
-      const lines = body ? body.split("\n").length : 0;
-      if (lines > 1) {
-        pane.confirmAction(
-          `Run “${snippet.name}” (${lines} lines) in ${pane.displayName()}?`,
-          async () => send(),
-          "Run",
-        );
-        return;
-      }
-      send();
-    },
-    validateWorkspaceName: (name) => {
-      const cleanName = (name || "").trim();
-      if (!cleanName) return "Give the workspace a name.";
-      if (cleanName.startsWith(".")) return "Names starting with a dot are reserved.";
-      // "scratch" is reserved: the backend deletes that file at app start and
-      // exit, so a user workspace under that name would silently vanish.
-      if (cleanName.toLowerCase() === "scratch") return "“scratch” is reserved for the disposable workspace.";
-      // The backend stores names through a safe-name filter; a name that does
-      // not survive it unchanged would collide or fail to restore on reboot.
-      if (cleanName.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\.+$/, "") !== cleanName) {
-        return "Use letters, digits, spaces, dots, dashes or underscores.";
-      }
-      return null;
-    },
-    // Returns null on success, or a human-readable problem string. Both the
-    // validation message and a failed PUT used to vanish: the caller saw
-    // nothing, and a rejected save still left the app pointing at a workspace
-    // that was never written.
-    saveWorkspace: async (name, folderInput) => {
-      const cleanName = (name || "").trim();
-      const problem = app.validateWorkspaceName(cleanName);
-      if (problem) return problem;
-      // Naming this layout into a workspace another window already has open
-      // would put two autosaving windows on one file from the next keystroke on.
-      const refusal = await claimWorkspaceFor(cleanName);
-      if (refusal) {
-        showError(refusal);
-        return refusal;
-      }
-      // A workspace is a folder first. An empty box falls back to a real
-      // previous choice, never to the disposable scratch root.
-      const folder = (folderInput || "").trim()
-        || (currentWorkspace && currentWorkspace !== SCRATCH_WS ? workspacePath : null);
-      // Naming is the only way to create a workspace, so this always promotes
-      // the current (scratch) layout IN PLACE: every session moves into the
-      // named workspace and the disposable "scratch" is cleared. No terminal
-      // is killed, and scratch never lingers beside the workspace it became.
-      const promotingScratchWs = currentWorkspace === SCRATCH_WS;
-      const previousWorkspace = currentWorkspace;
-      const previousPath = workspacePath;
-      const previousWorkspaceIds = new Set(workspaceSessionIds);
-      const previousScratchIds = new Set(scratchSessionIds);
-      if (!currentWorkspace) {
-        // Never-adopted scratch: promote its background sessions too.
-        workspaceSessionIds = new Set(scratchSessionIds);
-        scratchSessionIds.clear();
-      }
-      for (const sid of app.attachedSessionIds()) workspaceSessionIds.add(sid);
-      clearTimeout(workspaceSaveTimer);
-      currentWorkspace = cleanName;
-      workspacePath = folder;
-      workspacePathExists = true;
-      rememberWorkspace(cleanName);
-      try {
-        await workspace.save(
-        cleanName, layout.serialize(), workspaceLogo, [...ownedSessionIds()], folder,
-      );
-      } catch (error) {
-        currentWorkspace = previousWorkspace;
-        workspacePath = previousPath;
-        workspaceSessionIds = previousWorkspaceIds;
-        scratchSessionIds.clear();
-        for (const sid of previousScratchIds) scratchSessionIds.add(sid);
-        rememberWorkspace(previousWorkspace);
-        await claimWorkspaceFor(previousWorkspace); // the rename did not happen
-
-        const message = error?.detail || `Could not save “${cleanName}”. Nothing was changed.`;
-        showError(message);
-        return message;
-      }
-      if (promotingScratchWs) {
-        // Strip the scratch file's ownership before deleting it, so the backend
-        // delete (which reaps a workspace's detached sessions) can't take the
-        // terminals we just migrated. Then drop the ephemeral file and name.
-        await workspace.save(SCRATCH_WS, { type: "pane" }, null, []).catch(() => {});
-        await api.deleteWorkspace(SCRATCH_WS).catch(() => {});
-        workspaceNames = workspaceNames.filter((item) => item !== SCRATCH_WS);
-      }
-      if (!workspaceNames.includes(cleanName)) workspaceNames.push(cleanName);
-      workspaceNames.sort((a, b) => a.localeCompare(b));
-      workspaceRoots.set(cleanName, folder);
-      clearError();
-      buildLauncher();
-      refreshStatusSoon();
-      return null;
-    },
+    validateWorkspaceName,
+    saveWorkspace: actions.saveWorkspace,
     loadWorkspace: (name) => switchWorkspace(name),
-    // Deleting a workspace never touches the current layout: the server only
-    // kills sessions nobody is attached to, and deleting the workspace you're
-    // in simply turns the live layout into a scratch layout in place.
-    deleteWorkspace: async (name) => {
-      // Deleting a workspace another window has open pulls the file out from
-      // under a live layout that is still autosaving into it.
-      const holder = workspaceHolder(await listWindowsSafe(), windowId, name);
-      if (holder) {
-        showError(windowChoiceMessage({ name, taken: true, mine: false, holder })
-          + " Close it there first.");
-        return false;
-      }
-      try {
-        await api.deleteWorkspace(name);
-      } catch (_) {
-        showError(`Could not delete workspace “${name}”.`);
-        return false;
-      }
-      const deletingCurrent = currentWorkspace === name;
-      if (deletingCurrent) {
-        clearTimeout(workspaceSaveTimer);
-        await claimWorkspaceFor(null); // the live layout is a scratch layout now
-        currentWorkspace = null;
-        workspaceLogo = null;
-        workspacePath = scratchRoot || null;
-        workspacePathExists = true;
-        rememberWorkspace(null);
-        for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);
-        workspaceSessionIds = new Set();
-      }
-      workspaceNames = workspaceNames.filter((item) => item !== name);
-      workspaceRoots.delete(name);
-      buildLauncher();
-      refreshStatusSoon();
-      scheduleWorkspaceSave(); // live layout continues as scratch
-      return true;
-    },
-    onWorkspacesChanged: async () => {
-      workspaceNames = await api.listWorkspaces().catch(() => workspaceNames);
-      buildLauncher();
-      refreshWorkspaceRoots();
-    },
-    currentWorkspace: () => currentWorkspace,
+    deleteWorkspace: actions.deleteWorkspace,
+    onWorkspacesChanged: actions.onWorkspacesChanged,
+    currentWorkspace: () => state.currentWorkspace,
     // Second-window support. The picker offers scratch plus every named
     // workspace, marking the ones another window already holds instead of
     // hiding them: a missing row reads as "that workspace is gone". "scratch"
     // itself is not offered by name, exactly as the sidebar does not list it;
     // the disposable scratch row is the way to open one.
     newWindowChoices: async () => windowChoices(
-      workspaceNames.filter((item) => item !== SCRATCH_WS),
+      state.workspaceNames.filter((item) => item !== SCRATCH_WS),
       await listWindowsSafe(),
-      windowId,
-      currentWorkspace,
+      state.windowId,
+      state.currentWorkspace,
     ),
     openNewWindow,
     // Another workspace tiled into this window, beside the view that asked.
@@ -1868,214 +257,53 @@ async function boot() {
     canShowWorkspaceBeside: () => Boolean(viewHost()),
     shownViews: () => viewHost()?.list() || [],
     focusShownWorkspace: (name) => Boolean(viewHost()?.focusWorkspace(name)),
-    createWorkspaceHere,
+    createWorkspaceHere: actions.createWorkspaceHere,
     hereState,
     explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
-    windowRegistryAvailable: () => registryAvailable,
+    windowRegistryAvailable: () => state.registryAvailable,
     // Set when RegisterHotKey failed at startup (another program owns the
     // combination). Settings renders it next to the field.
-    hotkeyError: () => cfg.hotkey_error || null,
-    workspaceLogo: () => workspaceLogo,
-    workspacePath: () => workspacePath,
+    hotkeyError: () => state.cfg.hotkey_error || null,
+    workspaceLogo: () => state.workspaceLogo,
+    workspacePath: () => state.workspacePath,
     suggestedWorkspaceFolder,
-    workspacePathExists: () => workspacePathExists,
-    scratchRoot: () => scratchRoot,
-    // Repointing a workspace at a different folder is a plain, reversible
-    // edit: nothing running is touched, and the next terminal opens there.
-    // Any saved workspace can be repointed from the Dashboard, not just the
-    // one that happens to be open.
-    setWorkspaceFolder: async (name, folder) => {
-      if (!name || name === currentWorkspace) return app.setWorkspacePath(folder);
-      const saved = await workspace.details(name).catch(() => null);
-      if (!saved) {
-        showError(`Workspace “${name}” could not be read.`);
-        return false;
-      }
-      try {
-        await workspace.save(
-          name, saved.layout, saved.logo || null, [...(saved.session_ids || [])],
-          (folder || "").trim() || null,
-        );
-      } catch (error) {
-        showError(error?.detail || `That folder could not be saved for “${name}”.`);
-        return false;
-      }
-      workspaceRoots.set(name, (folder || "").trim() || null);
-      clearError();
-      return true;
-    },
-    setWorkspacePath: async (folder) => {
-      const next = (folder || "").trim() || null;
-      if (!currentWorkspace) {
-        showError("Name this workspace before giving it a folder.");
-        return false;
-      }
-      const previous = workspacePath;
-      workspacePath = next;
-      workspacePathExists = true;
-      try {
-        await workspace.save(
-          currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()], next,
-        );
-      } catch (error) {
-        workspacePath = previous;
-        showError(error?.detail || "That folder could not be saved for this workspace.");
-        return false;
-      }
-      workspaceRoots.set(currentWorkspace, next);
-      clearError();
-      buildLauncher();
-      refreshStatusSoon();
-      return true;
-    },
-    setWorkspaceLogo: async (assetId) => {
-      if (!currentWorkspace) return false;
-      workspaceLogo = assetId || null;
-      await workspace.save(
-        currentWorkspace, layout.serialize(), workspaceLogo, [...ownedSessionIds()], workspacePath,
-      );
-      buildLauncher();
-      return true;
-    },
-    attachedSessionIds: () => layout.panes()
-      .filter((pane) => pane.session && pane.state === "attached")
-      .map((pane) => pane.session.id),
+    workspacePathExists: () => state.workspacePathExists,
+    scratchRoot: () => state.scratchRoot,
+    setWorkspaceFolder: actions.setWorkspaceFolder,
+    setWorkspacePath: actions.setWorkspacePath,
+    setWorkspaceLogo: actions.setWorkspaceLogo,
+    attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
-    refocusTerm: () => {
-      if (!layout.focused) return false;
-      // Report success even while an overlay holds the keyboard: the caller
-      // only wants to know whether there *is* a pane to hand back to, and
-      // saying "no" would send it to the fallback branch and park focus on a
-      // sidebar button instead. focus.js decides when the pane actually takes
-      // it; the class is set either way so the pane still reads as focused.
-      layout.focused.setFocused(true);
-      return true;
-    },
-    focusHeldByOverlay: () => !terminalMayFocus(),
-    onConfigSaved: async () => {
-      const [fresh, freshInventory] = await Promise.all([
-        api.getConfig().catch(() => null),
-        api.getTerminalOptions().catch(() => terminalInventory),
-      ]);
-      if (!fresh) return;
-      cfg = fresh;
-      reportLaunchError(fresh.launch_error);
-      scratchRoot = fresh.scratch_dir || scratchRoot;
-      profiles = fresh.profiles || [];
-      snippets = fresh.snippets || [];
-      terminalInventory = saveInventoryCache(freshInventory);
-      app.profiles = profiles;
-      app.snippets = snippets;
-      app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
-      applyChromeTheme(fresh.theme, fresh.custom_theme);
-      layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
-      layout.setFontFamily(fresh.font_family || "JetBrains Mono");
-      setFontSize(fresh.font_size, false);
-      buildLauncher();
-    },
   };
 
+  const {
+    reportLaunchError, checkLaunchError, onConfigSaved, previewTheme, appliedTheme, refreshCachedInventory,
+  } = createConfigSync({
+    api, state, app, layout, setFontSize, showError,
+    buildLauncher: () => buildLauncher(),
+  });
+  app.onConfigSaved = onConfigSaved;
+
   const palette = new Palette(app);
-  panels = new Panels(app);
+  const panels = new Panels(app);
   app.openPanel = (name) => panels.show(name);
   $("app-error-close").addEventListener("click", () => {
     clearError();
     app.refocusTerm();
   });
 
-  // Terminal text size: applied live to every pane, persisted to config so it
-  // survives restarts and shows up in Settings. Saving is debounced so holding
-  // the shortcut does not spam the backend.
-  function persistFontSize() {
-    clearTimeout(fontSaveTimer);
-    fontSaveTimer = setTimeout(() => {
-      api.getFullConfig().then((full) => {
-        if (!full) return;
-        full.font_size = fontSize;
-        cfg.font_size = fontSize;
-        return api.putConfig(full);
-      }).catch(() => {});
-    }, 700);
-  }
-
-  function setFontSize(px, persist = true) {
-    const next = clampFont(px);
-    if (next === fontSize && persist) return;
-    fontSize = next;
-    layout.setFontSize(fontSize);
-    if (persist) persistFontSize();
-  }
   app.setFontSize = setFontSize;
-  app.fontSize = () => fontSize;
-
-  // Ctrl+± changes the focused pane only and Ctrl+0 puts it back on the saved
-  // default; Settings changes that default for every pane. Pane-first is the
-  // least surprising: changing text size in one terminal should not reflow
-  // every other running terminal.
-  function scopedFontSize() {
-    return layout.focused ? layout.focused.fontSize : fontSize;
-  }
-
-  function setScopedFontSize(px) {
-    const next = clampFont(px);
-    if (layout.focused) {
-      layout.focused.setFontSize(next);
-      layout.focused.flashNotice(`[font ${next}px]`);
-      return;
-    }
-    setFontSize(next);
-  }
-
-  function resetScopedFontSize() {
-    setScopedFontSize(fontSize);
-  }
-
+  app.fontSize = fontSize;
   app.fontBigger = () => setScopedFontSize(scopedFontSize() + 1);
   app.fontSmaller = () => setScopedFontSize(scopedFontSize() - 1);
   app.fontReset = resetScopedFontSize;
   app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
   app.balanceFocused = () => layout.balanceFocusedSplit();
+  app.previewTheme = previewTheme;
+  app.appliedTheme = appliedTheme;
+  app.version = state.cfg.version || "";
 
-  // Live theme preview: apply the chrome and every terminal's colors instantly
-  // (Settings calls this the moment you click a theme) without persisting.
-  // Reverting is just re-applying the committed config theme, which is what
-  // appliedTheme() reports.
-  app.previewTheme = (themeId, custom) => {
-    applyChromeTheme(themeId, custom || {});
-    layout.setTheme(getTheme(themeId, custom || {}).xterm);
-  };
-  app.appliedTheme = () => ({ theme: cfg.theme, custom_theme: cfg.custom_theme || {} });
-  app.version = cfg.version || "";
-
-  // Update notification: a quiet accent pill in the nav when a newer release
-  // exists. Clicking it opens Settings > About, where install lives.
-  function showUpdatePill(latest) {
-    const nav = document.querySelector(".sidebar-footer");
-    if (!nav || nav.querySelector(".update-pill")) return;
-    const pill = document.createElement("button");
-    pill.type = "button";
-    pill.className = "sidebar-action sidebar-nav-button update-pill";
-    pill.title = `QuickTerm v${latest} is available. Open About to install.`;
-    pill.setAttribute("aria-label", pill.title);
-    pill.textContent = "up";
-    pill.addEventListener("click", () => {
-      panels.settingsTab = "about"; // land directly on About, where install lives
-      panels.show("settings");
-    });
-    nav.prepend(pill);
-  }
-
-  function watchUpdates() {
-    if (cfg.elevated || cfg.update_check === false) return;
-    const probe = () => {
-      api.checkUpdate().then((result) => {
-        if (result && result.update_available) showUpdatePill(result.latest);
-      }).catch(() => {});
-    };
-    setTimeout(probe, 4000); // stay out of the boot path
-    setInterval(probe, 6 * 3600 * 1000);
-  }
-  watchUpdates();
+  watchUpdates({ api, state, panels });
 
   initKeys({
     togglePalette: () => { panels.close(); palette.toggle(); },
@@ -2094,7 +322,7 @@ async function boot() {
     toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
     toggleSettings: () => { palette.close(); panels.toggle("settings"); },
     toggleHelp: () => { palette.close(); panels.toggle("help"); },
-    toggleSidebar: () => launcherView?.cycleMode(),
+    toggleSidebar: () => state.launcherView?.cycleMode(),
     openExplorer: app.openExplorer,
     openEditor: app.openEditor,
     fontBigger: () => setScopedFontSize(scopedFontSize() + 1),
@@ -2102,137 +330,20 @@ async function boot() {
     fontReset: resetScopedFontSize,
   });
 
-  function buildLauncher() {
-    viewHost()?.update();
-    launcherView = initLauncher($("launcher"), {
-      profiles,
-      inventory: terminalInventory,
-      workspaces: workspaceNames,
-      currentWorkspace,
-      workspacePath,
-      workspacePathExists,
-      selectedTerminal,
-      defaultProfile: cfg.default_profile,
-      onSelectTerminal: (choice) => { selectedTerminal = choice; },
-      logoUrl: api.assetUrl(workspaceLogo || cfg.logo),
-      onRunProfile: runProfile,
-      onRunSystem: runSystemTerminal,
-      onLaunchComplete: () => layout.focused?.focusSoon(),
-      onElevateProfile: elevateProfile,
-      onElevateSystem: elevateSystemTerminal,
-      onWorkspace: switchWorkspace,
-      onNewScratch: newScratchWorkspace,
-      onNewTerminal: app.newTerminal,
-      onRenameSession: (session, name) => app.renameSession(session.id, name),
-      onFocusSession: (sessionId) => {
-        const pane = layout.panes().find((item) => item.session?.id === sessionId);
-        if (pane) layout.focusPane(pane);
-      },
-      onAttachSession: attachSession,
-      // A terminal another workspace owns is never attached by a click alone.
-      // The sidebar arms a choice first; this is the explicit half of it, and
-      // moveSessionHere re-checks the session is alive and takes it out of the
-      // old workspace's saved ownership before attaching.
-      onMoveSession: (session, fromWorkspace) => app.moveSessionHere(session, fromWorkspace),
-      // Tiling: which workspaces the window already shows (with their view
-      // colours), how to add one beside this view, and the "workspace here"
-      // offer for the focused terminal's folder.
-      shownViews: () => app.shownViews(),
-      canOpenBeside: () => app.canShowWorkspaceBeside(),
-      onOpenBeside: (name) => app.openWorkspaceBeside(name),
-      onFocusView: (name) => app.focusShownWorkspace(name),
-      workspaceRoots: () => workspaceRoots,
-      here: hereState(),
-      onWorkspaceHere: () => createWorkspaceHere(),
-      onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
-      onOpenFolder: openHere,
-      sessions: lastSessions,
-      attachedSessionIds: app.attachedSessionIds(),
-      ownedSessionIds: app.ownedSessionIds(),
-      elevated: Boolean(cfg.elevated),
-      // One entry point each. The palette already has a permanent trigger in
-      // the status bar (#sb-shortcuts) plus Alt+K, and the Dashboard used to
-      // sit here AND directly above as "Manage workspaces", pixel-identical
-      // once the sidebar is collapsed.
-      chrome: [
-        // Tile another workspace into this window. From inside a view this
-        // still works, because the parent window does the tiling.
-        ["workspace beside", () => {
-          panels.close();
-          palette.newWindowMode(true);
-        }],
-        // The discoverable half of the palette's "new window…" row. Both land
-        // in the same picker, because which workspace a second window opens on
-        // is a choice and the free/taken list only exists in one place. No
-        // shortcut: keys.js may claim only cold Alt combos, and the letters
-        // still free are readline/PSReadLine bindings the shell needs.
-        ["new window", () => {
-          panels.close();
-          palette.newWindowMode();
-        }],
-        ["dashboard", () => panels.toggle("dashboard"), "alt+g"],
-        ["settings", () => panels.toggle("settings"), "alt+s"],
-        ["help", () => panels.toggle("help"), "alt+i"],
-      ],
-    });
-  }
+  const { buildLauncher, refreshStatus, refreshStatusSoon } = createSidebar({
+    api, state, layout, app, panels, palette, viewHost, initialSessions,
+    runProfile, runSystemTerminal, elevateProfile, elevateSystemTerminal, attachSession,
+    switchWorkspace, newScratchWorkspace, hereState, openHere,
+    createWorkspaceHere: actions.createWorkspaceHere,
+  });
+  const { claimLaunchLoop, stopLaunchLoop } = createLaunchLoop({ api, state, openFolderInScratch, showError });
+  const { persistOnExit, closeView } = createLifecycle({
+    api, workspace, state, layout, ownedSessionIds,
+    stopWindowHeartbeat: registry.stopWindowHeartbeat,
+    stopLaunchLoop, cancelWorkspaceSave, cancelWorkspaceRetry, scheduleWorkspaceSave,
+  });
 
-  function refreshStatus() {
-    if (document.hidden) return;
-    // The focused terminal's folder changes with every cd and focus change,
-    // so the "workspace here" offer is patched here, not rebuilt with the
-    // sidebar.
-    launcherView?.updateHere(hereState());
-    api.getSessions({ metrics: false }).then((list) => {
-      lastSessions = list;
-      launcherView?.updateSessions(list, [...app.attachedSessionIds()], [...app.ownedSessionIds()]);
-    }).catch(() => {});
-  }
-
-  function refreshStatusSoon() {
-    clearTimeout(statusTimer);
-    statusTimer = setTimeout(refreshStatus, 250);
-  }
-
-  function persistOnExit() {
-    if (exiting) return;
-    exiting = true;
-    launchLoopStopped = true;
-    clearInterval(windowHeartbeatTimer);
-    // keepalive, for the same reason the layout PUT below needs it: the
-    // document is going away and a normal fetch is cancelled with it, so the
-    // release would never leave and this window's workspace would stay claimed
-    // until the registry expired the heartbeat. That is the difference between
-    // the other window opening it now and the user waiting out a timeout.
-    const release = () => {
-      if (!windowId) return;
-      return fetch(`/api/windows/${encodeURIComponent(windowId)}`, {
-        method: "DELETE",
-        headers: { ...api.authHeaders() },
-        keepalive: true,
-      }).catch(() => {});
-    };
-    if (currentWorkspace && layout.root && !transitioning) {
-      // Use the same queue as autosave: a queued older snapshot must never
-      // arrive after this one. Unload remains best-effort; explicit view close
-      // awaits the save while its document is still alive.
-      workspace.save(currentWorkspace, layout.serialize(), workspaceLogo,
-        [...ownedSessionIds()], undefined, { keepalive: true })
-        .catch(() => {}).finally(release);
-    } else release();
-    // The idle reaper has fresh activity data; pagehide must never kill scratch.
-  }
   window.addEventListener("pagehide", persistOnExit);
-
-  // A global hotkey launches while this window is in the background, and its
-  // failure only lands on the config. Look again when the user comes back to
-  // the window instead of polling the whole config every few seconds.
-  let launchErrorCheckedAt = 0;
-  function checkLaunchError() {
-    if (embedded || !windowIsPrimary || Date.now() - launchErrorCheckedAt < 5000) return;
-    launchErrorCheckedAt = Date.now();
-    api.getConfig().then((fresh) => reportLaunchError(fresh && fresh.launch_error)).catch(() => {});
-  }
   window.addEventListener("focus", checkLaunchError);
 
   setInterval(refreshStatus, 10000);
@@ -2244,21 +355,21 @@ async function boot() {
     }
   });
 
-  if (currentWorkspace) {
-    const restored = await restoreWorkspace(currentWorkspace);
+  if (state.currentWorkspace) {
+    const restored = await restoreWorkspace(state.currentWorkspace);
     if (!restored) await startScratch();
   } else {
     // Boot straight into scratch without going through startScratch(): adopt
     // the scratch folder here too, or the sidebar and status bar would claim
     // scratch has no folder while its terminals open in one.
-    workspacePath = scratchRoot || null;
-    workspacePathExists = true;
+    state.workspacePath = state.scratchRoot || null;
+    state.workspacePathExists = true;
     const pane = layout.init();
     const administratorSession = !openDir && initialSessions.find((session) =>
       (session.name || "").startsWith("Administrator - "));
     if (administratorSession) {
       pane.attach(administratorSession);
-      scratchSessionIds.add(administratorSession.id);
+      state.scratchSessionIds.add(administratorSession.id);
       layout.focusPane(pane);
     } else {
       await spawnDefaultInto(pane, openDir);
@@ -2267,70 +378,21 @@ async function boot() {
   // Do not sweep unknown sessions here: backend autostart profiles exist
   // before this window and intentionally have no saved workspace yet. The
   // backend idle reaper already removes only safe, untouched, non-busy shells.
-  transitioning = false;
+  state.transitioning = false;
   window.quicktermView = {
-    workspace: () => currentWorkspace,
+    workspace: () => state.currentWorkspace,
     suspend: suspendView,
-    close: async () => {
-      if (transitioning) return false;
-      transitioning = true;
-      clearTimeout(workspaceSaveTimer);
-      clearTimeout(workspaceRetryTimer);
-      try {
-        if (currentWorkspace) {
-          await workspace.save(currentWorkspace, layout.serialize(), workspaceLogo,
-            [...ownedSessionIds()], workspacePath);
-        }
-        for (const id of ownedSessionIds()) {
-          await api.retainSession(id).catch((error) => { if (!sessionAlreadyGone(error)) throw error; });
-        }
-        if (windowId) await api.unregisterWindow(windowId);
-        exiting = true;
-        clearInterval(windowHeartbeatTimer);
-        launchLoopStopped = true;
-        return true;
-      } catch (error) {
-        transitioning = false;
-        scheduleWorkspaceSave();
-        throw error;
-      }
-    },
+    close: closeView,
   };
   buildLauncher();
   refreshStatus();
   // After the restore, so nothing the boot itself reports replaces it.
-  reportLaunchError(cfg.launch_error);
+  reportLaunchError(state.cfg.launch_error);
   if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
   // Off the boot path: one small request per saved workspace.
   setTimeout(() => refreshWorkspaceRoots(), 1200);
-  if (cachedInventory) {
-    setTimeout(() => {
-      api.getTerminalOptions().then((fresh) => {
-        if (JSON.stringify(fresh) === JSON.stringify(terminalInventory)) return;
-        terminalInventory = saveInventoryCache(fresh);
-        buildLauncher();
-      }).catch(() => {});
-    }, 1500);
-  }
-}
-
-const INVENTORY_CACHE_KEY = "quickterm.inventory";
-
-function loadInventoryCache() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(INVENTORY_CACHE_KEY) || "null");
-    return parsed && Array.isArray(parsed.types) ? parsed : null;
-  } catch (_) { return null; }
-}
-
-function saveInventoryCache(inventory) {
-  try {
-    if (inventory && Array.isArray(inventory.types)) {
-      localStorage.setItem(INVENTORY_CACHE_KEY, JSON.stringify(inventory));
-    }
-  } catch (_) { /* optional */ }
-  return inventory;
+  if (cachedInventory) refreshCachedInventory();
 }
 
 boot();
