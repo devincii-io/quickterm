@@ -11,14 +11,14 @@ from collections import deque
 from dataclasses import dataclass
 
 from .config import default_cwd, validate_environment
-from .process_usage import snapshot_processes, summarize_trees
+from .process_usage import pids_with_children, snapshot_processes, summarize_trees
 
 log = logging.getLogger(__name__)
 
 if os.name == "nt":
-    from .pty_session import PtySession, pids_with_children
+    from .pty_session import PtySession
 else:
-    from .pty_posix import PtySession, pids_with_children
+    from .pty_posix import PtySession
 
 # Keep slow-viewer memory bounded. If a viewer falls behind this window it is
 # explicitly told to reconnect and replay the current scrollback; arbitrary VT
@@ -29,6 +29,10 @@ _KILL_REMOVE_GRACE_S = 1.0
 
 class SessionLimitError(RuntimeError):
     """A new spawn would exceed the configured live-session limit."""
+
+
+class SpawnError(ValueError):
+    """The PTY backend could not start the process (missing command, bad folder)."""
 
 
 @dataclass
@@ -208,6 +212,10 @@ class SessionManager:
         self._sessions[sid] = session
         return info
 
+    async def spawn_async(self, **kwargs) -> SessionInfo:
+        """``spawn`` for request handlers. Contract stub: refined by the sessions agent."""
+        return self.spawn(**kwargs)
+
     def list(self) -> list[SessionInfo]:
         # The registry is mutated on the event-loop thread but iterated from
         # the anyio threadpool (sync REST handlers) and the pywebview GUI
@@ -238,6 +246,13 @@ class SessionManager:
             s.info.touched = True
             s.last_activity = time.monotonic()
             s.pty.write(data)
+
+    def touch(self, sid: str) -> None:
+        """Record real user input (the client's explicit touch frame)."""
+        s = self._sessions.get(sid)
+        if s and s.info.alive:
+            s.info.touched = True
+            s.last_activity = time.monotonic()
 
     def busy_ids(self) -> set[str]:
         """Sessions whose shell has a child process right now (ssh, a build,

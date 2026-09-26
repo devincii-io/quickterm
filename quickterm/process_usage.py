@@ -49,6 +49,21 @@ def reachable_pids(
     return seen
 
 
+def pids_with_children(identities: "list[tuple[int, int]] | None" = None) -> set[int]:
+    """PIDs that have at least one direct child, from one process-table snapshot.
+
+    A session is "busy" exactly when its root PID is in this set.
+    """
+    if identities is None:
+        identities = process_identities()
+    return {parent for _pid, parent in identities if parent}
+
+
+def descendants(identities: "list[tuple[int, int]]", root: int) -> set[int]:
+    """Every process below ``root`` (the root itself excluded)."""
+    return reachable_pids(identities, {root}) - {root}
+
+
 def summarize_trees(
     processes: dict[int, ProcessSample], root_pids: set[int]
 ) -> dict[int, TreeUsage]:
@@ -158,11 +173,11 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(ctypes.c_void_p(handle))
 
-    def snapshot_processes(roots: set[int] | None = None) -> dict[int, ProcessSample]:
-        """Sample process counters. With ``roots``, only their trees."""
+    def process_identities() -> list[tuple[int, int]]:
+        """(pid, parent_pid) for every process, from one Toolhelp snapshot."""
         snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if not snap or snap == _INVALID_HANDLE:
-            return {}
+            return []
         identities: list[tuple[int, int]] = []
         try:
             entry = _PROCESSENTRY32W()
@@ -177,7 +192,15 @@ if os.name == "nt":
                         break
         finally:
             _k32.CloseHandle(ctypes.c_void_p(snap))
+        return identities
 
+    def snapshot_processes(
+        roots: set[int] | None = None,
+        identities: list[tuple[int, int]] | None = None,
+    ) -> dict[int, ProcessSample]:
+        """Sample process counters. With ``roots``, only their trees."""
+        if identities is None:
+            identities = process_identities()
         wanted = reachable_pids(identities, roots) if roots is not None else None
         result: dict[int, ProcessSample] = {}
         for pid, parent in identities:
@@ -189,35 +212,59 @@ if os.name == "nt":
         return result
 
 else:
-    def snapshot_processes(roots: set[int] | None = None) -> dict[int, ProcessSample]:
-        """Read Linux /proc counters; return unavailable on other POSIX systems.
+    def _proc_stat_tail(name: str) -> list[bytes] | None:
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            return None  # process vanished or access was denied
+        # pid (comm) state ppid ...; comm may contain spaces and parentheses,
+        # so split after the LAST ')'.
+        return raw[raw.rfind(b")") + 2 :].split()
 
-        With ``roots``, only the processes in those trees are returned (the
-        parse still touches every /proc entry; that read is the cheap part).
-        """
+    def process_identities() -> list[tuple[int, int]]:
+        """(pid, parent_pid) for every process in /proc; empty without /proc."""
         try:
             entries = os.listdir("/proc")
+        except OSError:
+            return []
+        identities: list[tuple[int, int]] = []
+        for name in entries:
+            if not name.isdigit():
+                continue
+            tail = _proc_stat_tail(name)
+            try:
+                identities.append((int(name), int(tail[1])))  # type: ignore[index]
+            except (TypeError, ValueError, IndexError):
+                continue
+        return identities
+
+    def snapshot_processes(
+        roots: set[int] | None = None,
+        identities: list[tuple[int, int]] | None = None,
+    ) -> dict[int, ProcessSample]:
+        """Read Linux /proc counters; return unavailable on other POSIX systems.
+
+        With ``roots``, only the processes in those trees are read.
+        """
+        try:
             clock_ticks = os.sysconf("SC_CLK_TCK")
             page_size = os.sysconf("SC_PAGE_SIZE")
         except (OSError, ValueError):
             return {}
+        if identities is None:
+            identities = process_identities()
+        wanted = reachable_pids(identities, roots) if roots is not None else None
         samples: dict[int, ProcessSample] = {}
-        for name in entries:
-            if not name.isdigit():
+        for pid, _parent in identities:
+            if wanted is not None and pid not in wanted:
                 continue
+            tail = _proc_stat_tail(str(pid))
             try:
-                with open(f"/proc/{name}/stat", "rb") as handle:
-                    raw = handle.read()
-                tail = raw[raw.rfind(b")") + 2 :].split()
-                parent = int(tail[1])
-                cpu = (int(tail[11]) + int(tail[12])) / clock_ticks
-                memory = int(tail[21]) * page_size
-                samples[int(name)] = ProcessSample(parent, memory, cpu)
-            except (OSError, ValueError, IndexError):
-                continue  # process vanished, access was denied, or row was malformed
-        if roots is None:
-            return samples
-        wanted = reachable_pids(
-            [(pid, sample.parent_pid) for pid, sample in samples.items()], roots
-        )
-        return {pid: sample for pid, sample in samples.items() if pid in wanted}
+                parent = int(tail[1])  # type: ignore[index]
+                cpu = (int(tail[11]) + int(tail[12])) / clock_ticks  # type: ignore[index]
+                memory = int(tail[21]) * page_size  # type: ignore[index]
+            except (TypeError, ValueError, IndexError):
+                continue  # vanished between the two reads, or a malformed row
+            samples[pid] = ProcessSample(parent, memory, cpu)
+        return samples

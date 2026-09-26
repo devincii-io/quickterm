@@ -79,8 +79,24 @@ def root_exists(root: str | None) -> bool:
         return False
 
 
+_NAMESPACE: str | None = None
+
+
+def set_namespace(name: str | None) -> None:
+    """Keep this process's workspaces in their own folder (None = the default).
+
+    An elevated instance is a second backend with its own window registry, so
+    sharing workspace files with the normal instance let both autosave one
+    layout, and its scratch cleanup deleted the other's live scratch file.
+    """
+    global _NAMESPACE
+    _NAMESPACE = name or None
+
+
 def _workspaces_dir() -> Path:
     path = config_dir() / "workspaces"
+    if _NAMESPACE:
+        path = path / _NAMESPACE
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -148,9 +164,7 @@ def load_workspace(name: str) -> Workspace | None:
     if not isinstance(session_ids, list):
         # Backward compatibility: older workspace files expressed ownership
         # only through panes in the saved layout.
-        found: set[str] = set()
-        _collect_session_ids(raw.get("layout", {}), found)
-        session_ids = sorted(found)
+        session_ids = sorted(layout_session_ids(raw.get("layout", {})))
     try:
         path = normalize_root(raw.get("path"))
     except ValueError:
@@ -204,16 +218,34 @@ def save_workspace(ws: Workspace) -> None:
         raise
 
 
-def _collect_session_ids(node: object, out: set[str]) -> None:
-    if not isinstance(node, dict):
-        return
-    if node.get("type") == "split":
-        for child in node.get("children", []):
-            _collect_session_ids(child, out)
-        return
-    sid = node.get("session_id")
-    if isinstance(sid, str) and sid:
-        out.add(sid)
+def layout_session_ids(node: object) -> set[str]:
+    """Session ids of every pane in a saved layout tree (the one walker)."""
+    found: set[str] = set()
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, dict):
+            continue
+        if current.get("type") == "split":
+            children = current.get("children", [])
+            if isinstance(children, list):
+                pending.extend(children)
+            continue
+        sid = current.get("session_id")
+        if isinstance(sid, str) and sid:
+            found.add(sid)
+    return found
+
+
+def referenced_session_ids() -> set[str]:
+    """Every session any saved workspace owns, through its layout or its list."""
+    ids: set[str] = set()
+    for name in list_workspaces():
+        ws = load_workspace(name)
+        if ws is not None:
+            ids.update(layout_session_ids(ws.layout))
+            ids.update(ws.session_ids)
+    return ids
 
 
 def delete_workspace(name: str) -> None:
