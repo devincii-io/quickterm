@@ -295,6 +295,7 @@ class SessionInfo:
     retained: bool = False      # explicit detach; keep even if untouched/idle
     workspace: str | None = None  # workspace this session belongs to
     cwd: str | None = None      # folder the process started in
+    current_cwd: str | None = None  # last folder the shell reported (OSC 7, OSC 9;9)
 
 class Session:
     info: SessionInfo
@@ -320,6 +321,9 @@ class SessionManager:
                                                      # KeyError when sid is unknown
     def attach(self, sid: str) -> "Attachment"       # KeyError: unknown or being reaped
     def acknowledge(self, sid: str) -> None          # background output seen, no subscription
+    def mark_seen(self, sid: str) -> None            # clear attention; KeyError when unknown
+    def session_attention(self, sid: str) -> dict | None  # {kind, text, age_seconds}
+    def set_attention_listener(self, cb) -> None     # cb(info, record), loop thread
     def busy_ids(self) -> set[str]                   # sessions whose shell has a child process
     def session_metrics(self) -> tuple[set[str], dict[str, dict]]
     def session_activity(self, sid: str) -> dict[str, int | None]
@@ -378,6 +382,20 @@ class Attachment:
   the loop thread right before its kill, so a session picked up during a slow
   pass survives; a failed kill clears the mark.
 - Session ids: full random hex (`uuid4().hex`).
+- "Needs you": `quickterm/signals.py` scans every output burst (two
+  `bytes.find` calls when a burst holds neither BEL nor `ESC ]`, a small carry
+  across bursts, never a per-byte loop) for a BEL that does not end an OSC
+  string, OSC 9 notifications (not the ConEmu subcommands 9;1 to 9;12, which
+  include progress, the folder and prompt marks), OSC 777 `notify` and OSC 99.
+  The latest one becomes the session's attention record
+  `Attention(kind="bell"|"notify", text, at)`; an exit becomes `kind="exit"`
+  when the session was attached once and typed into or explicitly detached,
+  and no viewer is attached. Output never clears attention; `mark_seen` (the
+  client, when the pane showing it gains focus or the user opens it from the
+  sidebar), a touch, and opening an exited session do. The reaper keeps an
+  exited session with attention like one with unread output, and never reaps
+  an idle live one that has attention. The same scanner reads OSC 7 and
+  OSC 9;9 into `SessionInfo.current_cwd`.
 
 ## quickterm/workspace.py
 
@@ -548,6 +566,14 @@ holds the shared request helpers (bounded JSON bodies, `resolve_request`).
 Route modules load `workspace`, `config`, `opener`, `update` and `assets`
 through `importlib.import_module("quickterm.X")` so tests can stub them.
 
+`create_app` also takes `notify=None`: in the desktop app,
+`notify(session_id, name, kind, text)` is called on the loop thread when a
+session gains attention. When no QuickTerm window is in the foreground it
+flashes the primary window's taskbar button; when every window is hidden in
+the tray it shows a tray balloon; at most once per terminal every 30 s. The
+window title never changes: `hotkeys.py` finds the window to summon by its
+exact title.
+
 `windows` is the registry shared with `app.py`'s native side; omitted, the app
 builds a private one (headless, tests). `open_window(workspace, cwd) -> window
 id` exists only when a pywebview shell is running; it blocks, so the route
@@ -585,10 +611,11 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `?metrics=false` skips process-tree sampling and returns lifecycle/activity data with unavailable usage for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
+| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
 | GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
+| POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
 | POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
 | GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
@@ -607,6 +634,8 @@ REST (JSON, under `/api`):
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
 | DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. |
 | GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, default_profile, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the primary window shows it in the error banner. |
+| GET | /api/config/history | → `[{id, saved_at, summary}]`, newest first: the last 20 configs a save replaced (`<config dir>/history/`, same DPAPI protection as `config.json`; a save that changes nothing adds none). `summary` names the top-level settings that differ from the next newer version, or from the current config for the newest. |
+| POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry) → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
 | PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. `port`, `host` and `summon_hotkey` need a restart and are not applied live; everything else, `scratch_dir` included, applies at once. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
