@@ -430,6 +430,24 @@
   text-transform: uppercase;
 }
 
+/* A group of profiles of one terminal type: the title and how many sit under
+   it on one line. Unstyled, the count fell onto a line of its own and read
+   as a stray "1" under every heading. */
+.config-group-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 18px 0 8px;
+}
+.config-group-heading:first-child { margin-top: 0; }
+.config-group-title { margin: 0; }
+.config-group-count,
+.config-group-note {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
 .settings-grid { gap: 12px 14px; }
 .settings-field { gap: 5px; }
 .field-label { color: var(--text-soft); font-size: 11.5px; font-weight: 600; }
