@@ -69,13 +69,24 @@ const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
 
-export function fileUrlToPath(value) {
+// The backend is always on this machine (loopback only), so the client's
+// platform is the platform every path is resolved on.
+function clientIsWindows() {
+  return typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent || "");
+}
+
+// A POSIX shell reports OSC 7 as file://<its hostname>/path. Reading that host
+// as a UNC server turned every split's cwd on Linux into \\host\path and the
+// split failed. Only Windows has UNC shares, and there only a host other than
+// localhost names one; a drive-letter path is local whatever host it carries.
+export function fileUrlToPath(value, { windows = clientIsWindows() } = {}) {
   try {
     const url = new URL(value);
     if (url.protocol !== "file:") return null;
-    let path = decodeURIComponent(url.pathname || "");
+    const path = decodeURIComponent(url.pathname || "");
     if (/^\/[A-Za-z]:\//.test(path)) return path.slice(1).replaceAll("/", "\\");
-    if (url.hostname) return `\\\\${url.hostname}${path.replaceAll("/", "\\")}`;
+    const host = (url.hostname || "").toLowerCase();
+    if (windows && host && host !== "localhost") return `\\\\${url.hostname}${path.replaceAll("/", "\\")}`;
     return path;
   } catch (_) {
     return null;
@@ -739,12 +750,21 @@ export class Pane {
     return false;
   }
 
-  // First real input flips userWrote and notifies once: the workspace layer
-  // uses that moment to adopt a scratch layout as the "scratch" workspace.
+  // Every real input (a key, a native paste, sendText, a drop) comes through
+  // here. It tells the backend once per connection, because the session's
+  // `touched` flag keeps it from the idle reaper and keeps the app in the tray,
+  // and it flips userWrote once per pane: the workspace layer uses that moment
+  // to adopt a scratch layout as the "scratch" workspace.
   _markWrote() {
+    this._sendTouch();
     if (this.userWrote) return;
     this.userWrote = true;
     this.onStateChange(this);
+  }
+
+  _sendTouch() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this._exited) return;
+    if (this._protocol.takeTouch()) this.ws.send(JSON.stringify({ type: "touch" }));
   }
 
   // Two-step close: something is running inside this shell, so the first

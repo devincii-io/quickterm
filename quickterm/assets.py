@@ -42,10 +42,6 @@ def assets_dir() -> Path:
     return path
 
 
-def accepts(content_type: str) -> bool:
-    return content_type.split(";")[0].strip().lower() in _TYPES
-
-
 def save_asset(data: bytes, content_type: str) -> str:
     """Persist bytes, returning the asset id (filename). Raises ValueError."""
     ctype = content_type.split(";")[0].strip().lower()

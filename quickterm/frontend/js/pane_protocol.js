@@ -9,15 +9,29 @@ export class PaneAttachProtocol {
     this.replayWrites = 0;
     this.queuedBytes = 0;
     this.generation = 0;
+    this.touchSent = false;
   }
 
+  // Every connection is a new WebSocket, and the server may be a restarted
+  // backend or a reattach after an overflow, so each one says "touch" afresh.
   beginReplay() {
     this.phase = "replay";
     this.replayDone = false;
     this.replayWrites = 0;
     this.queuedBytes = 0;
     this.generation += 1;
+    this.touchSent = false;
     return this.generation;
+  }
+
+  // True exactly once per connection, on the first real user input that can
+  // reach the PTY. The backend's `touched` flag comes only from this frame:
+  // onData alone also carries xterm's automatic replies (DA, DSR, focus
+  // reports), which must never make a shell look used.
+  takeTouch() {
+    if (this.touchSent || !this.canSendInput()) return false;
+    this.touchSent = true;
+    return true;
   }
 
   isCurrent(generation) {

@@ -25,10 +25,15 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from uuid import uuid4
 
-# A window heartbeats far more often than this (the frontend picks the
-# interval). The TTL only has to outlive one slow page load plus a missed beat,
-# because its whole job is releasing a workspace held by a window that is gone.
-DEFAULT_TTL_S = 45.0
+# The frontend beats every few seconds while visible, but Chromium (and so
+# WebView2) aligns the timers of a page hidden for five minutes to one wake-up
+# per minute, so a minimized or tray-hidden window may beat only every 60 s or
+# a little later. A shorter TTL expired such a window and freed its workspace
+# for a second window to autosave over. The TTL is only the fallback for a
+# window that vanished without a word: a native close forgets its window and a
+# closing page unregisters itself, so a long TTL costs nothing in the normal
+# case.
+DEFAULT_TTL_S = 150.0
 # Windows are cheap but not free (one WebView2 each). A ceiling keeps a runaway
 # caller from opening them until the machine gives up.
 DEFAULT_MAX_WINDOWS = 12
@@ -158,17 +163,6 @@ class WindowRegistry:
 
     # --- queries ------------------------------------------------------------
 
-    def list(self, *, now: float | None = None) -> list[WindowInfo]:
-        with self._lock:
-            now = self._prune_locked(now)
-            return [replace(info) for info in self._ordered_locked()]
-
-    def get(self, window_id: str, *, now: float | None = None) -> WindowInfo | None:
-        with self._lock:
-            self._prune_locked(now)
-            info = self._windows.get(_clean(window_id, MAX_ID_CHARS))
-            return replace(info) if info is not None else None
-
     def owner_of(self, workspace: object, *, now: float | None = None) -> WindowInfo | None:
         name = normalize_workspace(workspace)
         if name is None:
@@ -177,11 +171,6 @@ class WindowRegistry:
             self._prune_locked(now)
             owner = self._owner_locked(name)
             return replace(owner) if owner is not None else None
-
-    def count(self, *, now: float | None = None) -> int:
-        with self._lock:
-            self._prune_locked(now)
-            return len(self._windows)
 
     def snapshot(self, *, now: float | None = None) -> list[dict]:
         """Client-facing list, oldest window first, with ages instead of clocks."""
@@ -258,9 +247,6 @@ class WindowRegistry:
             info.last_seen = stamp
             return replace(info)
 
-    def release(self, window_id: str, *, now: float | None = None) -> WindowInfo:
-        return self.claim(window_id, None, now=now)
-
     def forget(self, window_id: str, *, now: float | None = None) -> bool:
         """Drop a window that is definitely gone (its native shell closed, or
         the page said goodbye). Frees the claim without waiting out the TTL."""
@@ -270,21 +256,13 @@ class WindowRegistry:
             self._ensure_primary_locked()
             return dropped
 
-    def prune(self, *, now: float | None = None) -> list[WindowInfo]:
-        with self._lock:
-            expired: list[WindowInfo] = []
-            self._prune_locked(now, expired)
-            return expired
-
     # --- internals ----------------------------------------------------------
 
-    def _prune_locked(self, now: float | None, expired: list[WindowInfo] | None = None) -> float:
+    def _prune_locked(self, now: float | None) -> float:
         stamp = self._clock() if now is None else float(now)
         for wid, info in list(self._windows.items()):
             if stamp - info.last_seen > self._ttl:
                 del self._windows[wid]
-                if expired is not None:
-                    expired.append(info)
         self._ensure_primary_locked()
         return stamp
 

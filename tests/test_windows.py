@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from quickterm.windows import (
+    DEFAULT_TTL_S,
     KEEP,
     TooManyWindows,
     UnknownWindow,
@@ -45,6 +46,16 @@ def registry(clock) -> WindowRegistry:
     return WindowRegistry(ttl_s=30.0, max_windows=4, clock=clock)
 
 
+def row(registry: WindowRegistry, window_id: str) -> dict | None:
+    # The registry's only read surface is what the server exposes: snapshot()
+    # and owner_of(). Tests read through the same door.
+    return next((item for item in registry.snapshot() if item["id"] == window_id), None)
+
+
+def ids(registry: WindowRegistry) -> list[str]:
+    return [item["id"] for item in registry.snapshot()]
+
+
 # --- claiming ---------------------------------------------------------------
 
 
@@ -56,14 +67,14 @@ def test_two_windows_cannot_claim_one_workspace(registry):
     assert excinfo.value.workspace == "dev"
     assert excinfo.value.owner.id == first.id
     # The refusal must not have half-applied: the loser still claims nothing.
-    assert registry.get(second.id).workspace is None
+    assert row(registry, second.id)["workspace"] is None
 
 
 def test_registering_into_a_claimed_workspace_fails_and_adds_nothing(registry):
     registry.register(window_id="a", workspace="dev")
     with pytest.raises(WorkspaceClaimed):
         registry.register(window_id="b", workspace="dev")
-    assert [info.id for info in registry.list()] == ["a"]
+    assert ids(registry) == ["a"]
 
 
 def test_a_window_may_reclaim_what_it_already_holds(registry):
@@ -77,15 +88,15 @@ def test_a_window_may_reclaim_what_it_already_holds(registry):
 def test_claiming_a_second_workspace_replaces_the_first(registry):
     info = registry.register(window_id="a", workspace="dev")
     registry.claim(info.id, "docs")
-    assert registry.get("a").workspace == "docs"
+    assert row(registry, "a")["workspace"] == "docs"
     # ...and the vacated one is immediately claimable by somebody else.
     other = registry.register(window_id="b")
     assert registry.claim(other.id, "dev").workspace == "dev"
 
 
-def test_release_frees_the_workspace(registry):
+def test_claiming_nothing_frees_the_workspace(registry):
     registry.register(window_id="a", workspace="dev")
-    registry.release("a")
+    registry.claim("a", None)
     assert registry.owner_of("dev") is None
     registry.register(window_id="b", workspace="dev")
     assert registry.owner_of("dev").id == "b"
@@ -95,7 +106,7 @@ def test_windows_without_a_claim_never_collide(registry):
     registry.register(window_id="a")
     registry.register(window_id="b")
     assert registry.owner_of(None) is None
-    assert len(registry.list()) == 2
+    assert len(ids(registry)) == 2
 
 
 def test_workspace_names_are_compared_exactly(registry):
@@ -108,10 +119,10 @@ def test_workspace_names_are_compared_exactly(registry):
 def test_registering_without_a_workspace_key_preserves_the_claim(registry):
     registry.register(window_id="a", workspace="dev")
     registry.register(window_id="a", title="QuickTerm", workspace=KEEP)
-    assert registry.get("a").workspace == "dev"
+    assert row(registry, "a")["workspace"] == "dev"
     # An explicit null is the way to say "I hold nothing now".
     registry.register(window_id="a", workspace=None)
-    assert registry.get("a").workspace is None
+    assert row(registry, "a")["workspace"] is None
 
 
 def test_unknown_window_cannot_claim_or_beat(registry):
@@ -140,7 +151,7 @@ def test_a_window_that_stops_beating_expires_and_frees_its_workspace(registry, c
     # Without expiry one crashed window would lock its project out of the app
     # for the rest of the backend's life.
     assert registry.owner_of("dev") is None
-    assert registry.list() == []
+    assert ids(registry) == []
     assert registry.register(window_id="b", workspace="dev").workspace == "dev"
 
 
@@ -152,12 +163,18 @@ def test_heartbeats_keep_a_window_alive(registry, clock):
     assert registry.owner_of("dev").id == "a"
 
 
-def test_expiry_is_reported_by_prune(registry, clock):
-    registry.register(window_id="a")
-    registry.register(window_id="b")
-    clock.advance(31)
-    assert sorted(info.id for info in registry.prune()) == ["a", "b"]
-    assert registry.prune() == []
+def test_the_default_ttl_outlives_a_hidden_window_s_throttled_beat(clock):
+    # Chromium wakes the timers of a page hidden for five minutes about once a
+    # minute, so a minimized window beats every 60 s or a little later. At the
+    # old 45 s TTL that expired it and freed its workspace for another window.
+    registry = WindowRegistry(clock=clock)
+    registry.register(window_id="a", workspace="dev")
+    for _ in range(10):
+        clock.advance(70)
+        registry.heartbeat("a")
+    assert registry.owner_of("dev").id == "a"
+    clock.advance(DEFAULT_TTL_S + 1)
+    assert registry.owner_of("dev") is None
 
 
 def test_a_beat_after_expiry_is_a_404_not_a_silent_revival(registry, clock):
@@ -191,11 +208,11 @@ def test_one_live_window_is_always_primary(registry):
     first = registry.register(window_id="a", primary=True)
     registry.register(window_id="b")
     assert first.primary is True
-    assert registry.get("b").primary is False
+    assert row(registry, "b")["primary"] is False
     # The Explorer handoff and the summon hotkey aim at the primary window, so
     # closing it must hand the role on rather than leave nothing to aim at.
     registry.forget("a")
-    assert registry.get("b").primary is True
+    assert row(registry, "b")["primary"] is True
 
 
 def test_expiring_the_primary_also_promotes(registry, clock):
@@ -204,13 +221,13 @@ def test_expiring_the_primary_also_promotes(registry, clock):
     registry.register(window_id="b")
     clock.advance(20)
     registry.heartbeat("b")
-    assert registry.get("b").primary is True
+    assert row(registry, "b")["primary"] is True
 
 
 def test_registry_hands_out_copies_not_its_own_records(registry):
     info = registry.register(window_id="a", workspace="dev")
     info.workspace = "somewhere-else"
-    assert registry.get("a").workspace == "dev"
+    assert row(registry, "a")["workspace"] == "dev"
 
 
 def test_snapshot_reports_ages_oldest_first(registry, clock):

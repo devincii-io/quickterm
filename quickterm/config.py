@@ -10,8 +10,11 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from . import secret_store
+
+_T = TypeVar("_T")
 
 
 ENV_MAX_PAIRS = 256
@@ -437,7 +440,7 @@ def load_config() -> AppConfig:
         save_config(cfg)
         return cfg
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(read_text(path))
         cfg = config_from_dict(raw)
         validate_config(cfg)
         if _has_plaintext_environment(raw):
@@ -450,7 +453,7 @@ def load_config() -> AppConfig:
         # Keep the exact broken file recoverable instead of trapping the app in
         # a startup crash loop or silently overwriting the user's settings.
         backup = path.with_name(f"config.invalid-{time.time_ns()}.json")
-        os.replace(path, backup)
+        replace_file(path, backup)
         cfg = AppConfig()
         save_config(cfg)
         return cfg
@@ -459,7 +462,70 @@ def load_config() -> AppConfig:
 def save_config(cfg: AppConfig) -> None:
     validate_config(cfg)
     path = config_dir() / "config.json"
-    _atomic_write(path, json.dumps(_storage_dict(cfg), indent=2))
+    text = json.dumps(_storage_dict(cfg), indent=2)
+    _keep_previous(path, text)
+    _atomic_write(path, text)
+
+
+def _keep_previous(path: Path, text: str) -> None:
+    """Copy the config about to be replaced to config.prev.json, best effort.
+
+    A PUT that drops fields (an older or buggy client) replaced every profile
+    and snippet with nothing to go back to. The copy is the stored file as it
+    was, so DPAPI-protected values stay protected in it. An identical save
+    leaves the backup alone, or saving twice would erase the only older state.
+    """
+    try:
+        previous = read_text(path)
+    except (OSError, UnicodeError):
+        return
+    if previous == text:
+        return
+    try:
+        legacy_plaintext = _has_plaintext_environment(json.loads(previous))
+    except (ValueError, TypeError, AttributeError):
+        legacy_plaintext = False  # unparseable: nothing in it can be decrypted either
+    if legacy_plaintext:
+        # This save is the one that encrypts a legacy config's secrets; a copy
+        # of the old file would keep them on disk in the clear.
+        return
+    try:
+        _atomic_write(path.with_name("config.prev.json"), previous)
+    except OSError:
+        pass  # a backup must never be the reason a save fails
+
+
+# Windows refuses to replace or open a file while another handle on it lacks
+# FILE_SHARE_DELETE, which Python's own open() never passes. A reader and an
+# atomic writer of the same file therefore collide for a few milliseconds; a
+# short retry absorbs that instead of failing an autosave or a Settings save.
+# A module flag rather than an os.name check at the call, so tests can
+# exercise the retry on every platform.
+_RETRY_SHARING_VIOLATIONS = os.name == "nt"
+_RETRY_ATTEMPTS = 5
+_RETRY_DELAY_S = 0.02
+
+
+def _retrying(action: Callable[[], _T]) -> _T:
+    attempt = 1
+    while True:
+        try:
+            return action()
+        except PermissionError:
+            if not _RETRY_SHARING_VIOLATIONS or attempt >= _RETRY_ATTEMPTS:
+                raise
+        attempt += 1
+        time.sleep(_RETRY_DELAY_S)
+
+
+def replace_file(source: str | Path, target: Path) -> None:
+    """os.replace that rides out a concurrent reader on Windows."""
+    _retrying(lambda: os.replace(source, target))
+
+
+def read_text(path: Path) -> str:
+    """UTF-8 read that rides out a concurrent atomic replace on Windows."""
+    return _retrying(lambda: path.read_text(encoding="utf-8"))
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -472,7 +538,7 @@ def _atomic_write(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, path)
+        replace_file(temp_name, path)
         if os.name != "nt":
             path.chmod(0o600)
     except BaseException:
