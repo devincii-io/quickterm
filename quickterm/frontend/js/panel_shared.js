@@ -60,9 +60,10 @@ export function environmentError(env) {
   return "";
 }
 
-// launch.resolve_profile builds these argument lists itself and drops the
-// profile's own, so a command that carries arguments is never inferred as
-// one of them: the arguments would vanish on the next save.
+// launch.resolve_profile builds these argument lists itself: WSL drops the
+// profile's own, and the shells append their login flag after them, so
+// "bash -c make" would run as "bash -c make -l". A command that carries
+// arguments is therefore never inferred as one of them.
 const DROPS_ARGS = new Set(["wsl", "bash", "zsh", "fish"]);
 
 export function inferTerminalType(profile) {
