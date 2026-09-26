@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import sys
 import threading
 from ctypes import wintypes
@@ -38,6 +39,10 @@ _NIF_ICON = 0x2
 _NIF_TIP = 0x4
 _NIF_INFO = 0x10
 _NIIF_INFO = 0x1
+_NIN_BALLOONUSERCLICK = 0x0405  # WM_USER + 5
+
+_FLASHW_ALL = 0x3
+_FLASHW_TIMERNOFG = 0xC
 
 _MF_STRING = 0x0
 _MF_SEPARATOR = 0x800
@@ -109,6 +114,78 @@ class _NOTIFYICONDATAW(ctypes.Structure):
     ]
 
 
+class _FLASHWINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.UINT),
+        ("hwnd", wintypes.HWND),
+        ("dwFlags", wintypes.DWORD),
+        ("uCount", wintypes.UINT),
+        ("dwTimeout", wintypes.DWORD),
+    ]
+
+
+_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.FlashWindowEx.argtypes = [ctypes.POINTER(_FLASHWINFO)]
+_user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
+
+
+def _pid_of(hwnd: int) -> int:
+    pid = wintypes.DWORD(0)
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def foreground_is_ours() -> bool:
+    """Whether the window in front belongs to this process (any viewer)."""
+    hwnd = _user32.GetForegroundWindow()
+    return bool(hwnd) and _pid_of(hwnd) == os.getpid()
+
+
+def own_window(title: str) -> tuple[int, bool] | None:
+    """This process's top-level window with exactly ``title``, and whether it
+    is visible. Hidden windows count: that is the tray-hidden case.
+
+    The process check comes first, so the title is only ever read from our own
+    windows (another app titled "QuickTerm" is never flashed).
+    """
+    found: list[tuple[int, bool]] = []
+    me = os.getpid()
+
+    @_WNDENUMPROC
+    def visit(hwnd: int, _lparam: int) -> bool:
+        if _pid_of(hwnd) != me:
+            return True
+        length = _user32.GetWindowTextLengthW(hwnd)
+        if length != len(title):
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        _user32.GetWindowTextW(hwnd, buf, length + 1)
+        if buf.value == title:
+            found.append((hwnd, bool(_user32.IsWindowVisible(hwnd))))
+            return False
+        return True
+
+    _user32.EnumWindows(visit, 0)
+    return found[0] if found else None
+
+
+def flash_window(hwnd: int) -> None:
+    """Flash a window's taskbar button until it comes to the foreground."""
+    info = _FLASHWINFO()
+    info.cbSize = ctypes.sizeof(_FLASHWINFO)
+    info.hwnd = hwnd
+    info.dwFlags = _FLASHW_ALL | _FLASHW_TIMERNOFG
+    info.uCount = 0
+    info.dwTimeout = 0
+    _user32.FlashWindowEx(ctypes.byref(info))
+
+
 def _load_icon() -> int:
     """Best icon available: the exe's own (frozen), the repo .ico (dev), stock."""
     if getattr(sys, "frozen", False):
@@ -170,6 +247,13 @@ class TrayIcon:
         if self._balloon_shown or not self._hwnd:
             return
         self._balloon_shown = True
+        self.balloon(title, text)
+
+    def balloon(self, title: str, text: str) -> None:
+        """Show a notification from the tray icon. Clicking it opens the
+        windows, like clicking the icon. Safe from any thread."""
+        if not self._hwnd:
+            return
         nid = self._nid()
         nid.uFlags = _NIF_INFO
         nid.szInfo = text[:255]
@@ -258,7 +342,7 @@ class TrayIcon:
     def _wnd_proc(self, hwnd, msg, wparam, lparam) -> int:
         if msg == _WM_TRAY:
             event = lparam & 0xFFFF
-            if event in (_WM_LBUTTONUP, _WM_LBUTTONDBLCLK):
+            if event in (_WM_LBUTTONUP, _WM_LBUTTONDBLCLK, _NIN_BALLOONUSERCLICK):
                 self._safe(self._on_open)
             elif event in (_WM_RBUTTONUP, _WM_CONTEXTMENU):
                 self._menu()

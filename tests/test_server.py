@@ -215,6 +215,17 @@ class FakeSessionManager:
     def set_max_sessions(self, limit: int) -> None:
         self.max_sessions = limit
 
+    def busy_ids(self) -> set[str]:
+        return set(getattr(self, "busy", set()))
+
+    def session_attention(self, sid: str) -> dict | None:
+        return getattr(self, "attention", {}).get(sid)
+
+    def mark_seen(self, sid: str) -> None:
+        if sid not in self.sessions:
+            raise KeyError(sid)
+        getattr(self, "attention", {}).pop(sid, None)
+
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -374,7 +385,9 @@ def test_list_sessions_includes_background_activity(client, manager):
 
 
 def test_list_sessions_lightweight_skips_process_metrics(client, manager, monkeypatch):
-    manager.add_session(name="agent")
+    idle = manager.add_session(name="agent")
+    working = manager.add_session(name="build")
+    manager.busy = {working.id}
 
     def fail_if_sampled():
         raise AssertionError("lightweight session listing sampled processes")
@@ -382,8 +395,11 @@ def test_list_sessions_lightweight_skips_process_metrics(client, manager, monkey
     monkeypatch.setattr(manager, "session_metrics", fail_if_sampled)
     response = client.get("/api/sessions?metrics=false")
     assert response.status_code == 200
-    assert response.json()[0]["busy"] is None
-    assert "usage" not in response.json()[0]
+    # Busy is still answered, from the one process-table snapshot, so the
+    # sidebar's poll can show it; only usage sampling is skipped.
+    busy = {entry["id"]: entry["busy"] for entry in response.json()}
+    assert busy == {idle.id: False, working.id: True}
+    assert all("usage" not in entry for entry in response.json())
 
 
 def test_spawn_with_explicit_cmd(client, manager):

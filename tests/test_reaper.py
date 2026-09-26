@@ -193,6 +193,9 @@ async def test_reaper_drops_exited_sessions_nobody_cared_about(fake_manager):
     mgr._on_exit(mgr.get(never_attached.id), 0)
     untouched, _ = _finished_in_background(mgr)
     seen, _ = _finished_in_background(mgr, retained=True, output=b"")
+    # A retained terminal's exit is itself reported as attention, which holds
+    # it like unread output does; once seen, nothing is left to keep.
+    mgr.mark_seen(seen.id)
     assert sorted(mgr.reap_idle(300, set())) == sorted(
         [never_attached.id, untouched.id, seen.id]
     )

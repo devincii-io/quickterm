@@ -1,9 +1,9 @@
-"""Session routes: list, spawn, kill, retain, rename, cleanup, kill-all."""
+"""Session routes: list, spawn, kill, retain, rename, seen, cleanup, kill-all."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
@@ -17,29 +17,65 @@ from quickterm.api.common import (
     resolve_request,
 )
 
+from quickterm.signals import NotifyThrottle
+
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
+
+# One native notification per terminal per this many seconds. The sidebar
+# state is not throttled; only the flash and the balloon are.
+NOTIFY_INTERVAL_S = 30.0
+
+
+def _wire_notifier(ctx: ApiContext) -> None:
+    """Pass each session's new attention to the desktop shell, rate-limited."""
+    notify = ctx.notify
+    listen = getattr(ctx.manager, "set_attention_listener", None)
+    if notify is None or listen is None:
+        return
+    throttle = NotifyThrottle(NOTIFY_INTERVAL_S)
+
+    def on_attention(info: Any, record: Any) -> None:
+        if throttle.allow(info.id):
+            notify(info.id, info.name, record.kind, record.text)
+
+    listen(on_attention)
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
     manager = ctx.manager
+    _wire_notifier(ctx)
 
     @app.get("/api/sessions")
     def list_sessions(metrics: bool = True) -> list[dict]:
-        # Sidebar/status polling needs lifecycle and attention state, not an
-        # expensive full OS process snapshot. Dashboard callers retain the
-        # detailed default for backwards compatibility.
-        busy_set, usage = manager.session_metrics() if metrics else (set(), {})
+        # Sidebar polling skips usage sampling, the expensive half: one handle
+        # and counter read per process in every session tree. Busy still comes
+        # from one process-table snapshot, because returning null there left
+        # the sidebar unable to ever show a busy terminal.
+        if metrics:
+            busy_set, usage = manager.session_metrics()
+        else:
+            busy_set, usage = manager.busy_ids(), {}
         out = []
         for info in manager.list():
             d = asdict(info)
             d["attachments"] = manager.attachment_count(info.id)
-            d["busy"] = info.id in busy_set if metrics else None
+            d["busy"] = info.id in busy_set
             d["activity"] = manager.session_activity(info.id)
+            d["attention"] = manager.session_attention(info.id)
             if info.id in usage:
                 d["usage"] = usage[info.id]
             out.append(d)
         return out
+
+    @app.post("/api/sessions/{sid}/seen")
+    def mark_session_seen(sid: str) -> Response:
+        """The user looked at this terminal: clear its "needs you" state."""
+        try:
+            manager.mark_seen(sid)
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        return Response(status_code=204)
 
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:

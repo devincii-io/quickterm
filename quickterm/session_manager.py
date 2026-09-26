@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,7 @@ from .process_usage import (
 )
 from .reaper import EXITED_UNREAD_RETENTION_S, Reaper
 from .scrollback import ScrollbackRing
+from .signals import SignalScanner, clean_text
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ else:
 
 __all__ = [
     "EXITED_UNREAD_RETENTION_S",
+    "Attention",
     "QUEUE_MAX_BYTES",
     "QUEUE_MERGE_BYTES",
     "Attachment",
@@ -74,6 +77,22 @@ class SessionInfo:
     retained: bool = False  # Explicit detach: keep even if untouched and idle
     workspace: str | None = None  # workspace this session belongs to
     cwd: str | None = None  # directory the shell was started in
+    # Where the shell says it is now (OSC 7 or OSC 9;9), None until it says so.
+    current_cwd: str | None = None
+
+
+@dataclass
+class Attention:
+    """The latest reason a session wants the user: "bell", "notify" or "exit".
+
+    Latest wins. Cleared by mark_seen (the client saw it) and by touch (the
+    user typed), never by more output: a program that keeps printing after
+    ringing still asked a question nobody has answered.
+    """
+
+    kind: str
+    text: str | None
+    at: float  # time.monotonic() when it was raised
 
 
 class Session:
@@ -97,6 +116,11 @@ class Session:
         self.ever_attached = False
         self.background_output_bytes = 0
         self.background_output_at: float | None = None
+        self.attention: Attention | None = None
+        self._signals = SignalScanner()
+        # Set before a kill is attempted, so the exit it causes is not
+        # reported as the terminal asking for the user.
+        self.stopping = False
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
         """Replay snapshot: an optional mode preamble, then the ring's chunks.
@@ -127,6 +151,9 @@ class SessionManager:
         # insert; counted against the limit so parallel requests cannot all
         # pass the check while their PTYs are still being built.
         self._spawning = 0
+        # Told on the loop thread whenever a session gains attention; the
+        # server hands it to the desktop shell's notifier.
+        self._attention_listener: Callable[[SessionInfo, Attention], None] | None = None
         # Shares the registry dict, so it must only ever be mutated in place.
         self._reaper = Reaper(loop, self._sessions, self.kill, self.busy_ids)
 
@@ -312,11 +339,52 @@ class SessionManager:
             s.pty.write(data)
 
     def touch(self, sid: str) -> None:
-        """Record real user input (the client's explicit touch frame)."""
+        """Record real user input (the client's explicit touch frame).
+
+        Typing answers whatever the terminal asked, so it clears attention.
+        """
         s = self._sessions.get(sid)
         if s and s.info.alive:
             s.info.touched = True
             s.last_activity = time.monotonic()
+            s.attention = None
+
+    def mark_seen(self, sid: str) -> None:
+        """The user has seen this session: clear its attention. KeyError when
+        ``sid`` is unknown."""
+        s = self._sessions.get(sid)
+        if s is None:
+            raise KeyError(sid)
+        s.attention = None
+
+    def session_attention(self, sid: str) -> dict[str, Any] | None:
+        """``{kind, text, age_seconds}`` for the list route, or None."""
+        s = self._sessions.get(sid)
+        record = s.attention if s is not None else None
+        if record is None:
+            return None
+        return {
+            "kind": record.kind,
+            "text": record.text,
+            "age_seconds": max(0, int(time.monotonic() - record.at)),
+        }
+
+    def set_attention_listener(
+        self, listener: Callable[[SessionInfo, Attention], None] | None
+    ) -> None:
+        self._attention_listener = listener
+
+    def _raise_attention(self, session: Session, kind: str, text: str | None) -> None:
+        record = Attention(kind, text, time.monotonic())
+        session.attention = record
+        listener = self._attention_listener
+        if listener is None:
+            return
+        try:
+            listener(session.info, record)
+        except Exception:
+            # A notifier failure must never reach the PTY reader callback.
+            log.debug("attention listener failed", exc_info=True)
 
     def _busy_from(self, identities: list[tuple[int, int]]) -> set[str]:
         """The one busy definition: alive, and the root PID has a direct child."""
@@ -447,7 +515,9 @@ class SessionManager:
             raise KeyError(sid)
         # Exactly True: a backend regression returning None must read as a
         # failure, never as a verified kill that hides a running process.
+        s.stopping = True
         if s.pty is not None and s.pty.kill() is not True:
+            s.stopping = False
             return False
         try:
             self._loop.call_soon_threadsafe(self._finish_kill, sid, s)
@@ -503,6 +573,12 @@ class SessionManager:
         s.ever_attached = True
         s.background_output_bytes = 0
         s.background_output_at = None
+        if not s.info.alive:
+            # Opening an exited terminal replays everything up to its exit,
+            # which answers whatever it asked. A live one is different: a
+            # workspace restore attaches every pane, and that is nobody
+            # looking at the one that rang.
+            s.attention = None
 
     def shutdown(self) -> None:
         for s in list(self._sessions.values()):
@@ -522,12 +598,18 @@ class SessionManager:
         if data and session.ever_attached and not session._attachments:
             session.background_output_bytes += len(data)
             session.background_output_at = session.last_activity
-        # The ring and the viewers are called directly, not through Session
-        # wrappers: this runs once per reader burst, and going direct keeps it
-        # at two Python calls, as many as before the ring had its own class.
+        # The ring, the viewers and the scanner are called directly, not
+        # through Session wrappers: this runs once per reader burst. The
+        # scanner answers plain output with two C-level finds and None.
         info = session.info
         session._ring.record(data, info.cols, info.rows)
         session._attachments.publish(data)
+        found = session._signals.feed(data)
+        if found is not None:
+            if found.cwd is not None:
+                info.current_cwd = found.cwd
+            if found.attention is not None:
+                self._raise_attention(session, found.attention, found.text)
 
     def _on_exit(self, session: Session, code: int) -> None:
         was_alive = session.info.alive
@@ -535,4 +617,12 @@ class SessionManager:
         session.info.exit_code = code
         session.ended_at = time.monotonic()
         if was_alive:
+            # Only a terminal the user had a stake in (opened and then typed
+            # into or explicitly detached; the reaper's own "cared about"),
+            # only when nobody is watching it end, and never for an exit
+            # QuickTerm caused. An untouched shell ending is no news.
+            info = session.info
+            cared = session.ever_attached and (info.touched or info.retained)
+            if cared and not session._attachments and not session.stopping:
+                self._raise_attention(session, "exit", clean_text(f"exited with code {code}"))
             session._attachments.publish(None)

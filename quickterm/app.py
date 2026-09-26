@@ -357,6 +357,7 @@ async def _serve(
     cwd: str | None = None,
     windows: WindowRegistry | None = None,
     open_window: Callable[[str | None, str | None], str] | None = None,
+    notify: Callable[[str, str, str, str | None], None] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
     from quickterm.ws_protocol import WebSocketProtocol
@@ -373,6 +374,7 @@ async def _serve(
         elevated=elevated,
         windows=windows,
         open_window=open_window,
+        notify=notify,
     )
     server = UvicornServer(
         UvicornConfig(
@@ -439,6 +441,20 @@ def _sessions_worth_keeping(manager: Any) -> bool:
         # take the user's running terminals with it.
         log.exception("could not evaluate session keep policy; hiding to tray")
         return True
+
+
+def attention_balloon(name: str, kind: str, text: str | None) -> tuple[str, str]:
+    """Title and body of the tray balloon for a terminal that wants the user."""
+    title = f"{name or 'A terminal'} needs you"
+    if text:
+        body = text
+    elif kind == "bell":
+        body = "It rang the bell."
+    elif kind == "exit":
+        body = "It has finished."
+    else:
+        body = "It is waiting for you."
+    return title, body
 
 
 class _ViewerWindows:
@@ -574,6 +590,41 @@ class _ViewerWindows:
         )
         return False  # cancel the close; we merely hid
 
+    def notify_attention(
+        self, session_id: str, name: str, kind: str, text: str | None
+    ) -> None:
+        """A terminal wants the user (the server's `notify` hook).
+
+        Called on the event loop, already rate-limited per session. The Win32
+        calls run on a short thread of their own: Shell_NotifyIconW talks to
+        Explorer and stalls with it, and no terminal may stall with Explorer.
+        """
+        threading.Thread(
+            target=self._notify_now,
+            args=(name, kind, text),
+            name="attention-notify",
+            daemon=True,
+        ).start()
+
+    def _notify_now(self, name: str, kind: str, text: str | None) -> None:
+        if self.quitting.is_set():
+            return
+        try:
+            from quickterm import tray as tray_mod
+
+            # Someone is looking at QuickTerm already; the sidebar says it.
+            if tray_mod.foreground_is_ours():
+                return
+            primary = tray_mod.own_window(self._base_title)
+            if primary is not None and primary[1]:
+                tray_mod.flash_window(primary[0])
+            elif self.tray is not None and self.count() <= 1:
+                # Only the last window ever hides, so a hidden primary with no
+                # other viewer means everything is in the tray.
+                self.tray.balloon(*attention_balloon(name, kind, text))
+        except Exception:
+            log.debug("attention notification failed", exc_info=True)
+
     def _on_closed(self, uid: str) -> None:
         with self._lock:
             self._live.pop(uid, None)
@@ -641,6 +692,7 @@ def _run_desktop(
                     elevated=elevated,
                     windows=registry,
                     open_window=_open_window_hook(viewers),
+                    notify=viewers.notify_attention,
                 )
             )
         except BaseException as exc:
