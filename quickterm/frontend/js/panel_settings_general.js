@@ -1,4 +1,4 @@
-import { make } from "./panel_shared.js";
+import { folderPickerControl, make } from "./panel_shared.js";
 import { configPurpose } from "./panel_settings_kit.js";
 export function renderGeneralSettings(host) {
     const cfg = this.settingsDraft;
@@ -59,7 +59,7 @@ export function renderGeneralSettings(host) {
     const behavior = make("div", "settings-group");
     behavior.append(
       make("h3", "settings-group-title", "Application"),
-      configPurpose("How QuickTerm itself runs: the shortcut that summons it, the local port it serves on, and how much it keeps in memory. The port and the summon shortcut apply after a restart."),
+      configPurpose("How QuickTerm itself runs: the shortcut that summons it, the local port it serves on, how much it keeps in memory, and where scratch terminals start. The port and the summon shortcut apply after a restart."),
     );
     const hotkey = this._textInput(cfg.summon_hotkey, "ctrl+alt+grave");
     hotkey.addEventListener("input", () => { cfg.summon_hotkey = hotkey.value; });
@@ -96,6 +96,12 @@ export function renderGeneralSettings(host) {
     maxSessions.addEventListener("input", () => {
       cfg.max_sessions = Math.max(0, Math.min(100, Number(maxSessions.value) || 0));
     });
+    // Settings PUTs the whole draft, so writing the field into it is all a
+    // save needs; the server applies the folder live and main.js re-reads the
+    // resolved root in onConfigSaved. Empty means the built-in default.
+    const scratch = this._textInput(cfg.scratch_dir || "", "Default: a QuickTerm folder in the system temp folder");
+    scratch.addEventListener("input", () => { cfg.scratch_dir = scratch.value.trim(); });
+    const scratchField = folderPickerControl(scratch, { label: "Choose the scratch folder" });
     // summon_hotkey and port are deliberately excluded from the live-update
     // whitelist in server.py, and Windows can refuse a shortcut another program
     // already owns, so say both here instead of letting "Saved." imply it worked.
@@ -109,6 +115,7 @@ export function renderGeneralSettings(host) {
       this._field("In-memory scrollback", scrollback, "Per live session. Never written to disk; released when the terminal is removed."),
       this._field("Clean unused shells", idleTimeout, "Only untouched, detached shells are ended after this time; used and busy terminals are kept."),
       this._field("Live terminal limit", maxSessions, "0 means unlimited. At the limit, new terminals are blocked; existing terminals are never stopped."),
+      this._field("Scratch folder", scratchField, "Where scratch terminals start. Leave empty for a QuickTerm folder in the system temp folder. QuickTerm never deletes anything in it."),
     );
     behavior.append(appFields);
     host.append(group, branding, behavior);
