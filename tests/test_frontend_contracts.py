@@ -890,3 +890,98 @@ def test_tiled_views_are_restored_by_the_primary_after_its_own_workspace():
     assert store.count("catch (_)") == 2
     assert views.count("api.registerWindow(") == 1
     assert views.count("await this._claimView(") == 2
+
+
+def test_an_exited_pane_restarts_in_place_with_its_own_launch():
+    """The exit bar offers Restart (button, Enter, palette). The restart repeats
+    the pane's own launch, never the sidebar's current choice, and keeps the
+    dead session's output above a separator instead of the replay's reset.
+    """
+    pane = PANE_JS.read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    actions = (FRONTEND_JS / "terminal_actions.js").read_text(encoding="utf-8")
+    spawner = SPAWNER_JS.read_text(encoding="utf-8")
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+
+    exit_path = pane[pane.index("  _onExit(code) {"):]
+    exit_path = exit_path[:exit_path.index("\n  }\n")]
+    assert "this._renderExitBar();" in exit_path
+    assert '`[exited · code ${this._exitCode}]`' in pane
+    # Enter only while exited, and inside xterm's own key handler, so the
+    # keyboard is never taken from focus.js's owner.
+    keys = pane[pane.index("this.term.attachCustomKeyEventHandler((e) => {"):]
+    keys = keys[:keys.index("\n    });")]
+    assert 'e.key === "Enter" && this.state === "exited"' in keys
+    assert "this.requestRestart();" in keys
+    assert 'this.onActionRequest("restart", this);' in pane
+    assert 'else if (action === "restart") app.restartTerminal(pane);' in main
+    assert 'label: "restart terminal"' in palette
+    # Same launch: restartSavedPane, fed by the pane's profile/spec/options.
+    assert "pane.keepScreenOnNextAttach();" in actions
+    assert "return restartSavedPane(pane);" in actions
+    assert "state.selectedTerminal" not in actions
+    assert "repeatLaunchOptions(pane, profileName, options," in spawner
+    assert "out.launch_options = options;" in layout
+    assert "launchOptionsFromNode(n && n.launch_options)" in layout
+    # Keep the screen: the separator replaces reset() for that one replay.
+    replay = pane[pane.index('      case "replay_size":'):pane.index('      case "replay_done":')]
+    assert replay.index("this._keepScreenGeneration === this._generation") < replay.index(
+        "this.term.reset();"
+    )
+    assert "this.term.write(this._restartSeparator());" in replay
+    assert "[restarted]" in pane
+
+
+def test_broadcast_mirrors_only_real_input_within_this_document():
+    """xterm's onData also carries its automatic replies to terminal queries;
+    typing those into other shells is garbage, so only data behind the input
+    gate is mirrored, and binary data never is. The switch lives in the layout,
+    which is one document, and restore() (every workspace switch) clears it.
+    """
+    pane = PANE_JS.read_text(encoding="utf-8")
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+
+    data = pane[pane.index("this.term.onData((d) => {"):]
+    data = data[:data.index("\n    });")]
+    assert "if (this._inputGate.open) this.onUserInput(d, this);" in data
+    binary = pane[pane.index("this.term.onBinary((d) => {"):]
+    binary = binary[:binary.index("\n    });")]
+    assert "onUserInput" not in binary
+    assert "this.term.onKey(() => this._inputGate.arm());" in pane
+    # On the host in the capture phase: xterm's own textarea listeners run
+    # first at the target and would emit the data before the gate opened.
+    gate = pane[pane.index('for (const type of ["paste", "compositionend", "input"]) {'):]
+    gate = gate[:gate.index("\n    }\n")]
+    assert "this.termHost.addEventListener(type, () => {" in gate
+    assert 'this._inputGate.arm(type === "compositionend" ? 2 : 1);' in gate
+    assert "}, true);" in gate
+    assert "onUserInput: (data, p) => this._broadcastFrom(p, data)," in layout
+    assert "for (const p of broadcastTargets(this.panes(), source)) p.sendText(data);" in layout
+    restore = layout[layout.index("  restore(layout) {"):]
+    restore = restore[:restore.index("\n  }\n")]
+    assert "this.broadcasting = false;" in restore
+    assert '"broadcast input to all panes in this workspace"' in palette
+    assert '"stop broadcasting input"' in palette
+    assert ".pane.broadcasting:not(.drop-target)::after" in app_css
+
+
+def test_search_and_export_are_palette_rows():
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    actions = (FRONTEND_JS / "terminal_actions.js").read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+
+    assert 'label: "search all terminals…"' in palette
+    assert 'label: "save terminal output"' in palette
+    assert 'label: "open last saved output"' in palette
+    assert "/api/search?q=${encodeURIComponent(query)}" in actions
+    assert "/export`" in actions
+    # Opening goes through the one token-gated opener route.
+    assert "api.openTarget(lastSaved)" in actions
+    # A hit outside this layout is attached the way "attach here" does it.
+    assert "if (!attachSession(info)) return false;" in actions
+    assert "...createTerminalActions({ api, layout, attachSession, restartSavedPane, showError })," in main

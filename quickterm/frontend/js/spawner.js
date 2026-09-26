@@ -3,6 +3,7 @@
 // elevate). The spec helpers at the top are pure and tested in node.
 
 import { SCRATCH_WS } from "./boot_context.js";
+import { launchOptions, repeatLaunchOptions } from "./launch_options.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
 
 // With no personal profiles, fall back to the first available system shell.
@@ -94,20 +95,26 @@ export function createSpawner({
     return state.currentWorkspace && state.currentWorkspace !== SCRATCH_WS ? state.currentWorkspace : undefined;
   }
 
-  async function spawnInto(pane, profileName, cwd, options = {}) {
+  // `options` left out means "the way this pane was started": a workspace
+  // restore and a restart call it like that and get the saved Claude mode,
+  // start command or args back. A fresh launch passes its own, `{}` for none,
+  // so a new terminal in a replaceable pane never inherits the old launch.
+  async function spawnInto(pane, profileName, cwd, options) {
+    const launch = repeatLaunchOptions(pane, profileName, options, profileTerminalType(profileName));
     if (!pane.beginSpawn()) return null;
     try {
       const info = await api.createSession({
         profile: profileName,
         cwd: cwd || undefined,
         workspace: spawnWorkspaceTag(),
-        ...(options.startCommand !== undefined ? { start_command: options.startCommand } : {}),
-        ...(options.claudeMode !== undefined ? { claude_mode: options.claudeMode } : {}),
-        ...(options.args !== undefined ? { args: options.args } : {}),
+        ...(launch.startCommand !== undefined ? { start_command: launch.startCommand } : {}),
+        ...(launch.claudeMode !== undefined ? { claude_mode: launch.claudeMode } : {}),
+        ...(launch.args !== undefined ? { args: launch.args } : {}),
       });
       pane.profileName = profileName;
       pane.terminalType = profileTerminalType(profileName);
       pane.launchSpec = null;
+      pane.launchOptions = launchOptions(launch);
       // The backend resolves the workspace folder, so its answer, not the
       // hint we sent, is what this pane actually opened in.
       pane.setLaunchCwd(info.cwd || cwd || profileByName(profileName)?.cwd || null);
@@ -134,6 +141,7 @@ export function createSpawner({
       pane.terminalType = commandTerminalType(launchSpec);
       pane.setLaunchCwd(info.cwd || launchSpec.cwd);
       pane.launchSpec = launchSpec;
+      pane.launchOptions = null;
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -150,7 +158,7 @@ export function createSpawner({
   function spawnDefaultInto(pane, cwdOverride) {
     if (state.selectedTerminal) {
       if (state.selectedTerminal.kind === "profile") {
-        return spawnInto(pane, state.selectedTerminal.profile.name, contextCwd(cwdOverride));
+        return spawnInto(pane, state.selectedTerminal.profile.name, contextCwd(cwdOverride), {});
       }
       return spawnSpecInto(pane, {
         cmd: state.selectedTerminal.cmd,
@@ -161,7 +169,7 @@ export function createSpawner({
       });
     }
     const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride));
+    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride), {});
     const system = defaultSystemSpec(state.terminalInventory);
     if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
     pane.showNotice("[no shell found, add one in settings]");
@@ -211,7 +219,7 @@ export function createSpawner({
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null));
+    await spawnInto(pane, profile.name, contextCwd(null), {});
   }
 
   async function runClaudeMode(profile, claudeMode) {
@@ -294,6 +302,9 @@ export function createSpawner({
     if (!pane) return;
     layout.focusPane(pane);
     pane.terminalType = info.profile ? profileTerminalType(info.profile) : pane.terminalType;
+    // An attached terminal was started elsewhere; whatever launch this pane
+    // held before is not how it was started.
+    pane.launchOptions = null;
     pane.attach(info);
     ownSession(info.id);
     scheduleWorkspaceSave();
@@ -301,6 +312,7 @@ export function createSpawner({
     return true;
   }
 
+  // No options: spawnInto repeats the pane's own launch options.
   async function restartSavedPane(pane) {
     if (pane.profileName) return spawnInto(pane, pane.profileName, pane.cwd);
     if (pane.launchSpec) return spawnSpecInto(pane, pane.launchSpec);
