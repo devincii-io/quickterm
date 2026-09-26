@@ -2224,11 +2224,23 @@ async function boot() {
   }
   window.addEventListener("pagehide", persistOnExit);
 
+  // A global hotkey launches while this window is in the background, and its
+  // failure only lands on the config. Look again when the user comes back to
+  // the window instead of polling the whole config every few seconds.
+  let launchErrorCheckedAt = 0;
+  function checkLaunchError() {
+    if (embedded || !windowIsPrimary || Date.now() - launchErrorCheckedAt < 5000) return;
+    launchErrorCheckedAt = Date.now();
+    api.getConfig().then((fresh) => reportLaunchError(fresh && fresh.launch_error)).catch(() => {});
+  }
+  window.addEventListener("focus", checkLaunchError);
+
   setInterval(refreshStatus, 10000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       refreshStatus();
       layout.fitAll();
+      checkLaunchError();
     }
   });
 

@@ -188,9 +188,12 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
         # inside the login shell plain `bash` is the same program, and it has
         # no space to quote.
         shell = configured or "bash"
+        # The profile's own arguments first, as for cmd and nushell: bash
+        # reads the operand after -c as the command. The login flag is ours.
+        extra = [arg for arg in existing_args if arg not in ("-l", "--login")]
         if start:
-            return shell, ["-lc", f"{start}; exec bash -l"], cwd
-        return shell, ["-l"], cwd
+            return shell, extra + ["-lc", f"{start}; exec bash -l"], cwd
+        return shell, extra + ["-l"], cwd
     if terminal_type == "nushell":
         # `nu -e` runs the command and then stays interactive.
         args = existing_args + (["-e", start] if start else [])

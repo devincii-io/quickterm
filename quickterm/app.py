@@ -239,16 +239,21 @@ def _harden_program_lookup() -> None:
     inherits that folder, so a taskkill.exe or pwsh.exe planted there ran
     instead of the real one. The launch folder travels explicitly as ?cwd=, so
     nothing needs the process to stay in it.
+
+    NoDefaultCurrentDirectoryInExePath would say the same thing, but it is an
+    environment variable: every terminal, the relaunched app after an update
+    and VS Code opened from a pane would inherit it, and cmd.exe there would
+    stop running programs from its own folder. Leaving the folder is enough.
     """
     if os.name != "nt":
         return
-    from quickterm.pty_base import set_private_env
-
-    set_private_env("NoDefaultCurrentDirectoryInExePath", "1")
-    try:
-        os.chdir(Path.home())
-    except (OSError, RuntimeError):
-        log.warning("could not leave the launch folder", exc_info=True)
+    for folder in (Path.home(), Path(os.environ.get("SystemRoot", r"C:\Windows"))):
+        try:
+            os.chdir(folder)
+            return
+        except (OSError, RuntimeError):
+            continue
+    log.warning("could not leave the launch folder")
 
 
 def _override_port(cfg: "AppConfig", port: int) -> None:

@@ -463,17 +463,20 @@ def save_config(cfg: AppConfig) -> None:
     validate_config(cfg)
     path = config_dir() / "config.json"
     text = json.dumps(_storage_dict(cfg), indent=2)
-    _keep_previous(path, text)
+    _keep_previous(path, text, cfg)
     _atomic_write(path, text)
 
 
-def _keep_previous(path: Path, text: str) -> None:
+def _keep_previous(path: Path, text: str, cfg: AppConfig) -> None:
     """Copy the config about to be replaced to config.prev.json, best effort.
 
     A PUT that drops fields (an older or buggy client) replaced every profile
     and snippet with nothing to go back to. The copy is the stored file as it
-    was, so DPAPI-protected values stay protected in it. An identical save
-    leaves the backup alone, or saving twice would erase the only older state.
+    was, so DPAPI-protected values stay protected in it. A save that changes
+    nothing leaves the backup alone, or saving twice would erase the only
+    older state. "Nothing" is decided on the decrypted settings: DPAPI output
+    differs on every call, so with any profile secret the file text never
+    repeats.
     """
     try:
         previous = read_text(path)
@@ -482,9 +485,15 @@ def _keep_previous(path: Path, text: str) -> None:
     if previous == text:
         return
     try:
-        legacy_plaintext = _has_plaintext_environment(json.loads(previous))
-    except (ValueError, TypeError, AttributeError):
-        legacy_plaintext = False  # unparseable: nothing in it can be decrypted either
+        raw = json.loads(previous)
+        legacy_plaintext = _has_plaintext_environment(raw)
+        unchanged = config_from_dict(raw) == cfg
+    except (ValueError, TypeError, AttributeError, OSError):
+        # Unparseable or undecryptable: nothing in it can be compared, and
+        # nothing in it is plaintext this save would be encrypting either.
+        legacy_plaintext = unchanged = False
+    if unchanged:
+        return
     if legacy_plaintext:
         # This save is the one that encrypts a legacy config's secrets; a copy
         # of the old file would keep them on disk in the clear.

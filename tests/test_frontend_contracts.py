@@ -188,16 +188,25 @@ def test_a_background_launch_failure_reaches_the_banner_once():
     assert main.index("reportLaunchError(cfg.launch_error);") > main.index(
         "const restored = await restoreWorkspace(currentWorkspace);"
     )
+    # A hotkey fires while the window is in the background: coming back to it
+    # (focus, or the page becoming visible) looks again.
+    assert 'window.addEventListener("focus", checkLaunchError);' in main
+    visible = main[main.index('document.addEventListener("visibilitychange", () => {\n    if (!document.hidden) {'):]
+    assert "checkLaunchError();" in visible[: visible.index("\n  });")]
 
 
 def test_only_real_user_input_marks_a_session_touched():
     # The backend counted every WebSocket byte as use, including xterm's
     # automatic replies to terminal queries, so an untyped shell was never
-    # reaped. Only onKey, the native paste shortcut and sendText (snippets and
-    # drops) reach _markWrote, which sends one touch frame per connection.
+    # reaped. Only onKey, the native paste shortcut, any paste or IME
+    # composition on xterm's textarea, and sendText (snippets and drops) reach
+    # _markWrote, which sends one touch frame per connection.
     pane = PANE_JS.read_text(encoding="utf-8")
     protocol = (FRONTEND_JS / "pane_protocol.js").read_text(encoding="utf-8")
     assert "this.term.onKey(() => this._markWrote());" in pane
+    # Input that never fires onKey (menu or middle-click paste, IME, dictation).
+    assert 'this.term.textarea?.addEventListener("paste", typed, true);' in pane
+    assert 'this.term.textarea?.addEventListener("compositionend", typed, true);' in pane
     mark = pane[pane.index("  _markWrote() {"):pane.index("  _sendTouch() {")]
     assert "this._sendTouch();" in mark
     touch = pane[pane.index("  _sendTouch() {"):]

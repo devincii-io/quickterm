@@ -905,6 +905,14 @@ export class Pane {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.termHost);
+    // Real input that never fires onKey: a paste from a context menu or a
+    // middle click, IME composition, dead keys, Win+H dictation. Capture phase,
+    // so the touch frame leaves before xterm turns the event into onData.
+    const typed = () => {
+      if (this._protocol.canSendInput() && !this._exited) this._markWrote();
+    };
+    this.term.textarea?.addEventListener("paste", typed, true);
+    this.term.textarea?.addEventListener("compositionend", typed, true);
     // OSC 52: apps running inside the terminal (Claude Code, tmux, vim, etc.)
     // copy to the system clipboard by emitting ESC]52;c;<base64>. xterm.js has
     // no built-in OSC 52 handler, so without this the copy is silently dropped

@@ -235,16 +235,8 @@ WRITE_QUEUE_ITEMS = 64
 
 def merge_environment(override: dict[str, str] | None) -> dict[str, str]
 def path_value(env: dict[str, str]) -> str | None   # PATH whatever the key's case
-def set_private_env(name: str, value: str) -> None   # QuickTerm's process only
 class PtyBase: ...                                   # write queue, writer, _post
 ```
-
-`set_private_env` exists for `NoDefaultCurrentDirectoryInExePath=1`, which
-`app.py` sets on Windows so a program planted in the launch folder never runs
-in place of `taskkill.exe` or a shell; `merge_environment` leaves such a
-variable out of every terminal unless the user had it set already or a
-profile sets it, because inherited it would change how cmd.exe runs programs
-from its own folder.
 
 ## quickterm/process_usage.py
 
@@ -673,10 +665,12 @@ class _ViewerWindows:                       # the native windows this process ow
   ordinary process posts the folder to the authenticated `/api/launches` queue,
   summons the existing native viewer, and exits. The viewer opens it in Scratch.
 - Right after reading its arguments (the launch folder is captured by then),
-  Windows sets `NoDefaultCurrentDirectoryInExePath=1` through
-  `pty_base.set_private_env` and changes to the home folder: "Open QuickTerm
-  here" starts the process in the folder the user clicked, and CreateProcess
-  and `shutil.which` search the current folder before PATH.
+  Windows changes to the home folder: "Open QuickTerm here" starts the process
+  in the folder the user clicked, and CreateProcess and `shutil.which` search
+  the current folder before PATH. `NoDefaultCurrentDirectoryInExePath` is
+  deliberately not used: as an environment variable it would reach every
+  terminal and the app relaunched after an update, and change how cmd.exe runs
+  programs from its own folder there.
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
   native Edge WebView2 viewer. `--port` and an elevated instance record
   `{"port"}` in `cfg.runtime_overrides`. Every client URL (window, running

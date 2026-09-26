@@ -113,6 +113,10 @@ def test_git_bash_gets_the_bash_start_command_treatment():
     assert cwd == "/tmp/x"
     prof.start_command = None
     assert launch.resolve_profile(prof)[1] == ["-l"]
+    # Arguments set in Advanced survive, ahead of the command bash runs.
+    prof.args = ["--norc", "-l"]
+    prof.start_command = "make"
+    assert launch.resolve_profile(prof)[1] == ["--norc", "-lc", "make; exec bash -l"]
 
 
 def test_nushell_runs_the_start_command_and_stays_interactive():
@@ -223,30 +227,22 @@ def test_hardened_process_no_longer_finds_programs_in_the_launch_folder(monkeypa
     home.mkdir()
     empty_path = tmp_path / "bin"
     empty_path.mkdir()
-    from quickterm import pty_base
-
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("PATH", str(empty_path))
-    # setenv first, so teardown removes what the hardening sets; a bare
-    # delenv of an absent variable records nothing to restore.
-    monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "x")
-    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath")
-    monkeypatch.setattr(pty_base, "_PRIVATE_ENV", set())
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
     monkeypatch.chdir(launch_dir)
     # The hazard: an Explorer launch leaves the process in that folder, and a
     # planted claude.exe there wins over PATH.
     assert shutil.which("claude") is not None
+    environment = dict(os.environ)
 
     app_mod._harden_program_lookup()
 
-    assert os.environ["NoDefaultCurrentDirectoryInExePath"] == "1"
     assert os.path.samefile(os.getcwd(), home)
-    monkeypatch.chdir(launch_dir)  # even back in that folder
     assert shutil.which("claude") is None
-    # The guard is QuickTerm's own: a terminal's cmd.exe still runs programs
-    # from its current folder as it would anywhere else.
-    child_env = pty_base.merge_environment({})
-    assert not any(k.casefold() == "nodefaultcurrentdirectoryinexepath" for k in child_env)
+    # Nothing leaks into what the app starts: an environment variable would
+    # reach every terminal and the relaunched app after an update.
+    assert dict(os.environ) == environment
 
 
 # --- app launches: autostart, hotkeys, the elevated first terminal ----------

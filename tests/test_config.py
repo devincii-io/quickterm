@@ -282,6 +282,28 @@ def test_an_identical_save_does_not_overwrite_the_backup(fake_appdata):
     assert json.loads(config_text(fake_appdata, "config.prev.json"))["font_size"] == 12
 
 
+def test_a_save_that_changes_nothing_keeps_the_backup_even_with_secrets(
+    fake_appdata, monkeypatch
+):
+    # DPAPI output differs on every call, so the file text of a config with a
+    # profile secret never repeats; comparing text replaced the backup with a
+    # copy of the current state on every such save.
+    counter = iter(range(1_000_000))
+    monkeypatch.setattr(cfgmod.secret_store, "protection_available", lambda: True)
+    monkeypatch.setattr(
+        cfgmod.secret_store, "protect", lambda data: b"%d:" % next(counter) + data,
+    )
+    monkeypatch.setattr(
+        cfgmod.secret_store, "unprotect", lambda data: data.split(b":", 1)[1],
+    )
+    profiles = [Profile(name="work", cmd="cmd.exe", env={"API_TOKEN": "secret"})]
+    save_config(AppConfig(profiles=profiles, font_size=12))
+    save_config(AppConfig(profiles=profiles, font_size=15))
+    save_config(AppConfig(profiles=profiles, font_size=15))
+
+    assert json.loads(config_text(fake_appdata, "config.prev.json"))["font_size"] == 12
+
+
 def test_the_first_save_has_no_backup_and_a_failed_backup_does_not_fail_the_save(
     fake_appdata, monkeypatch
 ):

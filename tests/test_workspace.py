@@ -332,7 +332,27 @@ def test_a_typed_underscore_name_does_not_collide_with_a_reserved_one():
     assert list_workspaces() == ["_con.txt", "con.txt"]
 
 
-def test_the_old_reserved_file_shape_still_reads_and_migrates(fake_appdata):
+def test_windows_10_never_opens_a_legacy_name_that_is_a_device(fake_appdata, monkeypatch):
+    # On Windows 10 "con.json" and "con.txt--<digest>.json" ARE the console:
+    # reading one blocks, with the workspace lock held.
+    monkeypatch.setattr(workspace_mod, "_DEVICE_NAMES_TAKE_EXTENSIONS", True)
+    # "con--<digest>.json" (the old shape of a bare "con") is an ordinary file.
+    digest = workspace_mod._digest("con")
+    assert [p.name for p in workspace_mod._legacy_paths_for("con")] == [f"con--{digest}.json"]
+    assert workspace_mod._legacy_paths_for("con.txt") == []
+    assert load_workspace("con") is None
+    save_workspace(Workspace(name="con", layout={"a": 1}))
+    assert load_workspace("con").layout == {"a": 1}
+
+    monkeypatch.setattr(workspace_mod, "_DEVICE_NAMES_TAKE_EXTENSIONS", False)
+    assert [p.name for p in workspace_mod._legacy_paths_for("con")] == [
+        "con.json", f"con--{digest}.json",
+    ]
+
+
+def test_the_old_reserved_file_shape_still_reads_and_migrates(fake_appdata, monkeypatch):
+    # Windows 11 and POSIX, where such a file can exist.
+    monkeypatch.setattr(workspace_mod, "_DEVICE_NAMES_TAKE_EXTENSIONS", False)
     folder = fake_appdata / "quickterm" / "workspaces"
     folder.mkdir(parents=True)
     old = folder / f"aux.tools--{workspace_mod._digest('aux.tools')}.json"

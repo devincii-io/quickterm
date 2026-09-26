@@ -294,10 +294,11 @@ default; `tests/test_routes_auth.py` walks the route table and fails on an
 ungated one. The HTTP guard is a plain ASGI middleware (`LocalGuard`):
 `@app.middleware("http")` wraps `receive`, and then `request.is_disconnected()`
 never sees a client leave, which the launch long-poll relies on. There is no
-`/openapi.json`. On Windows `app.py` hides the launch folder from program
-lookup (`NoDefaultCurrentDirectoryInExePath` through
-`pty_base.set_private_env`, then `chdir` home) and `taskkill.exe` runs by
-absolute path. `update.py` only fetches https URLs from the pinned repo's release
+`/openapi.json`. On Windows `app.py` leaves the launch folder for the home
+folder at startup, so program lookup never searches a folder the user merely
+clicked, and `taskkill.exe` runs by absolute path. Do not "harden" this with
+`NoDefaultCurrentDirectoryInExePath`: every child, terminals included, would
+inherit it. `update.py` only fetches https URLs from the pinned repo's release
 payload and hash-verifies installers.
 
 ## Author / license

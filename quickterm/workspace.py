@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -158,7 +159,19 @@ def _legacy_paths_for(name: str) -> list[Path]:
     if _is_reserved(safe):
         candidates.append(folder / f"{safe[:80]}--{_digest(name)}.json")
     current = _path_for(name)
-    return [path for path in candidates if path != current]
+    # On Windows 10 "con.json" IS the console: reading it blocks on the
+    # hidden console's input while the workspace lock is held, and every
+    # later autosave waits behind it. No such file can exist there anyway.
+    return [
+        path for path in candidates
+        if path != current and not (_DEVICE_NAMES_TAKE_EXTENSIONS and _is_reserved(path.name))
+    ]
+
+
+# Windows 11 (build 22000) stopped mapping "con.txt" to the console; only the
+# bare device names are reserved there. A module flag so tests can exercise
+# both.
+_DEVICE_NAMES_TAKE_EXTENSIONS = os.name == "nt" and sys.getwindowsversion().build < 22000
 
 
 # Serializes this process's replaces against quarantine renames, so a listing
