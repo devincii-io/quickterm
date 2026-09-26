@@ -13,6 +13,7 @@ full path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test 
 
 ```
 uv run quickterm                  # run the app (native window; --port N to override)
+uv run quickterm ls|new|open|send # drive the running app (quickterm/cli.py)
 uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate

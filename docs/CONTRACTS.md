@@ -618,9 +618,10 @@ REST (JSON, under `/api`):
 | GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
+| POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
 | POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
-| POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
+| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's launch loop shows a workspace alone (focusing it if this window or a tiled view already shows it, else switching through the claim rules), starts a profile in the given folder or the workspace root, in the named workspace or the current one, and opens a folder alone in scratch as before. |
 | GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
 | GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, idle_seconds, age_seconds}]}`, oldest window first |
 | POST | /api/windows | `{id?, workspace?, title?, primary?}` → `{id, workspace, title, primary}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. 409 on a claimed workspace or too many windows, 400 on a junk name |
@@ -808,6 +809,30 @@ applying. Tray menu: Open / Quit, where Open restores every live window and the
 summon hotkey also restores a tray-hidden one. When the window holding the bare
 title closes, the oldest survivor is retitled to it, because `hotkeys.py`
 summons by exact title match and would otherwise have nothing to aim at.
+
+## quickterm/cli.py
+
+`quickterm <verb>` drives the running app over HTTP with the per-install token
+(the port comes from the config, `--port` overrides). `app.main()` checks
+`cli.is_command(argv)` first: an argument is a verb only when it is one of the
+verbs below and not an existing folder, so Explorer's "Open QuickTerm here"
+(which passes a folder path) is unchanged.
+
+```
+quickterm ls [--json]                           one line per session
+quickterm new [--profile P] [--cwd D] [--workspace W]
+quickterm open WORKSPACE
+quickterm send SESSION TEXT... [--enter]        id, id prefix or exact name
+quickterm --version
+```
+
+Exit codes: 0 success, 1 usage error (including a session that matches
+nothing or several), 2 app not running (checked through `/api/health`), 3 the
+server refused (its detail is printed). `new` with no running app starts the
+app with that launch. The frozen build is a GUI-subsystem exe: a verb
+attaches to the parent console and writes to `CONOUT$`; with no console it
+prints nothing and still exits with the right code. cmd and PowerShell do not
+wait for a GUI program, so scripts use `start /wait` in cmd.
 
 ## quickterm/launch.py
 
