@@ -987,8 +987,23 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   instead of opened twice. Borders and headers appear only with two or more
   views. Closing a view waits for a successful save and marks every owned
   terminal retained before releasing its registry entry and removing it;
-  save failures keep the view open. The arrangement is window-local and not
-  restored at startup.
+  save failures keep the view open. The primary, non-embedded window stores
+  the arrangement in localStorage (`quickterm.workspaceViews`: the split tree
+  of `{primary}` and `{workspace, window}` leaves, the active and the zoomed
+  view) and rebuilds it after its own workspace restored: each view's stored
+  registry id is released first (the previous page's iframe still holds its
+  claim), then claimed again; scratch, missing and refused views are dropped.
+- Panes: an exited pane shows `[exited · code N]` with a Restart action
+  (button, Enter in the pane, "restart terminal" in the palette) when it knows
+  its launch (a profile or a launch spec; an attached terminal started
+  elsewhere does not). The restart repeats that launch with its
+  `launch_options` and keeps the old output above a `[restarted]` mark; on
+  Windows the old screen scrolls into the scrollback first, because a new
+  ConPTY addresses rows as if the screen were empty. "broadcast input to all
+  panes in this workspace" mirrors real input (never xterm's automatic
+  replies) to every other live pane in the document; a paste is re-pasted in
+  each target so its own bracketed-paste mode frames it. It turns off on a
+  workspace switch.
 - `menu.js` is the one popover menu behind every chooser in the chrome (the
   terminal picker, the workspace menu). Fixed-position under its anchor,
   clamped inside the viewport (`menuPosition`, pure), it claims the keyboard

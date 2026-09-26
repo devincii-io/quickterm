@@ -268,7 +268,15 @@ export class Pane {
   // An exited terminal, or a saved one that is no longer running: both can be
   // started again with the launch this pane remembers.
   get canRestart() {
-    return !this.spawnPending && (this.state === "exited" || this.state === "missing");
+    return !this.spawnPending && (this.state === "exited" || this.state === "missing")
+      && this.knowsItsLaunch;
+  }
+
+  // A profile or a launch spec: what a restart repeats. A terminal attached
+  // from elsewhere (a finished row, a search hit, "attach here") has neither,
+  // and restarting it would start whatever the sidebar has selected.
+  get knowsItsLaunch() {
+    return Boolean(this.profileName || this.launchSpec);
   }
 
   get _phase() { return this._protocol.phase; }
@@ -286,6 +294,12 @@ export class Pane {
   // restarted is usually right there). A later reattach replays as usual.
   keepScreenOnNextAttach() {
     this._keepScreen = Boolean(this.term);
+  }
+
+  // A restart that started nothing (no shell configured) must not leave the
+  // flag behind for an unrelated attach later.
+  dropKeepScreen() {
+    this._keepScreen = false;
   }
 
   beginSpawn() {
@@ -489,6 +503,16 @@ export class Pane {
     copy.textContent = text;
     const actions = document.createElement("span");
     actions.className = "pane-confirm-actions";
+    if (!this.knowsItsLaunch) {
+      this.exitBar.textContent = "";
+      this.exitBar.append(copy);
+      this.exitBar.classList.remove("confirming");
+      this.exitBar.classList.add("exited");
+      this.exitBar.hidden = false;
+      const live = document.getElementById("live-status");
+      if (live) live.textContent = text.replace(/^\[|\]$/g, "");
+      return;
+    }
     const restart = document.createElement("button");
     restart.type = "button";
     restart.className = "pane-exit-restart";
@@ -831,6 +855,15 @@ export class Pane {
       return true;
     }
     return false;
+  }
+
+  // A paste from another pane (broadcast): xterm frames it for this pane's
+  // own bracketed-paste mode, as if it had been pasted here.
+  pasteText(text) {
+    if (!this.acceptsInput() || !this.term) return false;
+    this._markWrote();
+    this.term.paste(text);
+    return true;
   }
 
   // Whether sendText would reach the PTY right now.
@@ -1251,7 +1284,15 @@ export class Pane {
   _restartSeparator() {
     const leaveAlt = this.term.buffer.active.type === "alternate" ? "\x1b[?1047l" : "";
     const newline = this.term.buffer.normal.cursorX > 0 ? "\r\n" : "";
-    return leaveAlt + RESTART_RESET + newline + RESTART_MARK;
+    // A new ConPTY believes it starts on an empty screen with its cursor on
+    // row 1, and after its first plain text it moves the cursor to absolute
+    // rows: the first key typed after a restart echoed on row 4, in the
+    // middle of the old output. So on Windows the old screen and the mark
+    // scroll into the scrollback, one scroll up, and the new console gets a
+    // clean screen whose row 1 is its row 1. POSIX shells move relatively
+    // and can continue right below the mark.
+    const clear = clientIsWindows() ? "\r\n".repeat(Math.max(1, this.term.rows)) + "\x1b[H" : "";
+    return leaveAlt + RESTART_RESET + newline + RESTART_MARK + clear;
   }
 
   // Write queued output; when >PENDING_LIMIT bytes are unacknowledged by

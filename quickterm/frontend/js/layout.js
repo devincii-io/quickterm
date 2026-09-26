@@ -7,7 +7,7 @@
 // reused across re-renders so terminals survive structural changes.
 
 import { Pane } from "./pane.js";
-import { broadcastTargets } from "./broadcast.js";
+import { broadcastTargets, unbracketedPaste, withoutTerminalReplies } from "./broadcast.js";
 import { launchOptionsFromNode, launchOptionsToNode } from "./launch_options.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 import { dwindleDir } from "./split_tree.js";
@@ -76,7 +76,13 @@ export class LayoutManager {
 
   _broadcastFrom(source, data) {
     if (!this.broadcasting) return;
-    for (const p of broadcastTargets(this.panes(), source)) p.sendText(data);
+    const pasted = unbracketedPaste(data);
+    const typed = pasted === null ? withoutTerminalReplies(data) : null;
+    if (typed === "") return;
+    for (const p of broadcastTargets(this.panes(), source)) {
+      if (pasted !== null) p.pasteText(pasted);
+      else p.sendText(typed);
+    }
   }
 
   init() {

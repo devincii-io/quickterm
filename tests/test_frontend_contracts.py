@@ -921,7 +921,9 @@ def test_an_exited_pane_restarts_in_place_with_its_own_launch():
     assert 'label: "restart terminal"' in palette
     # Same launch: restartSavedPane, fed by the pane's profile/spec/options.
     assert "pane.keepScreenOnNextAttach();" in actions
-    assert "return restartSavedPane(pane);" in actions
+    assert "restartSavedPane(pane)" in actions
+    # A restart that started nothing does not leave the keep-screen flag behind.
+    assert "pane.dropKeepScreen();" in actions
     assert "state.selectedTerminal" not in actions
     assert "repeatLaunchOptions(pane, profileName, options," in spawner
     assert "out.launch_options = options;" in layout
@@ -963,7 +965,10 @@ def test_broadcast_mirrors_only_real_input_within_this_document():
     assert 'this._inputGate.arm(type === "compositionend" ? 2 : 1);' in gate
     assert "}, true);" in gate
     assert "onUserInput: (data, p) => this._broadcastFrom(p, data)," in layout
-    assert "for (const p of broadcastTargets(this.panes(), source)) p.sendText(data);" in layout
+    assert "for (const p of broadcastTargets(this.panes(), source)) {" in layout
+    # Automatic replies are stripped, and a paste is re-pasted per target.
+    assert "withoutTerminalReplies(data)" in layout
+    assert "if (pasted !== null) p.pasteText(pasted);" in layout
     restore = layout[layout.index("  restore(layout) {"):]
     restore = restore[:restore.index("\n  }\n")]
     assert "this.broadcasting = false;" in restore

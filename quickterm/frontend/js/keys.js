@@ -42,8 +42,12 @@ export function initKeys(actions) {
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
       const key = e.key.toLowerCase();
       const unnamed = !e.key || e.key === "Unidentified";
+      // AZERTY types "a" with a grave accent on the 0 key unshifted (0 needs
+      // Shift there); Ctrl+0 on that key was the reset before and no shell
+      // binds Ctrl+that letter.
       const reset = key === "0"
-        || (unnamed && (e.code === "Digit0" || e.code === "Numpad0"));
+        || (unnamed && (e.code === "Digit0" || e.code === "Numpad0"))
+        || (e.code === "Digit0" && !e.shiftKey && key === "à");
       const smaller = key === "-" || e.code === "NumpadSubtract"
         || (unnamed && e.code === "Minus");
       // "=" counts only on the key whose shifted character is "+" (US and

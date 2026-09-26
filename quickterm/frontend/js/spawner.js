@@ -303,7 +303,11 @@ export function createSpawner({
     layout.focusPane(pane);
     pane.terminalType = info.profile ? profileTerminalType(info.profile) : pane.terminalType;
     // An attached terminal was started elsewhere; whatever launch this pane
-    // held before is not how it was started.
+    // held before is not how it was started. Only its profile, if it has one,
+    // says how to start it again; a restart must never fall back to the
+    // sidebar's current choice.
+    pane.profileName = info.profile || null;
+    pane.launchSpec = null;
     pane.launchOptions = null;
     pane.attach(info);
     ownSession(info.id);

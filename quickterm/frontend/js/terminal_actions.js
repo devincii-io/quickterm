@@ -32,7 +32,10 @@ export function createTerminalActions({ api, layout, attachSession, restartSaved
       return Promise.resolve(null);
     }
     pane.keepScreenOnNextAttach();
-    return restartSavedPane(pane);
+    return Promise.resolve(restartSavedPane(pane)).then((result) => {
+      if (!result) pane.dropKeepScreen();
+      return result;
+    });
   }
 
   function searchTerminals(query) {

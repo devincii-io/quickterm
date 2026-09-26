@@ -228,3 +228,15 @@ test("the numpad and the US = key still zoom", async () => {
   }
   assert.deepEqual(calls, ["fontBigger", "fontSmaller", "fontReset", "fontBigger"]);
 });
+
+test("Ctrl+0 resets on AZERTY, where the 0 key types a grave-accented a unshifted", async () => {
+  const { handler, calls } = await captureHandler();
+  const reset = keyEvent({ key: "à", code: "Digit0", ctrlKey: true });
+  handler(reset);
+  assert.equal(reset.defaultPrevented, true);
+  // The same letter on another key is not a zoom gesture.
+  const other = keyEvent({ key: "à", code: "Quote", ctrlKey: true });
+  handler(other);
+  assert.equal(other.defaultPrevented, false);
+  assert.deepEqual(calls, ["fontReset"]);
+});

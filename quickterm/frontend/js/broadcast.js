@@ -34,6 +34,38 @@ export class RealInputGate {
   }
 }
 
+// xterm's own answers to terminal queries. The gate above opens on a key,
+// but a WebSocket message queued before that key is still parsed inside the
+// open window, and ConPTY asks for device attributes at every session start:
+// typing while a new split's shell started mirrored its DA reply into every
+// other prompt. No key or IME produces any of these, except that xterm sends
+// Shift+F3 and Ctrl+F3 as ESC[1;2R and ESC[1;5R, the shape of a cursor
+// report; those two are not mirrored, which is the cheaper mistake.
+const TERMINAL_REPLY = new RegExp([
+  "\\x1b\\[[?>=]?[\\d;]*c",          // device attributes (DA1, DA2, DA3)
+  "\\x1b\\[\\??[\\d;]*R",            // cursor position report
+  "\\x1b\\[\\??\\d*n",               // status report
+  "\\x1b\\[[IO]",                    // focus in, focus out
+  "\\x1b\\[\\??[\\d;]*\\$y",         // mode report (DECRQM)
+  "\\x1b\\[[\\d;]*t",                // window reports
+  "\\x1b\\][0-9]+;[^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)", // OSC colour and other replies
+  "\\x1bP[^\\x1b]*\\x1b\\\\",        // DCS replies (DECRQSS, XTGETTCAP)
+].join("|"), "g");
+
+export function withoutTerminalReplies(data) {
+  return data.replace(TERMINAL_REPLY, "");
+}
+
+// A paste arrives framed for the source pane's shell. Each target decides
+// its own framing (bracketed paste on or off), so the text is handed over
+// bare and re-pasted there.
+const BRACKETED = /^\x1b\[200~([\s\S]*)\x1b\[201~$/;
+
+export function unbracketedPaste(data) {
+  const match = BRACKETED.exec(data);
+  return match ? match[1] : null;
+}
+
 // Every other pane that can take input right now. A pane that is still
 // replaying, reconnecting or has exited is skipped rather than queued: input
 // typed "into all panes" must not land in one of them seconds later.
