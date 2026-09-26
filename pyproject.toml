@@ -19,6 +19,8 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    # Only for the OpenConsole.exe and conpty.dll it ships (quickterm/conpty.py);
+    # its Python API is not used.
     "pywinpty>=2.0; sys_platform == 'win32'",
     "pywebview>=6.2.1; sys_platform == 'win32'",
     "fastapi>=0.115",

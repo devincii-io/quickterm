@@ -56,13 +56,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
 ## Conventions
 
-- Backend I/O is bytes in / bytes out; no decoding on the hot path. The one
-  exception is pywinpty, whose API is str: the ConPTY backend re-encodes reads
-  and decodes writes as UTF-8, and that round trip is lossy (pywinpty decodes
-  each read on its own and drops NULs, so a character split across two reads
-  becomes U+FFFD; input bytes that are not valid UTF-8 reach the child as
-  U+FFFD whatever error handler we pick). Only owning the ConPTY pipes would
-  fix it.
+- Backend I/O is bytes in / bytes out; no decoding on the hot path. The
+  ConPTY backend owns its pipes (`conpty.py`, ctypes). Do not go back to
+  pywinpty's str API: it decoded each read on its own, so a character split
+  across two reads became U+FFFD (`test_multibyte_output_arrives_whole`). The
+  console host caps bulk output at about 5-6 MB/s with either binding.
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
   Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
   detach, Alt+W confirmed kill, and
@@ -232,15 +230,20 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
 ## Packaging gotchas (learned the hard way)
 
-- PyInstaller does NOT bundle pywinpty's runtime EXEs. `quickterm.spec` must
-  ship `OpenConsole.exe`, `winpty-agent.exe`, `conpty.dll`, `winpty.dll` (dest
-  "winpty") and keep `upx=False` (UPX corrupts them + the WebView2 loader).
-  Symptom when broken: every terminal spawns then dies instantly with exit
-  0xC000013A / 3221225786.
-- A GUI-subsystem frozen process must allocate one hidden process-wide console
-  before constructing any pywinpty PTY. Keep `_ensure_host_console()` in
-  `pty_session.py`: without it pywinpty can panic on a false `ShowWindow`
-  return or let one PTY free console state shared by its siblings.
+- The ConPTY host is `OpenConsole.exe` + `conpty.dll` from the pywinpty
+  wheel, which QuickTerm does not import, so PyInstaller cannot see them.
+  `quickterm.spec` ships both to dest "conpty" (conpty.dll starts
+  OpenConsole.exe from its own folder), excludes `winpty`, and keeps
+  `upx=False` (UPX corrupts them + the WebView2 loader). Symptom when broken:
+  every terminal spawns then dies instantly with exit 0xC000013A /
+  3221225786. Without them `conpty.py` falls back to the inbox ConPTY, which
+  is older than the reflow settings in `pane.js` assume.
+- ConPTY children must get `STARTF_USESTDHANDLES` with null handles, or they
+  inherit QuickTerm's redirected stdout (a log pipe, pytest's capture) and
+  write there instead of into the terminal.
+- Keep `_ensure_host_console()` in `pty_session.py`: the frozen GUI's one
+  hidden console is what console programs QuickTerm starts (`code` is
+  code.cmd) inherit instead of opening a visible window of their own.
 - Any module reached ONLY via `importlib.import_module("quickterm.X")` (server
   stubbable modules: `opener`, `update`, plus `workspace`/`config` which happen
   to also be static-imported) is invisible to PyInstaller's static graph and

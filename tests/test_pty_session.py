@@ -14,8 +14,6 @@ from quickterm import process_usage
 if os.name == "nt":
     from ctypes import wintypes
 
-    import winpty
-
     import quickterm.pty_session as pty_module
     from quickterm.pty_session import PtySession
 else:
@@ -69,18 +67,17 @@ def test_gui_host_console_is_allocated_hidden_and_reused(monkeypatch):
 
 
 @windows_only
-def test_write_failure_is_available_in_debug_log(caplog):
-    class BrokenPty:
-        def write(self, _text):
-            raise RuntimeError("write broke")
+def test_write_failure_is_logged_and_closes_input(caplog):
+    class GoneConsole:
+        def write(self, _data):
+            return False
 
     session = object.__new__(PtySession)
     session._pid = 4242
-    session._pty = BrokenPty()
+    session._console = GoneConsole()
     with caplog.at_level(logging.DEBUG, logger="quickterm.pty_session"):
-        session._do_write(b"hello")
+        assert session._do_write(b"hello") is False
     assert "PTY write failed for process 4242" in caplog.text
-    assert "write broke" in caplog.text
 
 
 def _short(script: str) -> tuple[str, list[str]]:
@@ -150,6 +147,18 @@ async def test_write_reaches_process():
     await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
 
 
+@windows_only
+async def test_multibyte_output_arrives_whole():
+    """pywinpty decoded each read on its own, so a character split across two
+    reads came out as U+FFFD: a few dozen in a 300 000 character burst."""
+    script = "import sys; sys.stdout.buffer.write(chr(0x2500).encode() * 300000)"
+    sess, chunks, exited, codes = await _spawn(sys.executable, ["-c", script])
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
+    text = b"".join(chunks).decode("utf-8")  # strict: a split byte would raise
+    assert text.count("─") == 300000
+    assert codes == [0]
+
+
 async def test_kill_terminates_tree():
     cmd, args, _ = _interactive()
     sess, _, exited, _ = await _spawn(cmd, args)
@@ -205,20 +214,12 @@ def test_taskkill_runs_by_absolute_path():
 
 
 @windows_only
-def test_winpty_spawn_failure_is_an_os_error(monkeypatch):
-    class FailingPty:
-        def __init__(self, cols, rows):
-            pass
-
-        def spawn(self, *args, **kwargs):
-            raise winpty.WinptyError("the directory name is invalid")
-
-    monkeypatch.setattr(pty_module.winpty, "PTY", FailingPty)
+def test_spawn_failure_is_an_os_error_naming_the_command(tmp_path):
     loop = asyncio.new_event_loop()
     try:
-        with pytest.raises(OSError, match="could not start cmd.exe: the directory name"):
+        with pytest.raises(OSError, match="could not start cmd.exe: "):
             PtySession(
-                "cmd.exe", [], None, {}, 80, 24, loop,
+                "cmd.exe", [], str(tmp_path / "gone"), {}, 80, 24, loop,
                 on_output=lambda _d: None, on_exit=lambda _c: None,
             )
     finally:
@@ -342,10 +343,7 @@ async def test_kill_never_addresses_a_root_known_to_be_dead(monkeypatch):
         assert calls == []
     finally:
         sess._proc_dead.set()
-        try:
-            sess._pty.cancel_io()
-        except winpty.WinptyError:
-            pass
+        sess._console.close()
         pty_module._k32.CloseHandle(sess._hproc)
 
 

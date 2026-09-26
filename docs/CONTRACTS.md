@@ -155,7 +155,8 @@ fails the same way and the failure is reported as `launch_error`.
 
 ## quickterm/pty_session.py and quickterm/pty_posix.py
 
-One PTY each: ConPTY through pywinpty on Windows, `pty.fork` elsewhere. Both
+One PTY each: ConPTY on Windows (the ctypes binding in `conpty.py`), `pty.fork`
+elsewhere. Both
 subclass `pty_base.PtyBase` and expose the same interface, so
 `SessionManager` uses either unchanged. Set `QUICKTERM_DEBUG_IO=1` to log raw
 in/out bytes; `0` and every other value leave tracing disabled.
@@ -189,12 +190,15 @@ Threads, per session:
   in chunks of up to 256 KiB. A full stdin pipe blocks only this thread,
   never the loop. It stops only after a verified kill or a natural exit, so a
   terminal whose kill failed still takes input.
-- **Watcher**: exit detection follows the process, not EOF. Windows waits on
-  the process handle (winpty's EOF lags about 8 s); POSIX owns `waitpid`,
-  because a background job that inherited the terminal keeps the slave open
-  after the shell is gone. After the exit the reader drains until the PTY has
-  been quiet 0.15 s (at most 1 s), then `on_exit` is posted exactly once,
-  after the final output.
+- **Watcher**: exit detection follows the process, not EOF, because a
+  background job that inherited the terminal keeps it open after the shell
+  is gone. Windows waits on the CreateProcess handle; POSIX owns `waitpid`.
+  On Windows the pseudoconsole is released right after the spawn, so the
+  console host ends by itself once its last client is gone and the reader
+  reads EOF after the final output; when that does not come, the watcher
+  closes the host once the output has been quiet 0.15 s (at most 1 s), and
+  the reader still reads what is left in the pipe. POSIX drains the same way.
+  `on_exit` is posted exactly once, after the final output.
 
 POSIX specifics: the master is non-blocking and non-inheritable (a later
 terminal must not hold an earlier one's master), the fd lock is held for one
@@ -229,12 +233,15 @@ Kill:
   exited. A retry can never turn a failure into a success by finding the shell
   already dead.
 
-Bytes: the POSIX backend is bytes in, bytes out. pywinpty's API is str, so the
-ConPTY backend re-encodes reads and decodes writes as UTF-8, and that round
-trip is lossy: pywinpty decodes each read separately and drops NULs, so a
-character split across two reads becomes U+FFFD, and input bytes that are not
-valid UTF-8 reach the child as U+FFFD. Only owning the ConPTY pipes would fix
-it.
+Bytes: both backends are bytes in, bytes out. On Windows `conpty.py` owns
+both pipes (128 KiB each; with the default few KiB the console host blocked
+on every write) and passes bytes through untouched; the console host decodes
+input as UTF-8 itself. The pseudoconsole comes from the `conpty.dll` and
+`OpenConsole.exe` in the pywinpty wheel (the frozen app's `conpty/` folder),
+falling back to kernel32's inbox ConPTY without them. Children get
+`STARTF_USESTDHANDLES` with null handles, so they never inherit QuickTerm's own
+redirected stdout. pywinpty's str API, used before, turned a UTF-8 character
+split across two reads into U+FFFD.
 
 ## quickterm/pty_base.py
 
@@ -946,7 +953,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   pinned xterm: `@xterm/xterm@6.0.0`, `@xterm/addon-fit@0.11.0`,
   `@xterm/addon-webgl@0.19.0`, `@xterm/addon-web-links@0.12.0`,
   `@xterm/addon-unicode11@0.9.0` (the UMD `lib/*.js` builds and `css/xterm.css`,
-  committed). 6.0 is the floor on Windows: pywinpty ships OpenConsole 1.24,
+  committed). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
   and since 1.22 ConPTY does not repaint after a resize, so the terminal must
   reflow as ConPTY does, which 5.x did not.
 - `main.js` is the composition root (about 400 lines): it builds the modules
