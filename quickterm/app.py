@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -176,21 +175,24 @@ class _DesktopApi:
 def main() -> None:
     argv = sys.argv[1:]
     # A verb (`quickterm ls`, `new`, `open`, `send`) drives the running app and
-    # exits; nothing below runs for it. Only `new` with no app to hand its
-    # launch to comes back here, to start the app with that launch.
-    handoff: dict[str, str] | None = None
+    # exits; nothing below runs for it. `new` with no app running starts this
+    # program again, detached, with --handoff.
     if cli.is_command(argv):
-        outcome = cli.run(argv)
-        if isinstance(outcome, int):
-            sys.exit(outcome)
-        argv, handoff = outcome.argv, outcome.handoff
+        sys.exit(cli.run(argv))
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
+    parser.add_argument("--handoff", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
     parser.add_argument(
         "path", nargs="?", help="open a terminal in this directory (Explorer 'Open QuickTerm here')"
     )
     args = parser.parse_args(argv)
+    handoff = None
+    if args.handoff is not None:
+        try:
+            handoff = _parse_handoff(args.handoff)
+        except ValueError as exc:
+            parser.error(f"--handoff: {exc}")
     open_dir = None
     if args.path:
         candidate = os.path.abspath(os.path.expanduser(args.path))
@@ -245,6 +247,19 @@ def main() -> None:
         asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir, handoff=handoff))
     except KeyboardInterrupt:
         pass
+
+
+def _parse_handoff(text: str) -> dict[str, str]:
+    """The launch `quickterm new` started this app for; /api/launches checks the rest."""
+    value = json.loads(text)
+    if (
+        not isinstance(value, dict)
+        or not value
+        or not set(value) <= {"cwd", "profile", "workspace"}
+        or not all(isinstance(item, str) for item in value.values())
+    ):
+        raise ValueError("expected a JSON object of cwd, profile and workspace strings")
+    return value
 
 
 def _harden_program_lookup() -> None:
@@ -326,32 +341,23 @@ def _setup_logging() -> None:
 
 
 def _already_running(port: int, host: str = "127.0.0.1") -> bool:
+    # Through the command line's probe: no proxy, and only a backend that
+    # proves it holds this user's token counts as QuickTerm.
     try:
-        with urllib.request.urlopen(f"{_base_url(port, host)}/api/health", timeout=0.6) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return isinstance(data, dict) and data.get("app") == "quickterm"
+        return cli.probe(_base_url(port, host), timeout=0.6) == cli.QUICKTERM
     except Exception:
         return False
 
 
 def _queue_running_launch(port: int, cwd: str, host: str = "127.0.0.1") -> bool:
     """Hand Explorer's folder launch to the already-running authenticated app."""
-    from quickterm import auth
-
-    request = urllib.request.Request(
-        f"{_base_url(port, host)}/api/launches",
-        data=json.dumps({"cwd": cwd}).encode("utf-8"),
-        headers={"Content-Type": "application/json", auth.HEADER: auth.get_or_create_token()},
-        method="POST",
-    )
     for attempt in range(3):
-        try:
-            with urllib.request.urlopen(request, timeout=1.5) as response:
-                return response.status == 200
-        except Exception:
-            if attempt < 2:
-                time.sleep(0.15)
-    log.error("running-instance folder handoff failed")
+        failure = cli.post_launch(port, {"cwd": cwd}, host, timeout=1.5)
+        if failure is None:
+            return True
+        if attempt < 2:
+            time.sleep(0.15)
+    log.error("running-instance folder handoff failed: %s", failure)
     return False
 
 

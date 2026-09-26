@@ -4,8 +4,11 @@ opening targets, reading a file and browsing folders."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -21,6 +24,7 @@ if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
 
 FILE_READ_CAP = 512 * 1024
+_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -28,10 +32,22 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     inventory_cache = ctx.inventory_cache
 
     @app.get("/api/health")
-    def health() -> dict:
+    def health(challenge: str | None = None) -> dict:
         from quickterm import __version__
 
-        return {"app": "quickterm", "version": __version__}
+        answer = {"app": "quickterm", "version": __version__}
+        if challenge is None:
+            return answer
+        # A caller about to send the token asks first whether this backend
+        # holds it: another local user can bind the port before QuickTerm
+        # does. The HMAC of a nonce the caller chose says nothing about the
+        # token, so the route stays open.
+        if not _CHALLENGE.fullmatch(challenge):
+            raise HTTPException(400, "challenge must be 16 to 64 URL-safe characters")
+        answer["proof"] = hmac.new(
+            ctx.token.encode("utf-8"), challenge.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return answer
 
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:

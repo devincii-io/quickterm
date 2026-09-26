@@ -250,6 +250,15 @@ export function renderTerminalSettings(host, rerender) {
       const lineMode = kind === "custom" && fitsCommandLine([profile.cmd || "", ...(profile.args || [])]);
       const el = make("article", "terminal-profile-card");
       el.dataset.kind = kind;
+      // Settings infers a type for display only; a profile without one
+      // launches as a plain command. Once the user fills in a field whose
+      // meaning comes from the inferred type (a start command, a host, a
+      // distribution, a Claude mode), that type is what they are editing, so
+      // it goes into the draft then. Otherwise Save stored no type and the
+      // launch dropped the very value just typed.
+      const settleKind = () => {
+        if (!profile.terminal_type) profile.terminal_type = kind;
+      };
 
       // ---- the main row: name, command (or host), start command, remove ----
       const main = make("div", "profile-main");
@@ -262,6 +271,7 @@ export function renderTerminalSettings(host, rerender) {
         const hostInput = this._textInput(profile.ssh_host, "server.example.com");
         hostInput.addEventListener("input", () => {
           profile.ssh_host = hostInput.value || null;
+          settleKind();
           refresh();
         });
         main.append(this._field("Host", hostInput));
@@ -287,6 +297,7 @@ export function renderTerminalSettings(host, rerender) {
         : "Runs inside the shell and keeps it open.";
       start.addEventListener("input", () => {
         profile.start_command = start.value || null;
+        settleKind();
         refresh();
       });
       const startField = this._field(kind === "ssh" ? "Remote command" : "Start command", start);
@@ -409,17 +420,20 @@ export function renderTerminalSettings(host, rerender) {
         portInput.addEventListener("input", () => {
           const parsed = Number.parseInt(portInput.value, 10);
           profile.ssh_port = Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
+          settleKind();
           refresh();
         });
         const userInput = this._textInput(profile.ssh_user, "Optional, e.g. deploy");
         userInput.addEventListener("input", () => {
           profile.ssh_user = userInput.value || null;
+          settleKind();
           refresh();
         });
         const keyInput = this._textInput(profile.ssh_key, "Optional, C:\\Users\\you\\key.ppk");
         keyInput.title = "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal.";
         keyInput.addEventListener("input", () => {
           profile.ssh_key = keyInput.value || null;
+          settleKind();
           refresh();
         });
         fields.append(
@@ -440,6 +454,7 @@ export function renderTerminalSettings(host, rerender) {
           title: distros.length ? "Detected from WSL on this computer." : "Install a distribution with wsl --install.",
           onChange: (value) => {
             profile.wsl_distro = value || null;
+            settleKind();
             refresh();
           },
         });
@@ -456,6 +471,7 @@ export function renderTerminalSettings(host, rerender) {
           title: "Uses Claude's native continue, session picker, or background-agent view in the project folder.",
           onChange: (value) => {
             profile.claude_mode = value;
+            settleKind();
             refresh();
           },
         });

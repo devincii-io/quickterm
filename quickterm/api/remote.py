@@ -21,11 +21,6 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.post("/api/sessions/{sid}/input")
     async def send_input(sid: str, request: Request) -> Response:
-        session = manager.get(sid)
-        if session is None:
-            raise HTTPException(404, "no such session")
-        if not session.info.alive:
-            raise HTTPException(409, "the terminal has exited")
         body = await read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
@@ -47,11 +42,23 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             data += b"\r"
         if not data:
             raise HTTPException(400, "nothing to send")
+        # Looked up only now, after the body arrived: a terminal that exited
+        # while the body was read was answered 204 with nothing written. From
+        # here to the write nothing awaits, and the exit is recorded on this
+        # same loop thread, so the check still holds when the write runs.
+        session = manager.get(sid)
+        if session is None:
+            raise HTTPException(404, "no such session")
+        if not session.info.alive:
+            raise HTTPException(409, "the terminal has exited")
         try:
             # Only enqueues: the PTY writer thread does the blocking write.
             manager.write(sid, data)
         except BufferError:
             raise HTTPException(503, "terminal input queue is full") from None
+        if manager.get(sid) is not session or not session.info.alive:
+            # write() drops input for a terminal that is gone without saying so.
+            raise HTTPException(409, "the terminal has exited")
         # Unlike the automatic replies a pane forwards, this is input a person
         # asked for, so the shell now counts as used (reaper, close-to-tray).
         manager.touch(sid)

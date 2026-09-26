@@ -138,6 +138,20 @@ def test_posix_login_shells_keep_the_profile_arguments(shell):
     assert launch.resolve_profile(Prof(name="s", terminal_type=shell))[0] == shell
 
 
+def test_the_exec_after_a_start_command_survives_a_windows_shell_path():
+    # The shell parses this line itself: unquoted backslashes vanished and
+    # the terminal closed as soon as the start command had run.
+    prof = Prof(
+        name="msys", cmd=r"C:\msys64\usr\bin\bash.exe", terminal_type="bash", start_command="make",
+    )
+    cmd, args, _cwd = launch.resolve_profile(prof)
+    assert cmd == r"C:\msys64\usr\bin\bash.exe"
+    assert args == ["-lc", "make; exec C:/msys64/usr/bin/bash.exe -l"]
+    prof.cmd = "/opt/my shells/zsh"
+    prof.terminal_type = "zsh"
+    assert launch.resolve_profile(prof)[1] == ["-lc", "make; exec '/opt/my shells/zsh' -l"]
+
+
 def test_nushell_runs_the_start_command_and_stays_interactive():
     prof = Prof(name="nu", cmd="C:/nu/nu.exe", terminal_type="nushell", start_command="ls")
     assert launch.resolve_profile(prof) == ("C:/nu/nu.exe", ["-e", "ls"], None)
