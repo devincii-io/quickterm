@@ -95,7 +95,68 @@ export function renderAboutSettings(host) {
     toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Tell me when a new version is available"));
     card.append(toggle);
     host.append(card);
+    host.append(renderSettingsHistory.call(this));
   }
+
+// "theme, profiles" from the server; an empty summary means that version and
+// the one after it hold the same values (DPAPI makes their files differ).
+export function historySummary(entry) {
+  return entry?.summary ? `changes ${entry.summary}` : "no difference";
+}
+
+export function historyTime(savedAt) {
+  const when = new Date(savedAt);
+  if (Number.isNaN(when.getTime())) return String(savedAt || "");
+  return when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// The last versions a save replaced, with a Restore action each. Restoring
+// goes through the same server path as Save (validation, live apply, and the
+// version it replaces joins this list), then reloads the open draft, because
+// the draft still holds the settings from before.
+function renderSettingsHistory() {
+  const section = make("section", "about-update settings-history");
+  section.append(
+    make("h4", "", "Settings history"),
+    configPurpose("Every save keeps the version it replaced, the last 20 of them, on this device. Restoring one saves it again, so the settings it replaces are kept here too."),
+  );
+  const list = make("div", "settings-history-list");
+  const status = make("p", "about-update-status", "Loading…");
+  section.append(status, list);
+
+  api.getConfigHistory().then((entries) => {
+    list.textContent = "";
+    if (!entries?.length) {
+      status.textContent = "Nothing yet. The first save that changes something starts the history.";
+      return;
+    }
+    status.hidden = true;
+    for (const entry of entries) {
+      const row = make("div", "settings-history-row");
+      const time = historyTime(entry.saved_at);
+      const summary = historySummary(entry);
+      row.append(make("span", "settings-history-time", time), make("span", "settings-history-summary", summary));
+      const restore = this._button("Restore", "secondary-button compact");
+      restore.title = `Restore the settings saved ${time} (${summary})`;
+      restore.addEventListener("click", () => {
+        this._confirmNear(restore, `Restore the settings saved ${time}? Unsaved edits here are discarded.`, "Restore", async () => {
+          await api.restoreConfigVersion(entry.id);
+          await this.app.onConfigSaved();
+          this._themePreviewDirty = false;
+          if (this.open === "settings") {
+            this.bodyEl.textContent = "";
+            this._settings();
+          }
+        });
+      });
+      row.append(restore);
+      list.append(row);
+    }
+  }).catch(() => {
+    status.textContent = "The settings history could not be read.";
+  });
+  return section;
+}
 
 
 export function renderVoiceSettings(host) {

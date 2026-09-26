@@ -42,7 +42,10 @@ export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
 export const retainSession = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/retain`, {});
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
-export const cleanupSessions = (sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
+// The user looked at this terminal: clears its "needs you" state (404 once
+// the registry has dropped it, which callers may ignore).
+export const markSessionSeen = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/seen`, {});
+export const cleanupSessions =(sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
 export const killAllSessions = () => req("POST", "/api/sessions/kill-all", {});
 export const claimLaunch = () => req("GET", "/api/launches/next");
 // Dot-prefixed names are reserved (validateWorkspaceName refuses them), so a
@@ -95,6 +98,11 @@ export const requestWindow = (body) => req("POST", "/api/windows/open", body || 
 
 export const getFullConfig = () => req("GET", "/api/config/full");
 export const putConfig = (cfg) => req("PUT", "/api/config", cfg);
+// The last saved versions the config replaced, newest first:
+// [{id, saved_at (UTC ISO), summary}]. Restoring one saves it like a PUT.
+export const getConfigHistory = () => req("GET", "/api/config/history");
+export const restoreConfigVersion = (id) =>
+  req("POST", `/api/config/history/${encodeURIComponent(id)}/restore`, {});
 export const getTerminalOptions = () => req("GET", "/api/system/terminals");
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
 export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);

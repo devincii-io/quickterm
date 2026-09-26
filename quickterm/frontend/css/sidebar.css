@@ -303,6 +303,20 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 }
 @keyframes session-busy { 50% { opacity: .35; } }
 .session-row.state-elsewhere .session-state { border-style: dashed; }
+/* Needs you: the accent dot inside an accent halo. Solid accent alone is
+   "open here", so the halo is what tells the two apart at rail size. */
+.session-row.state-attention .session-state {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent);
+}
+.session-row.state-attention { color: var(--text); }
+/* Finished: kept for its last output or its question. Dimmed, not hidden;
+   the exit code is in the tooltip. */
+.session-row.finished { opacity: .62; }
+.session-row.finished .session-state { border-style: dotted; background: transparent; }
+.session-row.finished.state-attention { opacity: .85; }
+.session-row.finished.state-attention .session-state { background: var(--accent); }
 
 /* The folder is a second line and only once the sidebar has been dragged wide
    enough to hold one; below that the tooltip carries it. */
@@ -322,6 +336,7 @@ body.sidebar-wide .session-where { display: block; }
 .chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
 .chip-unread { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
 .chip-elsewhere { background: var(--surface); color: var(--muted); }
+.chip-attention { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 /* Other workspaces fold under a small head. Yours has no head at all when it
    is the only one: a list of one thing needs no label. */
@@ -457,6 +472,14 @@ body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
 body.sidebar-collapsed .session-group + .session-group { margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
 body.sidebar-collapsed .session-state { width: 8px; height: 8px; }
+/* The one exception to "foreign groups are not offered here": a terminal
+   that needs you keeps its dot in the rail wherever it lives, folded group
+   included. Nothing else from those groups shows. Clicking it widens the
+   sidebar so its choices can be read. */
+body.sidebar-collapsed .session-group.has-attention { display: block; }
+body.sidebar-collapsed .session-group.has-attention .session-group-rows[hidden] { display: block; }
+body.sidebar-collapsed .session-group:not(.current) .session-entry:not(.needs-you),
+body.sidebar-collapsed .session-group-rows[hidden] .session-entry:not(.needs-you) { display: none; }
 body.sidebar-collapsed .sidebar-footer { flex-direction: column; padding: 3px 0; }
 body.sidebar-collapsed .sidebar-collapse { margin: 0; }
 body.sidebar-collapsed .sidebar-collapse svg { transform: none; }

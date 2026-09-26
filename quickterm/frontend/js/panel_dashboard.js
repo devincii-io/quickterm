@@ -26,6 +26,7 @@ import {
   shortPath,
 } from "./panel_shared.js";
 import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
+import { attentionText, sessionFolder } from "./launcher.js";
 
 // Sessions nobody claims are grouped under this label, which is also the signal
 // to the move/kill calls that there is no owning workspace to name.
@@ -464,9 +465,15 @@ function updateUsageRow(row, session, ctx) {
     : session.workspace ? `workspace ${session.workspace}` : "unassigned";
   // A WSL session's Linux side lives in the distro's VM, so the host figures
   // describe only part of it. Say so rather than under-reporting silently.
+  const state = session.attention
+    ? `needs you: ${attentionText(session.attention)}`
+    : session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background");
+  const folder = sessionFolder(session);
   setText(parts.scope, usage.scope === "host-process-tree-partial-wsl"
     ? "host side only · WSL workload excluded"
-    : `${ownership} · ${session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background")} · ${session.profile || "terminal"}`);
+    : `${ownership} · ${state} · ${session.profile || "terminal"}${folder ? ` · ${shortPath(folder)}` : ""}`);
+  setClass(row, "attention", Boolean(session.attention));
+  setAttrs(parts.scope, { title: folder || null });
   const cpu = usage.cpu_percent == null ? "Sampling…" : `${usage.cpu_percent.toFixed(1)}%`;
   setText(parts.metrics.ram, usage.available ? formatBytes(usage.working_set_bytes) : "Unavailable");
   setText(parts.metrics.cpu, usage.available ? cpu : "Unavailable");
@@ -649,10 +656,15 @@ function updateSessionRow(row, entry) {
   const { session, isCurrent } = entry;
   setText(parts.name, session.name || session.id);
   const unreadBytes = session.activity?.background_output_bytes || 0;
-  const activity = unreadBytes > 0
-    ? `New output ${formatBytes(unreadBytes)} · ${formatUptime(session.activity?.background_output_age_seconds || 0)} ago`
-    : `Quiet ${formatUptime(session.activity?.idle_seconds || 0)} · ${session.id}`;
-  setText(parts.detail, `${session.profile || "terminal"} · ${activity}`);
+  const activity = session.attention
+    ? `Needs you: ${attentionText(session.attention)} · ${formatUptime(session.attention.age_seconds || 0)} ago`
+    : unreadBytes > 0
+      ? `New output ${formatBytes(unreadBytes)} · ${formatUptime(session.activity?.background_output_age_seconds || 0)} ago`
+      : `Quiet ${formatUptime(session.activity?.idle_seconds || 0)} · ${session.id}`;
+  const folder = sessionFolder(session);
+  setText(parts.detail, `${session.profile || "terminal"} · ${activity}${folder ? ` · ${shortPath(folder)}` : ""}`);
+  setAttrs(parts.detail, { title: folder || null });
+  setClass(row, "attention", Boolean(session.attention));
   setText(parts.attach, isCurrent ? "Attach" : "Move here & attach");
 }
 

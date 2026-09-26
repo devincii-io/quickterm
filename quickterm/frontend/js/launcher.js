@@ -64,22 +64,56 @@ function asSet(value) {
 
 // What one terminal is doing, in one word.
 //
-// `busy` is null on the sidebar's poll: main.js asks for `metrics: false`
-// because the truthful answer costs a full OS process snapshot every 10 s. A
-// null therefore means "not measured" and must never be printed as "idle", so
-// only an explicit `true` claims busy and the quiet figure below comes from
-// `activity.idle_seconds`, which the cheap payload does carry.
+// `busy` comes from one process-table snapshot even on the sidebar's cheap
+// poll (`metrics: false` skips only usage sampling). Older backends answered
+// null there, which means "not measured" and must never be printed as "idle",
+// so only an explicit `true` claims busy and the quiet figure below comes from
+// `activity.idle_seconds`.
+//
+// `attention` outranks everything, being open here included: a pane you are
+// not looking at can ring, and the focused one never keeps it long, because
+// sidebar.js tells the server it was seen.
 //
 // `attachments` counts subscribers on the backend, not panes in this window,
 // so a terminal open in another QuickTerm window says so rather than looking
 // abandoned. That matters before moving it.
 export function sessionState(session, isAttached) {
   const activity = session?.activity || {};
+  if (session?.attention) return { key: "attention", label: "needs you" };
+  if (session?.alive === false) return { key: "finished", label: "finished" };
   if (isAttached) return { key: "open", label: "open" };
   if (session?.busy === true) return { key: "busy", label: "busy" };
   if ((activity.background_output_bytes || 0) > 0) return { key: "unread", label: "new output" };
   if ((session?.attachments || 0) > 0) return { key: "elsewhere", label: "open elsewhere" };
   return { key: "idle", label: "background" };
+}
+
+// The folder a row names: where the shell says it is now (OSC 7 / OSC 9;9),
+// else where it started.
+export function sessionFolder(session) {
+  return session?.current_cwd || session?.cwd || "";
+}
+
+// What a terminal asked for, in words, for the tooltip and the dashboard.
+export function attentionText(attention) {
+  if (!attention) return "";
+  if (attention.text) return attention.text;
+  if (attention.kind === "bell") return "rang the bell";
+  if (attention.kind === "exit") return "finished";
+  return "sent a notification";
+}
+
+function exitText(session) {
+  return Number.isInteger(session?.exit_code) ? `exited with code ${session.exit_code}` : "exited";
+}
+
+// An exited terminal stays listed only while the backend holds it for the
+// user: unread final output (the 24 h retention) or an unanswered attention.
+// Anything else that has exited is on its way out of the registry.
+export function isListedSession(session) {
+  if (!session) return false;
+  if (session.alive) return true;
+  return Boolean(session.attention) || (session.activity?.background_output_bytes || 0) > 0;
 }
 
 // The line under the name, in the order someone scans it: what kind of terminal
@@ -89,7 +123,12 @@ export function sessionSummary(session) {
   const activity = session?.activity || {};
   const unread = activity.background_output_bytes || 0;
   const parts = [session?.profile || "terminal"];
-  if (unread > 0) {
+  if (session?.attention) {
+    const age = session.attention.age_seconds;
+    parts.push(Number.isFinite(age) ? `needs you ${formatUptime(age)} ago` : "needs you");
+  } else if (session?.alive === false) {
+    parts.push(exitText(session));
+  } else if (unread > 0) {
     const age = activity.background_output_age_seconds;
     parts.push(Number.isFinite(age)
       ? `+${formatBytes(unread)} ${formatUptime(age)} ago`
@@ -109,8 +148,16 @@ export function sessionSummary(session) {
 // scan a list by.
 export function sessionTooltip(session, groupName) {
   const usage = session?.usage;
-  const lines = [session?.name || session?.id, sessionSummary(session), `workspace: ${groupName}`];
-  if (session?.cwd) lines.push(session.cwd);
+  const lines = [session?.name || session?.id, sessionSummary(session)];
+  if (session?.attention) lines.push(`needs you: ${attentionText(session.attention)}`);
+  if (session?.alive === false) lines.push(`finished, ${exitText(session)}; click to read its output`);
+  lines.push(`workspace: ${groupName}`);
+  const here = session?.current_cwd;
+  if (here && session?.cwd && here !== session.cwd) {
+    lines.push(`in ${here}`, `started in ${session.cwd}`);
+  } else if (sessionFolder(session)) {
+    lines.push(sessionFolder(session));
+  }
   if ((session?.attachments || 0) > 0) lines.push(`${session.attachments} viewer${session.attachments === 1 ? "" : "s"} attached`);
   if (usage?.available) {
     lines.push(`${formatBytes(usage.working_set_bytes || 0)} · ${(usage.cpu_percent ?? 0).toFixed(1)}% CPU · ${usage.process_count || 0} processes`);
@@ -120,7 +167,10 @@ export function sessionTooltip(session, groupName) {
   return lines.filter(Boolean).join("\n");
 }
 
-// Group every live terminal on the backend by the workspace that owns it.
+const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread"];
+
+// Group every live terminal on the backend by the workspace that owns it,
+// plus the exited ones the backend still holds for the user (isListedSession).
 //
 // The ownership rule has to be the dashboard's rule or the two views disagree
 // about the same machine. panel_dashboard.js derives it from each saved
@@ -138,14 +188,14 @@ export function groupSessionsByWorkspace(sessions = [], context = {}) {
   const groupFor = (name, kind) => {
     let group = groups.get(name);
     if (!group) {
-      group = { name, kind, sessions: [], open: 0, busy: 0, unread: 0 };
+      group = { name, kind, sessions: [], open: 0, busy: 0, unread: 0, attention: 0, finished: 0 };
       groups.set(name, group);
     }
     return group;
   };
 
   for (const session of sessions || []) {
-    if (!session || !session.alive) continue;
+    if (!isListedSession(session)) continue;
     const isAttached = attached.has(session.id);
     const claimed = session.workspace || null;
     const isHere = isAttached || owned.has(session.id) || (claimed !== null && claimed === currentName);
@@ -153,16 +203,15 @@ export function groupSessionsByWorkspace(sessions = [], context = {}) {
       ? groupFor(currentName, "current")
       : groupFor(claimed || UNASSIGNED_GROUP, claimed ? "workspace" : "unassigned");
     const state = sessionState(session, isAttached);
-    group.sessions.push({ session, isAttached, isHere, state });
-    if (state.key === "open") group.open += 1;
-    else if (state.key === "busy") group.busy += 1;
-    else if (state.key === "unread") group.unread += 1;
+    group.sessions.push({ session, isAttached, isHere, state, finished: !session.alive });
+    if (COUNTED_STATES.includes(state.key)) group[state.key] += 1;
   }
   if (groups.size && !groups.has(currentName)) groupFor(currentName, "current");
 
-  // Attention first inside a group, name second. A terminal you are looking at
-  // is the anchor, then the ones asking for you, then the rest.
-  const rank = { open: 0, unread: 1, busy: 2, elsewhere: 3, idle: 4 };
+  // Attention first inside a group, name second. A terminal asking for you
+  // leads, then the one you are looking at, then the rest; a finished one
+  // that asked for nothing sinks to the bottom.
+  const rank = { attention: 0, open: 1, unread: 2, busy: 3, elsewhere: 4, idle: 5, finished: 6 };
   for (const group of groups.values()) {
     group.sessions.sort((a, b) => (rank[a.state.key] ?? 9) - (rank[b.state.key] ?? 9)
       || (a.session.name || a.session.id).localeCompare(b.session.name || b.session.id));
@@ -178,11 +227,15 @@ export function groupSessionsByWorkspace(sessions = [], context = {}) {
 export function groupSummary(group) {
   if (!group.sessions.length) return "nothing running";
   const parts = [];
+  const attention = group.attention || 0;
+  const finished = group.finished || 0;
+  if (attention) parts.push(`${attention} need${attention === 1 ? "s" : ""} you`);
   if (group.open) parts.push(`${group.open} open`);
   if (group.unread) parts.push(`${group.unread} new output`);
   if (group.busy) parts.push(`${group.busy} busy`);
-  const quiet = group.sessions.length - group.open - group.unread - group.busy;
+  const quiet = group.sessions.length - attention - finished - group.open - group.unread - group.busy;
   if (quiet > 0) parts.push(`${quiet} background`);
+  if (finished) parts.push(`${finished} finished`);
   return parts.join(" · ");
 }
 
@@ -903,18 +956,23 @@ export function initLauncher(el, options) {
   };
 
   const sessionEntry = (entry, group) => {
-    const { session, isAttached, isHere, state } = entry;
+    const { session, isAttached, isHere, state, finished } = entry;
     // Foreign means "another workspace owns it". Unassigned is not foreign:
     // there is nobody to take it from, so attaching is the honest reading of a
     // click, and main.js already allows exactly that.
     const foreign = !isHere && group.kind === "workspace";
-    const wrap = make("div", `session-entry${foreign ? " foreign" : ""}`);
+    const wrap = make("div", [
+      "session-entry",
+      foreign ? "foreign" : "",
+      state.key === "attention" ? "needs-you" : "",
+    ].filter(Boolean).join(" "));
     wrap.dataset.sessionId = session.id;
     const row = make("button", [
       "session-row",
       `state-${state.key}`,
       isAttached ? "attached" : "detached",
       state.key === "unread" ? "unread" : "",
+      finished ? "finished" : "",
     ].filter(Boolean).join(" "));
     row.type = "button";
     row.dataset.rowKey = session.id;
@@ -923,10 +981,12 @@ export function initLauncher(el, options) {
     row.append(make("span", "session-state"), name);
     // The folder is the fact that tells one project's shell from another's, so
     // it gets its own line as soon as the sidebar is wide enough to hold it.
-    if (session.cwd) row.append(make("small", "session-where", folderName(session.cwd)));
+    // It is where the shell is now when the shell says so, else where it began.
+    const folder = sessionFolder(session);
+    if (folder) row.append(make("small", "session-where", folderName(folder)));
     // Chips only for the states worth interrupting for: a plain background
     // shell is a hollow dot, or the list turns into a wall of badges.
-    if (state.key === "unread" || state.key === "busy" || state.key === "elsewhere") {
+    if (["attention", "unread", "busy", "elsewhere"].includes(state.key)) {
       row.append(make("span", `session-chip chip-${state.key}`, state.key === "unread" ? "new" : state.label));
     }
     wrap.append(row);
@@ -934,6 +994,8 @@ export function initLauncher(el, options) {
     if (!foreign) {
       row.addEventListener("click", () => {
         if (isAttached) options.onFocusSession?.(session.id);
+        // Finished: read what it left, through the replay-only reattach.
+        else if (finished) options.onOpenFinished?.(session);
         else options.onAttachSession?.(session);
       });
       row.addEventListener("dblclick", (event) => {
@@ -978,7 +1040,11 @@ export function initLauncher(el, options) {
       beside.dataset.rowKey = `${session.id}:beside`;
       choices.append(beside);
     }
-    if (typeof options.onMoveSession === "function") {
+    if (finished) {
+      // A finished terminal is read where it ran; there is nothing to move.
+      choices.append(make("p", "session-choice-note",
+        `It has finished. Open ${group.name} to read its output.`));
+    } else if (typeof options.onMoveSession === "function") {
       const move = choiceButton("arrow-up-right", "move here",
         `Take this terminal out of ${group.name} and attach it in ${workspaceName}`,
         () => {
@@ -999,6 +1065,10 @@ export function initLauncher(el, options) {
       setArmed(null);
       row.focus();
     });
+    // The rail shows a foreign terminal only when it needs you, and has no
+    // room for its choices: widen first (listeners run in order), so the
+    // click is never dead.
+    row.addEventListener("click", () => { if (mode === "rail") setMode("full"); });
     row.addEventListener("click", () => setArmed(armedSessionId === session.id ? null : session.id));
     wrap.append(choices);
     return wrap;
@@ -1007,7 +1077,7 @@ export function initLauncher(el, options) {
   // `bare` drops the heading when everything alive belongs to this workspace.
   // A single group headed by its own name is a label for a list of one thing.
   const sessionGroup = (group, bare = false) => {
-    const box = make("div", `session-group ${group.kind}`);
+    const box = make("div", `session-group ${group.kind}${group.attention ? " has-attention" : ""}`);
     const closed = !bare && closedGroups.has(group.name);
     const head = make("button", "session-group-head");
     head.type = "button";
