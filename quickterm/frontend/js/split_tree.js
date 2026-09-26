@@ -88,6 +88,23 @@ export function removeLeaf(root, payload) {
   return root;
 }
 
+// A copy of the tree with every payload passed through `fn`. A leaf mapped to
+// null or undefined is dropped and its split collapses into the sibling, the
+// same way removeLeaf does it. The copy carries only dir and ratio on each
+// split: whatever a renderer hung on the original (a divider element, the
+// last box) stays behind. Returns null when nothing is left.
+export function mapLeaves(root, fn) {
+  if (!root) return null;
+  if (root.type === "pane") {
+    const payload = fn(root.pane);
+    return payload == null ? null : leaf(payload);
+  }
+  const children = root.children.map((child) => mapLeaves(child, fn));
+  if (!children[0]) return children[1];
+  if (!children[1]) return children[0];
+  return { type: "split", dir: root.dir === "v" ? "v" : "h", ratio: root.ratio, children };
+}
+
 // Where every leaf and every divider lands inside `rect`, as plain numbers.
 // `gap` is the divider's thickness. Ratios are clamped the same way the
 // renderer clamps them, so a stored 0.01 cannot squeeze a view to nothing.

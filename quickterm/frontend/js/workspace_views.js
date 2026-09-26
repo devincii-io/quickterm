@@ -15,9 +15,10 @@
 // properties is what makes a split, a move or a close slide into place.
 
 import * as api from "./api.js";
+import { SCRATCH_WS } from "./boot_context.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
-import { dwindleDir, insertBeside, layoutRects, leaves, removeLeaf } from "./split_tree.js";
+import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
 
 export const VIEW_COLORS = ["#d4ad63", "#6daedb", "#8fcf8a", "#c78fd6", "#e0907a", "#6fc7c2"];
 export const VIEW_RATIO_MIN = 15;
@@ -56,6 +57,159 @@ export function ratioBounds(total) {
   return { min, max };
 }
 
+// ---- the arrangement across restarts ----
+//
+// Stored in localStorage under VIEW_ARRANGEMENT_KEY, written by the primary
+// window whenever the tiling changes and read once when it boots:
+//
+//   {"version": 1,
+//    "tree": <node>,
+//    "active": <view>,           the view the keyboard was in
+//    "zoomed": <view> | null}
+//   <node> = {"type":"split","dir":"h"|"v","ratio":r,"children":[<node>,<node>]}
+//          | {"type":"pane","pane":<view>}
+//   <view> = {"primary":true} | {"workspace":"<name>"}
+//
+// The same split tree the views live in, with each view reduced to what
+// brings it back. The primary is a position, not a name: this document
+// restores its own workspace before the others are rebuilt around it.
+
+export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";
+export const VIEW_ARRANGEMENT_VERSION = 1;
+// Past this a stored tree is not something a person tiled by hand.
+const MAX_STORED_VIEWS = 16;
+const MAX_STORED_DEPTH = 16;
+
+const PRIMARY = Object.freeze({ primary: true });
+
+function viewKey(descriptor) {
+  return descriptor?.primary ? "" : `w:${descriptor?.workspace}`;
+}
+
+// The arrangement for `root`, or null when there is nothing to bring back:
+// the primary alone is what every boot shows anyway.
+export function describeArrangement({ root, nameOf, active = null, zoomed = null }) {
+  const describe = (view) => (view.primary ? PRIMARY : { workspace: nameOf(view) });
+  const tree = mapLeaves(root, describe);
+  if (!tree || tree.type !== "split") return null;
+  return {
+    version: VIEW_ARRANGEMENT_VERSION,
+    tree,
+    active: active ? describe(active) : PRIMARY,
+    zoomed: zoomed ? describe(zoomed) : null,
+  };
+}
+
+function parseDescriptor(value) {
+  if (!value || typeof value !== "object") return null;
+  if (value.primary === true) return PRIMARY;
+  if (typeof value.workspace === "string" && value.workspace.trim()) return { workspace: value.workspace };
+  return null;
+}
+
+function parseNode(node, depth, counts) {
+  if (!node || typeof node !== "object" || depth > MAX_STORED_DEPTH) return null;
+  if (node.type === "pane") {
+    const view = parseDescriptor(node.pane);
+    if (!view) return null;
+    counts.views += 1;
+    if (view.primary) counts.primary += 1;
+    return { type: "pane", pane: view };
+  }
+  if (node.type !== "split" || !Array.isArray(node.children) || node.children.length !== 2) return null;
+  if (node.dir !== "h" && node.dir !== "v") return null;
+  const first = parseNode(node.children[0], depth + 1, counts);
+  const second = first && parseNode(node.children[1], depth + 1, counts);
+  if (!second) return null;
+  const ratio = clampViewRatio(Number(node.ratio) * 100) / 100;
+  return { type: "split", dir: node.dir, ratio, children: [first, second] };
+}
+
+// A stored arrangement, checked all the way down. Anything malformed, from
+// another version, or without exactly one primary is null: a half-trusted
+// tree would be rebuilt into a layout nobody made.
+export function parseArrangement(raw) {
+  let value = raw;
+  if (typeof raw === "string") {
+    try { value = JSON.parse(raw); } catch (_) { return null; }
+  }
+  if (!value || typeof value !== "object" || value.version !== VIEW_ARRANGEMENT_VERSION) return null;
+  const counts = { views: 0, primary: 0 };
+  const tree = parseNode(value.tree, 0, counts);
+  if (!tree || counts.primary !== 1 || counts.views > MAX_STORED_VIEWS) return null;
+  return {
+    version: VIEW_ARRANGEMENT_VERSION,
+    tree,
+    active: parseDescriptor(value.active) || PRIMARY,
+    zoomed: parseDescriptor(value.zoomed),
+  };
+}
+
+// What can come back after a restart. Scratch views are dropped because the
+// backend deletes the scratch file at startup; a workspace that no longer
+// exists, the one the primary itself restored, and a second copy of a name
+// are dropped too. The splits they leave collapse into their siblings. An
+// active or zoomed view that did not survive falls back to the primary and
+// to no zoom. `skipped` lists every dropped view with its reason.
+export function restorePlan(arrangement, { exists = () => true, primaryName = null } = {}) {
+  const parsed = parseArrangement(arrangement);
+  if (!parsed) return null;
+  const skipped = [];
+  const seen = new Set();
+  const tree = mapLeaves(parsed.tree, (view) => {
+    if (view.primary) return view;
+    const name = view.workspace;
+    let reason = null;
+    if (name === SCRATCH_WS) reason = "scratch";
+    else if (name === primaryName) reason = "primary";
+    else if (seen.has(name)) reason = "duplicate";
+    else if (!exists(name)) reason = "missing";
+    if (reason) {
+      skipped.push({ workspace: name, reason });
+      return null;
+    }
+    seen.add(name);
+    return view;
+  });
+  const kept = new Set(leaves(tree).map(viewKey));
+  return {
+    tree,
+    active: kept.has(viewKey(parsed.active)) ? parsed.active : PRIMARY,
+    zoomed: parsed.zoomed && kept.has(viewKey(parsed.zoomed)) ? parsed.zoomed : null,
+    skipped,
+  };
+}
+
+// localStorage behind a load/save pair. Every access can throw (storage
+// disabled, quota, a private window), and none of that may reach the view
+// manager: losing the arrangement is fine, losing the window is not.
+export function viewArrangementStore(storage = null) {
+  const backing = () => storage || globalThis.localStorage;
+  return {
+    load() {
+      try { return backing().getItem(VIEW_ARRANGEMENT_KEY); } catch (_) { return null; }
+    },
+    save(text) {
+      try {
+        if (text) backing().setItem(VIEW_ARRANGEMENT_KEY, text);
+        else backing().removeItem(VIEW_ARRANGEMENT_KEY);
+      } catch (_) { /* storage may be disabled */ }
+    },
+  };
+}
+
+// One sentence for a restore that brought nothing back, or null when at
+// least one view returned or nothing but scratch was ever there to return.
+// A view that is missing on its own is not worth a word: the others are the
+// answer.
+export function restoreFailureMessage(restored, failed) {
+  if (restored.length || !failed.length) return null;
+  const names = failed.map((name) => `“${name}”`).join(", ");
+  return failed.length === 1
+    ? `The tiled view of ${names} did not come back: it is open in another window or no longer saved.`
+    : `The tiled views of ${names} did not come back: they are open in another window or no longer saved.`;
+}
+
 function reducedMotion() {
   try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_) { return false; }
 }
@@ -68,11 +222,18 @@ function applyRect(el, rect) {
 }
 
 export class WorkspaceViews {
-  constructor({ current, focus, fit, error }) {
+  // `store` (viewArrangementStore) is given only to the window whose
+  // arrangement outlives a restart. It stays silent until restoreSaved() has
+  // read it, so the lone primary of an early boot cannot erase what it is
+  // about to restore.
+  constructor({ current, focus, fit, error, store = null }) {
     this.current = current;
     this.focus = focus;
     this.fit = fit;
     this.error = error;
+    this.store = store;
+    this.persisting = false;
+    this.lastStored = undefined;
     this.busy = false;
     this.zoomed = null;
     this.companionClaimed = false;
@@ -135,6 +296,23 @@ export class WorkspaceViews {
       view.el.setAttribute("aria-label", `Workspace view: ${name}`);
       if (view.frame) view.frame.title = `Workspace: ${name}`;
     }
+    // A view switching its own workspace calls this through the sidebar, and
+    // the stored arrangement has to follow the name.
+    this._persist();
+  }
+
+  _persist() {
+    if (!this.store || !this.persisting) return;
+    const arrangement = describeArrangement({
+      root: this.root,
+      nameOf: (view) => this.nameOf(view),
+      active: this.active,
+      zoomed: this.zoomed,
+    });
+    const text = arrangement ? JSON.stringify(arrangement) : null;
+    if (text === this.lastStored) return;
+    this.lastStored = text;
+    this.store.save(text);
   }
 
   // ---- focus ----
@@ -153,6 +331,7 @@ export class WorkspaceViews {
       each.el.classList.toggle("active", each === view);
       each.frame?.contentWindow?.quicktermView?.suspend(each !== view);
     }
+    this._persist();
   }
 
   focusView(view) {
@@ -192,29 +371,7 @@ export class WorkspaceViews {
     const beside = this.viewFor(anchor || anchorWindow) || this.active || this.primary;
     this.busy = true;
     try {
-      // Reserve first: a failed registry must never create two layout writers.
-      const info = await api.registerWindow({ workspace: name, title: `Side view: ${name}` });
-      if (!info?.id) throw new Error("Missing workspace view identity");
-      const view = this._makeView({
-        primary: false,
-        color: pickViewColor(this.views().map((each) => each.color)),
-        label: name,
-        id: String(info.id),
-      });
-      view.frame = document.createElement("iframe");
-      view.frame.title = `Workspace: ${name}`;
-      view.frame.src = companionUrl(location.pathname, name, info.id, api.token());
-      view.frame.addEventListener("load", () => {
-        this.update();
-        // The newest view is where the work is about to happen, so it gets
-        // the keyboard, exactly as a tiling window manager focuses the window
-        // it just opened.
-        if (this.pendingFocus === view) {
-          this.pendingFocus = null;
-          this.focusView(view);
-        }
-      });
-      view.el.append(view.frame);
+      const view = await this._claimView(name, this.views().map((each) => each.color));
       const from = this.zoomed && this.zoomed !== beside
         ? this._rectOf(this.zoomed)
         : this._rectOf(beside);
@@ -231,6 +388,103 @@ export class WorkspaceViews {
     } finally {
       this.busy = false;
     }
+  }
+
+  // Claim `name` for a new view and build it, iframe included, without
+  // placing it: the caller decides where it goes in the tree and appends it
+  // to the stage exactly once. Throws when the registry refuses the claim.
+  async _claimView(name, usedColors) {
+    // Reserve first: a failed registry must never create two layout writers.
+    const info = await api.registerWindow({ workspace: name, title: `Side view: ${name}` });
+    if (!info?.id) throw new Error("Missing workspace view identity");
+    const view = this._makeView({
+      primary: false,
+      color: pickViewColor(usedColors),
+      label: name,
+      id: String(info.id),
+    });
+    view.frame = document.createElement("iframe");
+    view.frame.title = `Workspace: ${name}`;
+    view.frame.src = companionUrl(location.pathname, name, info.id, api.token());
+    view.frame.addEventListener("load", () => {
+      this.update();
+      // The newest view is where the work is about to happen, so it gets
+      // the keyboard, exactly as a tiling window manager focuses the window
+      // it just opened.
+      if (this.pendingFocus === view) {
+        this.pendingFocus = null;
+        this.focusView(view);
+      }
+    });
+    view.el.append(view.frame);
+    return view;
+  }
+
+  // Rebuild a whole arrangement around the primary in one step, where open()
+  // would only place one view by dwindle. `tree` is a split tree whose leaves
+  // are {primary:true} or {workspace}, as restorePlan() returns it. Each
+  // workspace is claimed through the same registry path open() uses, one
+  // after another; a refused claim drops that leaf and its split collapses.
+  // Views are built where they will stay: each element is appended to the
+  // stage once and only its box is written afterwards.
+  async rebuild(tree, { active = null, zoomed = null } = {}) {
+    const result = { restored: [], failed: [] };
+    if (this.busy || this.views().length !== 1 || !tree) return result;
+    this.busy = true;
+    try {
+      const claimed = new Map();
+      for (const descriptor of leaves(tree)) {
+        if (descriptor.primary) continue;
+        const name = descriptor.workspace;
+        try {
+          const used = [this.primary.color, ...[...claimed.values()].map((view) => view.color)];
+          claimed.set(name, await this._claimView(name, used));
+          result.restored.push(name);
+        } catch (_) {
+          result.failed.push(name);
+        }
+      }
+      if (!claimed.size) return result;
+      const root = mapLeaves(tree, (descriptor) =>
+        (descriptor.primary ? this.primary : claimed.get(descriptor.workspace) || null));
+      if (!root || !leaves(root).includes(this.primary)) return result;
+      this.root = root;
+      for (const view of claimed.values()) this.stage.append(view.el);
+      const find = (descriptor) => (descriptor?.primary ? this.primary : claimed.get(descriptor?.workspace) || null);
+      this.zoomed = find(zoomed);
+      const focused = find(active) || this.primary;
+      this.layout({ animate: false });
+      this.activate(focused);
+      // An iframe cannot take the keyboard before its document exists; its
+      // load handler hands it over. The primary already holds it.
+      if (!focused.primary) this.pendingFocus = focused;
+      return result;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  // Once per boot: read the stored arrangement, rebuild what can come back,
+  // and from then on keep the store current. Nothing is said about a view
+  // that stayed away unless every one of them did.
+  async restoreSaved({ exists = () => true } = {}) {
+    if (!this.store) return null;
+    let result = null;
+    try {
+      const plan = restorePlan(this.store.load(), { exists, primaryName: this.current() });
+      // Something was tiled by hand before the restore got here; that wins.
+      if (!plan || this.views().length !== 1) return null;
+      result = plan.tree?.type === "split"
+        ? await this.rebuild(plan.tree, plan)
+        : { restored: [], failed: [] };
+      const gone = plan.skipped.filter((item) => item.reason === "missing").map((item) => item.workspace);
+      const message = restoreFailureMessage(result.restored, [...gone, ...result.failed]);
+      if (message) this.error(message);
+    } finally {
+      this.persisting = true;
+      this._persist();
+    }
+    return result;
   }
 
   async close(view) {
@@ -303,7 +557,7 @@ export class WorkspaceViews {
   // Writes every view's and divider's box. `entering` starts at `from` (the
   // box of the view it split off) and slides to its own; `leaving` fades and
   // is removed once the others have slid over it.
-  layout({ animate = true, entering = null, from = null, leaving = null } = {}) {
+  layout({ animate = true, entering = null, from = null, leaving = null, persist = true } = {}) {
     const views = this.views();
     const multiple = views.length > 1;
     const stage = this._stageRect();
@@ -359,6 +613,7 @@ export class WorkspaceViews {
     }
     requestAnimationFrame(() => this.fit());
     if (!still) setTimeout(() => this.fit(), SLIDE_MS + 20);
+    if (persist) this._persist();
   }
 
   _dividerFor(node) {
@@ -413,7 +668,8 @@ export class WorkspaceViews {
         const stage = this.stage.getBoundingClientRect();
         const pos = vertical ? event.clientY - stage.top - box.top : event.clientX - stage.left - box.left;
         node.ratio = Math.min(max, Math.max(min, (pos - DIVIDER_PX / 2) / (total - DIVIDER_PX)));
-        this.layout({ animate: false });
+        // Stored once, where the drag ends, not on every pointer move.
+        this.layout({ animate: false, persist: false });
       };
       const stop = () => {
         el.removeEventListener("pointermove", move);
@@ -422,6 +678,7 @@ export class WorkspaceViews {
         this.stage.classList.remove("resizing");
         document.body.classList.remove("dragging");
         this.fit();
+        this._persist();
       };
       el.addEventListener("pointermove", move);
       el.addEventListener("pointerup", stop);
