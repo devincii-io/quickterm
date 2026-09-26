@@ -1,59 +1,85 @@
-"""One POSIX pty: fork/exec, reader thread -> loop callbacks, write, resize, kill.
+"""One POSIX pty: fork/exec, reader, writer and watcher threads, resize, session kill.
 
 Mirrors the PtySession interface of pty_session.py (the ConPTY backend) so
-SessionManager can use either one unchanged. The child runs in its own
-session/process group (pty.fork calls setsid), so kill() can reap the whole
-tree with killpg.
+SessionManager can use either one unchanged. pty.fork calls setsid, so the
+child leads its own session, and kill() takes down every process group in it.
+
+Who owns what:
+
+- The reader waits on the master and a wake pipe, drains everything already
+  available (up to READ_COALESCE_BYTES) and posts it as one callback. Posting
+  every read(2) on its own flooded the viewers' fan-out queues under any fast
+  output.
+- The writer (pty_base) writes without blocking and holds the fd lock for one
+  write(2) at a time. A child that stops reading its input therefore can never
+  freeze resize() on the event loop or keep the exit from being reported.
+- The watcher owns reaping. Exit is the child's exit, not EOF on the master: a
+  background job that inherited the terminal keeps the slave open long after
+  the shell is gone. After a short drain it wakes the reader, waits for reader
+  and writer, closes the master (the only place that does, so a recycled
+  descriptor number is never read, written or resized) and posts on_exit once,
+  after the final output.
 """
 
 from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import pty
-import queue
+import select
 import shutil
 import signal
 import struct
+import sys
 import termios
 import threading
+import time
 from typing import Callable
 
-_READ_CHUNK = 65536
+from . import process_usage
+from .pty_base import (
+    DRAIN_IDLE_S,
+    DRAIN_MAX_S,
+    READ_COALESCE_BYTES,
+    PtyBase,
+    merge_environment,
+    path_value,
+)
+
+log = logging.getLogger(__name__)
+
+_KILL_VERIFY_S = 2.0
+# How long a writer facing a full input buffer waits for room before it
+# rechecks whether the session has ended or been killed.
+_WRITE_WAIT_S = 0.1
+_WRITER_JOIN_S = 1.0
+# pty.fork returns an inheritable master, and a fork in another thread between
+# pty.fork and set_inheritable would hand this master to that child. Spawns run
+# in worker threads (SessionManager.spawn_async), so the two steps are atomic
+# with respect to each other.
+_FORK_LOCK = threading.Lock()
+# poll() has no FD_SETSIZE ceiling, which a backend with many terminals can
+# reach, but macOS poll() does not support character devices such as a pty.
+_USE_POLL = hasattr(select, "poll") and sys.platform != "darwin"
 
 
-def pids_with_children() -> set[int]:
-    """PIDs that have at least one direct child right now (one /proc scan).
-
-    Mirrors pty_session.pids_with_children so the UI can treat a shell as
-    "busy" when something is running inside it. Returns empty on systems
-    without /proc.
-    """
-    parents: set[int] = set()
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return parents
-    for name in entries:
-        if not name.isdigit():
-            continue
-        try:
-            with open(f"/proc/{name}/stat", "rb") as f:
-                stat = f.read()
-        except OSError:
-            continue  # process vanished mid-scan
-        # pid (comm) state ppid ...; comm may contain spaces, so split after ')'
-        tail = stat[stat.rfind(b")") + 2 :].split()
-        if len(tail) >= 2:
-            try:
-                parents.add(int(tail[1]))
-            except ValueError:
-                pass
-    return parents
+def _wait(read_fds: tuple[int, ...], write_fds: tuple[int, ...], timeout: float | None) -> set[int]:
+    """The descriptors that are ready (hangup and error count as ready)."""
+    if _USE_POLL:
+        poller = select.poll()
+        for fd in read_fds:
+            poller.register(fd, select.POLLIN)
+        for fd in write_fds:
+            poller.register(fd, select.POLLOUT)
+        ms = None if timeout is None else int(timeout * 1000)
+        return {fd for fd, _events in poller.poll(ms)}
+    readable, writable, _ = select.select(read_fds, write_fds, [], timeout)
+    return set(readable) | set(writable)
 
 
-class PtySession:
+class PtySession(PtyBase):
     def __init__(
         self,
         cmd: str,
@@ -66,98 +92,99 @@ class PtySession:
         on_output: Callable[[bytes], None],
         on_exit: Callable[[int], None],
     ) -> None:
-        self._loop = loop
-        self._on_output = on_output
-        self._on_exit = on_exit
+        super().__init__(loop, on_output, on_exit)
         self._exit_code: int | None = None
-        self._dead = threading.Event()
+        # Set by the watcher once it has reaped the child: the process is gone
+        # even while trailing output is still being drained.
+        self._proc_dead = threading.Event()
+        self._last_read = time.monotonic()
 
-        merged = dict(os.environ)
-        merged.update(env or {})
-        merged.setdefault("TERM", "xterm-256color")
-        exe = shutil.which(cmd, path=merged.get("PATH", os.defpath))
+        merged = merge_environment(env)
+        exe = shutil.which(cmd, path=path_value(merged))
         if exe is None:
             raise FileNotFoundError(f"command not found: {cmd}")
         workdir = cwd or os.getcwd()
 
-        pid, fd = pty.fork()
-        if pid == 0:  # child: never returns
-            try:
-                os.chdir(workdir)
-            except OSError:
-                pass
-            try:
-                os.execve(exe, [exe, *args], merged)
-            except OSError:
-                os._exit(127)
+        # Created before the fork so a failure leaves no orphaned child.
+        # os.pipe descriptors are non-inheritable.
+        self._wake_r, self._wake_w = os.pipe()
+        try:
+            with _FORK_LOCK:
+                pid, fd = pty.fork()
+                if pid == 0:  # child: never returns
+                    try:
+                        os.chdir(workdir)
+                    except OSError:
+                        pass
+                    try:
+                        os.execve(exe, [exe, *args], merged)
+                    except OSError:
+                        os._exit(127)
+                os.set_inheritable(fd, False)
+        except BaseException:
+            os.close(self._wake_r)
+            os.close(self._wake_w)
+            raise
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
         self._pid = pid
         self._fd = fd
-        # Serializes every use of _fd against _read_loop closing it. A closed
-        # descriptor number is immediately recyclable, so an unguarded write or
-        # ioctl could land on whatever opened next.
+        # Serializes every use of _fd against the watcher closing it. It is
+        # only ever held for one non-blocking call.
         self._fd_lock = threading.Lock()
         self.resize(cols, rows)
 
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{pid}", daemon=True
         )
-        self._write_q: queue.Queue[bytes | None] = queue.Queue(maxsize=64)
-        self._writer = threading.Thread(
-            target=self._write_loop, name=f"pty-writer-{pid}", daemon=True
+        self._watcher = threading.Thread(
+            target=self._watch_exit, name=f"pty-watch-{pid}", daemon=True
         )
         self._reader.start()
-        self._writer.start()
+        self._start_writer(f"pty-writer-{pid}")
+        self._watcher.start()
 
-    def write(self, data: bytes) -> None:
-        if not self._dead.is_set():
-            try:
-                self._write_q.put_nowait(data)
-            except queue.Full:
-                raise BufferError("PTY input queue is full") from None
-
-    def _write_loop(self) -> None:
-        while True:
-            data = self._write_q.get()
-            if data is None:
-                return
-            view = memoryview(data)
-            while view and not self._dead.is_set():
+    def _do_write(self, data: bytes) -> bool:
+        view = memoryview(data)
+        while view:
+            if self._proc_dead.is_set() or self._input_closed.is_set():
+                return False
+            with self._fd_lock:
+                fd = self._fd
+                if fd < 0:
+                    return False
                 try:
-                    with self._fd_lock:
-                        if self._fd < 0:
-                            return  # _read_loop closed it; the number is recyclable
-                        written = os.write(self._fd, view)
+                    written = os.write(fd, view)
+                except BlockingIOError:
+                    written = 0
                 except OSError:
-                    return
-                if written <= 0:
-                    return
+                    return False
+            if written:
                 view = view[written:]
-
-    def _stop_writer(self) -> None:
-        try:
-            self._write_q.put_nowait(None)
-        except queue.Full:
+                continue
+            # The child's input buffer is full. Wait for room without the
+            # lock, so resize() and the watcher never queue behind a child
+            # that stopped reading. Polling a number the watcher has closed
+            # meanwhile is harmless: the next write takes the lock and sees -1.
             try:
-                self._write_q.get_nowait()
-                self._write_q.put_nowait(None)
-            except (queue.Empty, queue.Full):
-                pass
+                _wait((), (fd,), _WRITE_WAIT_S)
+            except (OSError, ValueError):
+                return False
+        return True
 
     def resize(self, cols: int, rows: int) -> None:
-        # Read once: _read_loop can close and clear the descriptor concurrently,
-        # and the number is recyclable the moment it is closed:
-        # resizing a stale fd would resize whatever inherited it.
-        try:
-            with self._fd_lock:
-                if self._fd < 0:
-                    return
+        # The lock is never held across a call that can block, so this returns
+        # at once even while the writer waits on a child that does not read.
+        with self._fd_lock:
+            if self._fd < 0:
+                return  # closed; the number may already belong to someone else
+            try:
                 fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-        except OSError:
-            pass  # dead pty
+            except OSError:
+                pass  # dead pty
 
     @property
     def alive(self) -> bool:
-        return not self._dead.is_set()
+        return not self._proc_dead.is_set()
 
     @property
     def exit_code(self) -> int | None:
@@ -168,67 +195,124 @@ class PtySession:
         return self._pid
 
     def kill(self) -> bool:
-        if self._dead.is_set():
+        """Kill every process in the child's session and verify it.
+
+        Interactive shells put each job in its own process group, so killing
+        only the leader's group left background jobs and HUP-ignoring
+        foreground jobs running with the terminal open; the leader then stayed
+        an unreaped zombie and every retry failed the same way. Verified means
+        the watcher reaped the leader and no process of the session is left
+        that has not exited. EPERM is not treated as success: the process it
+        protects is still found by the scan, and kill() returns False.
+        """
+        if self._proc_dead.is_set():
+            self._stop_writer()
             return True
-        try:
-            os.killpg(self._pid, signal.SIGKILL)  # child is its own group leader
-        except (OSError, ProcessLookupError):
-            try:
-                os.kill(self._pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return True  # already gone
-            except OSError:
-                pass  # EPERM and friends: verified below
-        self._stop_writer()
-        # CONTRACTS.md requires kill() to report VERIFIED termination:
-        # clients remove only what the backend confirms stopped. Returning True
-        # unconditionally swallowed EPERM and made a surviving process
-        # disappear from the UI while it kept running. The reader thread does
-        # the exit bookkeeping; wait briefly for it, then probe the process.
-        # Never waitpid() here: the reader thread owns reaping, and stealing
-        # the status from it would lose the real exit code.
-        if self._dead.wait(timeout=2.0):
-            return True
-        try:
-            os.kill(self._pid, 0)
-        except ProcessLookupError:
-            return True  # gone; the reader simply has not finished bookkeeping
-        except OSError:
-            return False  # exists and we cannot signal it (EPERM)
-        return False
+        deadline = time.monotonic() + _KILL_VERIFY_S
+        denied = False
+        while True:
+            # None: no /proc (macOS, BSD). Then the leader's group is all that
+            # can be reached, and the reaped leader is the whole verification.
+            members = process_usage.session_process_groups(self._pid)
+            if self._proc_dead.is_set() and not members:
+                self._stop_writer()
+                return True
+            if time.monotonic() >= deadline:
+                log.warning(
+                    "session %s could not be stopped (%s)",
+                    self._pid,
+                    "permission denied" if denied else f"survivors: {sorted(members or ())}",
+                )
+                return False
+            groups = set(members.values()) if members else set()
+            if not self._proc_dead.is_set():
+                groups.add(self._pid)
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # the group emptied since the scan
+                except PermissionError:
+                    denied = True
+            if self._proc_dead.is_set():
+                time.sleep(0.02)  # the rest of the session is still dying
+            else:
+                self._proc_dead.wait(0.02)
 
     def _read_loop(self) -> None:
+        fd, wake = self._fd, self._wake_r
         while True:
             try:
-                chunk = os.read(self._fd, _READ_CHUNK)
-            except OSError:  # EIO when the child side closes
+                ready = _wait((fd, wake), (), None)
+            except (OSError, ValueError):
+                break
+            data, eof = self._drain(fd)
+            if data:
+                self._last_read = time.monotonic()
+                self._post(self._on_output, data)
+            if eof or wake in ready:
+                break
+
+    def _drain(self, fd: int) -> tuple[bytes, bool]:
+        """Everything already readable, up to READ_COALESCE_BYTES, and whether EOF."""
+        parts: list[bytes] = []
+        total = 0
+        eof = False
+        while total < READ_COALESCE_BYTES:
+            try:
+                chunk = os.read(fd, READ_COALESCE_BYTES - total)
+            except BlockingIOError:
+                break
+            except OSError:  # EIO: every holder of the slave has closed it
+                eof = True
                 break
             if not chunk:
+                eof = True
                 break
-            self._post(self._on_output, chunk)
+            parts.append(chunk)
+            total += len(chunk)
+        return b"".join(parts), eof
+
+    def _watch_exit(self) -> None:
+        code: int | None = None
         try:
-            _, status = os.waitpid(self._pid, 0)
+            _pid, status = os.waitpid(self._pid, 0)
             if os.WIFEXITED(status):
-                self._exit_code = os.WEXITSTATUS(status)
+                code = os.WEXITSTATUS(status)
             elif os.WIFSIGNALED(status):
-                self._exit_code = 128 + os.WTERMSIG(status)
+                code = 128 + os.WTERMSIG(status)
         except ChildProcessError:
+            pass  # reaped elsewhere; the status is lost
+        self._exit_code = code if code is not None else 1
+        self._proc_dead.set()
+
+        # Let output still in flight arrive before the reader is stopped. A
+        # reader that already saw EOF needs no grace at all.
+        deadline = time.monotonic() + DRAIN_MAX_S
+        while (
+            self._reader.is_alive()
+            and time.monotonic() < deadline
+            and time.monotonic() - self._last_read < DRAIN_IDLE_S
+        ):
+            time.sleep(0.03)
+        try:
+            os.write(self._wake_w, b"\0")
+        except OSError:
             pass
-        if self._exit_code is None:
-            self._exit_code = 1
-        self._dead.set()
+        self._reader.join()
         self._stop_writer()
+        if self._writer is not None:
+            # The writer rechecks the dead flag every _WRITE_WAIT_S, so this
+            # returns promptly. Were it ever late, the lock and the cleared
+            # number below would still keep it off the closed descriptor.
+            self._writer.join(timeout=_WRITER_JOIN_S)
+
         with self._fd_lock:
             fd, self._fd = self._fd, -1
-        if fd >= 0:
+        for descriptor in (fd, self._wake_r, self._wake_w):
             try:
-                os.close(fd)
+                os.close(descriptor)
             except OSError:
                 pass
+        # Closing the master hangs up whatever still holds the slave.
         self._post(self._on_exit, self._exit_code)
-
-    def _post(self, cb: Callable, arg) -> None:
-        try:
-            self._loop.call_soon_threadsafe(cb, arg)
-        except RuntimeError:
-            pass  # loop already closed
