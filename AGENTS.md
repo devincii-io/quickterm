@@ -89,7 +89,8 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Session termination is verified per process on both backends: POSIX kills
   every process group in the child's session, Windows every process of the
   tree captured before the kill (through handles, so PID reuse cannot fake a
-  death). POSIX `kill()` must not swallow EPERM, a PTY `kill()` counts only
+  death); after a failed kill, a retry must verify again instead of passing
+  on the dead root. POSIX `kill()` must not swallow EPERM, a PTY `kill()` counts only
   when it returns exactly `True`, and `SessionManager.kill` raises `KeyError`
   for an id it does not know. "Remove only verified kills" guards against
   hiding a terminal that is still running, so it applies to a 500. A 404 means

@@ -209,15 +209,25 @@ Kill:
   `/proc/<pid>/stat`; the leader's group where `/proc` is missing) with
   SIGKILL, retries for up to 2 s, and returns True only when the leader has
   been reaped and no other process in that session is still running. EPERM is
-  never swallowed. A kill after the shell already exited returns True and
-  leaves jobs that outlived it (`nohup`) alone, as Windows does.
-- Windows captures the process tree first and opens a handle to each process,
-  so a reused PID cannot pass for one that died. It runs
+  never swallowed.
+- Windows captures the process tree first and opens a handle to each process
+  (kept only when its creation time predates the snapshot), so a reused PID
+  cannot pass for one that died. It holds a handle to the root from spawn
+  until the exit is flagged and never addresses a dead root by PID number.
+  Every captured process is verified through its handle, also one whose
+  parent died during the kill. It runs
   `%SystemRoot%\System32\taskkill.exe /T /F` by absolute path with
   `cwd=%SystemRoot%` (a bare `taskkill` searched the current folder first),
   terminates what survives, and returns False if any captured process is
   still running. No Job Objects: a job would also kill programs started from
   the terminal that taskkill never touched (`code .`, `explorer .`).
+- A shell that exited on its own before any kill attempt keeps its jobs:
+  `kill()` returns True without touching them (`nohup`), as a terminal
+  emulator does. Once a kill of the session has failed, every later `kill()`
+  verifies again: POSIX that no live process is left in the session, Windows
+  that the survivors of the failed attempt, still held by their handles, have
+  exited. A retry can never turn a failure into a success by finding the shell
+  already dead.
 
 Bytes: the POSIX backend is bytes in, bytes out. pywinpty's API is str, so the
 ConPTY backend re-encodes reads and decodes writes as UTF-8, and that round
