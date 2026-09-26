@@ -150,8 +150,10 @@ SESSION or whose name is exactly SESSION; `--enter` presses Enter after it.
 Every verb takes `--port N` when the app does not run on the configured port.
 
 Exit codes: 0 done, 1 usage error or a SESSION that matches no session or
-several (the candidates are listed), 2 QuickTerm is not running, 3 the app
-refused the request (its reason is printed). The installed `QuickTerm.exe` is
+several (the candidates are listed), 2 QuickTerm is not running, or something
+else answers on its port, 3 the app refused the request or it failed after
+QuickTerm answered (the reason is printed). `quickterm new` with no app
+running starts QuickTerm in the background and returns once it is up. The installed `QuickTerm.exe` is
 a windowed program, so `cmd` and PowerShell do not wait for it: use
 `start /wait quickterm ls` in cmd, or pipe it (`quickterm ls | Out-Host`) in
 PowerShell, to read the output and the exit code in order.

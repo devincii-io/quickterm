@@ -615,7 +615,7 @@ REST (JSON, under `/api`):
 | Method | Path | Body → Response |
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
-| GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. |
+| GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. With `?challenge=<nonce>` (`[A-Za-z0-9_-]{16,64}`, else 400) it adds `proof`, the hex HMAC-SHA256 of the nonce keyed with the token: a local client proves it found this user's QuickTerm before it sends the token, and the proof of a caller-chosen nonce reveals nothing about the token. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
@@ -826,10 +826,24 @@ quickterm send SESSION TEXT... [--enter]        id, id prefix or exact name
 quickterm --version
 ```
 
-Exit codes: 0 success, 1 usage error (including a session that matches
-nothing or several), 2 app not running (checked through `/api/health`), 3 the
-server refused (its detail is printed). `new` with no running app starts the
-app with that launch. The frozen build is a GUI-subsystem exe: a verb
+Every loopback call goes through one opener with no proxy handler (an
+intercepting proxy would log the token and every `send`; a corporate one made
+a running app look absent), and the token is sent only after `/api/health`
+answered a fresh challenge with the right proof (`cli.probe` returns absent,
+QuickTerm or impostor). `app.py`'s running-instance probe and Explorer handoff
+use the same path.
+
+Exit codes: 0 done; 1 usage error, or a session name that matches nothing or
+several (the candidates are listed); 2 not running, something else answering
+on the port without a valid proof, or a started app that never came up; 3 the
+server refused (its detail is printed) or the request failed after QuickTerm
+answered. `new` with no running app starts QuickTerm as a detached process
+(`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows, a new session on
+POSIX, no inherited stdio): a folder alone goes as the positional folder,
+anything else as the hidden `--handoff <json>` (a non-empty object of string
+`cwd`, `profile`, `workspace`), which the app queues through `/api/launches`
+once its backend is up, reporting a refusal as `launch_error`. The CLI waits
+up to 20 s for a verified health answer and exits. The frozen build is a GUI-subsystem exe: a verb
 attaches to the parent console and writes to `CONOUT$`; with no console it
 prints nothing and still exits with the right code. cmd and PowerShell do not
 wait for a GUI program, so scripts use `start /wait` in cmd.
