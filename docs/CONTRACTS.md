@@ -338,7 +338,11 @@ class Attachment:
   more than 2 MiB pending is sent the overflow sentinel, told to reconnect and
   replays the current ring. Terminal bytes are never silently dropped.
 - Replay: after any trim the ring never starts inside an escape sequence or a
-  UTF-8 character (the front skips forward, bounded at 4 KiB). DEC private
+  UTF-8 character (the front skips forward, bounded at 4 KiB). A front inside
+  an OSC, DCS, APC, PM or SOS string of any length (an OSC 52 yank, a sixel
+  image) drops through the string's terminator; while an unterminated string
+  is still arriving the ring stays empty, so a replay may be the preamble
+  alone rather than string payload printed as text. DEC private
   modes are tracked as bytes leave the ring, and `scrollback_chunks()` puts
   one synthesized chunk first that restores those in effect at the ring start:
   cursor keys (1), cursor visibility (25), focus reports (1004), bracketed
