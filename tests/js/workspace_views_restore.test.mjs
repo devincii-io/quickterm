@@ -255,8 +255,9 @@ test("the stored tree is rebuilt in place, claim by claim, without moving an ele
   // Restored, the store follows the arrangement as it is now.
   const saved = JSON.parse(store.text);
   assert.equal(shape(saved.tree), "h60(v30(api,P),docs)");
-  assert.deepEqual(saved.active, W("docs"));
-  assert.deepEqual(saved.zoomed, W("api"));
+  // Each view is stored with the registry id it holds now.
+  assert.deepEqual(saved.active, { workspace: "docs", window: "side-2" });
+  assert.deepEqual(saved.zoomed, { workspace: "api", window: "side-1" });
 });
 
 test("nothing coming back is said once, and the store then forgets the old tree", async () => {
@@ -307,4 +308,42 @@ test("leaves of a rebuilt tree are the live view objects", async () => {
   assert.equal(live.length, 2);
   assert.equal(live[1], views.primary);
   assert.equal(live[0].label, "api");
+});
+
+test("a restore releases the claim the previous page's view still holds", async () => {
+  // A reload used to bring nothing back: the old iframe's claim outlives it
+  // for the registry TTL, so the new claim was refused as taken.
+  installDom();
+  const calls = [];
+  let next = 1;
+  globalThis.fetch = async (path, options) => {
+    calls.push(`${options.method} ${path}`);
+    if (options.method === "DELETE") return { ok: true, status: 204, json: async () => ({}), headers: { get: () => "" } };
+    const body = JSON.parse(options.body || "{}");
+    return {
+      ok: true, status: 200,
+      json: async () => ({ id: `new-${next++}`, workspace: body.workspace }),
+      headers: { get: () => "application/json" },
+    };
+  };
+  const store = memoryStore(JSON.stringify({
+    version: 1,
+    tree: split("h", pane(P), pane({ workspace: "api", window: "old-7" })),
+    active: P,
+    zoomed: null,
+  }));
+  const { views } = makeViews(store);
+  const result = await views.restoreSaved();
+
+  assert.deepEqual(result, { restored: ["api"], failed: [] });
+  assert.deepEqual(calls, ["DELETE /api/windows/old-7", "POST /api/windows"], "released before it is claimed again");
+  const saved = JSON.parse(store.text);
+  assert.deepEqual(saved.tree.children[1].pane, { workspace: "api", window: "new-1" }, "the new id is what the next restore releases");
+});
+
+test("a stored window id is kept only when it is a short string", () => {
+  const tree = (pane_) => ({ version: 1, tree: split("h", pane(P), pane(pane_)), active: P });
+  assert.deepEqual(parseArrangement(tree({ workspace: "a", window: "w-1" })).tree.children[1].pane, { workspace: "a", window: "w-1" });
+  assert.deepEqual(parseArrangement(tree({ workspace: "a", window: 7 })).tree.children[1].pane, { workspace: "a" });
+  assert.deepEqual(parseArrangement(tree({ workspace: "a", window: "x".repeat(65) })).tree.children[1].pane, { workspace: "a" });
 });

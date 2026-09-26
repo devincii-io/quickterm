@@ -89,7 +89,11 @@ function viewKey(descriptor) {
 // The arrangement for `root`, or null when there is nothing to bring back:
 // the primary alone is what every boot shows anyway.
 export function describeArrangement({ root, nameOf, active = null, zoomed = null }) {
-  const describe = (view) => (view.primary ? PRIMARY : { workspace: nameOf(view) });
+  // The registry id travels with a view so a restore can release the claim
+  // the previous page's iframe still holds (see rebuild()).
+  const describe = (view) => (view.primary
+    ? PRIMARY
+    : { workspace: nameOf(view), ...(view.id ? { window: String(view.id) } : {}) });
   const tree = mapLeaves(root, describe);
   if (!tree || tree.type !== "split") return null;
   return {
@@ -103,8 +107,11 @@ export function describeArrangement({ root, nameOf, active = null, zoomed = null
 function parseDescriptor(value) {
   if (!value || typeof value !== "object") return null;
   if (value.primary === true) return PRIMARY;
-  if (typeof value.workspace === "string" && value.workspace.trim()) return { workspace: value.workspace };
-  return null;
+  if (typeof value.workspace !== "string" || !value.workspace.trim()) return null;
+  const window = typeof value.window === "string" && value.window && value.window.length <= 64
+    ? { window: value.window }
+    : {};
+  return { workspace: value.workspace, ...window };
 }
 
 function parseNode(node, depth, counts) {
@@ -437,6 +444,14 @@ export class WorkspaceViews {
         if (descriptor.primary) continue;
         const name = descriptor.workspace;
         try {
+          // The iframe this view had before a reload is gone, but its claim
+          // outlives it: its goodbye on pagehide rarely leaves in time, and
+          // the registry keeps an entry for its whole TTL, so the claim below
+          // was refused as "open in another window". The id was minted for
+          // that view alone and nothing else holds it (a rebuild only runs
+          // while the primary is the only view), so releasing it is safe;
+          // after a real restart the registry is empty and this is a no-op.
+          if (descriptor.window) await api.unregisterWindow(descriptor.window).catch(() => {});
           const used = [this.primary.color, ...[...claimed.values()].map((view) => view.color)];
           claimed.set(name, await this._claimView(name, used));
           result.restored.push(name);
