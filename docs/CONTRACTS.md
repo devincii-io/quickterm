@@ -856,6 +856,24 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
   pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
   `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
+- `main.js` is the composition root (about 400 lines): it builds the modules
+  below in order and hands each the dependencies it uses. State more than one
+  of them reads lives in one object from `app_state.js`, read at call time;
+  where a module built early calls one built later, `main.js` passes an arrow
+  that resolves the later name when it runs. `window_registry.js` (register,
+  claim, heartbeat), `launch_loop.js` (the Explorer handoff long poll),
+  `workspace_switch.js` and `workspace_actions.js` (moving between, naming,
+  saving and deleting workspaces), `autosave.js`, `scratch.js` (adopting and
+  leaving scratch), `session_ownership.js` and `layout_sessions.js` (which
+  terminals a layout owns), `spawner.js` (which shell and folder a new pane
+  gets), `pane_commands.js` (what keys, palette and header do to the focused
+  pane), `sidebar.js` (wiring `launcher.js`), `config_sync.js` (re-reading the
+  config, `launch_error`), `here.js` (the focused terminal's folder),
+  `boot_context.js`, `lifecycle.js` (pagehide), `feedback.js` (the error
+  banner and live region), `fonts.js`, `updates.js`.
+  `tests/js/main_modules.test.mjs` builds every factory from dependencies
+  that throw when called, because `node --check` cannot see a closure
+  variable that stopped resolving.
 - `panels.js` owns only panel lifecycle and shared controls. Dashboard, help,
   settings sections, and DOM-free helpers live in `panel_*.js` modules. Keep
   new tabs/large sections out of the coordinator.
