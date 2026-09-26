@@ -60,19 +60,34 @@ export function environmentError(env) {
   return "";
 }
 
+// launch.resolve_profile builds these argument lists itself and drops the
+// profile's own, so a command that carries arguments is never inferred as
+// one of them: the arguments would vanish on the next save.
+const DROPS_ARGS = new Set(["wsl", "bash", "zsh", "fish"]);
+
 export function inferTerminalType(profile) {
   if (profile.terminal_type) return profile.terminal_type;
-  const cmd = (profile.cmd || "").toLowerCase().split(/[\\/]/).pop();
+  const path = (profile.cmd || "").trim().toLowerCase();
+  const segments = path.split(/[\\/]/);
+  const cmd = segments.pop();
+  const bare = cmd.endsWith(".exe") ? cmd.slice(0, -4) : cmd;
   // Claude integration is opt-in via terminal_type. A legacy custom command
   // named `claude` may carry bespoke args and must not silently acquire
   // continue/picker semantics merely by opening Settings.
-  if (cmd === "pwsh" || cmd === "pwsh.exe") return "powershell-core";
-  if (cmd === "powershell" || cmd === "powershell.exe") return "windows-powershell";
-  if (cmd === "cmd" || cmd === "cmd.exe") return "command-prompt";
-  if (cmd === "wsl" || cmd === "wsl.exe") return "wsl";
-  if (cmd === "plink" || cmd === "plink.exe") return "ssh";
-  if (cmd === "psftp" || cmd === "psftp.exe") return "sftp";
-  return "custom";
+  let type = "custom";
+  if (bare === "pwsh") type = "powershell-core";
+  else if (bare === "powershell") type = "windows-powershell";
+  else if (bare === "cmd") type = "command-prompt";
+  else if (bare === "wsl") type = "wsl";
+  else if (bare === "plink") type = "ssh";
+  else if (bare === "psftp") type = "sftp";
+  else if (bare === "nu") type = "nushell";
+  // Git for Windows ships bash.exe under ...\Git\bin or ...\Git\usr\bin. A
+  // bash.exe anywhere else (System32's is WSL's) is plain bash.
+  else if (bare === "bash") type = segments.includes("git") ? "git-bash" : "bash";
+  else if (bare === "zsh" || bare === "fish") type = bare;
+  if (DROPS_ARGS.has(type) && (profile.args || []).length) return "custom";
+  return type;
 }
 
 // The OS dialog is the secondary route now, not the mechanism. It exists only

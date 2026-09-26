@@ -695,7 +695,8 @@ def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
     assert 'import { findLeaf, parentOf, replaceChild } from "./split_tree.js";' in move
     assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in views
     assert (
-        'import { dwindleDir, insertBeside, layoutRects, leaves, removeLeaf } from "./split_tree.js";'
+        "import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf }"
+        ' from "./split_tree.js";'
         in views
     )
     assert "this.root = insertBeside(this.root, beside, view, dwindleDir(from));" in views
@@ -818,3 +819,74 @@ def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
     assert "requestAnimationFrame(() => (focusConfirm ? confirm : cancel).focus());" in pane
     assert 'this.el.addEventListener("keydown", keyHandler, true);' in pane
     assert 'claimFocus("pane-confirm");' in pane and 'releaseFocus("pane-confirm");' in pane
+
+
+def test_profile_card_is_a_name_a_command_and_one_more_disclosure():
+    """A profile shows a name, a command and a start command; the rest is under More.
+
+    The user found eight to twelve controls per card, each with a line of
+    prose, too much for what is usually "PowerShell, then uv run dev". Every
+    chooser on the card is a menu.js menu, and the menu has to close on
+    Escape before the sheet's own Escape handler closes the whole sheet.
+    """
+    terminals = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
+    kit = (FRONTEND_JS / "panel_settings_kit.js").read_text(encoding="utf-8")
+    panels_css = (
+        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "panels.css"
+    ).read_text(encoding="utf-8")
+
+    assert "this._select(" not in terminals
+    assert "configChoice({" in terminals
+    assert "configPurpose(" not in terminals
+    assert 'make("div", "profile-more")' in terminals
+    assert 'toggle.setAttribute("aria-expanded", String(open));' in terminals
+    assert "moreStartsOpen(profile, kind, profileProblems(profile, cfg.profiles, kind))" in terminals
+    # Typing re-infers the type in place; only an explicit type choice redraws.
+    command_input = terminals[terminals.index('command.addEventListener("input", () => {'):]
+    command_input = command_input[: command_input.index("\n        });\n")]
+    assert "rerender()" not in command_input
+    assert "syncKind();" in command_input
+
+    assert 'import { closeMenu, toggleMenu } from "./menu.js";' in kit
+    assert 'window.addEventListener("keydown", escape, true);' in kit
+    assert "event.stopImmediatePropagation();" in kit
+    assert ".qt-menu.in-panel { z-index: 105; }" in panels_css
+
+
+def test_text_zoom_leaves_readline_undo_and_star_to_the_shell():
+    """Ctrl+_ is readline's undo and Ctrl+* no zoom key; a code alone never zooms."""
+    keys = KEYS_JS.read_text(encoding="utf-8")
+    assert 'key === "_"' not in keys
+    assert 'key === "*"' not in keys
+    for code in ('e.code === "Minus"', 'e.code === "Digit0"', 'e.code === "Numpad0"'):
+        line = next(line for line in keys.splitlines() if code in line)
+        assert "unnamed" in line, line
+
+
+def test_tiled_views_are_restored_by_the_primary_after_its_own_workspace():
+    """The view arrangement outlives a restart, restored only by the primary window.
+
+    localStorage is shared by every window on the origin, so a second window
+    must neither restore the arrangement nor write over it. Restored views are
+    claimed through the same registry path open() uses.
+    """
+    main = MAIN_JS.read_text(encoding="utf-8")
+    views = (FRONTEND_JS / "workspace_views.js").read_text(encoding="utf-8")
+
+    assert main.index("views?.restoreSaved(") > main.index(
+        "await restoreWorkspace(state.currentWorkspace)"
+    )
+    assert (
+        "const keepsViewArrangement = !embedded && requestedWorkspace === undefined"
+        " && state.windowIsPrimary;"
+    ) in main
+    assert "store: keepsViewArrangement ? viewArrangementStore() : null," in main
+
+    assert 'export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";' in views
+    store = views[views.index("export function viewArrangementStore("):]
+    store = store[: store.index("\n}\n")]
+    # Both the read and the write are wrapped; storage can throw at any time.
+    assert store.count("try {") == 2
+    assert store.count("catch (_)") == 2
+    assert views.count("api.registerWindow(") == 1
+    assert views.count("await this._claimView(") == 2

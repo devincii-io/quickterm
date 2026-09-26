@@ -4,16 +4,20 @@ import {
   parseEnvLines, shortPath,
 } from "./panel_shared.js";
 import {
-  FILTER_THRESHOLD, configDescription, configEmpty, configFilter,
-  configGroupHeading, configNoMatch, configProblems, configPurpose,
-  configSummary, matchesQuery,
+  FILTER_THRESHOLD, configChoice, configDescription, configEmpty, configFilter,
+  configGroupHeading, configNoMatch, configProblems, configSummary, matchesQuery,
 } from "./panel_settings_kit.js";
 
-// What each kind of profile is, stated once, at the top of its editor. A
-// profile is not a form to fill in: it is a decision about how a terminal
-// starts, and the fields below only make sense once that is said.
+// A profile is a name and a command, optionally a start command. That is all
+// a card shows; everything else a profile can carry sits behind one "More"
+// per card. The user found eight to twelve controls per card, each with a
+// line of prose under it, too much to read for what is usually "PowerShell,
+// then uv run dev".
+
+// What each kind of profile is. It used to open every card as a paragraph;
+// now it is the tooltip on the type chooser, one hover away.
 const KIND_PURPOSE = {
-  "claude-code": "Claude Code, started in the folder of the workspace you launch it from. The launch mode below decides whether it picks up your last conversation there or starts a fresh one.",
+  "claude-code": "Claude Code, started in the folder of the workspace you launch it from. The launch mode decides whether it picks up your last conversation there or starts a fresh one.",
   wsl: "A Linux shell inside WSL. It starts in your Linux home directory; the workspace folder is reachable through /mnt.",
   ssh: "A remote shell over the bundled PuTTY plink. Only what you type here is stored; the passphrase for a key is asked in the terminal, never saved.",
   sftp: "A remote file transfer session over the bundled PuTTY psftp. It is an interactive sftp prompt, not a shell, so it takes no start command.",
@@ -25,9 +29,13 @@ export function purposeFor(kind) {
   return KIND_PURPOSE[kind] || DEFAULT_PURPOSE;
 }
 
+// Kinds the inventory offers on one platform only. A profile typed on the
+// other one still needs a name for its kind.
+const KIND_LABELS = { "git-bash": "Git Bash", nushell: "Nushell", bash: "Bash", zsh: "Zsh", fish: "Fish" };
+
 function typeLabel(types, kind) {
   const found = types.find((item) => item.id === kind) || TERMINAL_TYPES.find((item) => item.id === kind);
-  return found ? found.label : kind;
+  return found ? found.label : (KIND_LABELS[kind] || kind);
 }
 
 // The compact "what this actually runs" line every row wears. It is built from
@@ -56,7 +64,7 @@ export function runLine(profile, kind) {
     parts.push(...(profile.args || []));
   }
   const line = parts.join(" ");
-  const start = kind === "sftp" || kind === "claude-code" ? "" : (profile.start_command || "").trim();
+  const start = takesStartCommand(kind) ? (profile.start_command || "").trim() : "";
   return start ? `${line} · then ${start}` : line;
 }
 
@@ -82,13 +90,105 @@ export function profileProblems(profile, all, kind) {
   return problems;
 }
 
+// Local shells a typed command can turn a profile into. Claude Code stays
+// opt-in (see inferTerminalType), and SSH and SFTP are a host rather than a
+// command, so typing never switches a card to either of those.
+const SHELL_KINDS = new Set([
+  "powershell-core", "windows-powershell", "command-prompt", "wsl",
+  "bash", "zsh", "fish", "git-bash", "nushell",
+]);
+
+/**
+ * The kind a card has once its command reads `cmd` and `args`, given the kind
+ * it had when it was drawn. It is worked out from that starting kind every
+ * time, never from the previous keystroke: "pwsh.exe" edited into
+ * "C:\...\pwsh.exe" passes through "C" on the way, and a card that remembered
+ * the detour would come back without its arguments.
+ */
+export function kindForCommand(origin, cmd, args = []) {
+  const inferred = inferTerminalType({ cmd, args });
+  const shell = SHELL_KINDS.has(inferred);
+  if (SHELL_KINDS.has(origin)) return shell ? inferred : "custom";
+  return shell ? inferred : origin;
+}
+
+/** The arguments a kind starts with, as choosing it from the type menu sets them. */
+export function defaultArgsFor(kind) {
+  return kind === "powershell-core" || kind === "windows-powershell" ? ["-NoLogo"] : [];
+}
+
+/** Whether launch.resolve_profile runs a start command for this kind. */
+export function takesStartCommand(kind) {
+  return kind !== "custom" && kind !== "sftp" && kind !== "claude-code";
+}
+
+// A custom profile's command field is its whole command line. Double quotes
+// group, exactly as on a Windows command line, and nothing else is special:
+// a backslash is a path separator there, not an escape.
+export function splitCommandLine(text) {
+  const parts = [];
+  let current = "";
+  let started = false;
+  let quoted = false;
+  for (const ch of String(text || "")) {
+    if (ch === "\"") {
+      quoted = !quoted;
+      started = true;
+    } else if (!quoted && /\s/.test(ch)) {
+      if (started) parts.push(current);
+      current = "";
+      started = false;
+    } else {
+      current += ch;
+      started = true;
+    }
+  }
+  if (started) parts.push(current);
+  return parts;
+}
+
+export function joinCommandLine(parts) {
+  return parts.map((part) => (part === "" || /\s/.test(part) ? `"${part}"` : part)).join(" ");
+}
+
+// A double quote inside one part has no spelling in that syntax. Such a
+// profile keeps its executable and its arguments in separate fields instead,
+// and the arguments are left for the Advanced tab.
+export function fitsCommandLine(parts) {
+  return parts.every((part) => !String(part).includes("\""));
+}
+
+export function commandLineText(profile) {
+  const args = profile.args || [];
+  if (!profile.cmd && !args.length) return "";
+  return joinCommandLine([profile.cmd || "", ...args]);
+}
+
+/**
+ * Whether a card's "More" starts open. It does when the card has a problem to
+ * show, and when its type is not the one its command implies, since nothing in
+ * the main row would reveal that: a custom profile running pwsh.exe, or a
+ * PowerShell profile pointed at python.exe. Claude Code, SSH and SFTP say what
+ * they are in the run line and the main row.
+ */
+export function moreStartsOpen(profile, kind, problems = []) {
+  if (problems.length) return true;
+  if (kind === "claude-code" || kind === "ssh" || kind === "sftp") return false;
+  return inferTerminalType({ cmd: profile.cmd, args: profile.args }) !== kind;
+}
+
+let moreIds = 0;
+
 export function renderTerminalSettings(host, rerender) {
     const cfg = this.settingsDraft;
     cfg.profiles ||= [];
     this.settingsFilters ||= { terminals: "", snippets: "" };
+    // Which cards have "More" open, by profile object, so a rerender (a type
+    // chosen, a profile added or removed) leaves every one as it was.
+    this.profileMoreOpen ||= new WeakMap();
     const heading = this._sectionHeading(
       "Terminal profiles",
-      "Your own terminals: a shell, what it runs on start, and a line saying what it is for. The workspace supplies the folder, so one profile works in every project. System shells are always in the launcher without any setup.",
+      "A name and a command. The workspace supplies the folder.",
     );
     const addProfile = () => {
       let n = 1;
@@ -97,7 +197,7 @@ export function renderTerminalSettings(host, rerender) {
       const available = (this.terminalInventory.types || []).find((type) =>
         type.executable && type.available !== false && type.id !== "claude-code");
       const base = available || { id: "custom", executable: "" };
-      const args = base.id === "powershell-core" || base.id === "windows-powershell" ? ["-NoLogo"] : [];
+      const args = defaultArgsFor(base.id);
       cfg.profiles.push({ name: `Terminal ${n}`, description: "", cmd: base.executable || "", args, env: {}, keybinding: null, autostart: false, terminal_type: base.id, wsl_distro: null, start_command: null, claude_mode: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null });
       // A new card the active filter would hide reads as a button that did
       // nothing, so adding always clears the filter.
@@ -116,36 +216,86 @@ export function renderTerminalSettings(host, rerender) {
       emptyAdd.append(icon("plus", 13), make("span", "", "Add your first profile"));
       emptyAdd.addEventListener("click", addProfile);
       host.append(configEmpty({
-        lead: "No personal terminals yet.",
-        body: "The launcher already offers every shell installed on this computer, so a profile is for the terminal those cannot give you: "
-          + "PowerShell that starts your dev server, Claude Code set to continue the conversation, a server you reach over SSH. "
-          + "Add one when a terminal deserves a name.",
+        lead: "No profiles yet.",
+        body: "Every installed shell is already in the launcher. A profile gives a command a name, like PowerShell that starts your dev server.",
         action: emptyAdd,
       }));
       return;
     }
 
     const inventoryTypeList = this.terminalInventory.types || TERMINAL_TYPES;
-    const inventoryTypes = inventoryTypeList.map((type) => ({
-      value: type.id,
-      label: `${type.label}${type.available === false ? " (not found)" : ""}`,
-    }));
+    const typeOptions = (kind) => {
+      const options = inventoryTypeList.map((type) => ({
+        value: type.id,
+        label: type.label,
+        detail: type.available === false ? "not found on this computer" : undefined,
+      }));
+      if (!options.some((option) => option.value === kind)) {
+        options.push({ value: kind, label: typeLabel(inventoryTypeList, kind) });
+      }
+      return options;
+    };
     const distros = this.terminalInventory.wsl_distributions || [];
 
     const buildCard = (profile) => {
-      const kind = inferTerminalType(profile);
+      let kind = inferTerminalType(profile);
+      const remote = kind === "ssh" || kind === "sftp";
+      // What a typed command is measured against (kindForCommand). The
+      // arguments follow an explicit edit of the Arguments field.
+      const origin = { kind, args: [...(profile.args || [])] };
+      // A custom card types its whole command line; every other kind types
+      // its executable and keeps its arguments under More. Fixed for the life
+      // of the card, so a kind inferred mid-word never changes what the field
+      // under the caret means.
+      const lineMode = kind === "custom" && fitsCommandLine([profile.cmd || "", ...(profile.args || [])]);
       const el = make("article", "terminal-profile-card");
-      const cardHead = make("div", "terminal-card-head");
-      const identity = make("div", "terminal-identity");
-      const copy = make("div", "config-identity");
-      const title = make("h3", "", profile.name || "Untitled terminal");
-      let description = configDescription(profile.description);
-      const kindLine = make("p", "config-kind", this._terminalLabel(profile));
-      const summary = configSummary(runLine(profile, kind));
-      copy.append(title, description, kindLine, summary);
-      identity.append(make("span", "profile-mark large", (profile.name || "> ").slice(0, 2).toUpperCase()), copy);
-      const remove = this._button("", "text-button danger-text");
-      remove.append(icon("trash", 13), make("span", "", "Remove"));
+      el.dataset.kind = kind;
+
+      // ---- the main row: name, command (or host), start command, remove ----
+      const main = make("div", "profile-main");
+      const name = this._textInput(profile.name, "My terminal");
+      name.title = "Shown in the launcher, the palette and every split menu.";
+      main.append(this._field("Profile name", name));
+
+      let command = null;
+      if (remote) {
+        const hostInput = this._textInput(profile.ssh_host, "server.example.com");
+        hostInput.addEventListener("input", () => {
+          profile.ssh_host = hostInput.value || null;
+          refresh();
+        });
+        main.append(this._field("Host", hostInput));
+      } else {
+        command = this._textInput(
+          lineMode ? commandLineText(profile) : profile.cmd,
+          lineMode ? "\"C:\\path with spaces\\tool.exe\" --flag" : "pwsh.exe",
+        );
+        command.classList.add("mono-input");
+        command.title = lineMode
+          ? "The program and its arguments. Quote a part that contains spaces."
+          : "The program this terminal runs, by name or full path.";
+        main.append(this._field("Command", command));
+      }
+
+      const start = this._textInput(
+        profile.start_command,
+        kind === "ssh" ? "Optional, runs on the remote host" : "Optional, e.g. uv run dev",
+      );
+      start.classList.add("mono-input");
+      start.title = kind === "ssh"
+        ? "Runs instead of a remote shell; the session ends when it finishes."
+        : "Runs inside the shell and keeps it open.";
+      start.addEventListener("input", () => {
+        profile.start_command = start.value || null;
+        refresh();
+      });
+      const startField = this._field(kind === "ssh" ? "Remote command" : "Start command", start);
+      main.append(startField);
+
+      const remove = this._button("", "icon-button danger-text profile-remove");
+      remove.append(icon("trash", 13));
+      remove.title = "Remove this profile";
+      remove.setAttribute("aria-label", "Remove this profile");
       remove.addEventListener("click", () => {
         // Splice by identity: the visible list is grouped and filtered, so its
         // position is not the position in the draft.
@@ -154,182 +304,245 @@ export function renderTerminalSettings(host, rerender) {
         if (cfg.default_profile === profile.name) cfg.default_profile = cfg.profiles[0]?.name || "";
         rerender();
       });
-      cardHead.append(identity, remove);
-      el.append(cardHead);
+      main.append(remove);
+      el.append(main);
 
       const problemSlot = make("div", "config-problem-slot");
-      const showProblems = () => {
+      el.append(problemSlot);
+
+      // ---- the one line: More, what it is for, what it runs ----
+      const foot = make("div", "profile-foot");
+      const toggle = make("button", "profile-more-toggle");
+      toggle.type = "button";
+      toggle.append(icon("chevron-right", 12), make("span", "", "More"));
+      let description = configDescription(profile.description, "");
+      const summary = configSummary(runLine(profile, kind));
+      foot.append(toggle, description, summary);
+      el.append(foot);
+
+      const more = make("div", "profile-more");
+      more.id = `profile-more-${++moreIds}`;
+      toggle.setAttribute("aria-controls", more.id);
+      const setOpen = (open) => {
+        more.hidden = !open;
+        toggle.setAttribute("aria-expanded", String(open));
+        el.classList.toggle("more-open", open);
+      };
+      toggle.addEventListener("click", () => {
+        const open = more.hidden;
+        this.profileMoreOpen.set(profile, open);
+        setOpen(open);
+      });
+
+      const refresh = () => {
+        summary.textContent = runLine(profile, kind);
+        summary.title = summary.textContent;
         problemSlot.textContent = "";
         const box = configProblems(profileProblems(profile, cfg.profiles, kind));
         if (box) problemSlot.append(box);
       };
-      const refreshSummary = () => {
-        kindLine.textContent = this._terminalLabel(profile);
-        summary.textContent = runLine(profile, kind);
-        summary.title = summary.textContent;
-        showProblems();
-      };
-      showProblems();
-      el.append(problemSlot);
-      el.append(configPurpose(purposeFor(kind)));
 
+      // ---- More ----
       const fields = make("div", "settings-grid two-column");
-      const name = this._textInput(profile.name, "My terminal");
-      name.addEventListener("input", () => {
-        if (cfg.default_profile === profile.name) cfg.default_profile = name.value;
-        profile.name = name.value;
-        title.textContent = name.value || "Untitled terminal";
-        showProblems();
+      const typeChoice = configChoice({
+        options: typeOptions(kind),
+        value: kind,
+        label: "Terminal type",
+        title: purposeFor(kind),
+        onChange: (value) => {
+          if (value === kind) return;
+          profile.terminal_type = value;
+          // Prefer the live inventory (real resolved paths, includes git-bash,
+          // nushell, ssh/sftp); the static list is only the pre-load fallback.
+          const known = (this.terminalInventory.types || []).find((item) => item.id === value)
+            || TERMINAL_TYPES.find((item) => item.id === value);
+          // Clear an executable from the previous type even when the newly
+          // selected integration is not installed. Otherwise PowerShell could
+          // accidentally be launched with Claude's `--continue` arguments.
+          profile.cmd = known?.executable || "";
+          profile.args = defaultArgsFor(value);
+          if (value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";
+          // The card is redrawn for its new kind with More still open and the
+          // chooser keeping the keyboard, where the choice was made.
+          this.profileMoreOpen.set(profile, true);
+          this._focusProfileType = profile;
+          rerender();
+        },
       });
+      fields.append(this._field("Terminal type", typeChoice.el));
+
       const describe = this._textInput(profile.description, "What this terminal is for");
       describe.addEventListener("input", () => {
         profile.description = describe.value;
-        const fresh = configDescription(describe.value);
+        const fresh = configDescription(describe.value, "");
         description.replaceWith(fresh);
         description = fresh;
       });
-      const type = this._select(inventoryTypes, kind);
-      type.addEventListener("change", () => {
-        profile.terminal_type = type.value;
-        // Prefer the live inventory (real resolved paths, includes git-bash,
-        // nushell, ssh/sftp); the static list is only the pre-load fallback.
-        const known = (this.terminalInventory.types || []).find((item) => item.id === type.value)
-          || TERMINAL_TYPES.find((item) => item.id === type.value);
-        // Clear an executable from the previous type even when the newly
-        // selected integration is not installed. Otherwise PowerShell could
-        // accidentally be launched with Claude's `--continue` arguments.
-        profile.cmd = known?.executable || "";
-        if (type.value === "powershell-core" || type.value === "windows-powershell") profile.args = ["-NoLogo"];
-        else profile.args = [];
-        if (type.value === "claude-code" && !profile.claude_mode) profile.claude_mode = "continue";
-        rerender();
-      });
-      fields.append(
-        this._field("Profile name", name, "Shown in the launcher, the palette and every split menu."),
-        this._field("Description", describe, "One line about when you open this terminal. It is what tells two similar profiles apart."),
-        this._field("Terminal type", type, "Changing this resets the executable and arguments to the ones that type needs."),
-      );
+      fields.append(this._field("Description", describe));
 
-      if (kind === "wsl") {
-        const distroOptions = [{ value: "", label: distros.length ? "Default WSL distribution" : "No distributions detected" }, ...distros.map((distro) => ({ value: distro, label: distro }))];
-        const distro = this._select(distroOptions, profile.wsl_distro || "");
-        distro.addEventListener("change", () => {
-          profile.wsl_distro = distro.value || null;
-          refreshSummary();
-        });
-        fields.append(this._field("Linux distribution", distro, distros.length ? "Detected from WSL on this computer." : "Install a distribution with wsl --install."));
+      let argsInput = null;
+      let argsField = null;
+      if (!remote && !lineMode) {
+        const parts = profile.args || [];
+        argsInput = this._textInput(joinCommandLine(parts), "Optional arguments");
+        argsInput.classList.add("mono-input");
+        if (fitsCommandLine(parts)) {
+          argsInput.title = "Arguments after the program. Quote one that contains spaces.";
+          argsInput.addEventListener("input", () => {
+            profile.args = splitCommandLine(argsInput.value);
+            origin.args = [...profile.args];
+            refresh();
+          });
+        } else {
+          // Rewriting it here would lose the quote; the JSON keeps it exact.
+          argsInput.disabled = true;
+          argsInput.title = "An argument contains a double quote. Edit it in the Advanced tab.";
+        }
+        argsField = this._field("Arguments", argsInput);
+        fields.append(argsField);
       }
-      if (kind === "custom") {
-        const command = this._textInput(profile.cmd, "executable.exe");
-        command.addEventListener("input", () => {
-          profile.cmd = command.value;
-          refreshSummary();
-        });
-        const args = this._textInput((profile.args || []).join(" "), "--optional arguments");
-        args.addEventListener("input", () => {
-          profile.args = args.value.trim() ? args.value.trim().split(/\s+/) : [];
-          refreshSummary();
-        });
-        fields.append(
-          this._field("Executable", command, "A program on this computer, or anything on PATH."),
-          this._field("Arguments", args, "Arguments containing spaces can be edited precisely in Advanced."),
-        );
-      }
-      const remote = kind === "ssh" || kind === "sftp";
+
+      let distroField = null;
+      let claudeField = null;
       if (remote) {
-        const hostInput = this._textInput(profile.ssh_host, "server.example.com");
-        hostInput.addEventListener("input", () => {
-          profile.ssh_host = hostInput.value || null;
-          refreshSummary();
-        });
         const portInput = this._textInput(profile.ssh_port ? String(profile.ssh_port) : "", "22");
         portInput.addEventListener("input", () => {
           const parsed = Number.parseInt(portInput.value, 10);
           profile.ssh_port = Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
-          refreshSummary();
+          refresh();
         });
         const userInput = this._textInput(profile.ssh_user, "Optional, e.g. deploy");
         userInput.addEventListener("input", () => {
           profile.ssh_user = userInput.value || null;
-          refreshSummary();
+          refresh();
         });
         const keyInput = this._textInput(profile.ssh_key, "Optional, C:\\Users\\you\\key.ppk");
+        keyInput.title = "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal.";
         keyInput.addEventListener("input", () => {
           profile.ssh_key = keyInput.value || null;
-          refreshSummary();
+          refresh();
         });
         fields.append(
-          this._field("Host", hostInput),
-          this._field("Port", portInput, "Leave empty for 22."),
+          this._field("Port", portInput),
           this._field("Username", userInput),
-          this._field("Private key", keyInput, "PuTTY .ppk file. Passphrases are never stored; you are asked in the terminal."),
+          this._field("Private key", keyInput),
         );
       } else {
-        // The workspace owns the folder outright. A profile has no folder of
-        // any kind, so one "Claude Code" or "PowerShell" profile is usable in
-        // every project and nothing can point somewhere invisible.
-        fields.append(this._note(
-          kind === "claude-code"
-            ? "Claude opens in the folder of the workspace you launch it from. Set that folder in the Dashboard."
-            : "This terminal opens in the folder of the workspace you launch it from. Set that folder in the Dashboard.",
-        ));
-      }
-      if (kind === "claude-code") {
-        const launchMode = this._select([
-          { value: "continue", label: "Continue latest in this project" },
-          { value: "resume", label: "Choose from Claude sessions" },
-          { value: "agents", label: "Open Claude background-agent manager" },
-          { value: "new", label: "Always start a new conversation" },
-        ], profile.claude_mode || "continue");
-        launchMode.addEventListener("change", () => {
-          profile.claude_mode = launchMode.value;
-          refreshSummary();
+        // Built for every local card and shown per kind, because typing a
+        // command can turn a custom card into WSL without a redraw.
+        const distroChoice = configChoice({
+          options: [
+            { value: "", label: distros.length ? "Default distribution" : "No distributions detected" },
+            ...distros.map((distro) => ({ value: distro, label: distro })),
+          ],
+          value: profile.wsl_distro || "",
+          label: "Linux distribution",
+          title: distros.length ? "Detected from WSL on this computer." : "Install a distribution with wsl --install.",
+          onChange: (value) => {
+            profile.wsl_distro = value || null;
+            refresh();
+          },
         });
-        fields.append(this._field(
-          "Claude launch",
-          launchMode,
-          "Uses Claude's native continue, session picker, or background-agent view in the project folder.",
-        ));
-      } else if (kind !== "custom" && kind !== "sftp") {
-        const start = this._textInput(profile.start_command, kind === "ssh" ? "Optional, runs on the remote host" : "Optional, e.g. uv run dev");
-        start.addEventListener("input", () => {
-          profile.start_command = start.value || null;
-          refreshSummary();
+        distroField = this._field("Linux distribution", distroChoice.el);
+        const launchMode = configChoice({
+          options: [
+            { value: "continue", label: "Continue latest in this project" },
+            { value: "resume", label: "Choose from Claude sessions" },
+            { value: "agents", label: "Open Claude background-agent manager" },
+            { value: "new", label: "Always start a new conversation" },
+          ],
+          value: profile.claude_mode || "continue",
+          label: "Claude launch",
+          title: "Uses Claude's native continue, session picker, or background-agent view in the project folder.",
+          onChange: (value) => {
+            profile.claude_mode = value;
+            refresh();
+          },
         });
-        fields.append(this._field(
-          kind === "ssh" ? "Remote command" : "Start command",
-          start,
-          kind === "ssh" ? "Runs instead of a remote shell; the session ends when it finishes." : "Runs inside the shell and keeps it open.",
-        ));
+        claudeField = this._field("Claude launch", launchMode.el);
+        fields.append(distroField, claudeField);
       }
+
       const shortcut = this._textInput(profile.keybinding, "Optional, e.g. ctrl+alt+1");
+      shortcut.title = "Opens this profile from anywhere. Applied after restarting QuickTerm.";
       shortcut.addEventListener("input", () => { profile.keybinding = shortcut.value || null; });
-      fields.append(this._field("Global shortcut", shortcut, "Applied after restarting QuickTerm."));
-      el.append(fields);
+      fields.append(this._field("Global shortcut", shortcut));
+      more.append(fields);
 
       const envArea = make("textarea", "ui-input env-input");
       envArea.value = envToLines(profile.env);
       envArea.placeholder = "API_TOKEN=...\nNODE_ENV=development";
+      envArea.title = "One KEY=value per line. Values are encrypted on disk with your Windows account.";
       envArea.spellcheck = false;
       envArea.rows = 3;
       envArea.addEventListener("keydown", (event) => event.stopPropagation());
       envArea.addEventListener("input", () => {
         profile.env = parseEnvLines(envArea.value);
-        showProblems();
+        refresh();
       });
-      el.append(this._field(
-        "Environment variables",
-        envArea,
-        "One KEY=value per line, inherited by every process in this terminal. Values are encrypted on disk with your Windows account.",
-      ));
+      more.append(this._field("Environment variables", envArea));
 
-      const toggle = make("label", "toggle-row");
+      const autostart = make("label", "toggle-row");
       const checkbox = make("input", "sr-only");
       checkbox.type = "checkbox";
       checkbox.checked = Boolean(profile.autostart);
       checkbox.addEventListener("change", () => { profile.autostart = checkbox.checked; });
-      toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Open automatically with a restored workspace"));
-      el.append(toggle);
+      autostart.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Open automatically with a restored workspace"));
+      more.append(autostart);
+      el.append(more);
+
+      // The parts of the card that depend on its kind, set in place. A redraw
+      // here would replace the field the user is typing into.
+      const syncKind = () => {
+        el.dataset.kind = kind;
+        startField.hidden = !takesStartCommand(kind);
+        // launch.py builds these argument lists itself; a field it ignores
+        // would only be a place to type something that never runs.
+        if (argsField) argsField.hidden = kind === "wsl" || kind === "bash" || kind === "zsh" || kind === "fish";
+        if (distroField) distroField.hidden = kind !== "wsl";
+        if (claudeField) claudeField.hidden = kind !== "claude-code";
+        typeChoice.set(kind);
+        typeChoice.el.title = purposeFor(kind);
+      };
+
+      if (command) {
+        command.addEventListener("input", () => {
+          let next;
+          if (lineMode) {
+            const typed = splitCommandLine(command.value);
+            profile.cmd = typed[0] || "";
+            profile.args = typed.slice(1);
+            next = kindForCommand(origin.kind, profile.cmd, profile.args);
+          } else {
+            profile.cmd = command.value;
+            next = kindForCommand(origin.kind, profile.cmd);
+            // Back on the kind the card started with, its own arguments
+            // return; a different kind starts from that kind's defaults.
+            profile.args = next === origin.kind ? [...origin.args] : defaultArgsFor(next);
+            if (argsInput && !argsInput.disabled) argsInput.value = joinCommandLine(profile.args);
+          }
+          if (next !== kind) {
+            kind = next;
+            profile.terminal_type = next;
+            syncKind();
+          }
+          refresh();
+        });
+      }
+      name.addEventListener("input", () => {
+        if (cfg.default_profile === profile.name) cfg.default_profile = name.value;
+        profile.name = name.value;
+        refresh();
+      });
+
+      syncKind();
+      refresh();
+      const remembered = this.profileMoreOpen.get(profile);
+      setOpen(remembered ?? moreStartsOpen(profile, kind, profileProblems(profile, cfg.profiles, kind)));
+      if (this._focusProfileType === profile) {
+        this._focusProfileType = null;
+        requestAnimationFrame(() => typeChoice.el.focus());
+      }
       return el;
     };
 

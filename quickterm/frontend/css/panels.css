@@ -646,28 +646,113 @@
   border-radius: 0;
   background: transparent;
 }
-.terminal-card-head {
-  margin-bottom: 12px;
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-.terminal-identity { gap: 9px; }
-.terminal-identity h3 { font-size: 12.5px; font-weight: 600; }
-.terminal-identity p { margin-top: 2px; color: var(--muted); font-family: var(--mono); font-size: 10px; }
-/* Scoped to the editor: the same class marks a profile in the dashboard, and
-   that surface belongs to another file. */
-.terminal-identity .profile-mark,
-.terminal-identity .profile-mark.large {
-  width: 30px;
-  height: 30px;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 10px;
-}
 .snippet-card-head { gap: 8px; margin-bottom: 10px; }
+
+/* A profile is one row: name, command, start command, remove. The row keeps
+   its three columns while there is room for a path to be read, and the start
+   command column collapses away for a kind that takes none. */
+.terminal-profile-card { padding: 10px 0 11px; }
+.profile-main {
+  display: grid;
+  grid-template-columns: minmax(0, .8fr) minmax(0, 1.5fr) minmax(0, 1.2fr) auto;
+  align-items: end;
+  gap: 8px 10px;
+}
+.profile-main > .profile-remove { grid-column: -2; align-self: end; margin-bottom: 2px; }
+.profile-main > .settings-field:has(+ .settings-field[hidden]) { grid-column: span 2; }
+.mono-input { font-family: var(--mono); font-size: 11.5px; }
+
+/* The one line under the row: the More toggle, the description if one was
+   written, and what the profile actually runs. */
+.profile-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 6px;
+}
+.profile-more-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 7px 0 4px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.profile-more-toggle:hover { background: var(--surface-raised); color: var(--text); }
+.profile-more-toggle svg { transition: transform .14s ease; }
+.profile-more-toggle[aria-expanded="true"] { color: var(--text-soft); }
+.profile-more-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.profile-foot .config-description {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-foot .config-description:empty { display: none; }
+.profile-foot .config-summary {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-more {
+  margin: 8px 0 2px 22px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line-strong);
+}
+.profile-more > .settings-field { margin-top: 12px; }
+.profile-more > .toggle-row { margin-top: 10px; }
+
+/* A problem is said at the profile, in the danger colour, and takes no room
+   when there is none. */
+.terminal-profile-card .config-problems {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* The menu.js trigger that stands in for a native select in Settings. */
+.config-choice {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid var(--fg-faint);
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+.config-choice:hover { border-color: var(--line-hover); }
+.config-choice:focus-visible, .config-choice[aria-expanded="true"] { border-color: var(--accent-border); outline: 0; }
+.config-choice-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-choice svg { flex: none; color: var(--muted); }
+/* menu.css puts menus at z-index 60, under the sheet (100). A menu opened
+   from the sheet has to sit over it, and still under the error banner. */
+.qt-menu.in-panel { z-index: 105; }
 
 /* ---- about ---- */
 
@@ -863,6 +948,10 @@
   .settings-tab small { display: none; }
   .settings-content { padding: 14px 13px 24px; }
   .settings-grid.two-column { grid-template-columns: minmax(0, 1fr); }
+  .profile-main { grid-template-columns: minmax(0, 1fr) auto; }
+  .profile-main > .settings-field { grid-column: 1; }
+  .profile-main > .profile-remove { grid-column: 2; grid-row: 1; }
+  .profile-more { margin-left: 4px; }
   .settings-footer { flex-wrap: wrap; }
   .settings-message { display: block; order: -1; flex-basis: 100%; }
   .custom-theme-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); }

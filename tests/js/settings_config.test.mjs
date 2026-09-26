@@ -7,7 +7,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { commandPreview, snippetProblems } from "../../quickterm/frontend/js/panel_settings_snippets.js";
-import { profileProblems, purposeFor, runLine } from "../../quickterm/frontend/js/panel_settings_terminals.js";
+import {
+  commandLineText, defaultArgsFor, fitsCommandLine, joinCommandLine, kindForCommand, moreStartsOpen,
+  profileProblems, purposeFor, runLine, splitCommandLine, takesStartCommand,
+} from "../../quickterm/frontend/js/panel_settings_terminals.js";
 import { FILTER_THRESHOLD, matchesQuery } from "../../quickterm/frontend/js/panel_settings_kit.js";
 
 test("a snippet preview hides the carriage return that runs it", () => {
@@ -73,4 +76,64 @@ test("filtering searches every field and only appears for a list worth filtering
   assert.ok(matchesQuery("LOG", "tail logs", "Follow the app log"));
   assert.ok(matchesQuery("follow", "tail logs", "Follow the app log"));
   assert.ok(!matchesQuery("deploy", "tail logs", "Follow the app log"));
+});
+
+test("a custom command line splits on spaces, groups on quotes and joins back the same", () => {
+  assert.deepEqual(splitCommandLine("python -m http.server"), ["python", "-m", "http.server"]);
+  assert.deepEqual(
+    splitCommandLine("\"C:\\Program Files\\Tool\\t.exe\"  --name \"a b\" \"\""),
+    ["C:\\Program Files\\Tool\\t.exe", "--name", "a b", ""],
+  );
+  assert.deepEqual(splitCommandLine("   "), []);
+  for (const parts of [["python", "-m", "http.server"], ["C:\\Program Files\\x.exe", "a b", ""], ["tool"]]) {
+    assert.deepEqual(splitCommandLine(joinCommandLine(parts)), parts);
+  }
+  assert.equal(commandLineText({ cmd: "", args: [] }), "");
+  assert.equal(commandLineText({ cmd: "C:\\a b\\x.exe", args: ["-v"] }), "\"C:\\a b\\x.exe\" -v");
+  // A quote inside a part has no spelling there, so such a profile keeps
+  // its executable and arguments apart.
+  assert.equal(fitsCommandLine(["x", "say \"hi\""]), false);
+  assert.equal(fitsCommandLine(["x", "a b"]), true);
+});
+
+test("a typed command infers its kind from where the card started, never from the last keystroke", () => {
+  // A shell card follows its command, to another shell or to custom.
+  assert.equal(kindForCommand("powershell-core", "C"), "custom");
+  assert.equal(kindForCommand("powershell-core", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "powershell-core");
+  assert.equal(kindForCommand("powershell-core", "nu"), "nushell");
+  // A custom card becomes a shell only when the command names one.
+  assert.equal(kindForCommand("custom", "bash"), "bash");
+  assert.equal(kindForCommand("custom", "python"), "custom");
+  // Claude Code is opt-in and remote kinds are a host, not a command.
+  assert.equal(kindForCommand("custom", "claude"), "custom");
+  assert.equal(kindForCommand("claude-code", "C:\\bin\\claude.exe"), "claude-code");
+  assert.equal(kindForCommand("claude-code", "pwsh"), "powershell-core");
+  assert.equal(kindForCommand("custom", "plink"), "custom");
+  assert.equal(kindForCommand("wsl", "plink"), "custom");
+  // bash drops the profile's arguments at launch, so bash with arguments
+  // stays a custom command that keeps them.
+  assert.equal(kindForCommand("custom", "bash", ["-c", "make"]), "custom");
+});
+
+test("the kinds that take a start command are the ones launch.py starts one in", () => {
+  for (const kind of ["powershell-core", "windows-powershell", "command-prompt", "wsl", "bash", "git-bash", "nushell", "ssh"]) {
+    assert.equal(takesStartCommand(kind), true, kind);
+  }
+  for (const kind of ["custom", "sftp", "claude-code"]) assert.equal(takesStartCommand(kind), false, kind);
+  assert.deepEqual(defaultArgsFor("powershell-core"), ["-NoLogo"]);
+  assert.deepEqual(defaultArgsFor("git-bash"), []);
+  // The run line does not promise a start command a custom command never runs.
+  assert.equal(runLine({ cmd: "python", args: ["app.py"], start_command: "x" }, "custom"), "python app.py");
+});
+
+test("More starts open for a problem or a type the command does not show", () => {
+  const ok = { cmd: "C:\\Windows\\System32\\cmd.exe", args: [] };
+  assert.equal(moreStartsOpen(ok, "command-prompt", []), false);
+  assert.equal(moreStartsOpen(ok, "command-prompt", ["No name"]), true);
+  assert.equal(moreStartsOpen({ cmd: "pwsh.exe", args: [] }, "custom"), true);
+  assert.equal(moreStartsOpen({ cmd: "python.exe", args: [] }, "powershell-core"), true);
+  assert.equal(moreStartsOpen({ cmd: "python.exe", args: ["x"] }, "custom"), false);
+  // These say what they are in the main row and the run line.
+  assert.equal(moreStartsOpen({ cmd: "C:\\bin\\claude.exe", args: [] }, "claude-code"), false);
+  assert.equal(moreStartsOpen({ cmd: "", args: [] }, "ssh"), false);
 });

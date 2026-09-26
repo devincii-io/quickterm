@@ -16,6 +16,8 @@
 //     screen; "a snippet is a command you already type, kept with a note about
 //     when you reach for it" is a fact about the product.
 
+import { icon } from "./icons.js";
+import { closeMenu, toggleMenu } from "./menu.js";
 import { make } from "./panel_shared.js";
 
 // Below this a filter box is noise: you can see the whole list at once, and an
@@ -66,12 +68,80 @@ export function configSummary(text) {
   return line;
 }
 
-/** The description an item carries, or an honest stand-in for a missing one. */
-export function configDescription(text) {
+/**
+ * The description an item carries, or an honest stand-in for a missing one.
+ * `missing` replaces that stand-in; an empty string leaves the line empty,
+ * for a row that has no room to nag.
+ */
+export function configDescription(text, missing = "No description yet. Say what this is for.") {
   const written = String(text || "").trim();
   const line = make("p", written ? "config-description" : "config-description missing");
-  line.textContent = written || "No description yet. Say what this is for.";
+  line.textContent = written || missing;
   return line;
+}
+
+/**
+ * A chooser for a Settings row: a button that opens a menu.js menu, never a
+ * native <select> (AGENTS.md). `options` are {value, label, detail?};
+ * `onChange(value)` runs once the button already shows the new choice.
+ * Returns the button and a setter for a value changed from elsewhere.
+ */
+export function configChoice({ options, value, label = "", title = "", onChange }) {
+  let current = value;
+  const button = make("button", "config-choice");
+  button.type = "button";
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  if (label) button.setAttribute("aria-label", label);
+  if (title) button.title = title;
+  const text = make("span", "config-choice-label");
+  button.append(text, icon("chevron-down", 12));
+  const paint = () => {
+    const found = options.find((option) => option.value === current);
+    text.textContent = found ? found.label : String(current ?? "");
+  };
+  paint();
+  // The sheet closes itself on Escape from a capture listener on document,
+  // which runs before the menu ever sees the key. A capture listener on
+  // window runs earlier still, so Escape closes the menu and only the menu.
+  const escape = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeMenu("escape");
+  };
+  button.addEventListener("click", () => {
+    const menu = toggleMenu({
+      anchor: button,
+      label,
+      items: options.map((option) => ({
+        label: option.label,
+        detail: option.detail,
+        disabled: option.disabled,
+        selected: option.value === current,
+        run: () => {
+          current = option.value;
+          paint();
+          onChange?.(option.value);
+        },
+      })),
+      onClose: (reason) => {
+        window.removeEventListener("keydown", escape, true);
+        if (reason === "run" || reason === "escape") button.focus();
+      },
+    });
+    if (!menu) return;
+    // The sheet sits above the sidebar's menu layer.
+    menu.root.classList.add("in-panel");
+    window.addEventListener("keydown", escape, true);
+  });
+  return {
+    el: button,
+    set(next) {
+      current = next;
+      paint();
+    },
+  };
 }
 
 /**
