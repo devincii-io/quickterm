@@ -64,6 +64,33 @@ def descendants(identities: "list[tuple[int, int]]", root: int) -> set[int]:
     return reachable_pids(identities, {root}) - {root}
 
 
+def drop_reused_links(
+    identities: "list[tuple[int, int]]", created: "dict[int, int | None]"
+) -> list[tuple[int, int]]:
+    """Cut every parent link whose parent was created after the child.
+
+    Windows reuses PIDs quickly and an orphan keeps naming its dead parent's
+    PID. Without this check a new session root that inherits that PID adopts
+    the orphan: the session reads as busy forever and its metrics include an
+    unrelated process. A real parent always exists before its child. When a
+    creation time is unknown (protected processes, a process that exited
+    mid-snapshot) the link is kept, which is what the code did before.
+    """
+    guarded: list[tuple[int, int]] = []
+    for pid, parent in identities:
+        if parent:
+            parent_created = created.get(parent)
+            child_created = created.get(pid)
+            if (
+                parent_created is not None
+                and child_created is not None
+                and parent_created > child_created
+            ):
+                parent = 0
+        guarded.append((pid, parent))
+    return guarded
+
+
 def summarize_trees(
     processes: dict[int, ProcessSample], root_pids: set[int]
 ) -> dict[int, TreeUsage]:
@@ -173,8 +200,35 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(ctypes.c_void_p(handle))
 
+    def _creation_ticks(pid: int) -> int | None:
+        handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not _k32.GetProcessTimes(
+                ctypes.c_void_p(handle),
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        finally:
+            _k32.CloseHandle(ctypes.c_void_p(handle))
+
     def process_identities() -> list[tuple[int, int]]:
-        """(pid, parent_pid) for every process, from one Toolhelp snapshot."""
+        """(pid, parent_pid) for every process, from one Toolhelp snapshot.
+
+        A parent link survives only when the parent is not younger than the
+        child (drop_reused_links); a cut link reports parent 0. That costs one
+        OpenProcess and GetProcessTimes per process, about 12 ms for 400
+        processes.
+        """
         snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if not snap or snap == _INVALID_HANDLE:
             return []
@@ -192,7 +246,8 @@ if os.name == "nt":
                         break
         finally:
             _k32.CloseHandle(ctypes.c_void_p(snap))
-        return identities
+        created = {pid: _creation_ticks(pid) for pid, _parent in identities}
+        return drop_reused_links(identities, created)
 
     def snapshot_processes(
         roots: set[int] | None = None,
@@ -238,6 +293,32 @@ else:
             except (TypeError, ValueError, IndexError):
                 continue
         return identities
+
+    def session_process_groups(session_id: int) -> dict[int, int] | None:
+        """{pid: process group} of every live process in POSIX session ``session_id``.
+
+        Zombies are left out: they hold no terminal and cannot be killed
+        again, only reaped by their parent. ``None`` when /proc cannot be
+        listed (macOS, BSD), so the caller knows it has no answer.
+        """
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return None
+        members: dict[int, int] = {}
+        for name in entries:
+            if not name.isdigit():
+                continue
+            # state ppid pgrp session ...: field 6 of the full line is the
+            # session id.
+            tail = _proc_stat_tail(name)
+            try:
+                if int(tail[3]) != session_id or tail[0] in (b"Z", b"X"):  # type: ignore[index]
+                    continue
+                members[int(name)] = int(tail[2])  # type: ignore[index]
+            except (TypeError, ValueError, IndexError):
+                continue
+        return members
 
     def snapshot_processes(
         roots: set[int] | None = None,
