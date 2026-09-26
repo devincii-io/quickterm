@@ -131,6 +131,33 @@ withhold the original desktop path outside that native bridge. In that case
 QuickTerm suggests Copy as path plus native `Ctrl+V` instead of pasting a
 misleading filename.
 
+## Command line
+
+The same `quickterm` command drives the running app:
+
+```
+quickterm ls [--json]                  list terminals: id, name, workspace, state, folder
+quickterm new [--profile NAME] [--cwd DIR] [--workspace NAME]
+quickterm open WORKSPACE               show that workspace in the window
+quickterm send SESSION TEXT... [--enter]
+quickterm --version
+```
+
+`new` opens a terminal in the running app, or starts the app with it. Without
+`--cwd` a profile starts in the workspace's folder and a plain `new` starts in
+the folder you typed it in. `send` types into the session whose id starts with
+SESSION or whose name is exactly SESSION; `--enter` presses Enter after it.
+Every verb takes `--port N` when the app does not run on the configured port.
+
+Exit codes: 0 done, 1 usage error or a SESSION that matches no session or
+several (the candidates are listed), 2 QuickTerm is not running, or something
+else answers on its port, 3 the app refused the request or it failed after
+QuickTerm answered (the reason is printed). `quickterm new` with no app
+running starts QuickTerm in the background and returns once it is up. The installed `QuickTerm.exe` is
+a windowed program, so `cmd` and PowerShell do not wait for it: use
+`start /wait quickterm ls` in cmd, or pipe it (`quickterm ls | Out-Host`) in
+PowerShell, to read the output and the exit code in order.
+
 ## Keys
 
 QuickTerm uses familiar Windows copy, paste, and text-size conventions while

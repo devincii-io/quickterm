@@ -32,18 +32,29 @@ def test_running_instance_folder_launch_is_forwarded_with_local_token(monkeypatc
     class Response:
         status = 200
 
+        def __init__(self, body=b"{}"):
+            self.body = body
+
         def __enter__(self):
             return self
 
         def __exit__(self, *_args):
             return False
 
+        def read(self):
+            return self.body
+
     def fake_open(request, timeout):
+        if isinstance(request, str):
+            # The health check: prove the token, as the real backend does.
+            nonce = request.split("challenge=", 1)[1]
+            proof = app.cli.health_proof("local-token", nonce)
+            return Response(json.dumps({"app": "quickterm", "proof": proof}).encode())
         captured.update(request=request, timeout=timeout)
         return Response()
 
     monkeypatch.setattr(auth, "get_or_create_token", lambda: "local-token")
-    monkeypatch.setattr(app.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(app.cli, "_open", fake_open)
 
     assert _queue_running_launch(8620, str(tmp_path)) is True
     request = captured["request"]

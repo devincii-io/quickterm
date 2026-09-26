@@ -1,11 +1,14 @@
 // Layout tree matching the workspace JSON schema (CONTRACTS.md):
 //   {"type":"split","dir":"h"|"v","ratio":r,"children":[node,node]}
 //   {"type":"pane","profile":name,"cwd":path}
+// plus, on a pane, session_id, launch_spec, launch_options and title.
 // dir "h" = children side by side, "v" = stacked.
 // Rendered as nested flex divs with draggable splitters. Pane elements are
 // reused across re-renders so terminals survive structural changes.
 
 import { Pane } from "./pane.js";
+import { broadcastTargets, unbracketedPaste, withoutTerminalReplies } from "./broadcast.js";
+import { launchOptionsFromNode, launchOptionsToNode } from "./launch_options.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 import { dwindleDir } from "./split_tree.js";
 
@@ -30,12 +33,13 @@ export class LayoutManager {
     this.focused = null;
     this.zoomed = false;
     this.zoomedPane = null;
+    this.broadcasting = false;
     // Bumped by every render(), so a deferred "catch the DOM up" step can
     // tell whether a later structural change already did that work.
     this._renderGeneration = 0;
   }
 
-  newPane(profile, cwd, sessionId, launchSpec, title) {
+  newPane(profile, cwd, sessionId, launchSpec, title, launchOptions) {
     const pane = new Pane({
       fontFamily: this.opts.fontFamily,
       fontSize: this.opts.fontSize,
@@ -44,15 +48,41 @@ export class LayoutManager {
       cwd: cwd || null,
       sessionId: sessionId || null,
       launchSpec: launchSpec || null,
+      launchOptions: launchOptions || null,
       title: title || null,
       onFocusRequest: (p) => this.focusPane(p),
       onStateChange: (p) => { if (this.opts.onPaneState) this.opts.onPaneState(p); },
       onActionRequest: (action, p) => {
         if (this.opts.onPaneAction) this.opts.onPaneAction(action, p);
       },
+      onUserInput: (data, p) => this._broadcastFrom(p, data),
     });
+    if (this.broadcasting) pane.setBroadcasting(true);
     this._wireDrag(pane);
     return pane;
+  }
+
+  // ---- broadcast input ----
+  //
+  // One switch per layout, so it reaches exactly the panes of this document:
+  // a workspace view beside this one is another document with its own. It is
+  // off after every restore(), which is what a workspace switch goes through.
+
+  setBroadcast(on) {
+    this.broadcasting = Boolean(on);
+    for (const p of this.panes()) p.setBroadcasting(this.broadcasting);
+    return this.broadcasting;
+  }
+
+  _broadcastFrom(source, data) {
+    if (!this.broadcasting) return;
+    const pasted = unbracketedPaste(data);
+    const typed = pasted === null ? withoutTerminalReplies(data) : null;
+    if (typed === "") return;
+    for (const p of broadcastTargets(this.panes(), source)) {
+      if (pasted !== null) p.pasteText(pasted);
+      else p.sendText(typed);
+    }
   }
 
   init() {
@@ -394,6 +424,8 @@ export class LayoutManager {
       if (node.pane.session && node.pane.session.id) out.session_id = node.pane.session.id;
       else if (node.pane.savedSessionId) out.session_id = node.pane.savedSessionId;
       if (node.pane.launchSpec) out.launch_spec = node.pane.launchSpec;
+      const options = node.pane.profileName ? launchOptionsToNode(node.pane.launchOptions) : null;
+      if (options) out.launch_options = options;
       if (node.pane.title) out.title = node.pane.title;
       return out;
     }
@@ -411,6 +443,8 @@ export class LayoutManager {
     if (this.zoomed) this._unzoomDom();
     for (const p of this.panes()) p.dispose();
     this.focused = null;
+    // Broadcasting into panes the user has not seen yet is never wanted.
+    this.broadcasting = false;
     const build = (n) => {
       if (n && n.type === "split" && Array.isArray(n.children) && n.children.length === 2) {
         return {
@@ -426,6 +460,7 @@ export class LayoutManager {
         n && n.session_id,
         n && n.launch_spec,
         n && n.title,
+        launchOptionsFromNode(n && n.launch_options),
       );
       return { type: "pane", pane };
     };

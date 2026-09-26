@@ -152,7 +152,11 @@ async def test_yes_output_arrives_in_coalesced_chunks():
     total = sum(len(chunk) for chunk in rec.chunks)
     assert total >= 4_000_000  # ONLCR makes every "\n" a "\r\n"
     assert max(len(chunk) for chunk in rec.chunks) <= pty_posix.READ_COALESCE_BYTES
-    assert total / len(rec.chunks) > 2 * 4096
+    # Without coalescing no callback carries more than one read (4095 bytes
+    # from a Linux pty). How far above that the average lands depends on how
+    # busy the machine is: 2x held when idle and failed at 7.9 KB under load.
+    assert max(len(chunk) for chunk in rec.chunks) > 4096
+    assert total / len(rec.chunks) > 4096
 
 
 async def test_kill_takes_down_background_and_hup_ignoring_jobs(tmp_path):

@@ -4,6 +4,27 @@ from pathlib import Path
 FRONTEND_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js"
 PANELS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "panels.js"
 MAIN_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "main.js"
+# main.js is the composition root; the code it wires lives in these modules.
+BOOT_CONTEXT_JS = FRONTEND_JS / "boot_context.js"
+CONFIG_SYNC_JS = FRONTEND_JS / "config_sync.js"
+HERE_JS = FRONTEND_JS / "here.js"
+LAUNCH_LOOP_JS = FRONTEND_JS / "launch_loop.js"
+LIFECYCLE_JS = FRONTEND_JS / "lifecycle.js"
+PANE_COMMANDS_JS = FRONTEND_JS / "pane_commands.js"
+SCRATCH_JS = FRONTEND_JS / "scratch.js"
+SIDEBAR_JS = FRONTEND_JS / "sidebar.js"
+SPAWNER_JS = FRONTEND_JS / "spawner.js"
+WINDOW_REGISTRY_JS = FRONTEND_JS / "window_registry.js"
+WORKSPACE_ACTIONS_JS = FRONTEND_JS / "workspace_actions.js"
+WORKSPACE_SWITCH_JS = FRONTEND_JS / "workspace_switch.js"
+MAIN_MODULES = (
+    MAIN_JS, BOOT_CONTEXT_JS, CONFIG_SYNC_JS, HERE_JS, LAUNCH_LOOP_JS, LIFECYCLE_JS,
+    PANE_COMMANDS_JS, SCRATCH_JS, SIDEBAR_JS, SPAWNER_JS, WINDOW_REGISTRY_JS,
+    WORKSPACE_ACTIONS_JS, WORKSPACE_SWITCH_JS,
+    FRONTEND_JS / "app_state.js", FRONTEND_JS / "autosave.js", FRONTEND_JS / "feedback.js",
+    FRONTEND_JS / "fonts.js", FRONTEND_JS / "layout_sessions.js",
+    FRONTEND_JS / "session_ownership.js", FRONTEND_JS / "updates.js",
+)
 PANE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "pane.js"
 KEYS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "keys.js"
 PALETTE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "palette.js"
@@ -28,9 +49,9 @@ def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport()
 
 
 def test_kill_all_closes_only_backend_verified_sessions():
-    source = MAIN_JS.read_text(encoding="utf-8")
+    source = PANE_COMMANDS_JS.read_text(encoding="utf-8")
     start = source.index("    killAllSessions: async () =>")
-    end = source.index("\n    moveSessionHere,", start)
+    end = source.index("\n    focusedPaneName:", start)
     implementation = source[start:end]
 
     assert "new Set(result?.killed_ids || [])" in implementation
@@ -82,7 +103,7 @@ def test_shortcuts_keep_detach_and_confirmed_kill_distinct():
 
 
 def test_detach_retains_process_and_never_calls_kill():
-    source = MAIN_JS.read_text(encoding="utf-8")
+    source = PANE_COMMANDS_JS.read_text(encoding="utf-8")
     start = source.index("    closePane: async () =>")
     end = source.index("\n    killFocusedSession:", start)
     implementation = source[start:end]
@@ -92,7 +113,7 @@ def test_detach_retains_process_and_never_calls_kill():
 
 
 def test_workspace_restore_does_not_silently_spawn_over_missing_session():
-    source = MAIN_JS.read_text(encoding="utf-8")
+    source = WORKSPACE_SWITCH_JS.read_text(encoding="utf-8")
     start = source.index("  async function restoreWorkspace(")
     end = source.index("\n  async function startScratch", start)
     implementation = source[start:end]
@@ -118,8 +139,8 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     # This used to assert the native pywebview dialog *was* the mechanism. It
     # cannot be: that dialog exists only in the installed app, so Browse was
     # dead in a plain browser, and opening it moves focus out of the document.
-    # The invariant that matters is unchanged in shape — one shared control
-    # behind every folder field — but the primary picker is now the in-app
+    # The invariant that matters is unchanged in shape: one shared control
+    # behind every folder field. But the primary picker is now the in-app
     # browser, with the OS dialog kept as a secondary route.
     settings = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
     shared = (FRONTEND_JS / "panel_shared.js").read_text(encoding="utf-8")
@@ -159,34 +180,35 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
 def test_the_scratch_folder_is_a_setting_that_round_trips():
     # scratch_dir could only be set by hand-editing config.json. Settings PUTs
     # the whole draft it loaded from /api/config/full, so the field only has to
-    # write into that draft; main.js re-reads the resolved root after a save.
+    # write into that draft; config_sync.js re-reads the resolved root after a save.
     general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
-    main = MAIN_JS.read_text(encoding="utf-8")
+    sync = CONFIG_SYNC_JS.read_text(encoding="utf-8")
     panels = PANELS_JS.read_text(encoding="utf-8")
     assert "this._textInput(cfg.scratch_dir || \"\"" in general
     assert "cfg.scratch_dir = scratch.value.trim();" in general
     assert 'this._field("Scratch folder", scratchField,' in general
     assert "this.settingsDraft = JSON.parse(JSON.stringify(cfg));" in panels
     assert "await api.putConfig(this.settingsDraft);" in panels
-    assert "scratchRoot = fresh.scratch_dir || scratchRoot;" in main
+    assert "state.scratchRoot = fresh.scratch_dir || state.scratchRoot;" in sync
 
 
 def test_a_background_launch_failure_reaches_the_banner_once():
     # Autostart and hotkey launches have no pane to report into; app.py keeps
     # the latest failure as launch_error on GET /api/config.
     main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  function reportLaunchError(value) {")
-    end = main.index("\n  }\n", start)
-    body = main[start:end]
+    sync = CONFIG_SYNC_JS.read_text(encoding="utf-8")
+    start = sync.index("  function reportLaunchError(value) {")
+    end = sync.index("\n  }\n", start)
+    body = sync[start:end]
     assert "text !== shownLaunchError" in body
-    assert "!embedded && windowIsPrimary" in body
+    assert "!embedded && state.windowIsPrimary" in body
     assert "showError(" in body
     assert "shownLaunchError = text;" in body
-    assert "reportLaunchError(cfg.launch_error);" in main
-    assert "reportLaunchError(fresh.launch_error);" in main
+    assert "reportLaunchError(state.cfg.launch_error);" in main
+    assert "reportLaunchError(fresh.launch_error);" in sync
     # Boot reports it after the restore, so the restore cannot overwrite it.
-    assert main.index("reportLaunchError(cfg.launch_error);") > main.index(
-        "const restored = await restoreWorkspace(currentWorkspace);"
+    assert main.index("reportLaunchError(state.cfg.launch_error);") > main.index(
+        "const restored = await restoreWorkspace(state.currentWorkspace);"
     )
     # A hotkey fires while the window is in the background: coming back to it
     # (focus, or the page becoming visible) looks again.
@@ -251,17 +273,18 @@ def test_dashboard_refreshes_by_patching_instead_of_rebuilding():
 
 
 def test_workspace_folder_reaches_every_spawn_path():
-    main = MAIN_JS.read_text(encoding="utf-8")
+    spawner = SPAWNER_JS.read_text(encoding="utf-8")
     api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
     # An absent "path" key preserves the stored folder; every layout autosave
     # relies on that, so the wrapper must not default it to null.
     assert "...(path === undefined ? {} : { path })" in api
-    assert "function contextCwd(explicit)" in main
+    assert "function contextCwd(explicit)" in spawner
     # Profiles carry no folder, so nothing local can pre-empt the workspace
     # root the backend resolves. Scratch is the one exception: its throwaway
     # root is only known to the viewer.
-    assert "profile.cwd" not in main
-    assert "return scratchRoot || null;" in main
+    for module in MAIN_MODULES:
+        assert "profile.cwd" not in module.read_text(encoding="utf-8"), module.name
+    assert "return state.scratchRoot || null;" in spawner
 
 
 def test_sidebar_collapse_returns_input_focus_to_the_terminal():
@@ -278,9 +301,10 @@ def test_open_here_claims_one_folder_launch():
     other five. The invariant is now the opposite one, kept by
     test_sidebar_lists_every_live_terminal_grouped_by_workspace.
     """
-    main = MAIN_JS.read_text(encoding="utf-8")
-    assert "const launch = await api.claimLaunch()" in main
-    assert "await openFolderInScratch(launch.cwd)" in main
+    loop = LAUNCH_LOOP_JS.read_text(encoding="utf-8")
+    assert "const launch = await api.claimLaunch()" in loop
+    assert 'if (kind === "folder") return await openFolder(launch.cwd);' in loop
+    assert "if (!embedded) claimLaunchLoop();" in MAIN_JS.read_text(encoding="utf-8")
 
 
 def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
@@ -321,26 +345,28 @@ def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():
 
 
 def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy():
-    main = MAIN_JS.read_text(encoding="utf-8")
+    spawner = SPAWNER_JS.read_text(encoding="utf-8")
+    commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
     pane = PANE_JS.read_text(encoding="utf-8")
     palette = PALETTE_JS.read_text(encoding="utf-8")
 
-    assert 'from "./split_policy.js"' in main
-    assert "spawnSplitInto(pane, source)" in main
-    assert "newTerminal:" in main and "spawnDefaultInto(pane)" in main
+    assert 'from "./split_policy.js"' in spawner
+    assert "spawnSplitInto(pane, source)" in commands
+    assert "newTerminal:" in commands and "spawnDefaultInto(pane)" in commands
     assert "registerOscHandler(7" in pane
     assert "registerOscHandler(9" in pane
     assert "split Claude agent view:" in palette
-    assert 'claudeMode: "agents"' in main
+    assert 'claudeMode: "agents"' in spawner
 
 
 def test_full_panels_return_focus_to_the_terminal():
     panels = PANELS_JS.read_text(encoding="utf-8")
-    main = MAIN_JS.read_text(encoding="utf-8")
+    commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
 
     assert "if (!this.app.refocusTerm()" in panels
-    assert "if (!layout.focused) return false" in main
-    assert "layout.focused.setFocused(true)" in main
+    assert "if (!layout.focused) return false" in commands
+    assert "layout.focused.setFocused(true)" in commands
+    assert "...paneCommands," in MAIN_JS.read_text(encoding="utf-8")
 
 
 def test_every_configurable_thing_carries_its_own_description():
@@ -406,15 +432,16 @@ def test_absolutely_positioned_sidebar_children_outrank_the_stretch_rule():
 
 
 def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
-    main = MAIN_JS.read_text(encoding="utf-8")
+    sidebar = SIDEBAR_JS.read_text(encoding="utf-8")
+    registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
     palette = PALETTE_JS.read_text(encoding="utf-8")
     keys = KEYS_JS.read_text(encoding="utf-8")
 
     # Two entry points, one picker: the sidebar footer button and the palette
     # row both land in the same list of workspaces a new window may open on.
     # The footer is built from the `chrome` array, so that is where it goes.
-    assert '["new window", () => {' in main
-    assert "palette.newWindowMode()" in main
+    assert '["new window", () => {' in sidebar
+    assert "palette.newWindowMode()" in sidebar
     assert 'label: "new window…"' in palette
     assert "run: () => this._newWindowMode()" in palette
     # No new keyboard shortcut: keys.js may claim only cold Alt combos, and the
@@ -424,8 +451,8 @@ def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
     # The packaged shell owns the native window, so it is asked first; a plain
     # browser still gets a window instead of a dead button, and the token only
     # reaches it through the URL fragment.
-    open_start = main.index("  async function openNewWindow(")
-    opener = main[open_start:main.index("\n  // Tear down the current scratch layout", open_start)]
+    open_start = registry.index("  async function openNewWindow(")
+    opener = registry[open_start:registry.index("\n  // Same refusal, different consequence", open_start)]
     assert opener.index("globalThis.pywebview?.api?.open_window") < opener.index("api.requestWindow(")
     assert opener.index("api.requestWindow(") < opener.index("newWindowUrl(location.pathname")
     assert "api.token()" in opener
@@ -433,68 +460,75 @@ def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
 
 def test_two_windows_can_never_own_one_workspace():
     main = MAIN_JS.read_text(encoding="utf-8")
+    switcher = WORKSPACE_SWITCH_JS.read_text(encoding="utf-8")
     assert (FRONTEND_JS / "windows.js").exists()
+    assert 'from "./windows.js"' in WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
     assert 'from "./windows.js"' in main
 
     # Save while still owning the outgoing workspace, then claim before teardown.
-    start = main.index("  async function switchWorkspace(")
-    switch = main[start:main.index("\n  // Which scratch terminals", start)]
+    start = switcher.index("  async function switchWorkspace(")
+    switch = switcher[start:switcher.index("\n  return {", start)]
     assert switch.index("await workspace.save(") < switch.index("await claimWorkspaceFor(target)")
     assert switch.index("await claimWorkspaceFor(target)") < switch.index("await discardScratch();")
-    assert "if (transitioning) return false;" in switch
+    assert "if (state.transitioning) return false;" in switch
     assert "showError(refusal);" in switch
 
     # Boot claims before restoring: this window autosaves the layout on every
     # pane change, so restoring a workspace it may not own would start
     # overwriting the other window's file before anyone could read a warning.
     boot = main[main.index("  await acquireWindowId();"):main.index("  const initialSessions")]
-    assert "const refusal = await claimWorkspaceFor(currentWorkspace);" in boot
-    assert boot.index("currentWorkspace = null;") < boot.index("showError(refusal);")
+    assert "const refusal = await claimWorkspaceFor(state.currentWorkspace);" in boot
+    assert boot.index("state.currentWorkspace = null;") < boot.index("showError(refusal);")
 
     # Adopting scratch and naming a workspace are the other two ways to take a
     # workspace name, so both ask as well.
-    assert "if (await claimWorkspaceFor(SCRATCH_WS)) return;" in main
-    assert "const refusal = await claimWorkspaceFor(cleanName);" in main
+    assert "if (await claimWorkspaceFor(SCRATCH_WS)) return;" in SCRATCH_JS.read_text(encoding="utf-8")
+    assert "const refusal = await claimWorkspaceFor(cleanName);" in (
+        WORKSPACE_ACTIONS_JS.read_text(encoding="utf-8")
+    )
 
 
 def test_an_unreachable_registry_lets_the_user_work_but_never_fakes_a_claim():
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  async function claimWorkspaceFor(")
-    claim = main[start:main.index("\n  // The registry expires", start)]
+    registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
+    start = registry.index("  async function claimWorkspaceFor(")
+    claim = registry[start:registry.index("\n  // The registry expires", start)]
     # Only a 409 refuses; anything else degrades to "carry on" (claimOutcome is
     # unit-tested in tests/js/windows.test.mjs).
     assert 'if (claimOutcome(error) === "unavailable") {' in claim
     assert "return claimRefusalMessage(name, holder);" in claim
     # Every failure path leaves the claim unheld, so nothing later believes it.
-    assert claim.count("claimedWorkspace = null;") >= 3
+    assert claim.count("state.claimedWorkspace = null;") >= 3
 
 
 def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     main = MAIN_JS.read_text(encoding="utf-8")
-    assert "api.heartbeatWindow(windowId).then(" in main
-    assert "}, WINDOW_HEARTBEAT_MS);" in main
+    registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
+    lifecycle = LIFECYCLE_JS.read_text(encoding="utf-8")
+    assert "api.heartbeatWindow(state.windowId).then(" in registry
+    assert "}, WINDOW_HEARTBEAT_MS);" in registry
     # The registry answers a beat from an expired window with 404 instead of
     # reviving it, because an expired window has lost its claim and must not
     # carry on autosaving a workspace someone else may now own.
-    assert "if (error?.status === 404) recoverWindowRegistration();" in main
-    recover_start = main.index("  async function recoverWindowRegistration()")
-    recover = main[recover_start:main.index("\n  // Opening a window is", recover_start)]
+    assert "if (error?.status === 404) recoverWindowRegistration();" in registry
+    recover_start = registry.index("  async function recoverWindowRegistration()")
+    recover = registry[recover_start:registry.index("\n  // Opening a window is", recover_start)]
     # Losing the claim costs no terminal and no layout: the window lets go the
     # same way deleting the current workspace already does.
-    assert "for (const sid of workspaceSessionIds) scratchSessionIds.add(sid);" in recover
-    assert "currentWorkspace = null;" in recover
+    assert "for (const sid of state.workspaceSessionIds) state.scratchSessionIds.add(sid);" in recover
+    assert "state.currentWorkspace = null;" in recover
     assert "api.killSession" not in recover
     assert "cleanupSessions" not in recover
 
-    start = main.index("  function persistOnExit()")
-    exiting = main[start:main.index('\n  window.addEventListener("pagehide"', start)]
+    assert 'window.addEventListener("pagehide", persistOnExit);' in main
+    start = lifecycle.index("  function persistOnExit()")
+    exiting = lifecycle[start:lifecycle.index("\n  // window.quicktermView.close()", start)]
     # keepalive for the same reason the layout PUT needs it: the document is
     # going away and a normal fetch is cancelled with it, so the release would
     # never leave and the workspace would stay claimed until the heartbeat
     # expired.
-    assert "fetch(`/api/windows/${encodeURIComponent(windowId)}`, {" in exiting
+    assert "fetch(`/api/windows/${encodeURIComponent(state.windowId)}`, {" in exiting
     assert exiting.count("keepalive: true") >= 2
-    assert "workspace.save(currentWorkspace" in exiting
+    assert "workspace.save(state.currentWorkspace" in exiting
     assert '"DELETE"' in exiting
     assert ".finally(release)" in exiting
     assert "/api/sessions/cleanup" not in exiting
@@ -504,9 +538,10 @@ def test_a_window_registers_under_the_id_its_shell_gave_it():
     # app.py puts the window id in the launch URL and forgets *that* id when the
     # native window closes, so registering under any other one would keep the
     # workspace claimed until the heartbeat TTL ran out.
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("function captureWindowIdentity()")
-    identity = main[start:main.index("\nasync function boot()", start)]
+    context = BOOT_CONTEXT_JS.read_text(encoding="utf-8")
+    registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
+    start = context.index("export function captureWindowIdentity()")
+    identity = context[start:context.index("\n// sessionStorage is per window", start)]
     assert 'params.get("window")' in identity
     assert 'params.get("primary") === "1"' in identity
     # workspace is three-valued, and a secondary shell window without one was
@@ -515,8 +550,8 @@ def test_a_window_registers_under_the_id_its_shell_gave_it():
     assert "raw === null" in identity
     assert "(id && !primary ? null : undefined)" in identity
 
-    acquire_start = main.index("  async function acquireWindowId()")
-    acquire = main[acquire_start:main.index("\n  async function listWindowsSafe", acquire_start)]
+    acquire_start = registry.index("  async function acquireWindowId()")
+    acquire = registry[acquire_start:registry.index("\n  async function listWindowsSafe", acquire_start)]
     assert "id: identity.id || rememberedWindowId()," in acquire
     assert "primary: identity.primary," in acquire
     # No workspace key: registering is also how a reloaded page says hello, and
@@ -528,16 +563,19 @@ def test_only_the_primary_window_claims_the_explorer_folder_handoff():
     # The queue behind GET /api/launches/next hands each launch to exactly one
     # waiter, so several windows waiting on it made "Open QuickTerm here"
     # non-deterministic. The registry already names the window it is meant for.
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  async function claimLaunchLoop()")
-    loop = main[start:main.index("\n  function removeSessionFromLayout", start)]
-    assert "if (!windowIsPrimary && registryAvailable) {" in loop
-    # Unchanged otherwise: one claim, opened as a folder in scratch.
-    assert "const launch = await api.claimLaunch()" in loop
-    assert "await openFolderInScratch(launch.cwd)" in loop
+    launch = LAUNCH_LOOP_JS.read_text(encoding="utf-8")
+    registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
+    start = launch.index("  async function claimLaunchLoop()")
+    loop = launch[start:launch.index("\n  function stopLaunchLoop", start)]
+    assert "if (!state.windowIsPrimary && state.registryAvailable) {" in loop
+    # Unchanged otherwise: one claim, and a folder alone opens in scratch
+    # (tests/js/launch_loop.test.mjs covers the other launch shapes).
+    assert "await claimOnce()" in loop
+    assert "const launch = await api.claimLaunch()" in launch
+    assert "opened = await openFolderInScratch(cwd)" in launch
     # The flag is read back from the registry, which promotes a new primary when
     # that window closes, not trusted from the launch URL for the whole run.
-    assert 'if (info && "primary" in info) windowIsPrimary = Boolean(info.primary);' in main
+    assert 'if (info && "primary" in info) state.windowIsPrimary = Boolean(info.primary);' in registry
 
 
 def test_the_chrome_is_the_sidebar_and_nothing_else():
@@ -566,10 +604,12 @@ def test_the_chrome_is_the_sidebar_and_nothing_else():
     assert "quick-settings" not in app_css and ".statusbar" not in app_css
     assert 'if (key === "s") return done(actions.toggleSidebar);' in keys
     assert 'export const SIDEBAR_MODES = ["full", "rail", "hidden"];' in launcher
-    assert "toggleSidebar: () => launcherView?.cycleMode()," in main
-    # The save dot keeps its id: main.js drives it through data-state only.
+    assert "toggleSidebar: () => state.launcherView?.cycleMode()," in main
+    # The save dot keeps its id: feedback.js drives it through data-state only.
     assert 'save.id = "sb-save";' in launcher
-    assert "status.textContent = text;" not in main
+    for module in MAIN_MODULES:
+        assert "status.textContent = text;" not in module.read_text(encoding="utf-8"), module.name
+    assert "status.dataset.state = key;" in (FRONTEND_JS / "feedback.js").read_text(encoding="utf-8")
 
 
 def test_open_folder_actions_share_one_resolver_and_one_route():
@@ -585,10 +625,13 @@ def test_open_folder_actions_share_one_resolver_and_one_route():
     launcher = LAUNCHER_JS.read_text(encoding="utf-8")
     api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
 
-    assert "return layout.focused?.bestKnownCwd?.() || usableWorkspacePath() || null;" in main
+    assert (
+        "return layout.focused?.bestKnownCwd?.() || usableWorkspacePath() || null;"
+        in HERE_JS.read_text(encoding="utf-8")
+    )
     assert 'openExplorer: () => openHere("explorer"),' in main
     assert 'openEditor: () => openHere("vscode"),' in main
-    assert "onOpenFolder: openHere," in main
+    assert "onOpenFolder: openHere," in SIDEBAR_JS.read_text(encoding="utf-8")
     # Shift layer only: plain Alt+C is readline's capitalize-word.
     assert 'if (key === "e") return done(actions.openExplorer);' in keys
     assert 'if (key === "c") return done(actions.openEditor);' in keys
@@ -654,7 +697,8 @@ def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
     assert 'import { findLeaf, parentOf, replaceChild } from "./split_tree.js";' in move
     assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in views
     assert (
-        'import { dwindleDir, insertBeside, layoutRects, leaves, removeLeaf } from "./split_tree.js";'
+        "import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf }"
+        ' from "./split_tree.js";'
         in views
     )
     assert "this.root = insertBeside(this.root, beside, view, dwindleDir(from));" in views
@@ -666,7 +710,9 @@ def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
     assert ".workspace-views.resizing .workspace-view," in views_css
     # Panes: the same placement rule, and the same motion rules.
     assert "autoDir(pane = this.focused)" in layout and "return dwindleDir(" in layout
-    assert "layout.autoDir(pane)" in main and "function autoDir(" not in main
+    assert "layout.autoDir(pane)" in SPAWNER_JS.read_text(encoding="utf-8")
+    for module in MAIN_MODULES:
+        assert "function autoDir(" not in module.read_text(encoding="utf-8"), module.name
     assert ".split.sliding > * { transition: flex-grow" in app_css
     assert "body.dragging .split > * { transition: none; }" in app_css
     assert "prefers-reduced-motion" in app_css and "function reducedMotion()" in layout
@@ -713,19 +759,20 @@ def test_workspace_here_moves_the_terminal_before_switching():
     A workspace held by another window or view stops the flow before anything
     is written. The offer is patched on every status refresh, never rebuilt.
     """
-    main = MAIN_JS.read_text(encoding="utf-8")
+    actions = WORKSPACE_ACTIONS_JS.read_text(encoding="utf-8")
     launcher = LAUNCHER_JS.read_text(encoding="utf-8")
 
-    start = main.index("  async function createWorkspaceHere() {")
-    body = main[start : main.index("\n  }\n", start)]
-    holder = body.index("workspaceHolder(await listWindowsSafe(), windowId, name)")
+    start = actions.index("  async function createWorkspaceHere() {")
+    body = actions[start : actions.index("\n  }\n", start)]
+    holder = body.index("workspaceHolder(await listWindowsSafe(), state.windowId, name)")
     save = body.index("await workspace.save(name, layoutWith(")
     retain = body.index("await api.retainSession(session.id)")
     close = body.index("layout.closePane(pane, { animate: false })")
     switch = body.index("return switchWorkspace(name)")
     assert holder < save < retain < close < switch
     assert "killSession" not in body and "cleanupSessions" not in body
-    assert "launcherView?.updateHere(hereState());" in main
+    assert "state.launcherView?.updateHere(hereState());" in SIDEBAR_JS.read_text(encoding="utf-8")
+    assert "state.launcherView?.updateHere(hereState());" in HERE_JS.read_text(encoding="utf-8")
     assert "updateHere," in launcher and 'make("button", "sidebar-here")' in launcher
 
 
@@ -768,8 +815,202 @@ def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
     # kills; the header button keeps Cancel first; Escape works pane-wide.
     assert "killSession: () => app.killFocusedSession({ keyboard: true })," in main
     assert 'else if (action === "kill") app.killFocusedSession();' in main
-    assert 'if (keyboard && pane.confirmationLabel() === "Kill") {' in main
-    assert '}, "Kill", { focusConfirm: keyboard });' in main
+    commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
+    assert 'if (keyboard && pane.confirmationLabel() === "Kill") {' in commands
+    assert '}, "Kill", { focusConfirm: keyboard });' in commands
     assert "requestAnimationFrame(() => (focusConfirm ? confirm : cancel).focus());" in pane
     assert 'this.el.addEventListener("keydown", keyHandler, true);' in pane
     assert 'claimFocus("pane-confirm");' in pane and 'releaseFocus("pane-confirm");' in pane
+
+
+def test_profile_card_is_a_name_a_command_and_one_more_disclosure():
+    """A profile shows a name, a command and a start command; the rest is under More.
+
+    The user found eight to twelve controls per card, each with a line of
+    prose, too much for what is usually "PowerShell, then uv run dev". Every
+    chooser on the card is a menu.js menu, and the menu has to close on
+    Escape before the sheet's own Escape handler closes the whole sheet.
+    """
+    terminals = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
+    kit = (FRONTEND_JS / "panel_settings_kit.js").read_text(encoding="utf-8")
+    panels_css = (
+        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "panels.css"
+    ).read_text(encoding="utf-8")
+
+    assert "this._select(" not in terminals
+    assert "configChoice({" in terminals
+    assert "configPurpose(" not in terminals
+    assert 'make("div", "profile-more")' in terminals
+    assert 'toggle.setAttribute("aria-expanded", String(open));' in terminals
+    assert "moreStartsOpen(profile, kind, profileProblems(profile, cfg.profiles, kind))" in terminals
+    # Typing re-infers the type in place; only an explicit type choice redraws.
+    command_input = terminals[terminals.index('command.addEventListener("input", () => {'):]
+    command_input = command_input[: command_input.index("\n        });\n")]
+    assert "rerender()" not in command_input
+    assert "syncKind();" in command_input
+
+    assert 'import { closeMenu, toggleMenu } from "./menu.js";' in kit
+    assert 'window.addEventListener("keydown", escape, true);' in kit
+    assert "event.stopImmediatePropagation();" in kit
+    assert ".qt-menu.in-panel { z-index: 105; }" in panels_css
+
+
+def test_text_zoom_leaves_readline_undo_and_star_to_the_shell():
+    """Ctrl+_ is readline's undo and Ctrl+* no zoom key; a code alone never zooms."""
+    keys = KEYS_JS.read_text(encoding="utf-8")
+    assert 'key === "_"' not in keys
+    assert 'key === "*"' not in keys
+    for code in ('e.code === "Minus"', 'e.code === "Digit0"', 'e.code === "Numpad0"'):
+        line = next(line for line in keys.splitlines() if code in line)
+        assert "unnamed" in line, line
+
+
+def test_tiled_views_are_restored_by_the_primary_after_its_own_workspace():
+    """The view arrangement outlives a restart, restored only by the primary window.
+
+    localStorage is shared by every window on the origin, so a second window
+    must neither restore the arrangement nor write over it. Restored views are
+    claimed through the same registry path open() uses.
+    """
+    main = MAIN_JS.read_text(encoding="utf-8")
+    views = (FRONTEND_JS / "workspace_views.js").read_text(encoding="utf-8")
+
+    assert main.index("views?.restoreSaved(") > main.index(
+        "await restoreWorkspace(state.currentWorkspace)"
+    )
+    assert (
+        "const keepsViewArrangement = !embedded && requestedWorkspace === undefined"
+        " && state.windowIsPrimary;"
+    ) in main
+    assert "store: keepsViewArrangement ? viewArrangementStore() : null," in main
+
+    assert 'export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";' in views
+    store = views[views.index("export function viewArrangementStore("):]
+    store = store[: store.index("\n}\n")]
+    # Both the read and the write are wrapped; storage can throw at any time.
+    assert store.count("try {") == 2
+    assert store.count("catch (_)") == 2
+    assert views.count("api.registerWindow(") == 1
+    assert views.count("await this._claimView(") == 2
+
+
+def test_an_exited_pane_restarts_in_place_with_its_own_launch():
+    """The exit bar offers Restart (button, Enter, palette). The restart repeats
+    the pane's own launch, never the sidebar's current choice, and keeps the
+    dead session's output above a separator instead of the replay's reset.
+    """
+    pane = PANE_JS.read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    actions = (FRONTEND_JS / "terminal_actions.js").read_text(encoding="utf-8")
+    spawner = SPAWNER_JS.read_text(encoding="utf-8")
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+
+    exit_path = pane[pane.index("  _onExit(code) {"):]
+    exit_path = exit_path[:exit_path.index("\n  }\n")]
+    assert "this._renderExitBar();" in exit_path
+    assert '`[exited · code ${this._exitCode}]`' in pane
+    # Enter only while exited, and inside xterm's own key handler, so the
+    # keyboard is never taken from focus.js's owner.
+    keys = pane[pane.index("this.term.attachCustomKeyEventHandler((e) => {"):]
+    keys = keys[:keys.index("\n    });")]
+    assert 'e.key === "Enter" && this.state === "exited"' in keys
+    assert "this.requestRestart();" in keys
+    assert 'this.onActionRequest("restart", this);' in pane
+    assert 'else if (action === "restart") app.restartTerminal(pane);' in main
+    assert 'label: "restart terminal"' in palette
+    # Same launch: restartSavedPane, fed by the pane's profile/spec/options.
+    assert "pane.keepScreenOnNextAttach();" in actions
+    assert "restartSavedPane(pane)" in actions
+    # A restart that started nothing does not leave the keep-screen flag behind.
+    assert "pane.dropKeepScreen();" in actions
+    assert "state.selectedTerminal" not in actions
+    assert "repeatLaunchOptions(pane, profileName, options," in spawner
+    assert "out.launch_options = options;" in layout
+    assert "launchOptionsFromNode(n && n.launch_options)" in layout
+    # Keep the screen: the separator replaces reset() for that one replay.
+    replay = pane[pane.index('      case "replay_size":'):pane.index('      case "replay_done":')]
+    assert replay.index("this._keepScreenGeneration === this._generation") < replay.index(
+        "this.term.reset();"
+    )
+    assert "this.term.write(this._restartSeparator());" in replay
+    assert "[restarted]" in pane
+
+
+def test_broadcast_mirrors_only_real_input_within_this_document():
+    """xterm's onData also carries its automatic replies to terminal queries;
+    typing those into other shells is garbage, so only data behind the input
+    gate is mirrored, and binary data never is. The switch lives in the layout,
+    which is one document, and restore() (every workspace switch) clears it.
+    """
+    pane = PANE_JS.read_text(encoding="utf-8")
+    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
+        encoding="utf-8"
+    )
+
+    data = pane[pane.index("this.term.onData((d) => {"):]
+    data = data[:data.index("\n    });")]
+    assert "if (this._inputGate.open) this.onUserInput(d, this);" in data
+    binary = pane[pane.index("this.term.onBinary((d) => {"):]
+    binary = binary[:binary.index("\n    });")]
+    assert "onUserInput" not in binary
+    assert "this.term.onKey(() => this._inputGate.arm());" in pane
+    # On the host in the capture phase: xterm's own textarea listeners run
+    # first at the target and would emit the data before the gate opened.
+    gate = pane[pane.index('for (const type of ["paste", "compositionend", "input"]) {'):]
+    gate = gate[:gate.index("\n    }\n")]
+    assert "this.termHost.addEventListener(type, () => {" in gate
+    assert 'this._inputGate.arm(type === "compositionend" ? 2 : 1);' in gate
+    assert "}, true);" in gate
+    assert "onUserInput: (data, p) => this._broadcastFrom(p, data)," in layout
+    assert "for (const p of broadcastTargets(this.panes(), source)) {" in layout
+    # Automatic replies are stripped, and a paste is re-pasted per target.
+    assert "withoutTerminalReplies(data)" in layout
+    assert "if (pasted !== null) p.pasteText(pasted);" in layout
+    restore = layout[layout.index("  restore(layout) {"):]
+    restore = restore[:restore.index("\n  }\n")]
+    assert "this.broadcasting = false;" in restore
+    assert '"broadcast input to all panes in this workspace"' in palette
+    assert '"stop broadcasting input"' in palette
+    assert ".pane.broadcasting:not(.drop-target)::after" in app_css
+
+
+def test_search_and_export_are_palette_rows():
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    actions = (FRONTEND_JS / "terminal_actions.js").read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+
+    assert 'label: "search all terminals…"' in palette
+    assert 'label: "save terminal output"' in palette
+    assert 'label: "open last saved output"' in palette
+    assert "/api/search?q=${encodeURIComponent(query)}" in actions
+    assert "/export`" in actions
+    # Opening goes through the one token-gated opener route.
+    assert "api.openTarget(lastSaved)" in actions
+    # A hit outside this layout is attached the way "attach here" does it.
+    assert "if (!attachSession(info)) return false;" in actions
+    assert "...createTerminalActions({ api, layout, attachSession, restartSavedPane, showError })," in main
+
+
+def test_settings_infers_a_profile_type_for_display_only():
+    """Loading Settings must not stamp the inferred type onto every profile.
+
+    A hand-edited profile without a type launches as a plain command; the
+    stamp saved it with the inferred type on the next Save and changed how it
+    starts. Only the user's own choice in a card sets `terminal_type`.
+    """
+    panels = PANELS_JS.read_text(encoding="utf-8")
+    assert "profile.terminal_type = inferTerminalType(profile)" not in panels
+    assert "profile.terminal_type =" not in panels
+
+
+def test_menus_draw_above_the_sheet_and_below_the_error_banner():
+    css = (FRONTEND_JS.parent / "css" / "menu.css").read_text(encoding="utf-8")
+    rule = css[css.index(".qt-menu {"):]
+    rule = rule[: rule.index("}")]
+    assert "z-index: 130;" in rule
+    app_css = (FRONTEND_JS.parent / "css" / "app.css").read_text(encoding="utf-8")
+    assert ".panel-overlay { position: fixed; inset: 0; z-index: 100;" in app_css
+    assert "z-index: 140;" in app_css  # #app-error

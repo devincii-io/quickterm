@@ -1,26 +1,34 @@
-"""Session registry: lifecycle, scrollback ring buffer, subscriber fan-out."""
+"""Session registry: lifecycle, input, busy state and metrics.
+
+Owns SessionInfo, Session and SessionManager: spawning a PTY, the registry
+the loop thread mutates, writes, resizes, verified kills, attach, and the
+loop-thread callbacks from the PTY backends. The scrollback ring lives in
+``scrollback``, per-viewer queues in ``fanout``, idle cleanup in ``reaper``;
+their public names are re-exported here, which is the import path callers use.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
 import os
-import re
 import time
 import uuid
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any
 
 from .config import default_cwd, validate_environment
+from .fanout import QUEUE_MAX_BYTES, QUEUE_MERGE_BYTES, Attachment, AttachmentQueue, Viewers
 from .process_usage import (
     pids_with_children,
     process_identities,
     snapshot_processes,
     summarize_trees,
 )
+from .reaper import EXITED_UNREAD_RETENTION_S, Reaper
+from .scrollback import ScrollbackRing
+from .signals import SignalScanner, clean_text
 
 log = logging.getLogger(__name__)
 
@@ -29,34 +37,23 @@ if os.name == "nt":
 else:
     from .pty_posix import PtySession
 
-_T = TypeVar("_T")
+__all__ = [
+    "EXITED_UNREAD_RETENTION_S",
+    "Attention",
+    "QUEUE_MAX_BYTES",
+    "QUEUE_MERGE_BYTES",
+    "Attachment",
+    "AttachmentQueue",
+    "PtySession",
+    "Session",
+    "SessionInfo",
+    "SessionLimitError",
+    "SessionManager",
+    "SpawnError",
+    "pids_with_children",
+]
 
-# Keep slow-viewer memory bounded. If a viewer falls behind this window it is
-# explicitly told to reconnect and replay the current scrollback; arbitrary VT
-# bytes are never silently discarded because that corrupts terminal state.
-# The bound is in bytes, not items: the POSIX reader posts one callback per
-# os.read, so an item cap of 8 overflowed a consumer that did nothing but
-# await get() as soon as one loop iteration ran nine reader callbacks.
-QUEUE_MAX_BYTES = 2 * 1024 * 1024
-# Consecutive chunks merge into one pending item up to this size, the same cap
-# as the server's WS frame coalescing, so one get() never hands the pump more
-# than it sends in one frame.
-QUEUE_MERGE_BYTES = 128 * 1024
 _KILL_REMOVE_GRACE_S = 1.0
-# An exited session that the user retained or typed into, and that printed
-# output nobody has seen, is kept this long after it ended (unless a viewer
-# acknowledges it first). A day covers a build or agent left running
-# overnight; memory stays bounded by the scrollback cap per session, and
-# untouched never-attached exited sessions still go on the next pass.
-EXITED_UNREAD_RETENTION_S = 24 * 60 * 60
-# How far the ring front may move past a cut to reach a sequence boundary, and
-# how far back the cut looks for the ESC that might enclose it. The forward
-# side first looks at a short peek, which settles almost every CSI.
-_RESYNC_SCAN_BYTES = 4096
-_RESYNC_PEEK_BYTES = 64
-# A reaper claim that the loop does not run within this time (the app is
-# shutting down) is treated as "not reaped".
-_LOOP_CALL_TIMEOUT_S = 5.0
 
 
 class SessionLimitError(RuntimeError):
@@ -80,348 +77,30 @@ class SessionInfo:
     retained: bool = False  # Explicit detach: keep even if untouched and idle
     workspace: str | None = None  # workspace this session belongs to
     cwd: str | None = None  # directory the shell was started in
+    # Where the shell says it is now (OSC 7 or OSC 9;9), None until it says so.
+    current_cwd: str | None = None
 
 
-class AttachmentQueue:
-    """Byte-bounded FIFO with the part of the asyncio.Queue API the server uses.
+@dataclass
+class Attention:
+    """The latest reason a session wants the user: "bell", "notify" or "exit".
 
-    Items are bytes, None (session exited) or an attachment's overflow
-    sentinel. Consecutive bytes merge into the pending tail while it stays at
-    or below QUEUE_MERGE_BYTES, so a burst of small reads costs one wake-up
-    and one WS frame instead of one each. put_nowait raises asyncio.QueueFull
-    only when pending bytes would pass QUEUE_MAX_BYTES; markers never do.
+    Latest wins. Cleared by mark_seen (the client saw it) and by touch (the
+    user typed), never by more output: a program that keeps printing after
+    ringing still asked a question nobody has answered.
     """
 
-    def __init__(self) -> None:
-        # A merged run is held as a list of its chunks and joined once, when
-        # it is taken: growing a bytes or bytearray tail copied every chunk
-        # at least twice more on the output hot path.
-        self._items: deque[Any] = deque()
-        self._bytes = 0
-        # Size of the last item when it is data that can still grow, else -1.
-        self._tail_bytes = -1
-        self._getters: deque[asyncio.Future[None]] = deque()
-
-    def qsize(self) -> int:
-        return len(self._items)
-
-    def empty(self) -> bool:
-        return not self._items
-
-    def pending_bytes(self) -> int:
-        return self._bytes
-
-    def put_nowait(self, item: Any) -> None:
-        items = self._items
-        if isinstance(item, bytes):
-            size = len(item)
-            if not size:
-                return
-            if self._bytes + size > QUEUE_MAX_BYTES:
-                raise asyncio.QueueFull
-            self._bytes += size
-            if items and 0 <= self._tail_bytes <= QUEUE_MERGE_BYTES - size:
-                tail = items[-1]
-                if type(tail) is list:
-                    tail.append(item)
-                else:
-                    items[-1] = [tail, item]
-                self._tail_bytes += size
-                return
-            items.append(item)
-            self._tail_bytes = size
-        else:
-            items.append(item)
-            self._tail_bytes = -1
-        self._wake()
-
-    def get_nowait(self) -> Any:
-        if not self._items:
-            raise asyncio.QueueEmpty
-        item = self._items.popleft()
-        if type(item) is list:
-            item = b"".join(item)
-        if isinstance(item, bytes):
-            self._bytes -= len(item)
-        return item
-
-    async def get(self) -> Any:
-        while not self._items:
-            waiter = asyncio.get_running_loop().create_future()
-            self._getters.append(waiter)
-            try:
-                await waiter
-            except BaseException:
-                waiter.cancel()
-                try:
-                    self._getters.remove(waiter)
-                except ValueError:
-                    pass
-                # A put may have woken this getter just before it was
-                # cancelled; pass the wake-up on so the item is not stranded.
-                if self._items and not waiter.cancelled():
-                    self._wake()
-                raise
-        return self.get_nowait()
-
-    def clear(self) -> None:
-        self._items.clear()
-        self._bytes = 0
-        self._tail_bytes = -1
-
-    def _wake(self) -> None:
-        while self._getters:
-            waiter = self._getters.popleft()
-            if not waiter.done():
-                waiter.set_result(None)
-                return
-
-
-class Attachment:
-    """Per-subscriber bounded queue; None = exit, overflow_sentinel = resync."""
-
-    def __init__(self, session: Session) -> None:
-        self.queue = AttachmentQueue()
-        self.overflow_sentinel = object()
-        self.overflowed = False
-        self._session = session
-
-    def detach(self) -> None:
-        self._session._attachments.discard(self)
-
-
-# DEC private modes worth re-establishing on replay. Synchronized output
-# (2026) is deliberately absent: replaying a stale "begin" would freeze the
-# fresh view until a matching "end" that already went by.
-_MOUSE_TRACKING = (1000, 1002, 1003)
-_MOUSE_ENCODING = (1006, 1015)
-_ALT_SCREEN = (47, 1047, 1049)
-_REPLAYED_MODES = frozenset((1, 25, 1004, 2004, *_MOUSE_TRACKING, *_MOUSE_ENCODING, *_ALT_SCREEN))
-# Modes that are on in a fresh xterm; the preamble only states differences.
-_DEFAULT_ON = frozenset((25,))
-# xterm.js keeps one value per group: setting a member replaces the others and
-# resetting any member clears the group. Tracking them as independent flags
-# would replay a mouse mode the application had already replaced.
-_MODE_GROUP = {
-    mode: group for group in (_MOUSE_TRACKING, _MOUSE_ENCODING, _ALT_SCREEN) for mode in group
-}
-_DECSET = re.compile(rb"\x1b\[\?([0-9;]*)([hl])")
-# A tail that could still become a DECSET/DECRST or RIS once the next bytes
-# arrive: ESC, ESC [, or ESC [ ? followed by parameters only.
-_PARTIAL_MODE_TAIL = re.compile(rb"\x1b(?:\[(?:\?[0-9;]*)?)?")
-_MODE_CARRY_MAX = 64
-_GROUND = 0
-_AFTER_ESC = 1
-_OSC = 0x5D
-_STRING_INTRODUCERS = b"]P_^X"  # OSC, DCS, APC, PM, SOS
-# Both always match (possibly empty), so .match(...).end() is safe.
-_CSI_BODY = re.compile(rb"[\x20-\x3f]*")
-_ESC_INTERMEDIATES = re.compile(rb"[\x20-\x2f]*")
-
-
-class _ModeTracker:
-    """DEC private mode state of the bytes that have left the scrollback ring.
-
-    Fed only with trimmed bytes, so its state is the terminal's mode state at
-    the first retained byte: exactly what a replay has to restore before the
-    ring. Scanning is two bytes.find passes per trimmed span; the Python loop
-    runs once per mode sequence, not per byte.
-    """
-
-    def __init__(self) -> None:
-        self.modes: dict[int, bool] = {}
-        # Where the trimmed bytes end: _GROUND, _AFTER_ESC (the last one was
-        # an ESC whose next byte is not known yet) or, inside an OSC, DCS,
-        # APC, PM or SOS string, that string's introducer byte. The ring
-        # front is clean only in _GROUND; this is exact however long the
-        # string is, which the bounded resync window cannot be.
-        self.state = _GROUND
-        # Tail of the previous span that may be the start of a sequence split
-        # across a chunk boundary.
-        self._carry = b""
-
-    def end_string(self) -> None:
-        """The retained front is an ESC, which ends any string before it."""
-        self.state = _GROUND
-
-    def feed(self, buf: bytes, start: int, end: int) -> None:
-        if start >= end:
-            return
-        self._track_string(buf, start, end)
-        if self._carry:
-            carry = self._carry
-            self._carry = b""
-            head = carry + buf[start : min(end, start + _MODE_CARRY_MAX)]
-            if head[1:2] == b"c":
-                self._reset()
-                start += 2 - len(carry)
-            else:
-                match = _DECSET.match(head)
-                if match:
-                    self._apply(match)
-                    start += match.end() - len(carry)
-                elif _PARTIAL_MODE_TAIL.fullmatch(head) and len(head) <= _MODE_CARRY_MAX:
-                    if end - start == len(head) - len(carry):
-                        self._carry = head  # still incomplete and the span is used up
-                        return
-            if start >= end:
-                return
-        pos = start
-        next_mode = buf.find(b"\x1b[?", pos, end)
-        next_ris = buf.find(b"\x1bc", pos, end)
-        while next_mode >= 0 or next_ris >= 0:
-            if next_ris >= 0 and (next_mode < 0 or next_ris < next_mode):
-                self._reset()
-                pos = next_ris + 2
-                next_ris = buf.find(b"\x1bc", pos, end)
-                if 0 <= next_mode < pos:
-                    next_mode = buf.find(b"\x1b[?", pos, end)
-                continue
-            match = _DECSET.match(buf, next_mode, end)
-            pos = next_mode + 3
-            if match:
-                self._apply(match)
-                pos = match.end()
-            next_mode = buf.find(b"\x1b[?", pos, end)
-            if 0 <= next_ris < pos:
-                next_ris = buf.find(b"\x1bc", pos, end)
-        # From the span start, not from pos: a DECSET cut short at the span end
-        # failed to match above and was stepped over, and it is exactly what
-        # the carry is for. Completed sequences never match the partial form.
-        last_esc = buf.rfind(b"\x1b", max(start, end - _MODE_CARRY_MAX), end)
-        if last_esc >= 0 and _PARTIAL_MODE_TAIL.fullmatch(buf, last_esc, end):
-            self._carry = buf[last_esc:end]
-
-    def _track_string(self, buf: bytes, start: int, end: int) -> None:
-        # Every ESC ends a string, so only the last ESC of the span matters,
-        # plus, for an OSC, a BEL after it. Without an ESC the state carries
-        # over from the previous span.
-        esc = buf.rfind(b"\x1b", start, end)
-        if esc < 0:
-            if self.state == _AFTER_ESC:
-                esc, intro = start - 1, buf[start]
-            elif self.state == _OSC and buf.find(b"\x07", start, end) >= 0:
-                self.state = _GROUND
-                return
-            else:
-                return
-        elif esc == end - 1:
-            self.state = _AFTER_ESC
-            return
-        else:
-            intro = buf[esc + 1]
-        if intro not in _STRING_INTRODUCERS:
-            self.state = _GROUND
-        elif intro == _OSC and buf.find(b"\x07", esc + 2, end) >= 0:
-            self.state = _GROUND
-        else:
-            self.state = intro
-
-    def preamble(self) -> bytes:
-        parts = [
-            b"\x1b[?%d%s" % (mode, b"h" if on else b"l")
-            for mode, on in sorted(self.modes.items())
-            if on != (mode in _DEFAULT_ON)
-        ]
-        return b"".join(parts)
-
-    def _reset(self) -> None:
-        self.modes.clear()
-
-    def _apply(self, match: re.Match[bytes]) -> None:
-        on = match.group(2) == b"h"
-        for param in match.group(1).split(b";"):
-            # Length first: int() refuses digit strings past 4300 characters,
-            # and an exception here would cost the fan-out of the whole chunk.
-            if not param or len(param) > 5:
-                continue
-            mode = int(param)
-            if mode not in _REPLAYED_MODES:
-                continue
-            group = _MODE_GROUP.get(mode)
-            if group is not None:
-                for member in group:
-                    self.modes.pop(member, None)
-                if on:
-                    self.modes[mode] = True
-            else:
-                self.modes[mode] = on
-
-
-def _sequence_end(window: bytes, esc: int) -> int:
-    """Index just past the escape sequence starting at ``esc``, or -1 when it
-    does not end inside ``window``."""
-    n = len(window)
-    if esc + 1 >= n:
-        return -1
-    kind = window[esc + 1]
-    if kind == 0x5B:  # CSI: parameter and intermediate bytes, then one final byte
-        pos = _CSI_BODY.match(window, esc + 2).end()  # type: ignore[union-attr]
-        if pos >= n:
-            return -1
-        return pos + 1 if 0x40 <= window[pos] <= 0x7E else pos
-    if kind in b"]P_^X":  # OSC, DCS, APC, PM, SOS: a string up to BEL (OSC) or ESC
-        nxt = window.find(b"\x1b", esc + 2)
-        bel = window.find(b"\x07", esc + 2) if kind == 0x5D else -1
-        if bel >= 0 and (nxt < 0 or bel < nxt):
-            return bel + 1
-        if nxt < 0:
-            return -1
-        # Any ESC ends the string; ESC \ is the proper terminator and belongs
-        # to it, any other ESC already starts the next sequence.
-        return nxt + 2 if window[nxt + 1 : nxt + 2] == b"\\" else nxt
-    pos = _ESC_INTERMEDIATES.match(window, esc + 1).end()  # type: ignore[union-attr]
-    if pos >= n:  # plain escape: intermediates, then one final byte
-        return -1
-    return pos + 1 if 0x30 <= window[pos] <= 0x7E else pos
-
-
-def _resync_skip(window: bytes, cut: int, final: bool) -> int | None:
-    """How many bytes after ``cut`` a replay must skip to start cleanly.
-
-    ``window`` is the tail of the trimmed bytes followed by the head of the
-    retained ones, with the ring front at ``cut``. The front must not land
-    inside an escape sequence (xterm would print its tail as text) or a UTF-8
-    character (U+FFFD). Only the last ESC before the cut can enclose it, so
-    one rfind decides; the scan is bounded by the window. Returns None when
-    the sequence is still open at the window end and ``final`` is false, so
-    the caller can retry with more bytes.
-    """
-    pos = cut
-    esc = window.rfind(b"\x1b", 0, cut)
-    if esc >= 0:
-        end = _sequence_end(window, esc)
-        if end < 0:
-            if not final:
-                return None
-            # Unterminated within the window: every ESC ends whatever came
-            # before it, so the next one is a safe start.
-            nxt = window.find(b"\x1b", cut)
-            pos = nxt if nxt >= 0 else len(window)
-        elif end > cut:
-            pos = end
-    limit = min(len(window), pos + 3)
-    while pos < limit and 0x80 <= window[pos] <= 0xBF:
-        pos += 1
-    return pos - cut
+    kind: str
+    text: str | None
+    at: float  # time.monotonic() when it was raised
 
 
 class Session:
     def __init__(self, info: SessionInfo, cap: int) -> None:
         self.info = info
         self.pty: PtySession | None = None
-        self._cap = cap
-        # Scrollback ring as a deque of chunks + running byte count. The live
-        # part of the oldest chunk starts at _head, so trimming moves an
-        # offset instead of copying the rest of that chunk on every write; the
-        # slice happens once, at replay time.
-        self._chunks: deque[bytes] = deque()
-        self._head = 0
-        self._ring_bytes = 0
-        self._ring_cols = info.cols
-        self._ring_rows = info.rows
-        self._modes = _ModeTracker()
-        self._attachments: set[Attachment] = set()
+        self._ring = ScrollbackRing(cap, info.cols, info.rows)
+        self._attachments = Viewers()
         self.last_activity = time.monotonic()  # updated on output and input
         self.started_at = self.last_activity
         self.ended_at: float | None = None
@@ -437,6 +116,11 @@ class Session:
         self.ever_attached = False
         self.background_output_bytes = 0
         self.background_output_at: float | None = None
+        self.attention: Attention | None = None
+        self._signals = SignalScanner()
+        # Set before a kill is attempted, so the exit it causes is not
+        # reported as the terminal asking for the user.
+        self.stopping = False
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
         """Replay snapshot: an optional mode preamble, then the ring's chunks.
@@ -445,150 +129,10 @@ class Session:
         inside an escape sequence or a UTF-8 character, and the preamble
         re-establishes the DEC private modes that were in effect there.
         """
-        chunks = list(self._chunks)
-        if chunks and self._head:
-            chunks[0] = chunks[0][self._head :]
-        preamble = self._modes.preamble()
-        if preamble:
-            chunks.insert(0, preamble)
-        return tuple(chunks), self._ring_cols, self._ring_rows
-
-    def _record(self, data: bytes) -> None:
-        if data:
-            self._chunks.append(data)
-            self._ring_bytes += len(data)
-            # A non-ground tracker state means an earlier trim emptied the
-            # ring inside a string, so the new bytes are its payload and go
-            # too, even below the cap.
-            if self._ring_bytes > self._cap or self._modes.state:
-                self._trim()
-        self._ring_cols, self._ring_rows = self.info.cols, self.info.rows
+        return self._ring.snapshot()
 
     def set_scrollback_cap(self, cap: int) -> None:
-        self._cap = cap
-        if self._ring_bytes > self._cap:
-            self._trim()
-
-    def _trim(self) -> None:
-        """Drop the oldest bytes down to the cap, then on to a clean start."""
-        excess = self._ring_bytes - self._cap
-        spans = self._drop(excess) if excess > 0 else []
-        modes = self._modes
-        while modes.state == _AFTER_ESC and self._chunks:
-            spans += self._drop(1)  # the byte after the ESC decides
-        if modes.state:
-            self._drop_string_rest()
-            return
-        if not spans or not self._chunks:
-            return
-        # Only the last ESC before the cut can enclose it, so the lookback is
-        # just the bytes from there to the cut (none when there is no ESC in
-        # reach). This runs on every write once the ring is full; copying a
-        # fixed window each time made small writes ten times dearer.
-        lookback = b""
-        reach: list[tuple[bytes, int, int]] = []
-        budget = _RESYNC_SCAN_BYTES
-        for chunk, start, end in reversed(spans):
-            low = max(start, end - budget)
-            esc = chunk.rfind(b"\x1b", low, end)
-            if esc >= 0:
-                reach.append((chunk, esc, end))
-                lookback = b"".join(c[s:e] for c, s, e in reversed(reach))
-                break
-            reach.append((chunk, low, end))
-            budget -= end - low
-            if budget <= 0:
-                break
-        forward = self._peek(_RESYNC_PEEK_BYTES)
-        skip = _resync_skip(lookback + forward, len(lookback), len(forward) >= self._ring_bytes)
-        if skip is None:
-            # The sequence is still open at the end of the short peek.
-            forward = self._peek(_RESYNC_SCAN_BYTES)
-            skip = _resync_skip(lookback + forward, len(lookback), True)
-        if skip:
-            self._drop(skip)
-            if modes.state:
-                self._trim()  # the skip itself ended inside a string or after an ESC
-
-    def _drop_string_rest(self) -> None:
-        """The front is inside a string (an OSC 52 clipboard write, sixel, an
-        inline image): drop through its terminator, or everything retained
-        when it has not arrived yet. Replaying payload as text is worse than
-        replaying nothing. Rare, so scanning the ring here is fine."""
-        bel_ends = self._modes.state == _OSC
-        count = 0
-        offset = self._head
-        for index, chunk in enumerate(self._chunks):
-            esc = chunk.find(b"\x1b", offset)
-            bel = chunk.find(b"\x07", offset, esc if esc >= 0 else len(chunk)) if bel_ends else -1
-            if bel >= 0:
-                self._drop(count + bel + 1 - offset)
-                return
-            if esc >= 0:
-                if chunk[esc + 1 : esc + 2] == b"\\":
-                    self._drop(count + esc + 2 - offset)
-                    return
-                if esc + 1 == len(chunk) and index + 1 < len(self._chunks):
-                    if self._chunks[index + 1][:1] == b"\\":
-                        self._drop(count + esc + 2 - offset)
-                        return
-                # Any other ESC ends the string and starts the next sequence,
-                # so it stays as the new front.
-                self._drop(count + esc - offset)
-                self._modes.end_string()
-                return
-            count += len(chunk) - offset
-            offset = 0
-        self._drop(self._ring_bytes)
-
-    def _peek(self, count: int) -> bytes:
-        """The first ``count`` retained bytes (fewer when the ring is shorter)."""
-        parts: list[bytes] = []
-        size = 0
-        offset = self._head
-        for chunk in self._chunks:
-            piece = chunk[offset : offset + count - size]
-            parts.append(piece)
-            size += len(piece)
-            offset = 0
-            if size >= count:
-                break
-        return parts[0] if len(parts) == 1 else b"".join(parts)
-
-    def _drop(self, count: int) -> list[tuple[bytes, int, int]]:
-        """Remove ``count`` bytes from the ring front, feeding them to the mode
-        tracker; returns the removed spans as (chunk, start, end)."""
-        spans: list[tuple[bytes, int, int]] = []
-        chunks = self._chunks
-        while count > 0 and chunks:
-            chunk = chunks[0]
-            available = len(chunk) - self._head
-            if available <= count:
-                spans.append((chunk, self._head, len(chunk)))
-                chunks.popleft()
-                self._head = 0
-                self._ring_bytes -= available
-                count -= available
-            else:
-                spans.append((chunk, self._head, self._head + count))
-                self._head += count
-                self._ring_bytes -= count
-                count = 0
-        for chunk, start, end in spans:
-            self._modes.feed(chunk, start, end)
-        return spans
-
-    def _fanout(self, item: bytes | None) -> None:
-        for att in tuple(self._attachments):
-            if att.overflowed:
-                continue
-            q = att.queue
-            try:
-                q.put_nowait(item)
-            except asyncio.QueueFull:
-                att.overflowed = True
-                q.clear()
-                q.put_nowait(att.overflow_sentinel)
+        self._ring.set_cap(cap)
 
 
 class SessionManager:
@@ -607,6 +151,11 @@ class SessionManager:
         # insert; counted against the limit so parallel requests cannot all
         # pass the check while their PTYs are still being built.
         self._spawning = 0
+        # Told on the loop thread whenever a session gains attention; the
+        # server hands it to the desktop shell's notifier.
+        self._attention_listener: Callable[[SessionInfo, Attention], None] | None = None
+        # Shares the registry dict, so it must only ever be mutated in place.
+        self._reaper = Reaper(loop, self._sessions, self.kill, self.busy_ids)
 
     def set_max_sessions(self, limit: int) -> None:
         self._max_sessions = limit
@@ -790,11 +339,52 @@ class SessionManager:
             s.pty.write(data)
 
     def touch(self, sid: str) -> None:
-        """Record real user input (the client's explicit touch frame)."""
+        """Record real user input (the client's explicit touch frame).
+
+        Typing answers whatever the terminal asked, so it clears attention.
+        """
         s = self._sessions.get(sid)
         if s and s.info.alive:
             s.info.touched = True
             s.last_activity = time.monotonic()
+            s.attention = None
+
+    def mark_seen(self, sid: str) -> None:
+        """The user has seen this session: clear its attention. KeyError when
+        ``sid`` is unknown."""
+        s = self._sessions.get(sid)
+        if s is None:
+            raise KeyError(sid)
+        s.attention = None
+
+    def session_attention(self, sid: str) -> dict[str, Any] | None:
+        """``{kind, text, age_seconds}`` for the list route, or None."""
+        s = self._sessions.get(sid)
+        record = s.attention if s is not None else None
+        if record is None:
+            return None
+        return {
+            "kind": record.kind,
+            "text": record.text,
+            "age_seconds": max(0, int(time.monotonic() - record.at)),
+        }
+
+    def set_attention_listener(
+        self, listener: Callable[[SessionInfo, Attention], None] | None
+    ) -> None:
+        self._attention_listener = listener
+
+    def _raise_attention(self, session: Session, kind: str, text: str | None) -> None:
+        record = Attention(kind, text, time.monotonic())
+        session.attention = record
+        listener = self._attention_listener
+        if listener is None:
+            return
+        try:
+            listener(session.info, record)
+        except Exception:
+            # A notifier failure must never reach the PTY reader callback.
+            log.debug("attention listener failed", exc_info=True)
 
     def _busy_from(self, identities: list[tuple[int, int]]) -> set[str]:
         """The one busy definition: alive, and the root PID has a direct child."""
@@ -904,7 +494,7 @@ class SessionManager:
         if s and s.pty and s.info.alive:
             s.info.cols, s.info.rows = cols, rows
             # Reconnect geometry must stay current even while the PTY is silent.
-            s._ring_cols, s._ring_rows = cols, rows
+            s._ring.cols, s._ring.rows = cols, rows
             s.pty.resize(cols, rows)
 
     def kill(self, sid: str) -> bool:
@@ -925,7 +515,9 @@ class SessionManager:
             raise KeyError(sid)
         # Exactly True: a backend regression returning None must read as a
         # failure, never as a verified kill that hides a running process.
+        s.stopping = True
         if s.pty is not None and s.pty.kill() is not True:
+            s.stopping = False
             return False
         try:
             self._loop.call_soon_threadsafe(self._finish_kill, sid, s)
@@ -944,7 +536,7 @@ class SessionManager:
             if session.info.exit_code is None:
                 session.info.exit_code = 1
             session.ended_at = time.monotonic()
-            session._fanout(None)
+            session._attachments.publish(None)
         self._loop.call_later(_KILL_REMOVE_GRACE_S, self._remove_if_same, sid, session)
 
     def _remove_if_same(self, sid: str, session: Session) -> None:
@@ -963,7 +555,7 @@ class SessionManager:
         # the background. Do this before registering the viewer so the state is
         # consistent for concurrent session-list requests.
         self._acknowledge(s)
-        att = Attachment(s)
+        att = Attachment(s._attachments)
         s._attachments.add(att)
         if not s.info.alive:
             att.queue.put_nowait(None)
@@ -981,6 +573,12 @@ class SessionManager:
         s.ever_attached = True
         s.background_output_bytes = 0
         s.background_output_at = None
+        if not s.info.alive:
+            # Opening an exited terminal replays everything up to its exit,
+            # which answers whatever it asked. A live one is different: a
+            # workspace restore attaches every pane, and that is nobody
+            # looking at the one that rang.
+            s.attention = None
 
     def shutdown(self) -> None:
         for s in list(self._sessions.values()):
@@ -989,136 +587,9 @@ class SessionManager:
         self._sessions.clear()
 
     def reap_idle(self, timeout_s: int, protected: set[str] | None = None) -> list[str]:
-        """Clean stopped sessions and untouched background shells.
-
-        A silent session that the user typed into may be an SSH connection,
-        server, or WSL job, so it is never expired automatically. Exited sessions
-        are cleaned even when a stale workspace file still references them,
-        unless they hold final output the user has not seen (see
-        EXITED_UNREAD_RETENTION_S).
-
-        Runs in a worker thread (app._reap_loop) or on the loop thread. Each
-        candidate is rechecked and claimed on the loop thread right before its
-        kill: one kill can take seconds on Windows, and a session the user
-        picked up meanwhile must survive the pass.
-        """
-        protected = protected or set()
-        busy = self.busy_ids()
-        now = time.monotonic()
-        candidates = [
-            sid
-            for sid, s in list(self._sessions.items())
-            if self._reapable(s, sid, now, timeout_s, protected, busy)
-        ]
-        reaped: list[str] = []
-        for sid in candidates:
-            session = self._on_loop(self._claim, sid, timeout_s, protected, busy)
-            if session is None:
-                continue
-            try:
-                stopped = self.kill(sid)
-            except KeyError:
-                continue  # removed meanwhile; nothing left to stop
-            except Exception:
-                self._release_soon(session)
-                raise
-            if stopped:
-                reaped.append(sid)
-            else:
-                self._release_soon(session)
-        return reaped
-
-    def _release_soon(self, session: Session) -> None:
-        # Fire and forget, never through _on_loop: its timeout cancels the
-        # call, and a release lost to a stalled loop would leave the session
-        # claimed for good, answering every attach with 4404.
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is self._loop:
-            self._release(session)
-            return
-        try:
-            self._loop.call_soon_threadsafe(self._release, session)
-        except RuntimeError:
-            pass  # loop closed: no attach can come any more
-
-    def _reapable(
-        self,
-        s: Session,
-        sid: str,
-        now: float,
-        timeout_s: int,
-        protected: set[str],
-        busy: set[str],
-    ) -> bool:
-        if s._attachments or s.reaping:
-            return False
-        if not s.info.alive:
-            return not self._keeps_unread_exit(s, now)
-        if sid in protected or s.info.touched or s.info.retained or sid in busy:
-            return False
-        return timeout_s > 0 and now - s.last_activity > timeout_s
-
-    @staticmethod
-    def _keeps_unread_exit(s: Session, now: float) -> bool:
-        # A retained or typed-into session was something the user cared
-        # about; its last output (the build result, the agent's reply) exists
-        # only in this ring, so it stays until someone has seen it.
-        if not (s.info.retained or s.info.touched) or s.background_output_bytes <= 0:
-            return False
-        ended = s.ended_at if s.ended_at is not None else now
-        return now - ended < EXITED_UNREAD_RETENTION_S
-
-    def _claim(
-        self, sid: str, timeout_s: int, protected: set[str], busy: set[str]
-    ) -> Session | None:
-        """Loop thread: recheck one candidate and mark it for killing."""
-        s = self._sessions.get(sid)
-        if s is None or not self._reapable(s, sid, time.monotonic(), timeout_s, protected, busy):
-            return None
-        s.reaping = True
-        return s
-
-    @staticmethod
-    def _release(s: Session) -> None:
-        s.reaping = False
-
-    def _on_loop(self, fn: Callable[..., _T], *args: Any) -> _T | None:
-        """Run ``fn`` on the loop thread and return its result.
-
-        Called directly when already on that thread (tests call reap_idle
-        there, and blocking on our own loop would deadlock). Returns None when
-        the loop does not run it in time, which callers read as "leave it".
-        """
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is self._loop:
-            return fn(*args)
-        result: concurrent.futures.Future[_T] = concurrent.futures.Future()
-
-        def run() -> None:
-            if result.set_running_or_notify_cancel():
-                try:
-                    result.set_result(fn(*args))
-                except BaseException as exc:
-                    result.set_exception(exc)
-
-        try:
-            self._loop.call_soon_threadsafe(run)
-        except RuntimeError:
-            return None  # loop closed
-        try:
-            return result.result(timeout=_LOOP_CALL_TIMEOUT_S)
-        except concurrent.futures.TimeoutError:
-            if result.cancel():
-                return None
-        # It started just as the wait ran out. It is short, and its effect (a
-        # claim) must not be left behind with nobody to act on it.
-        return result.result()
+        """Clean stopped sessions and untouched background shells; returns the
+        reaped ids. The policy and its threading are ``reaper.Reaper``'s."""
+        return self._reaper.reap_idle(timeout_s, protected)
 
     # loop-thread callbacks from PtySession
 
@@ -1127,8 +598,18 @@ class SessionManager:
         if data and session.ever_attached and not session._attachments:
             session.background_output_bytes += len(data)
             session.background_output_at = session.last_activity
-        session._record(data)
-        session._fanout(data)
+        # The ring, the viewers and the scanner are called directly, not
+        # through Session wrappers: this runs once per reader burst. The
+        # scanner answers plain output with two C-level finds and None.
+        info = session.info
+        session._ring.record(data, info.cols, info.rows)
+        session._attachments.publish(data)
+        found = session._signals.feed(data)
+        if found is not None:
+            if found.cwd is not None:
+                info.current_cwd = found.cwd
+            if found.attention is not None:
+                self._raise_attention(session, found.attention, found.text)
 
     def _on_exit(self, session: Session, code: int) -> None:
         was_alive = session.info.alive
@@ -1136,4 +617,12 @@ class SessionManager:
         session.info.exit_code = code
         session.ended_at = time.monotonic()
         if was_alive:
-            session._fanout(None)
+            # Only a terminal the user had a stake in (opened and then typed
+            # into or explicitly detached; the reaper's own "cared about"),
+            # only when nobody is watching it end, and never for an exit
+            # QuickTerm caused. An untouched shell ending is no news.
+            info = session.info
+            cared = session.ever_attached and (info.touched or info.retained)
+            if cared and not session._attachments and not session.stopping:
+                self._raise_attention(session, "exit", clean_text(f"exited with code {code}"))
+            session._attachments.publish(None)

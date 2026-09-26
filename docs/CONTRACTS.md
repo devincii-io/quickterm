@@ -269,7 +269,15 @@ than the child (creation times; a link whose times cannot be read is kept,
 a dropped one reports parent 0). Without that, a new session whose root got
 such a PID counted an unrelated orphan as its child and stayed busy forever.
 
-## quickterm/session_manager.py
+## quickterm/session_manager.py (with scrollback.py, fanout.py, reaper.py)
+
+`session_manager.py` holds the registry, `SessionInfo`/`Session`, busy state
+and metrics and the PTY callbacks, and re-exports everything below. The ring
+(`ScrollbackRing`: chunks, cap, the clean-front trim, the DEC mode tracker and
+string handling) lives in `scrollback.py` with no asyncio or PTY code; the
+per-viewer queues (`AttachmentQueue`, `Attachment`, and `Viewers`, whose
+`publish()` holds the overflow-to-resync policy) in `fanout.py`; the keep and
+reap rules and the claim/kill/release pass (`Reaper`) in `reaper.py`.
 
 ```python
 QUEUE_MAX_BYTES = 2 * 1024 * 1024      # pending bytes per viewer before a resync
@@ -287,6 +295,7 @@ class SessionInfo:
     retained: bool = False      # explicit detach; keep even if untouched/idle
     workspace: str | None = None  # workspace this session belongs to
     cwd: str | None = None      # folder the process started in
+    current_cwd: str | None = None  # last folder the shell reported (OSC 7, OSC 9;9)
 
 class Session:
     info: SessionInfo
@@ -312,6 +321,9 @@ class SessionManager:
                                                      # KeyError when sid is unknown
     def attach(self, sid: str) -> "Attachment"       # KeyError: unknown or being reaped
     def acknowledge(self, sid: str) -> None          # background output seen, no subscription
+    def mark_seen(self, sid: str) -> None            # clear attention; KeyError when unknown
+    def session_attention(self, sid: str) -> dict | None  # {kind, text, age_seconds}
+    def set_attention_listener(self, cb) -> None     # cb(info, record), loop thread
     def busy_ids(self) -> set[str]                   # sessions whose shell has a child process
     def session_metrics(self) -> tuple[set[str], dict[str, dict]]
     def session_activity(self, sid: str) -> dict[str, int | None]
@@ -370,6 +382,20 @@ class Attachment:
   the loop thread right before its kill, so a session picked up during a slow
   pass survives; a failed kill clears the mark.
 - Session ids: full random hex (`uuid4().hex`).
+- "Needs you": `quickterm/signals.py` scans every output burst (two
+  `bytes.find` calls when a burst holds neither BEL nor `ESC ]`, a small carry
+  across bursts, never a per-byte loop) for a BEL that does not end an OSC
+  string, OSC 9 notifications (not the ConEmu subcommands 9;1 to 9;12, which
+  include progress, the folder and prompt marks), OSC 777 `notify` and OSC 99.
+  The latest one becomes the session's attention record
+  `Attention(kind="bell"|"notify", text, at)`; an exit becomes `kind="exit"`
+  when the session was attached once and typed into or explicitly detached,
+  and no viewer is attached. Output never clears attention; `mark_seen` (the
+  client, when the pane showing it gains focus or the user opens it from the
+  sidebar), a touch, and opening an exited session do. The reaper keeps an
+  exited session with attention like one with unread output, and never reaps
+  an idle live one that has attention. The same scanner reads OSC 7 and
+  OSC 9;9 into `SessionInfo.current_cwd`.
 
 ## quickterm/workspace.py
 
@@ -381,7 +407,10 @@ Layout tree (JSON-serializable, shared with the frontend, SAME schema):
 ```
 
 Pane nodes may also contain `launch_spec` for system terminals opened without a
-saved profile. `session_id` is preferred when restoring. A missing/dead ID
+saved profile, and profile panes `launch_options: {claude_mode?,
+start_command?, args?}`, the options the pane was started with, so a restart
+in place or a workspace restore repeats that launch exactly (a Claude "new
+conversation" pane stays "new"). Layouts without it load as "no options". `session_id` is preferred when restoring. A missing/dead ID
 becomes an explicit transcript-free unavailable pane; only a user-selected
 recovery action may start a replacement or resume a Claude conversation.
 
@@ -517,14 +546,36 @@ Rules:
   copies of `WindowInfo` rather than the registry's own records. `server.py`
   imports it statically, so it needs no `hiddenimports` entry.
 
-## quickterm/server.py
+## quickterm/server.py and quickterm/api/
 
 ```python
 def create_app(manager: SessionManager, cfg: AppConfig, token: str = "",
                elevated: bool = False, *,
                windows: WindowRegistry | None = None,
                open_window: Callable[[str | None, str | None], str] | None = None) -> FastAPI
+def client_host(host: str) -> str      # URL host for a bind address, IPv6 bracketed
 ```
+
+`server.py` is only the composition root: it builds one `api.context.ApiContext`
+(manager, cfg, token, elevated, the window registry, `open_window`, the
+Host/Origin allowlists, the launch queue, the inventory cache, the workspace
+write lock), installs `api.guard.LocalGuard`, calls `register(app, ctx)` on
+every route module and mounts the frontend last. The routes live in
+`quickterm/api/`: `sessions`, `launches`, `windows`, `workspaces`, `config`,
+`system` (health, profiles, terminal inventory, elevate, update, open, file,
+folder browser), `assets`, and `attach` (the WebSocket route, the replay
+handshake, the output and input pumps and the close codes). `api.common`
+holds the shared request helpers (bounded JSON bodies, `resolve_request`).
+Route modules load `workspace`, `config`, `opener`, `update` and `assets`
+through `importlib.import_module("quickterm.X")` so tests can stub them.
+
+`create_app` also takes `notify=None`: in the desktop app,
+`notify(session_id, name, kind, text)` is called on the loop thread when a
+session gains attention. When no QuickTerm window is in the foreground it
+flashes the primary window's taskbar button; when every window is hidden in
+the tray it shows a tray balloon; at most once per terminal every 30 s. The
+window title never changes: `hotkeys.py` finds the window to summon by its
+exact title.
 
 `windows` is the registry shared with `app.py`'s native side; omitted, the app
 builds a private one (headless, tests). `open_window(workspace, cwd) -> window
@@ -537,7 +588,7 @@ without asking for the token.
 
 ### Authentication
 
-Three layers, all in `server.py`. The HTTP side runs in a plain ASGI
+Three layers, in `api/guard.py`. The HTTP side runs in a plain ASGI
 middleware (`LocalGuard`), not `@app.middleware("http")`, whose wrapped
 `receive` hides a client disconnect from `request.is_disconnected()`; the
 WebSocket route checks the same rules itself before `accept`.
@@ -563,13 +614,15 @@ REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `?metrics=false` skips process-tree sampling and returns lifecycle/activity data with unavailable usage for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
-| GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. |
+| GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
+| GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. With `?challenge=<nonce>` (`[A-Za-z0-9_-]{16,64}`, else 400) it adds `proof`, the hex HMAC-SHA256 of the nonce keyed with the token: a local client proves it found this user's QuickTerm before it sends the token, and the proof of a caller-chosen nonce reveals nothing about the token. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
+| POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
+| POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
-| POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
-| GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
+| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's launch loop shows a workspace alone (focusing it if this window or a tiled view already shows it, else switching through the claim rules), starts a profile in the given folder or the workspace root, in the named workspace or the current one, and opens a folder alone in scratch as before. |
+| GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued handoff → the queued item (`{cwd?, profile?, workspace?}`, as POST /api/launches validated it) or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
 | GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, idle_seconds, age_seconds}]}`, oldest window first |
 | POST | /api/windows | `{id?, workspace?, title?, primary?}` → `{id, workspace, title, primary}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. 409 on a claimed workspace or too many windows, 400 on a junk name |
 | POST | /api/windows/{id}/heartbeat | → `{id, workspace, title, primary}`; **404 when the id is unknown or already expired**, which is the client's signal to re-register instead of carrying on autosaving a workspace it may have lost |
@@ -585,6 +638,8 @@ REST (JSON, under `/api`):
 | PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
 | DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. |
 | GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, default_profile, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the primary window shows it in the error banner. |
+| GET | /api/config/history | → `[{id, saved_at, summary}]`, newest first: the last 20 configs a save replaced (`<config dir>/history/`, same DPAPI protection as `config.json`; a save that changes nothing adds none). `summary` names the top-level settings that differ from the next newer version, or from the current config for the newest. |
+| POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry) → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
 | PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. `port`, `host` and `summon_hotkey` need a restart and are not applied live; everything else, `scratch_dir` included, applies at once. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
@@ -592,6 +647,8 @@ REST (JSON, under `/api`):
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
 | POST | /api/elevate | same body as POST /api/sessions → `{launched: true}`. Windows only (else 400). Resolved by `launch.resolve` like an ordinary terminal (an explicit `cwd` wins over the workspace root), then started by a separate elevated QuickTerm through UAC; 500 when the launch fails. |
+| GET | /api/search?q=...&limit=... | → `[{session_id, name, workspace, alive, line, text, start}]`: case-insensitive substring search over every session's scrollback as plain text (`quickterm/transcript.py`: escape sequences, OSC 52 payloads and alternate-screen text dropped, carriage-return overwrites and ConPTY repaints resolved). One hit per line, in session then line order; `text` is at most 300 characters around the match, `start` counts code points, `line` is only a hint because xterm wraps lines. `limit` defaults to 200 and is clamped to 1..1000; 400 when `q` is blank or over 1 KiB. Snapshots are taken on the loop, the work runs in a thread. |
+| POST | /api/sessions/{id}/export | Write that terminal's scrollback as plain text to `<Downloads or home>/QuickTerm/<name>-<YYYYmmdd-HHMMSS>.txt` (UTC; `-2`, `-3` instead of overwriting) → `{path}`; 404 unknown id, 500 when the write fails. Only on this explicit request does terminal output reach the disk. |
 | GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Strips surrounding quotes and expands `~` like `/api/open`. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory or unreadable (`cannot read <path>: <reason>`). |
 | GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
@@ -689,10 +746,8 @@ class _ViewerWindows:                       # the native windows this process ow
   native Edge WebView2 viewer. `--port` and an elevated instance record
   `{"port"}` in `cfg.runtime_overrides`. Every client URL (window, running
   instance probe, launch handoff) and the free-port probe follow `cfg.host`,
-  bracketing IPv6 (`server.client_host`).
-- An elevated instance calls `workspace.set_namespace("elevated")` before it
-  serves or discards scratch, so it never touches the normal instance's files. The viewer receives `_DesktopApi` as its
-  pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
+  bracketing IPv6 (`server.client_host`). The viewer receives `_DesktopApi` as
+  its pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
   one existing selected directory or `None` on Cancel/failure. It is the
   secondary picker now, offered from inside the in-app folder browser; its
   docstring's claim that "the browser frontend deliberately cannot learn
@@ -701,6 +756,8 @@ class _ViewerWindows:                       # the native windows this process ow
   bridge is for, not a new trust boundary: behind the same token
   `GET /api/file` already reads any file and `POST /api/sessions` already
   spawns arbitrary processes.
+- An elevated instance calls `workspace.set_namespace("elevated")` before it
+  serves or discards scratch, so it never touches the normal instance's files.
 - Spawn autostart profiles on startup. Autostart, global hotkeys and the
   elevated instance's first terminal resolve through `launch.resolve` like a
   REST spawn; a failure is logged and stored as `cfg.launch_error` instead of
@@ -752,6 +809,44 @@ applying. Tray menu: Open / Quit, where Open restores every live window and the
 summon hotkey also restores a tray-hidden one. When the window holding the bare
 title closes, the oldest survivor is retitled to it, because `hotkeys.py`
 summons by exact title match and would otherwise have nothing to aim at.
+
+## quickterm/cli.py
+
+`quickterm <verb>` drives the running app over HTTP with the per-install token
+(the port comes from the config, `--port` overrides). `app.main()` checks
+`cli.is_command(argv)` first: an argument is a verb only when it is one of the
+verbs below and not an existing folder, so Explorer's "Open QuickTerm here"
+(which passes a folder path) is unchanged.
+
+```
+quickterm ls [--json]                           one line per session
+quickterm new [--profile P] [--cwd D] [--workspace W]
+quickterm open WORKSPACE
+quickterm send SESSION TEXT... [--enter]        id, id prefix or exact name
+quickterm --version
+```
+
+Every loopback call goes through one opener with no proxy handler (an
+intercepting proxy would log the token and every `send`; a corporate one made
+a running app look absent), and the token is sent only after `/api/health`
+answered a fresh challenge with the right proof (`cli.probe` returns absent,
+QuickTerm or impostor). `app.py`'s running-instance probe and Explorer handoff
+use the same path.
+
+Exit codes: 0 done; 1 usage error, or a session name that matches nothing or
+several (the candidates are listed); 2 not running, something else answering
+on the port without a valid proof, or a started app that never came up; 3 the
+server refused (its detail is printed) or the request failed after QuickTerm
+answered. `new` with no running app starts QuickTerm as a detached process
+(`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows, a new session on
+POSIX, no inherited stdio): a folder alone goes as the positional folder,
+anything else as the hidden `--handoff <json>` (a non-empty object of string
+`cwd`, `profile`, `workspace`), which the app queues through `/api/launches`
+once its backend is up, reporting a refusal as `launch_error`. The CLI waits
+up to 20 s for a verified health answer and exits. The frozen build is a GUI-subsystem exe: a verb
+attaches to the parent console and writes to `CONOUT$`; with no console it
+prints nothing and still exits with the right code. cmd and PowerShell do not
+wait for a GUI program, so scripts use `start /wait` in cmd.
 
 ## quickterm/launch.py
 
@@ -834,6 +929,24 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
   pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
   `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
+- `main.js` is the composition root (about 400 lines): it builds the modules
+  below in order and hands each the dependencies it uses. State more than one
+  of them reads lives in one object from `app_state.js`, read at call time;
+  where a module built early calls one built later, `main.js` passes an arrow
+  that resolves the later name when it runs. `window_registry.js` (register,
+  claim, heartbeat), `launch_loop.js` (the Explorer handoff long poll),
+  `workspace_switch.js` and `workspace_actions.js` (moving between, naming,
+  saving and deleting workspaces), `autosave.js`, `scratch.js` (adopting and
+  leaving scratch), `session_ownership.js` and `layout_sessions.js` (which
+  terminals a layout owns), `spawner.js` (which shell and folder a new pane
+  gets), `pane_commands.js` (what keys, palette and header do to the focused
+  pane), `sidebar.js` (wiring `launcher.js`), `config_sync.js` (re-reading the
+  config, `launch_error`), `here.js` (the focused terminal's folder),
+  `boot_context.js`, `lifecycle.js` (pagehide), `feedback.js` (the error
+  banner and live region), `fonts.js`, `updates.js`.
+  `tests/js/main_modules.test.mjs` builds every factory from dependencies
+  that throw when called, because `node --check` cannot see a closure
+  variable that stopped resolving.
 - `panels.js` owns only panel lifecycle and shared controls. Dashboard, help,
   settings sections, and DOM-free helpers live in `panel_*.js` modules. Keep
   new tabs/large sections out of the coordinator.
@@ -845,7 +958,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `onBinary` never do.
 - `windows.js` is the DOM-free half of multi-window ownership: which workspace
   this window may claim, what a refusal means, and the wording the user sees.
-  `main.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
+  `window_registry.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
   DELETE on `pagehide`); the decisions live here so they can be unit-tested.
   The rule it exists to enforce: two windows must never own one workspace,
   because the layout autosaves on every pane change and the loser's panes would
@@ -888,8 +1001,23 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   instead of opened twice. Borders and headers appear only with two or more
   views. Closing a view waits for a successful save and marks every owned
   terminal retained before releasing its registry entry and removing it;
-  save failures keep the view open. The arrangement is window-local and not
-  restored at startup.
+  save failures keep the view open. The primary, non-embedded window stores
+  the arrangement in localStorage (`quickterm.workspaceViews`: the split tree
+  of `{primary}` and `{workspace, window}` leaves, the active and the zoomed
+  view) and rebuilds it after its own workspace restored: each view's stored
+  registry id is released first (the previous page's iframe still holds its
+  claim), then claimed again; scratch, missing and refused views are dropped.
+- Panes: an exited pane shows `[exited · code N]` with a Restart action
+  (button, Enter in the pane, "restart terminal" in the palette) when it knows
+  its launch (a profile or a launch spec; an attached terminal started
+  elsewhere does not). The restart repeats that launch with its
+  `launch_options` and keeps the old output above a `[restarted]` mark; on
+  Windows the old screen scrolls into the scrollback first, because a new
+  ConPTY addresses rows as if the screen were empty. "broadcast input to all
+  panes in this workspace" mirrors real input (never xterm's automatic
+  replies) to every other live pane in the document; a paste is re-pasted in
+  each target so its own bracketed-paste mode frames it. It turns off on a
+  workspace switch.
 - `menu.js` is the one popover menu behind every chooser in the chrome (the
   terminal picker, the workspace menu). Fixed-position under its anchor,
   clamped inside the viewport (`menuPosition`, pure), it claims the keyboard

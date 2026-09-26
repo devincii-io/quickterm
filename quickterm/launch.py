@@ -16,6 +16,8 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
+import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,6 +127,23 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]:
     return merged
 
 
+def _posix_word(program: str) -> str:
+    """`program` as one word of a POSIX shell command line.
+
+    The shell reads the `exec` after a start command itself, so an msys
+    C:\\msys64\\usr\\bin\\bash.exe lost its backslashes there and the terminal
+    exited once the start command finished. msys and Cygwin shells accept the
+    same path with forward slashes, and quoting keeps a space in one word.
+    """
+    if "\\" in program or re.match(r"[A-Za-z]:", program):
+        program = program.replace("\\", "/")
+    return shlex.quote(program)
+
+
+def _without_login_flags(args: list[str]) -> list[str]:
+    return [arg for arg in args if arg not in ("-l", "--login")]
+
+
 def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], str | None]:
     """Command, arguments and process folder for one profile.
 
@@ -179,10 +198,14 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
         return "wsl.exe", args, None
     if terminal_type in ("bash", "zsh", "fish"):
-        shell = prof.cmd or terminal_type
+        shell = configured or terminal_type
+        # Same rule as Git Bash below: the profile's own arguments go first,
+        # because the shell reads the operand after -c as the command, and the
+        # login flag is ours, so a profile that repeats it does not get two.
+        extra = _without_login_flags(existing_args)
         if start:
-            return shell, ["-lc", f"{start}; exec {shell} -l"], cwd
-        return shell, ["-l"], cwd
+            return shell, extra + ["-lc", f"{start}; exec {_posix_word(shell)} -l"], cwd
+        return shell, extra + ["-l"], cwd
     if terminal_type == "git-bash":
         # `cmd` is a Windows path such as C:\Program Files\Git\bin\bash.exe;
         # inside the login shell plain `bash` is the same program, and it has
@@ -190,7 +213,7 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
         shell = configured or "bash"
         # The profile's own arguments first, as for cmd and nushell: bash
         # reads the operand after -c as the command. The login flag is ours.
-        extra = [arg for arg in existing_args if arg not in ("-l", "--login")]
+        extra = _without_login_flags(existing_args)
         if start:
             return shell, extra + ["-lc", f"{start}; exec bash -l"], cwd
         return shell, extra + ["-l"], cwd

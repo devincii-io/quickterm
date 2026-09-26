@@ -8,7 +8,7 @@ installer closes the running app and upgrades in place.
 
 Trust model: only https URLs from the pinned REPO's release payload are ever
 fetched, and the installer must hash-match the checksums file published by the
-same release. Stdlib urllib only; calls run in a worker thread (server.py).
+same release. Stdlib urllib only; calls run in a worker thread (api/system.py).
 """
 
 from __future__ import annotations

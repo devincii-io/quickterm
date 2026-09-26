@@ -5,6 +5,7 @@
 import * as api from "./api.js";
 import { displaySnippet } from "./panel_shared.js";
 import { claimFocus, releaseFocus } from "./focus.js";
+import { resultLabel } from "./terminal_actions.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
 // long multi-line snippet cannot push the destination out of view.
@@ -55,6 +56,7 @@ export class Palette {
     this.prompt = null; // {submit(text)}
     this.foreignMode = false;
     this.windowMode = false;
+    this.searchMode = false;
     this.foreignSessions = [];
     this.requestId = 0;
 
@@ -102,6 +104,7 @@ export class Palette {
     this.prompt = null;
     this.foreignMode = false;
     this.windowMode = false;
+    this.searchMode = false;
     this.overlay.hidden = false;
     this.input.value = "";
     this.input.placeholder = "command / profile / snippet / session";
@@ -113,7 +116,7 @@ export class Palette {
       api.getSessions().catch(() => []),
       api.listWorkspaces().catch(() => []),
     ]);
-    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode || this.windowMode) return;
+    if (!this.open || requestId !== this.requestId || this._inSubMode()) return;
     this.items = this._staticItems();
     for (const name of workspaces) {
       this.items.push({
@@ -126,7 +129,7 @@ export class Palette {
       name,
       saved: await api.getWorkspace(name).catch(() => null),
     })));
-    if (!this.open || requestId !== this.requestId || this.prompt || this.foreignMode || this.windowMode) return;
+    if (!this.open || requestId !== this.requestId || this._inSubMode()) return;
     const owners = new Map();
     const layoutBound = new Set();
     for (const { name, saved } of workspaceData) {
@@ -173,6 +176,7 @@ export class Palette {
     this.prompt = null;
     this.foreignMode = false;
     this.windowMode = false;
+    this.searchMode = false;
     this.overlay.hidden = true;
     // Release before asking for the terminal back, or the guard this palette
     // installed would refuse its own hand-off.
@@ -207,6 +211,12 @@ export class Palette {
 
   // ---- internals ----
 
+  // A prompt or one of the lists reached from a command row: the command
+  // list's late enrichment must not overwrite it.
+  _inSubMode() {
+    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode);
+  }
+
   _staticItems() {
     const a = this.app;
     // The two folder rows name the folder they would open: that is the
@@ -230,6 +240,31 @@ export class Palette {
       // Quick settings. Duplicating it as five palette rows only crowded the list.
       { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
       { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession({ keyboard: true }) },
+      // Only offered where there is something to restart; Enter in the exited
+      // pane is the same action without opening the palette.
+      ...(a.canRestartFocused?.() ? [{
+        kind: "action", label: "restart terminal", hint: "Enter in an exited pane",
+        run: () => a.restartTerminal(),
+      }] : []),
+      // Views beside this one are other documents with their own switch, so
+      // the label says how far it reaches.
+      {
+        kind: "action",
+        label: a.isBroadcasting?.() ? "stop broadcasting input" : "broadcast input to all panes in this workspace",
+        run: () => a.toggleBroadcast(),
+      },
+      {
+        kind: "action", label: "search all terminals…", hint: "every terminal's scrollback",
+        keepOpen: true, run: () => this._searchPrompt(),
+      },
+      {
+        kind: "action", label: "save terminal output", hint: "as plain text into Downloads",
+        run: () => a.saveTerminalOutput(),
+      },
+      ...(a.lastSavedOutput?.() ? [{
+        kind: "action", label: "open last saved output", hint: a.lastSavedOutput(),
+        run: () => a.openLastSavedOutput(),
+      }] : []),
       { kind: "action", label: "open folder in Explorer", hint: folderHint("Alt+Shift+E"), run: () => a.openExplorer() },
       { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor() },
       {
@@ -310,8 +345,10 @@ export class Palette {
     return items;
   }
 
-  _promptMode(placeholder, submit) {
-    this.prompt = { submit };
+  // `stayOpen`: the answer leads to another list in the palette (search
+  // results) instead of an action, so Enter must not close it.
+  _promptMode(placeholder, submit, { stayOpen = false } = {}) {
+    this.prompt = { submit, stayOpen };
     this.input.value = "";
     this.input.placeholder = placeholder;
     this.listEl.textContent = "";
@@ -320,8 +357,63 @@ export class Palette {
     this.focusInput();
   }
 
+  _searchPrompt() {
+    this.searchMode = false;
+    this._promptMode("search every terminal's scrollback", (query) => this._searchMode(query), {
+      stayOpen: true,
+    });
+  }
+
+  // Results are one more list in the palette, like the session lists: type
+  // to narrow them, Enter brings the terminal into view at that line, Escape
+  // goes back to the commands.
+  async _searchMode(query) {
+    this.searchMode = true;
+    this.foreignMode = false;
+    this.windowMode = false;
+    this.prompt = null;
+    this.input.value = "";
+    this.input.placeholder = `searching for "${query}"…`;
+    const request = ++this.requestId;
+    this.items = [
+      { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
+    ];
+    this._refilter();
+    this.focusInput();
+    let results;
+    try {
+      results = await this.app.searchTerminals(query);
+    } catch (error) {
+      if (!this.open || !this.searchMode || request !== this.requestId) return;
+      this.input.placeholder = error?.detail || "search failed";
+      return;
+    }
+    if (!this.open || !this.searchMode || request !== this.requestId) return;
+    this.input.placeholder = results.length
+      ? `${results.length} line${results.length === 1 ? "" : "s"} match "${query}" · type to narrow`
+      : `no terminal output matches "${query}"`;
+    for (const result of results) {
+      this.items.push({
+        kind: "found",
+        label: resultLabel(result),
+        hint: [result.name, result.workspace, result.alive ? null : "exited"].filter(Boolean).join(" · "),
+        search: `${result.name} ${result.text}`,
+        run: () => this.app.revealSearchResult(result, query),
+      });
+    }
+    // Enter goes to the first hit, unless the user already moved or typed
+    // while the search ran.
+    const untouched = !this.input.value && this.sel === 0;
+    this._refilter(false);
+    if (untouched && results.length && this.filtered[1]) {
+      this.sel = 1;
+      this._renderList();
+    }
+  }
+
   _foreignSessionMode() {
     this.foreignMode = true;
+    this.searchMode = false;
     this.prompt = null;
     this.input.value = "";
     this.input.placeholder = "Other workspaces; choosing one moves the session here";
@@ -346,6 +438,7 @@ export class Palette {
   async _newWindowMode(beside = false) {
     this.windowMode = true;
     this.foreignMode = false;
+    this.searchMode = false;
     this.prompt = null;
     this.input.value = "";
     this.input.placeholder = beside ? "Tile a workspace beside this one…" : "Open a second window on…";
@@ -386,7 +479,7 @@ export class Palette {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      if (this.foreignMode || this.windowMode) {
+      if (this.foreignMode || this.windowMode || this.searchMode) {
         this.openPalette();
         return;
       }
@@ -397,8 +490,12 @@ export class Palette {
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
-        const submit = this.prompt.submit;
+        const { submit, stayOpen } = this.prompt;
         const value = this.input.value.trim();
+        if (stayOpen) {
+          if (value) submit(value);
+          return;
+        }
         this.close();
         if (value) submit(value);
       }

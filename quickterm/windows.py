@@ -48,7 +48,7 @@ KEEP: Any = object()
 
 
 class WindowError(Exception):
-    """Registry refusal. `status` is the HTTP code server.py answers with."""
+    """Registry refusal. `status` is the HTTP code api/windows.py answers with."""
 
     status = 400
 

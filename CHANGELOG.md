@@ -2,6 +2,69 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.11.0
+
+### Terminals that need you
+
+- A background terminal that rings the bell or sends a notification (Claude
+  Code and Codex do this when they wait for an approval or finish a turn)
+  gets a "needs you" dot in the sidebar, sorted to the top of its group, with
+  the message in the tooltip. It clears when you look at that terminal or
+  type into it. A detached terminal that finishes while you are away gets the
+  same mark.
+- When no QuickTerm window is in front, the taskbar button flashes; when
+  QuickTerm is hidden in the tray, a tray balloon names the terminal. At most
+  once per terminal every 30 seconds.
+- The sidebar shows each terminal's current folder, not only the one it
+  started in, and it now shows "busy" again.
+- A finished terminal whose output you have not read stays in the sidebar as
+  a dimmed row; opening it shows the final output.
+
+### Panes
+
+- An exited terminal has a Restart button; Enter in the exited pane or
+  "restart terminal" in the palette does the same. The old output stays above
+  a `[restarted]` line, and the restart repeats the pane's own launch, Claude
+  mode included.
+- "broadcast input to all panes in this workspace" in the palette sends what
+  you type to every live pane, like tmux's synchronize-panes. It stops on a
+  workspace switch or from the palette.
+- "search all terminals..." in the palette searches every terminal's
+  scrollback and jumps to the hit.
+- "save terminal output" writes a terminal's scrollback as plain text to
+  Downloads\QuickTerm.
+
+### Workspaces and settings
+
+- Workspaces tiled side by side come back after a restart or a reload.
+- Settings > Terminals shows a profile as a name, a command and an optional
+  start command; everything else is under "More".
+- Settings > About lists the last 20 saved settings and restores any of them.
+- Ctrl+_ (readline's undo) and Ctrl+Insert reach the terminal again; only
+  keys that really type +, - or 0 zoom the text.
+
+### Command line
+
+- `quickterm ls`, `quickterm new [--profile] [--cwd] [--workspace]`,
+  `quickterm open WORKSPACE` and `quickterm send SESSION TEXT [--enter]`
+  drive the running app. See the README.
+
+### Fixes
+
+- The Explorer handoff poll no longer retries hundreds of times a second
+  when the server refuses it.
+- Bash, Zsh and Fish profiles keep their own arguments; the dashboard names
+  Git Bash, Nushell, Bash, Zsh and Fish profiles correctly.
+- Menus opened in Settings draw above the sheet.
+- Moving a Claude pane into a new workspace keeps its launch mode.
+
+### Under the hood
+
+- The server is split into route modules (`quickterm/api/`), the session
+  manager into ring, fan-out and reaper modules, and the frontend's
+  2,300-line `boot()` into about twenty modules composed by `main.js`.
+  Nothing about the wire protocol changed.
+
 ## QuickTerm 3.10.0
 
 Fixes for the 55 issues filed by the September audit (#9 to #63).

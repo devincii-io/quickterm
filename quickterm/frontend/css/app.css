@@ -859,3 +859,19 @@ body.dragging .split > * { transition: none; }
 .pane-enter { animation: pane-in .22s ease-out both; }
 .pane-leave { opacity: 0; transition: opacity .16s ease; pointer-events: none; }
 @keyframes pane-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Broadcast input (layout.js setBroadcast): every pane that receives the
+   focused pane's typing wears an accent frame. A pseudo-element above the
+   terminal, because an outline on the pane paints under xterm's positioned
+   layers; a file drag over the pane keeps ::after for its own hint. */
+.pane.broadcasting:not(.drop-target)::after {
+  content: "";
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  border: 1px solid var(--accent);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.pane-exitbar.exited .pane-exit-restart { color: var(--text); }
+.pane-exitbar.exited .pane-exit-restart:hover { border-color: var(--accent-border); color: var(--accent); }

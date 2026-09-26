@@ -337,9 +337,10 @@ def test_client_urls_follow_the_configured_host(monkeypatch):
         probed.append(url)
         raise OSError("nothing there")
 
-    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(app_mod.cli, "_open", fake_open)
     assert app_mod._already_running(8620, "::1") is False
-    assert probed == ["http://[::1]:8620/api/health"]
+    assert len(probed) == 1
+    assert probed[0].startswith("http://[::1]:8620/api/health?challenge=")
 
 
 def test_a_runtime_port_is_recorded_as_an_override():

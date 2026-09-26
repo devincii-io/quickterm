@@ -6,9 +6,11 @@ import base64
 import dataclasses
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -463,11 +465,13 @@ def save_config(cfg: AppConfig) -> None:
     validate_config(cfg)
     path = config_dir() / "config.json"
     text = json.dumps(_storage_dict(cfg), indent=2)
-    _keep_previous(path, text, cfg)
+    replaced = _keep_previous(path, text, cfg)
     _atomic_write(path, text)
+    if replaced is not None:
+        _record_history(*replaced)
 
 
-def _keep_previous(path: Path, text: str, cfg: AppConfig) -> None:
+def _keep_previous(path: Path, text: str, cfg: AppConfig) -> tuple[str, int] | None:
     """Copy the config about to be replaced to config.prev.json, best effort.
 
     A PUT that drops fields (an older or buggy client) replaced every profile
@@ -477,13 +481,20 @@ def _keep_previous(path: Path, text: str, cfg: AppConfig) -> None:
     older state. "Nothing" is decided on the decrypted settings: DPAPI output
     differs on every call, so with any profile secret the file text never
     repeats.
+
+    Returns ``(previous file text, its mtime in ns)`` when the replaced
+    version belongs in the settings history, which save_config records once
+    the new file is in place. The same rules decide both copies; the history
+    also skips a file that does not parse, since it could never be restored.
     """
     try:
+        saved_ns = path.stat().st_mtime_ns
         previous = read_text(path)
     except (OSError, UnicodeError):
-        return
+        return None
     if previous == text:
-        return
+        return None
+    parsed = True
     try:
         raw = json.loads(previous)
         legacy_plaintext = _has_plaintext_environment(raw)
@@ -491,17 +502,122 @@ def _keep_previous(path: Path, text: str, cfg: AppConfig) -> None:
     except (ValueError, TypeError, AttributeError, OSError):
         # Unparseable or undecryptable: nothing in it can be compared, and
         # nothing in it is plaintext this save would be encrypting either.
-        legacy_plaintext = unchanged = False
+        legacy_plaintext = unchanged = parsed = False
     if unchanged:
-        return
+        return None
     if legacy_plaintext:
         # This save is the one that encrypts a legacy config's secrets; a copy
         # of the old file would keep them on disk in the clear.
-        return
+        return None
     try:
         _atomic_write(path.with_name("config.prev.json"), previous)
     except OSError:
         pass  # a backup must never be the reason a save fails
+    return (previous, saved_ns) if parsed else None
+
+
+# The settings history: the versions a save replaced, newest last by id. Each
+# file is the stored config.json text as it was, so DPAPI-protected values
+# stay protected; its mtime is when that version was saved.
+HISTORY_KEEP = 20
+_HISTORY_ID = re.compile(r"^\d{20}$")
+
+
+def history_dir() -> Path:
+    return config_dir() / "history"
+
+
+def _record_history(previous: str, saved_ns: int) -> None:
+    """Add one replaced version and drop all but the newest HISTORY_KEEP.
+
+    Best effort, like config.prev.json: the new config is already saved.
+    """
+    try:
+        folder = history_dir()
+        folder.mkdir(exist_ok=True)
+        if os.name != "nt":
+            folder.chmod(0o700)
+        entry_id = f"{time.time_ns():020d}"
+        target = folder / f"{entry_id}.json"
+        while target.exists():  # two saves within one clock tick
+            entry_id = f"{int(entry_id) + 1:020d}"
+            target = folder / f"{entry_id}.json"
+        _atomic_write(target, previous)
+        os.utime(target, ns=(saved_ns, saved_ns))
+        for old in _history_ids()[HISTORY_KEEP:]:
+            (folder / f"{old}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _history_ids() -> list[str]:
+    """Entry ids, newest first."""
+    try:
+        names = [p.stem for p in history_dir().glob("*.json")]
+    except OSError:
+        return []
+    return sorted((name for name in names if _HISTORY_ID.match(name)), reverse=True)
+
+
+def _comparable(text: str) -> dict:
+    """A stored config as plain values for comparison: decrypted when
+    possible, else the raw JSON (every protected value then differs)."""
+    raw = json.loads(text)
+    try:
+        return dataclasses.asdict(config_from_dict(raw))
+    except (ValueError, TypeError, AttributeError, OSError):
+        return raw if isinstance(raw, dict) else {}
+
+
+def _changed_settings(older: dict, newer: dict) -> str:
+    order = [f.name for f in dataclasses.fields(AppConfig)]
+    names = [name for name in order if older.get(name) != newer.get(name)]
+    return ", ".join(names)
+
+
+def config_history() -> list[dict]:
+    """``[{id, saved_at, summary}]``, newest first.
+
+    ``summary`` names the top-level settings in which that version differs
+    from the next newer one (the current config for the newest entry): what
+    restoring it would change. ``saved_at`` is UTC, ISO 8601 with a Z.
+    """
+    folder = history_dir()
+    try:
+        newer = _comparable(read_text(config_dir() / "config.json"))
+    except (OSError, UnicodeError, ValueError):
+        newer = {}
+    entries = []
+    for entry_id in _history_ids():
+        path = folder / f"{entry_id}.json"
+        try:
+            saved_ns = path.stat().st_mtime_ns
+            values = _comparable(read_text(path))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        saved_at = datetime.fromtimestamp(saved_ns / 1e9, tz=timezone.utc)
+        entries.append({
+            "id": entry_id,
+            "saved_at": saved_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "summary": _changed_settings(values, newer),
+        })
+        newer = values
+    return entries
+
+
+def load_history_entry(entry_id: str) -> dict:
+    """The stored config of one history entry, as saved (protected values
+    still protected). KeyError for an id that is malformed or not there."""
+    if not isinstance(entry_id, str) or not _HISTORY_ID.match(entry_id):
+        raise KeyError(entry_id)
+    path = history_dir() / f"{entry_id}.json"
+    try:
+        raw = json.loads(read_text(path))
+    except FileNotFoundError:
+        raise KeyError(entry_id) from None
+    if not isinstance(raw, dict):
+        raise ValueError("history entry is not a JSON object")
+    return raw
 
 
 # Windows refuses to replace or open a file while another handle on it lacks

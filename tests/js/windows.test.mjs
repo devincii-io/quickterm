@@ -34,7 +34,7 @@ test("a workspace is held only by another live window", () => {
 
 test("a refusal names the consequence, not the mechanism", () => {
   const message = claimRefusalMessage("Alpha", workspaceHolder(REGISTRY, "w9", "Alpha"));
-  assert.match(message, /“Alpha” is already open in another window/);
+  assert.match(message, /"Alpha" is already open in another window/);
   assert.match(message, /overwrite each other's saved layout/);
   assert.match(message, /stayed where it was/);
   // The window the user started is the one they can point at; any other is

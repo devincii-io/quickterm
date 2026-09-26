@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -24,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__, launch
+from quickterm import __version__, cli, launch
 from quickterm.server import client_host, create_app
 from quickterm.windows import (
     WindowRegistry,
@@ -174,13 +173,26 @@ class _DesktopApi:
 
 
 def main() -> None:
+    argv = sys.argv[1:]
+    # A verb (`quickterm ls`, `new`, `open`, `send`) drives the running app and
+    # exits; nothing below runs for it. `new` with no app running starts this
+    # program again, detached, with --handoff.
+    if cli.is_command(argv):
+        sys.exit(cli.run(argv))
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
+    parser.add_argument("--handoff", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
     parser.add_argument(
         "path", nargs="?", help="open a terminal in this directory (Explorer 'Open QuickTerm here')"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    handoff = None
+    if args.handoff is not None:
+        try:
+            handoff = _parse_handoff(args.handoff)
+        except ValueError as exc:
+            parser.error(f"--handoff: {exc}")
     open_dir = None
     if args.path:
         candidate = os.path.abspath(os.path.expanduser(args.path))
@@ -213,6 +225,11 @@ def main() -> None:
     if not elevated and _already_running(cfg.port, cfg.host):
         if open_dir:
             _queue_running_launch(cfg.port, open_dir, cfg.host)
+        if handoff:
+            # Another app came up between the verb's check and this one.
+            failure = cli.post_launch(cfg.port, handoff, cfg.host)
+            if failure:
+                log.error("command-line launch handoff failed: %s", failure)
         if sys.platform == "win32":
             from quickterm.hotkeys import summon_window
 
@@ -221,13 +238,28 @@ def main() -> None:
             _launch_window(cfg.port, cwd=open_dir, host=cfg.host)
         return
     if sys.platform == "win32":
-        if not _run_desktop(cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir):
+        if not _run_desktop(
+            cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir, handoff=handoff
+        ):
             sys.exit("QuickTerm could not create its native desktop window.")
         return
     try:
-        asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir))
+        asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir, handoff=handoff))
     except KeyboardInterrupt:
         pass
+
+
+def _parse_handoff(text: str) -> dict[str, str]:
+    """The launch `quickterm new` started this app for; /api/launches checks the rest."""
+    value = json.loads(text)
+    if (
+        not isinstance(value, dict)
+        or not value
+        or not set(value) <= {"cwd", "profile", "workspace"}
+        or not all(isinstance(item, str) for item in value.values())
+    ):
+        raise ValueError("expected a JSON object of cwd, profile and workspace strings")
+    return value
 
 
 def _harden_program_lookup() -> None:
@@ -309,32 +341,23 @@ def _setup_logging() -> None:
 
 
 def _already_running(port: int, host: str = "127.0.0.1") -> bool:
+    # Through the command line's probe: no proxy, and only a backend that
+    # proves it holds this user's token counts as QuickTerm.
     try:
-        with urllib.request.urlopen(f"{_base_url(port, host)}/api/health", timeout=0.6) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return isinstance(data, dict) and data.get("app") == "quickterm"
+        return cli.probe(_base_url(port, host), timeout=0.6) == cli.QUICKTERM
     except Exception:
         return False
 
 
 def _queue_running_launch(port: int, cwd: str, host: str = "127.0.0.1") -> bool:
     """Hand Explorer's folder launch to the already-running authenticated app."""
-    from quickterm import auth
-
-    request = urllib.request.Request(
-        f"{_base_url(port, host)}/api/launches",
-        data=json.dumps({"cwd": cwd}).encode("utf-8"),
-        headers={"Content-Type": "application/json", auth.HEADER: auth.get_or_create_token()},
-        method="POST",
-    )
     for attempt in range(3):
-        try:
-            with urllib.request.urlopen(request, timeout=1.5) as response:
-                return response.status == 200
-        except Exception:
-            if attempt < 2:
-                time.sleep(0.15)
-    log.error("running-instance folder handoff failed")
+        failure = cli.post_launch(port, {"cwd": cwd}, host, timeout=1.5)
+        if failure is None:
+            return True
+        if attempt < 2:
+            time.sleep(0.15)
+    log.error("running-instance folder handoff failed: %s", failure)
     return False
 
 
@@ -357,6 +380,8 @@ async def _serve(
     cwd: str | None = None,
     windows: WindowRegistry | None = None,
     open_window: Callable[[str | None, str | None], str] | None = None,
+    notify: Callable[[str, str, str, str | None], None] | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
     from quickterm.ws_protocol import WebSocketProtocol
@@ -373,6 +398,7 @@ async def _serve(
         elevated=elevated,
         windows=windows,
         open_window=open_window,
+        notify=notify,
     )
     server = UvicornServer(
         UvicornConfig(
@@ -402,6 +428,7 @@ async def _serve(
             launch_window=launch_window,
             initial_launch=initial_launch,
             cwd=cwd,
+            handoff=handoff,
         )
     )
     reaper = asyncio.ensure_future(_reap_loop(manager, cfg))
@@ -439,6 +466,20 @@ def _sessions_worth_keeping(manager: Any) -> bool:
         # take the user's running terminals with it.
         log.exception("could not evaluate session keep policy; hiding to tray")
         return True
+
+
+def attention_balloon(name: str, kind: str, text: str | None) -> tuple[str, str]:
+    """Title and body of the tray balloon for a terminal that wants the user."""
+    title = f"{name or 'A terminal'} needs you"
+    if text:
+        body = text
+    elif kind == "bell":
+        body = "It rang the bell."
+    elif kind == "exit":
+        body = "It has finished."
+    else:
+        body = "It is waiting for you."
+    return title, body
 
 
 class _ViewerWindows:
@@ -574,6 +615,41 @@ class _ViewerWindows:
         )
         return False  # cancel the close; we merely hid
 
+    def notify_attention(
+        self, session_id: str, name: str, kind: str, text: str | None
+    ) -> None:
+        """A terminal wants the user (the server's `notify` hook).
+
+        Called on the event loop, already rate-limited per session. The Win32
+        calls run on a short thread of their own: Shell_NotifyIconW talks to
+        Explorer and stalls with it, and no terminal may stall with Explorer.
+        """
+        threading.Thread(
+            target=self._notify_now,
+            args=(name, kind, text),
+            name="attention-notify",
+            daemon=True,
+        ).start()
+
+    def _notify_now(self, name: str, kind: str, text: str | None) -> None:
+        if self.quitting.is_set():
+            return
+        try:
+            from quickterm import tray as tray_mod
+
+            # Someone is looking at QuickTerm already; the sidebar says it.
+            if tray_mod.foreground_is_ours():
+                return
+            primary = tray_mod.own_window(self._base_title)
+            if primary is not None and primary[1]:
+                tray_mod.flash_window(primary[0])
+            elif self.tray is not None and self.count() <= 1:
+                # Only the last window ever hides, so a hidden primary with no
+                # other viewer means everything is in the tray.
+                self.tray.balloon(*attention_balloon(name, kind, text))
+        except Exception:
+            log.debug("attention notification failed", exc_info=True)
+
     def _on_closed(self, uid: str) -> None:
         with self._lock:
             self._live.pop(uid, None)
@@ -610,6 +686,7 @@ def _run_desktop(
     initial_launch: dict[str, Any] | None = None,
     elevated: bool = False,
     cwd: str | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> bool:
     """Run the backend beside a native Windows WebView on the main thread."""
     if sys.platform != "win32":
@@ -641,6 +718,8 @@ def _run_desktop(
                     elevated=elevated,
                     windows=registry,
                     open_window=_open_window_hook(viewers),
+                    notify=viewers.notify_attention,
+                    handoff=handoff,
                 )
             )
         except BaseException as exc:
@@ -822,6 +901,7 @@ async def _after_ready(
     launch_window: bool = True,
     initial_launch: dict[str, Any] | None = None,
     cwd: str | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> None:
     while not server.started:
         await asyncio.sleep(0.05)
@@ -841,10 +921,25 @@ async def _after_ready(
         )
     else:
         await _spawn_autostart(manager, cfg)
+    if handoff:
+        await _queue_startup_handoff(cfg, handoff)
     if ready_event is not None:
         ready_event.set()
     if launch_window:
         _launch_window(cfg.port, cwd=cwd, host=cfg.host)
+
+
+async def _queue_startup_handoff(cfg: "AppConfig", handoff: dict[str, str]) -> None:
+    """Queue the `quickterm new` this app was started for, through its own route.
+
+    Posting to /api/launches runs the same checks as a launch handed to an app
+    that was already up, and the window claims it like any other. Before the
+    window opens, so a refusal lands in `launch_error`, which the window shows
+    once it has booted.
+    """
+    failure = await asyncio.to_thread(cli.post_launch, cfg.port, handoff, cfg.host)
+    if failure:
+        _report_launch_failure(cfg, f"quickterm new: {failure}")
 
 
 async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:

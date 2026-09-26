@@ -1,7 +1,7 @@
 """Loopback auth token: the shared secret that proves a caller is QuickTerm's
 own window rather than any other process that can reach 127.0.0.1.
 
-The Host/Origin guard in server.py only stops *browser* attacks; it cannot stop
+The Host/Origin guard in api/guard.py only stops *browser* attacks; it cannot stop
 a native local program from forging a Host header. The token closes that gap:
 it is delivered to the window through its launch URL fragment (never sent to the
 server, never in logs) and stored in a user-private file for out-of-band callers.

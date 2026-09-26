@@ -215,6 +215,17 @@ class FakeSessionManager:
     def set_max_sessions(self, limit: int) -> None:
         self.max_sessions = limit
 
+    def busy_ids(self) -> set[str]:
+        return set(getattr(self, "busy", set()))
+
+    def session_attention(self, sid: str) -> dict | None:
+        return getattr(self, "attention", {}).get(sid)
+
+    def mark_seen(self, sid: str) -> None:
+        if sid not in self.sessions:
+            raise KeyError(sid)
+        getattr(self, "attention", {}).pop(sid, None)
+
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -264,7 +275,7 @@ def putty_dir(no_putty_tools, monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(manager, cfg) -> TestClient:
-    # base_url must match the server's Host allowlist (see _local_guard)
+    # base_url must match the server's Host allowlist (see quickterm.api.guard)
     with TestClient(create_app(manager, cfg), base_url=f"http://127.0.0.1:{cfg.port}") as c:
         yield c
 
@@ -374,7 +385,9 @@ def test_list_sessions_includes_background_activity(client, manager):
 
 
 def test_list_sessions_lightweight_skips_process_metrics(client, manager, monkeypatch):
-    manager.add_session(name="agent")
+    idle = manager.add_session(name="agent")
+    working = manager.add_session(name="build")
+    manager.busy = {working.id}
 
     def fail_if_sampled():
         raise AssertionError("lightweight session listing sampled processes")
@@ -382,8 +395,11 @@ def test_list_sessions_lightweight_skips_process_metrics(client, manager, monkey
     monkeypatch.setattr(manager, "session_metrics", fail_if_sampled)
     response = client.get("/api/sessions?metrics=false")
     assert response.status_code == 200
-    assert response.json()[0]["busy"] is None
-    assert "usage" not in response.json()[0]
+    # Busy is still answered, from the one process-table snapshot, so the
+    # sidebar's poll can show it; only usage sampling is skipped.
+    busy = {entry["id"]: entry["busy"] for entry in response.json()}
+    assert busy == {idle.id: False, working.id: True}
+    assert all("usage" not in entry for entry in response.json())
 
 
 def test_spawn_with_explicit_cmd(client, manager):
@@ -843,7 +859,7 @@ def fake_config_mod(monkeypatch, cfg):
     mod = types.ModuleType("quickterm.config")
     saved: list = []
     # The PERSISTED config, as distinct from the live one. app.py rewrites
-    # cfg.port at startup (--port 0, elevated instances), so server.py must
+    # cfg.port at startup (--port 0, elevated instances), so the config routes must
     # serve and preserve this one for port/host/summon_hotkey.
     mod.disk_config = dataclasses.replace(cfg)
 
@@ -1374,7 +1390,7 @@ async def test_handshake_buffer_drains_a_bounded_queue():
     (multi-round-trip) handshake were enough to mark the attachment overflowed,
     and the client reconnected into exactly the same window every time.
     """
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     attachment.queue = asyncio.Queue(maxsize=8)
@@ -1391,7 +1407,7 @@ async def test_handshake_buffer_drains_a_bounded_queue():
 
 
 async def test_handshake_buffer_stops_at_the_exit_sentinel():
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     buffer = _HandshakeBuffer(attachment)
@@ -1405,7 +1421,7 @@ async def test_handshake_buffer_stops_at_the_exit_sentinel():
 
 async def test_handshake_buffer_is_bounded():
     """It must not become the unbounded buffer the queue cap exists to prevent."""
-    from quickterm.server import _HandshakeBuffer
+    from quickterm.api.attach import _HandshakeBuffer
 
     attachment = FakeAttachment()
     buffer = _HandshakeBuffer(attachment)

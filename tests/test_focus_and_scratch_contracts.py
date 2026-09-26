@@ -1,4 +1,4 @@
-"""Source-text contracts for the two rules that live in main.js and pane.js.
+"""Source-text contracts for the focus and scratch rules (scratch.js, pane.js).
 
 Both are timing rules that no unit test can observe from Python, and both were
 regressions the user hit in the running app, so they are pinned here the way
@@ -8,7 +8,8 @@ tests/test_frontend_contracts.py pins the rest of the frontend.
 from pathlib import Path
 
 FRONTEND_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js"
-MAIN_JS = FRONTEND_JS / "main.js"
+SCRATCH_JS = FRONTEND_JS / "scratch.js"
+WORKSPACE_SWITCH_JS = FRONTEND_JS / "workspace_switch.js"
 PANE_JS = FRONTEND_JS / "pane.js"
 PALETTE_JS = FRONTEND_JS / "palette.js"
 PANELS_JS = FRONTEND_JS / "panels.js"
@@ -60,9 +61,9 @@ def test_palette_focuses_its_input_on_open_and_returns_the_terminal_on_close():
 
 
 def test_new_scratch_only_destroys_terminals_that_are_idle_and_untouched():
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  async function scratchTerminalsAtRisk()")
-    implementation = main[start:main.index("\n  function discardScratchWarning(", start)]
+    scratch = SCRATCH_JS.read_text(encoding="utf-8")
+    start = scratch.index("  async function scratchTerminalsAtRisk()")
+    implementation = scratch[start:scratch.index("\n  // Explicit replacement", start)]
     # POST /api/sessions/cleanup kills whatever it is handed; the "never expire
     # a shell the user typed into" rule only exists in reap_idle. So both facts
     # are checked here instead.
@@ -75,29 +76,29 @@ def test_new_scratch_only_destroys_terminals_that_are_idle_and_untouched():
 
 
 def test_the_confirmation_names_the_terminals_instead_of_counting_panes():
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  function discardScratchWarning(")
-    implementation = main[start:main.index("\n  // Explicit replacement", start)]
+    scratch = SCRATCH_JS.read_text(encoding="utf-8")
+    start = scratch.index("export function discardScratchWarning(")
+    implementation = scratch[start:scratch.index("\nexport function createScratch(", start)]
     assert "atRisk.slice(0, 3).map((item) => item.name)" in implementation
     assert "still running something" in implementation
 
-    start = main.index("  async function newScratchWorkspace()")
-    new_scratch = main[start:main.index("\n  async function openFolderInScratch", start)]
+    start = scratch.index("  async function newScratchWorkspace()")
+    new_scratch = scratch[start:scratch.index("\n  async function openFolderInScratch", start)]
     assert "const atRisk = await scratchTerminalsAtRisk();" in new_scratch
     assert "if (!atRisk.length) return replace();" in new_scratch
     assert "pane.confirmAction(discardScratchWarning(atRisk), replace, \"Discard\");" in new_scratch
 
 
 def test_leaving_scratch_spares_busy_and_used_terminals():
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  async function discardScratch(")
-    implementation = main[start:main.index("\n  // Ephemeral scratch:", start)]
+    scratch = SCRATCH_JS.read_text(encoding="utf-8")
+    start = scratch.index("  async function discardScratch(")
+    implementation = scratch[start:scratch.index("\n  // Ephemeral scratch:", start)]
     # Replacing scratch is confirmed by the user first, so it kills everything.
     # Merely leaving it was never confirmed by anyone.
     assert "async function discardScratch({ force = false } = {})" in implementation
     assert "if (!sessions) return;" in implementation
     assert "return session.busy === false && !session.touched;" in implementation
-    assert "await discardScratch({ force: true });" in main
+    assert "await discardScratch({ force: true });" in scratch
 
 
 def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
@@ -106,11 +107,12 @@ def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
     # so navigating to scratch from another workspace destroyed the scratch
     # terminals the user had left running there. Only the confirmed "New
     # scratch" action, which already carries replaceScratch, may replace it.
-    main = MAIN_JS.read_text(encoding="utf-8")
-    start = main.index("  async function switchWorkspace(")
-    switch = main[start:main.index("\n  // Which scratch terminals", start)]
+    switcher = WORKSPACE_SWITCH_JS.read_text(encoding="utf-8")
+    scratch = SCRATCH_JS.read_text(encoding="utf-8")
+    start = switcher.index("  async function switchWorkspace(")
+    switch = switcher[start:switcher.index("\n  return {", start)]
 
-    guard = "} else if (!replaceScratch && workspaceNames.includes(SCRATCH_WS)) {"
+    guard = "} else if (!replaceScratch && state.workspaceNames.includes(SCRATCH_WS)) {"
     assert guard in switch
     restore_start = switch.index(guard)
     replace_start = switch.index("\n    } else {", restore_start)
@@ -118,7 +120,7 @@ def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
 
     # Restored like any other workspace, and through rememberWorkspace, which
     # writes scratch's own flag rather than the durable key.
-    assert "currentWorkspace = SCRATCH_WS;" in restore
+    assert "state.currentWorkspace = SCRATCH_WS;" in restore
     assert "rememberWorkspace(SCRATCH_WS)" in restore
     assert "await restoreWorkspace(SCRATCH_WS)" in restore
     # The backend drops the scratch file at app start, so an absent one is
@@ -133,6 +135,8 @@ def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
     assert "api.deleteWorkspace(SCRATCH_WS)" in replace
 
     # The one caller allowed to reach that branch asks first.
-    new_scratch_start = main.index("  async function newScratchWorkspace()")
-    new_scratch = main[new_scratch_start:main.index("\n  async function openFolderInScratch", new_scratch_start)]
+    new_scratch_start = scratch.index("  async function newScratchWorkspace()")
+    new_scratch = scratch[
+        new_scratch_start:scratch.index("\n  async function openFolderInScratch", new_scratch_start)
+    ]
     assert "switchWorkspace(null, null, { replaceScratch: true })" in new_scratch

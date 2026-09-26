@@ -22,6 +22,11 @@ else:
     from quickterm.pty_posix import PtySession
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="ConPTY backend")
+# Upper bound for a real child to start, print or exit. It only limits how long
+# a failing test waits; a passing one returns as soon as the event happens. A
+# machine busy with other work took over 5 s to start cmd.exe, and the old
+# 5-15 s bounds turned that into random failures.
+_SLOW_S = 60
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX backend")
 
 
@@ -112,7 +117,7 @@ async def test_echo_output_exit_and_resize():
     sess, chunks, exited, codes = await _spawn(cmd, args)
     assert sess.pid > 0
     sess.resize(100, 40)  # live resize
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
     out = b"".join(chunks)
     assert b"hi" in out
     assert codes == [0]
@@ -124,7 +129,7 @@ async def test_echo_output_exit_and_resize():
 async def test_nonzero_exit_code():
     cmd, args = _short("exit 3")
     sess, _, exited, codes = await _spawn(cmd, args)
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
     assert codes == [3]
     assert sess.exit_code == 3
 
@@ -140,9 +145,9 @@ async def test_write_reaches_process():
         while b"marker_xyz" not in b"".join(chunks):
             await asyncio.sleep(0.05)
 
-    await asyncio.wait_for(saw_marker(), timeout=10)
+    await asyncio.wait_for(saw_marker(), timeout=_SLOW_S)
     sess.write(b"exit" + newline)
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
 
 
 async def test_kill_terminates_tree():
@@ -151,7 +156,7 @@ async def test_kill_terminates_tree():
     await asyncio.sleep(0.3)
     assert sess.alive
     sess.kill()
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
     assert sess.alive is False
     assert sess.exit_code is not None
 
@@ -184,7 +189,7 @@ async def test_resize_after_exit_does_not_touch_a_recycled_descriptor():
         "true", [], None, {}, 80, 24, loop,
         on_output=lambda data: None, on_exit=lambda code: exited.set(),
     )
-    await asyncio.wait_for(exited.wait(), timeout=5)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
     assert session.alive is False
     assert session._fd == -1
     session.resize(120, 40)  # must be a silent no-op, not an ioctl on a reused fd
@@ -238,7 +243,7 @@ async def _session_with_child(script="import time; time.sleep(30)", count=1):
     sess, chunks, exited, _ = await _spawn(cmd, args)
     await asyncio.sleep(0.3)
     sess.write(f'"{sys.executable}" -c "{script}"'.encode() + newline)
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _SLOW_S
     while True:
         identities = process_usage.process_identities()
         below = process_usage.descendants(identities, sess.pid)
@@ -257,7 +262,7 @@ async def test_kill_verifies_the_whole_tree():
     else:
         # Killed children may linger as zombies until reaped; they are not alive.
         assert process_usage.session_process_groups(sess.pid) == {}
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
 
 
 @windows_only
@@ -305,7 +310,7 @@ async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(m
     monkeypatch.setattr(pty_module, "_TERMINATE_WAIT_S", 0.3)
     try:
         assert sess.kill() is False
-        await asyncio.wait_for(exited.wait(), timeout=15)  # the root is gone
+        await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)  # the root is gone
         assert sess.alive is False
         assert sess.kill() is False  # the grandchild is not
         monkeypatch.undo()
@@ -331,7 +336,7 @@ async def test_kill_never_addresses_a_root_known_to_be_dead(monkeypatch):
     cmd, args = _short("exit 0")
     sess, _, _, _ = await _spawn(cmd, args)
     try:
-        assert pty_module._k32.WaitForSingleObject(sess._hproc, 5000) == 0
+        assert pty_module._k32.WaitForSingleObject(sess._hproc, int(_SLOW_S * 1000)) == 0
         assert sess.alive is True  # nobody has told the session yet
         assert sess.kill() is True
         assert calls == []
@@ -364,9 +369,9 @@ async def test_failed_kill_keeps_the_terminal_usable(monkeypatch):
         while b"still_here_42\r\n" not in b"".join(chunks):
             await asyncio.sleep(0.05)
 
-    await asyncio.wait_for(saw_marker(), timeout=10)
+    await asyncio.wait_for(saw_marker(), timeout=_SLOW_S)
     assert sess.kill() is True
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)
 
 
 @windows_only
@@ -387,4 +392,4 @@ async def test_kill_passes_a_safe_working_directory(monkeypatch):
     (command, kwargs), = calls
     assert os.path.isabs(command[0])
     assert os.path.normcase(kwargs["cwd"]) == os.path.normcase(os.environ["SystemRoot"])
-    await asyncio.wait_for(exited.wait(), timeout=15)
+    await asyncio.wait_for(exited.wait(), timeout=_SLOW_S)

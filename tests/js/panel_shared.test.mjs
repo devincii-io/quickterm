@@ -49,6 +49,26 @@ test("terminal and snippet helpers preserve their UI contracts", () => {
   assert.equal(formatBytes(1024 * 1024), "1.0 MB");
 });
 
+test("the terminal type is inferred for every shell the launcher knows", () => {
+  const cases = [
+    ["pwsh", "powershell-core"], ["C:\\Program Files\\PowerShell\\7\\pwsh.exe", "powershell-core"],
+    ["powershell.exe", "windows-powershell"], ["cmd", "command-prompt"], ["wsl.exe", "wsl"],
+    ["plink.exe", "ssh"], ["psftp", "sftp"],
+    ["bash", "bash"], ["/usr/bin/zsh", "zsh"], ["/opt/homebrew/bin/fish", "fish"],
+    ["C:\\Program Files\\Git\\bin\\bash.exe", "git-bash"], ["C:\\Program Files\\Git\\usr\\bin\\bash.exe", "git-bash"],
+    ["C:\\Windows\\System32\\bash.exe", "bash"],
+    ["nu", "nushell"], ["C:\\Users\\me\\.cargo\\bin\\nu.exe", "nushell"],
+    ["python.exe", "custom"], ["claude", "custom"], ["", "custom"], ["nushell", "custom"],
+  ];
+  for (const [cmd, type] of cases) assert.equal(inferTerminalType({ cmd }), type, cmd);
+  // launch.py builds its own arguments for these and drops the profile's, so
+  // a command that carries arguments is not inferred as one of them.
+  assert.equal(inferTerminalType({ cmd: "bash", args: ["-c", "make"] }), "custom");
+  assert.equal(inferTerminalType({ cmd: "wsl.exe", args: ["-d", "Ubuntu"] }), "custom");
+  assert.equal(inferTerminalType({ cmd: "nu", args: ["--no-config"] }), "nushell");
+  assert.equal(inferTerminalType({ cmd: "pwsh", args: ["-NoLogo"] }), "powershell-core");
+});
+
 test("native folder picker distinguishes selection, cancel, and browser fallback", async () => {
   const previous = globalThis.pywebview;
   try {

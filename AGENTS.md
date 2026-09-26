@@ -13,6 +13,7 @@ full path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test 
 
 ```
 uv run quickterm                  # run the app (native window; --port N to override)
+uv run quickterm ls|new|open|send # drive the running app (quickterm/cli.py)
 uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
@@ -32,12 +33,14 @@ EOF: the Windows process handle, POSIX `waitpid`; then a short drain, then one
 because a full stdin pipe blocks, and on POSIX the fd lock is never held
 across a wait). The shared queue/writer/posting lives in `pty_base.py`; the
 backends keep only spawn, raw I/O, resize and kill. → `session_manager.py`:
-registry, scrollback ring as a deque of chunks (O(chunk) trim; do not go back
+registry (ring in `scrollback.py`, fan-out in `fanout.py`, reaper in
+`reaper.py`), scrollback ring as a deque of chunks (O(chunk) trim; do not go back
 to a flat bytearray) whose front never starts mid-sequence and whose replay
 starts with a preamble restoring the DEC modes (alt screen, bracketed paste,
 mouse, ...) in effect there, byte-bounded per-subscriber fan-out queues
 (chunks merge up to 128 KB, overflow past 2 MiB triggers a clean
-replay/resync). → `server.py`: REST + WS attach (`replay_size` → scrollback
+replay/resync). → `quickterm/api/` (composed by `server.py`): REST + WS attach
+in `api/attach.py` (`replay_size` → scrollback
 frame → `replay_done` → live); the output pump coalesces queued chunks into one
 WS frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js`: one
 xterm.js + one WS per pane; write-callback backpressure; input only forwarded
@@ -79,10 +82,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Server handlers import stubbable modules via
   `importlib.import_module("quickterm.X")`. A plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.
-- Session activity tracking uses `touched`, and only the client sets it: the
+- Session activity tracking uses `touched`, and only a person sets it: the
   pane sends a `{"type":"touch"}` WS frame on the first real input of each
-  connection (`onKey`, native paste, `sendText`), and `SessionManager.write`
-  never touches. Input frames also carry xterm's automatic replies (DA, CPR,
+  connection (`onKey`, native paste, `sendText`), and `quickterm send`
+  (`POST /api/sessions/{id}/input`) touches on the server because someone
+  typed that command. `SessionManager.write` never touches. Input frames also carry xterm's automatic replies (DA, CPR,
   focus reports), which must not make a shell look used. Explicit detach also
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
@@ -285,7 +289,7 @@ keep shipping `QuickTerm-v*-Setup.exe` and `SHA256SUMS.txt` under those names.
 
 ## Security model
 
-Server binds 127.0.0.1. Three-layer guard in `server.py`: Host allowlist
+Server binds 127.0.0.1. Three-layer guard in `api/guard.py`: Host allowlist
 (DNS rebinding), Origin allowlist (cross-origin/WS), and a per-install token
 (`auth.py`), delivered via URL fragment `#t=`, sent as `X-QuickTerm-Token` on
 /api and as WS subprotocol `qtauth.<token>`. Exempt: `/api/health`,

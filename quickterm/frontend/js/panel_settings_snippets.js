@@ -68,7 +68,7 @@ export function renderSnippetSettings(host, rerender) {
       host.append(configEmpty({
         lead: "No snippets yet.",
         body: "A snippet is a command you already type, kept with a note about when you reach for it. "
-          + "“git status” is the smallest useful one: name it, describe it, and it is one Alt+K away in every terminal.",
+          + '"git status" is the smallest useful one: name it, describe it, and it is one Alt+K away in every terminal.',
         action: emptyAdd,
       }));
       return;
@@ -122,7 +122,7 @@ export function renderSnippetSettings(host, rerender) {
         description = fresh;
       });
       fields.append(
-        this._field("Snippet name", name, "Shown in the palette as “snippet: name”, so name it the way you would search for it."),
+        this._field("Snippet name", name, 'Shown in the palette as "snippet: name", so name it the way you would search for it.'),
         this._field("Description", describe, "One line about what it does and when you want it. It is what makes a list of snippets readable a month from now."),
       );
       el.append(fields);

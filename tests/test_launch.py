@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from quickterm import launch, putty_tools
-from quickterm import server as server_mod
+from quickterm.api import system as system_routes
 from quickterm import workspace as real_workspace
 
 
@@ -79,8 +79,8 @@ def test_the_pinned_ids_cover_the_windows_inventory(monkeypatch):
     def no_wsl(*_args, **_kwargs):
         raise OSError("not asked in tests")
 
-    monkeypatch.setattr(server_mod.subprocess, "run", no_wsl)
-    ids = {t["id"] for t in server_mod._terminal_inventory()["types"]}
+    monkeypatch.setattr(system_routes.subprocess, "run", no_wsl)
+    ids = {t["id"] for t in system_routes._terminal_inventory()["types"]}
     assert ids <= set(_inventory_type_ids())
 
 
@@ -117,6 +117,39 @@ def test_git_bash_gets_the_bash_start_command_treatment():
     prof.args = ["--norc", "-l"]
     prof.start_command = "make"
     assert launch.resolve_profile(prof)[1] == ["--norc", "-lc", "make; exec bash -l"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+def test_posix_login_shells_keep_the_profile_arguments(shell):
+    # These used to drop the profile's own arguments at launch, so an
+    # --norc/--no-config set in Advanced silently did nothing.
+    prof = Prof(name="s", cmd=f"/usr/bin/{shell}", terminal_type=shell, args=["--norc", "-l"])
+    assert launch.resolve_profile(prof, "/tmp/x") == (
+        f"/usr/bin/{shell}", ["--norc", "-l"], "/tmp/x",
+    )
+    prof.start_command = "make"
+    # Ahead of -lc, which takes the next operand as the command; our own -l
+    # is not doubled by the profile's.
+    assert launch.resolve_profile(prof)[1] == [
+        "--norc", "-lc", f"make; exec /usr/bin/{shell} -l",
+    ]
+    prof.args = ["--login"]
+    assert launch.resolve_profile(prof)[1] == ["-lc", f"make; exec /usr/bin/{shell} -l"]
+    assert launch.resolve_profile(Prof(name="s", terminal_type=shell))[0] == shell
+
+
+def test_the_exec_after_a_start_command_survives_a_windows_shell_path():
+    # The shell parses this line itself: unquoted backslashes vanished and
+    # the terminal closed as soon as the start command had run.
+    prof = Prof(
+        name="msys", cmd=r"C:\msys64\usr\bin\bash.exe", terminal_type="bash", start_command="make",
+    )
+    cmd, args, _cwd = launch.resolve_profile(prof)
+    assert cmd == r"C:\msys64\usr\bin\bash.exe"
+    assert args == ["-lc", "make; exec C:/msys64/usr/bin/bash.exe -l"]
+    prof.cmd = "/opt/my shells/zsh"
+    prof.terminal_type = "zsh"
+    assert launch.resolve_profile(prof)[1] == ["-lc", "make; exec '/opt/my shells/zsh' -l"]
 
 
 def test_nushell_runs_the_start_command_and_stays_interactive():
