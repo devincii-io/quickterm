@@ -34,7 +34,11 @@ def keeps_unread_exit(s: Session, now: float) -> bool:
     # A retained or typed-into session was something the user cared
     # about; its last output (the build result, the agent's reply) exists
     # only in this ring, so it stays until someone has seen it.
-    if not (s.info.retained or s.info.touched) or s.background_output_bytes <= 0:
+    # A terminal that asked for the user (a bell, a notification, its own
+    # exit) and was not answered is kept on the same terms: the sidebar
+    # offers it as a finished row until someone opens it.
+    unread = (s.info.retained or s.info.touched) and s.background_output_bytes > 0
+    if not unread and s.attention is None:
         return False
     ended = s.ended_at if s.ended_at is not None else now
     return now - ended < EXITED_UNREAD_RETENTION_S
@@ -54,6 +58,8 @@ def reapable(
         return not keeps_unread_exit(s, now)
     if sid in protected or s.info.touched or s.info.retained or sid in busy:
         return False
+    if s.attention is not None:
+        return False  # it is waiting for the user; idle is the point
     return timeout_s > 0 and now - s.last_activity > timeout_s
 
 

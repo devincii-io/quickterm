@@ -296,6 +296,28 @@
 }
 .dashboard .detached-session-actions { flex: none; display: flex; align-items: center; gap: 4px; }
 
+/* Settings > About: the settings history. It lives here rather than in
+   panels.css to keep this feature's styles in one file; the selectors are
+   the history's own and touch nothing else in the panel. */
+.settings-history-list { display: flex; flex-direction: column; max-width: 74ch; }
+.settings-history-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 0; border-bottom: 1px solid var(--line);
+}
+.settings-history-row:last-child { border-bottom: 0; }
+.settings-history-time { flex: none; min-width: 16ch; color: var(--text-soft); font-family: var(--mono); font-size: 11px; }
+.settings-history-summary {
+  flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11.5px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* A terminal that needs you: the sidebar's accent, on the row's edge and in
+   its detail line. No badge; the line already says what it asked. */
+.dashboard .usage-row.attention,
+.dashboard .detached-session-row.attention { box-shadow: inset 2px 0 0 var(--accent); }
+.dashboard .usage-row.attention .usage-identity small,
+.dashboard .detached-session-row.attention .detached-session-copy small { color: var(--accent); }
+
 .dashboard .detached-empty {
   margin: 0; padding: 12px; border: 0; border-radius: 0;
   color: var(--muted); font-size: 11.5px; text-align: left;

@@ -75,6 +75,7 @@ def create_app(
     *,
     windows: WindowRegistry | None = None,
     open_window: Callable[[str | None, str | None], str] | None = None,
+    notify: Callable[[str, str, str, str | None], None] | None = None,
 ) -> FastAPI:
     # No docs and no schema: /openapi.json listed every route without asking
     # for the token, the only non-static answer besides /api/health that did.
@@ -90,6 +91,7 @@ def create_app(
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         launches=launches.LaunchQueue(),
+        notify=notify,
     )
     app.add_middleware(LocalGuard, ctx=ctx)
     for routes in (system, sessions, launches, window_routes, workspaces, config, assets, attach):

@@ -1,4 +1,4 @@
-"""Configuration routes: the live view, the saved file, and saving it."""
+"""Configuration routes: the live view, the saved file, saving it, its history."""
 
 from __future__ import annotations
 
@@ -84,11 +84,37 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
     @app.put("/api/config")
     async def put_config(request: Request) -> Response:
-        config_mod = importlib.import_module("quickterm.config")
-
         body = await read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "invalid config: config must be a JSON object")
+        await save_and_apply(body)
+        return Response(status_code=204)
+
+    @app.get("/api/config/history")
+    async def get_config_history() -> list[dict]:
+        config_mod = importlib.import_module("quickterm.config")
+        # Reads and decrypts up to twenty stored files to compare them.
+        try:
+            return await asyncio.to_thread(config_mod.config_history)
+        except Exception as exc:
+            raise HTTPException(500, "could not read the settings history") from exc
+
+    @app.post("/api/config/history/{entry_id}/restore")
+    async def restore_config_history(entry_id: str) -> Response:
+        config_mod = importlib.import_module("quickterm.config")
+        try:
+            stored = await asyncio.to_thread(config_mod.load_history_entry, entry_id)
+        except KeyError:
+            raise HTTPException(404, "no such settings version") from None
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "could not read that settings version") from exc
+        # The same path as a Settings save: validation, a new history entry
+        # for the version this replaces, and the live apply.
+        await save_and_apply(stored)
+        return Response(status_code=204)
+
+    async def save_and_apply(body: dict[str, Any]) -> None:
+        config_mod = importlib.import_module("quickterm.config")
         # load_config and save_config fsync, and DPAPI runs once per protected
         # env value: all of it off the loop.
         try:
@@ -101,7 +127,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         # Omitted top-level keys keep their saved value instead.
         merged = {**asdict(on_disk), **body}
         try:
-            new_cfg = config_mod.config_from_dict(merged)
+            # Off the loop too: a restored history entry carries its profile
+            # secrets DPAPI-protected, and decoding them calls into DPAPI.
+            new_cfg = await asyncio.to_thread(config_mod.config_from_dict, merged)
             # A client holding a page rendered from the LIVE config (an older
             # build, or a window opened before /api/config/full served the
             # saved one) would write a runtime-only value back to disk. Only
@@ -128,4 +156,3 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         set_scrollback = getattr(manager, "set_scrollback_bytes", None)
         if set_scrollback:
             set_scrollback(cfg.scrollback_bytes)
-        return Response(status_code=204)
