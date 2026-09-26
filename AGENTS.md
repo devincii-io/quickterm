@@ -82,10 +82,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Server handlers import stubbable modules via
   `importlib.import_module("quickterm.X")`. A plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.
-- Session activity tracking uses `touched`, and only the client sets it: the
+- Session activity tracking uses `touched`, and only a person sets it: the
   pane sends a `{"type":"touch"}` WS frame on the first real input of each
-  connection (`onKey`, native paste, `sendText`), and `SessionManager.write`
-  never touches. Input frames also carry xterm's automatic replies (DA, CPR,
+  connection (`onKey`, native paste, `sendText`), and `quickterm send`
+  (`POST /api/sessions/{id}/input`) touches on the server because someone
+  typed that command. `SessionManager.write` never touches. Input frames also carry xterm's automatic replies (DA, CPR,
   focus reports), which must not make a shell look used. Explicit detach also
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
