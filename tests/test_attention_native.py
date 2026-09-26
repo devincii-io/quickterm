@@ -116,6 +116,7 @@ def test_the_win32_helpers_answer_without_a_window():
     assert tray.foreground_is_ours() in (True, False)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="tray.py is the Win32 tray")
 def test_balloon_text_is_cut_by_utf16_units_not_code_points():
     # The balloon fields are fixed WCHAR arrays: 200 emoji are 400 units and
     # overflowed a 256-unit field, so ctypes raised and the balloon was lost.
