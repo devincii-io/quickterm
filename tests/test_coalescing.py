@@ -142,6 +142,90 @@ def test_ring_front_always_lands_on_a_token_boundary():
             assert front in boundaries, (cap, front, ring[:24])
 
 
+def test_ring_front_is_never_inside_a_long_string():
+    """Like the fuzz above, with strings longer than the 4 KiB resync window
+    (OSC 52 clipboard writes, sixel, inline images). An empty ring is fine
+    while such a string is still arriving; payload replayed as text is not."""
+    rng = random.Random(5202)
+    short = [b"a", b"b", b" ", b"\r", b"\n", "─".encode(), b"\x1b[0m", b"\x1b[?2004h", b"\x1b]0;t\x07"]
+
+    def long_string():
+        body = bytes(rng.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ+/=") for _ in range(rng.randint(4000, 12000)))
+        return rng.choice([
+            b"\x1b]52;c;" + body + b"\x07",
+            b"\x1b]52;c;" + body + b"\x1b\\",
+            b"\x1bPq" + body + b"\x07more\x1b\\",  # BEL does not end a DCS
+            b"\x1b_G" + body + b"\x1b\\",
+        ])
+
+    stream = [long_string() if rng.random() < 0.01 else rng.choice(short) for _ in range(12000)]
+    boundaries = {0}
+    offset = 0
+    for token in stream:
+        offset += len(token)
+        boundaries.add(offset)
+    data = b"".join(stream)
+    for cap in (37, 3000, 64 * 1024):
+        s = _session(cap)
+        pos = 0
+        while pos < len(data):
+            size = rng.randint(1, 2000)
+            s._record(data[pos : pos + size])
+            pos = min(pos + size, len(data))
+            ring = _ring(s)
+            front = pos - len(ring)
+            assert data[front:pos] == ring
+            assert not ring or front in boundaries, (cap, front, ring[:24])
+
+
+@pytest.mark.parametrize("terminator", [b"\x07", b"\x1b\\"])
+@pytest.mark.parametrize("cut_kib", [2, 6, 9])
+def test_trim_inside_a_long_osc_52_skips_the_whole_payload(terminator, cut_kib):
+    prefix = b"$ yank\r\n"
+    osc = b"\x1b]52;c;" + b"QUJD" * 2560 + terminator  # a 10 KiB clipboard write
+    s = _session(64 * 1024)
+    s._record(prefix + osc[:4000])
+    s._record(osc[4000:])  # the string straddles a chunk boundary
+    s._record(b"prompt> ")
+    s.set_scrollback_cap(s._ring_bytes - len(prefix) - cut_kib * 1024)
+    assert _replay(s) == b"prompt> "
+
+
+def test_dcs_payload_bel_does_not_end_the_string():
+    s = _session(1000)
+    s._record(b"\x1bPq" + b"#0;2;0;0;0" * 600 + b"\x07still sixel\x1b\\after")
+    s.set_scrollback_cap(100)
+    assert _replay(s) == b"after"
+
+
+def test_unterminated_string_empties_the_ring_until_it_ends():
+    s = _session(64)
+    s._record(b"\x1b]52;c;" + b"QUJD" * 100)  # over the cap, no terminator yet
+    assert _replay(s) == b""
+    s._record(b"QUJD" * 4)  # below the cap, but still payload
+    assert _replay(s) == b""
+    s._record(b"QUJD\x07prompt> ")
+    assert _replay(s) == b"prompt> "
+    s._record(b"ls\r\n")
+    assert _replay(s) == b"prompt> ls\r\n"
+
+
+def test_cut_right_after_the_esc_that_opens_a_string():
+    s = _session(10000)
+    s._record(b"x" * 16 + b"\x1b")  # the trimmed bytes end with this ESC
+    s._record(b"]52;c;" + b"QUJD" * 1500 + b"\x07tail")
+    s.set_scrollback_cap(s._ring_bytes - 17)
+    assert _replay(s) == b"tail"
+
+
+def test_string_ended_by_a_plain_esc_keeps_that_esc_as_the_front():
+    s = _session(10000)
+    s._record(b"\x1b]52;c;" + b"QUJD" * 1500 + b"\x1b[1mbold")
+    s.set_scrollback_cap(100)
+    assert _replay(s) == b"\x1b[1mbold"
+    assert s._modes.state == 0
+
+
 def test_oversized_mode_parameters_do_not_break_recording():
     s = _session(10000)
     s._record(b"\x1b[?" + b"9" * 5000 + b"h" + b"\x1b[?2004h")
@@ -281,16 +365,17 @@ async def test_queue_get_waits_for_a_put():
     assert await asyncio.wait_for(getter, timeout=1) == b"late"
 
 
-async def test_cancelled_getter_does_not_strand_the_next_item():
+async def test_getter_cancelled_after_its_wake_up_passes_the_item_on():
     q = AttachmentQueue()
     first = asyncio.ensure_future(q.get())
-    await asyncio.sleep(0)
-    first.cancel()
-    await asyncio.sleep(0)
     second = asyncio.ensure_future(q.get())
-    await asyncio.sleep(0)
-    q.put_nowait(b"data")
+    await asyncio.sleep(0)  # both are waiting, first in line
+    q.put_nowait(b"data")  # wakes only the first getter...
+    first.cancel()  # ...which is cancelled before it gets to run
+    with pytest.raises(asyncio.CancelledError):
+        await first
     assert await asyncio.wait_for(second, timeout=1) == b"data"
+    assert q.empty()
 
 
 # ---- output pump send coalescing ----

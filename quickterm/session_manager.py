@@ -210,6 +210,10 @@ _DECSET = re.compile(rb"\x1b\[\?([0-9;]*)([hl])")
 # arrive: ESC, ESC [, or ESC [ ? followed by parameters only.
 _PARTIAL_MODE_TAIL = re.compile(rb"\x1b(?:\[(?:\?[0-9;]*)?)?")
 _MODE_CARRY_MAX = 64
+_GROUND = 0
+_AFTER_ESC = 1
+_OSC = 0x5D
+_STRING_INTRODUCERS = b"]P_^X"  # OSC, DCS, APC, PM, SOS
 # Both always match (possibly empty), so .match(...).end() is safe.
 _CSI_BODY = re.compile(rb"[\x20-\x3f]*")
 _ESC_INTERMEDIATES = re.compile(rb"[\x20-\x2f]*")
@@ -226,13 +230,24 @@ class _ModeTracker:
 
     def __init__(self) -> None:
         self.modes: dict[int, bool] = {}
+        # Where the trimmed bytes end: _GROUND, _AFTER_ESC (the last one was
+        # an ESC whose next byte is not known yet) or, inside an OSC, DCS,
+        # APC, PM or SOS string, that string's introducer byte. The ring
+        # front is clean only in _GROUND; this is exact however long the
+        # string is, which the bounded resync window cannot be.
+        self.state = _GROUND
         # Tail of the previous span that may be the start of a sequence split
         # across a chunk boundary.
         self._carry = b""
 
+    def end_string(self) -> None:
+        """The retained front is an ESC, which ends any string before it."""
+        self.state = _GROUND
+
     def feed(self, buf: bytes, start: int, end: int) -> None:
         if start >= end:
             return
+        self._track_string(buf, start, end)
         if self._carry:
             carry = self._carry
             self._carry = b""
@@ -276,6 +291,31 @@ class _ModeTracker:
         last_esc = buf.rfind(b"\x1b", max(start, end - _MODE_CARRY_MAX), end)
         if last_esc >= 0 and _PARTIAL_MODE_TAIL.fullmatch(buf, last_esc, end):
             self._carry = buf[last_esc:end]
+
+    def _track_string(self, buf: bytes, start: int, end: int) -> None:
+        # Every ESC ends a string, so only the last ESC of the span matters,
+        # plus, for an OSC, a BEL after it. Without an ESC the state carries
+        # over from the previous span.
+        esc = buf.rfind(b"\x1b", start, end)
+        if esc < 0:
+            if self.state == _AFTER_ESC:
+                esc, intro = start - 1, buf[start]
+            elif self.state == _OSC and buf.find(b"\x07", start, end) >= 0:
+                self.state = _GROUND
+                return
+            else:
+                return
+        elif esc == end - 1:
+            self.state = _AFTER_ESC
+            return
+        else:
+            intro = buf[esc + 1]
+        if intro not in _STRING_INTRODUCERS:
+            self.state = _GROUND
+        elif intro == _OSC and buf.find(b"\x07", esc + 2, end) >= 0:
+            self.state = _GROUND
+        else:
+            self.state = intro
 
     def preamble(self) -> bytes:
         parts = [
@@ -417,7 +457,10 @@ class Session:
         if data:
             self._chunks.append(data)
             self._ring_bytes += len(data)
-            if self._ring_bytes > self._cap:
+            # A non-ground tracker state means an earlier trim emptied the
+            # ring inside a string, so the new bytes are its payload and go
+            # too, even below the cap.
+            if self._ring_bytes > self._cap or self._modes.state:
                 self._trim()
         self._ring_cols, self._ring_rows = self.info.cols, self.info.rows
 
@@ -428,8 +471,15 @@ class Session:
 
     def _trim(self) -> None:
         """Drop the oldest bytes down to the cap, then on to a clean start."""
-        spans = self._drop(self._ring_bytes - self._cap)
-        if not self._chunks:
+        excess = self._ring_bytes - self._cap
+        spans = self._drop(excess) if excess > 0 else []
+        modes = self._modes
+        while modes.state == _AFTER_ESC and self._chunks:
+            spans += self._drop(1)  # the byte after the ESC decides
+        if modes.state:
+            self._drop_string_rest()
+            return
+        if not spans or not self._chunks:
             return
         # Only the last ESC before the cut can enclose it, so the lookback is
         # just the bytes from there to the cut (none when there is no ESC in
@@ -457,6 +507,39 @@ class Session:
             skip = _resync_skip(lookback + forward, len(lookback), True)
         if skip:
             self._drop(skip)
+            if modes.state:
+                self._trim()  # the skip itself ended inside a string or after an ESC
+
+    def _drop_string_rest(self) -> None:
+        """The front is inside a string (an OSC 52 clipboard write, sixel, an
+        inline image): drop through its terminator, or everything retained
+        when it has not arrived yet. Replaying payload as text is worse than
+        replaying nothing. Rare, so scanning the ring here is fine."""
+        bel_ends = self._modes.state == _OSC
+        count = 0
+        offset = self._head
+        for index, chunk in enumerate(self._chunks):
+            esc = chunk.find(b"\x1b", offset)
+            bel = chunk.find(b"\x07", offset, esc if esc >= 0 else len(chunk)) if bel_ends else -1
+            if bel >= 0:
+                self._drop(count + bel + 1 - offset)
+                return
+            if esc >= 0:
+                if chunk[esc + 1 : esc + 2] == b"\\":
+                    self._drop(count + esc + 2 - offset)
+                    return
+                if esc + 1 == len(chunk) and index + 1 < len(self._chunks):
+                    if self._chunks[index + 1][:1] == b"\\":
+                        self._drop(count + esc + 2 - offset)
+                        return
+                # Any other ESC ends the string and starts the next sequence,
+                # so it stays as the new front.
+                self._drop(count + esc - offset)
+                self._modes.end_string()
+                return
+            count += len(chunk) - offset
+            offset = 0
+        self._drop(self._ring_bytes)
 
     def _peek(self, count: int) -> bytes:
         """The first ``count`` retained bytes (fewer when the ring is shorter)."""
@@ -937,13 +1020,29 @@ class SessionManager:
             except KeyError:
                 continue  # removed meanwhile; nothing left to stop
             except Exception:
-                self._on_loop(self._release, session)
+                self._release_soon(session)
                 raise
             if stopped:
                 reaped.append(sid)
             else:
-                self._on_loop(self._release, session)
+                self._release_soon(session)
         return reaped
+
+    def _release_soon(self, session: Session) -> None:
+        # Fire and forget, never through _on_loop: its timeout cancels the
+        # call, and a release lost to a stalled loop would leave the session
+        # claimed for good, answering every attach with 4404.
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            self._release(session)
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._release, session)
+        except RuntimeError:
+            pass  # loop closed: no attach can come any more
 
     def _reapable(
         self,

@@ -390,6 +390,25 @@ async def test_failed_reaper_kill_releases_the_session(slow_kill):
     mgr._sessions.clear()
 
 
+async def test_failed_kill_release_survives_a_stalled_loop(slow_kill, monkeypatch):
+    """The release must not be a wait-then-cancel call: if the loop is busy
+    past that wait, the claim would stay and every attach would answer 4404."""
+    monkeypatch.setattr(session_manager, "_LOOP_CALL_TIMEOUT_S", 0.05)
+    slow_kill.result = False
+    mgr = SessionManager(asyncio.get_running_loop())
+    info = mgr.spawn(cmd="x.exe")
+    mgr.get(info.id).last_activity -= 600
+    reaping = asyncio.ensure_future(asyncio.to_thread(mgr.reap_idle, 300, set()))
+    await _wait_for(slow_kill.started.is_set)
+    slow_kill.release.set()
+    time.sleep(0.3)  # the loop stalls while the worker releases the claim
+    assert await asyncio.wait_for(reaping, timeout=10) == []
+    await asyncio.sleep(0)
+    assert mgr.get(info.id).reaping is False
+    mgr.attach(info.id).detach()
+    mgr._sessions.clear()
+
+
 def _finished_in_background(mgr, *, retained=False, touched=False, output=b"BUILD FAILED\r\n"):
     info = mgr.spawn(cmd="x.exe")
     session = mgr.get(info.id)
