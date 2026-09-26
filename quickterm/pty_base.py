@@ -31,7 +31,6 @@ DRAIN_IDLE_S = 0.15
 DRAIN_MAX_S = 1.0
 
 
-
 def merge_environment(override: dict[str, str] | None) -> dict[str, str]:
     """The child's environment: QuickTerm's own, with the profile override on top.
 

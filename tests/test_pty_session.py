@@ -261,8 +261,13 @@ async def test_kill_verifies_the_whole_tree():
 
 
 @windows_only
-async def test_kill_reports_a_descendant_that_survives(monkeypatch):
-    """#38: a descendant taskkill could not stop used to go unnoticed once the root died."""
+async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(monkeypatch):
+    """#38 and the retry after a failed kill.
+
+    A descendant taskkill could not stop went unnoticed once the root died;
+    one whose parent exited during the kill was dropped from verification;
+    and a retry passed on the dead root alone while the descendant ran on.
+    """
     # The grandchild is detached from the console, so closing the ConPTY does
     # not take it down with the root; only an explicit kill does.
     spawner = (
@@ -273,25 +278,70 @@ async def test_kill_reports_a_descendant_that_survives(monkeypatch):
     sess, exited, below, identities = await _session_with_child(spawner, count=2)
     (grandchild,) = [pid for pid, parent in identities if pid in below and parent != sess.pid]
     real_terminate = pty_module._k32.TerminateProcess
+    real_identities = process_usage.process_identities
     get_pid = ctypes.WinDLL("kernel32").GetProcessId
     get_pid.argtypes = (wintypes.HANDLE,)
     get_pid.restype = wintypes.DWORD
+    snapshots = []
 
     def terminate_all_but_grandchild(handle, code):
         if get_pid(handle) == grandchild:
             return 1  # pretend, like an elevated child that denies us
         return real_terminate(handle, code)
 
+    def parent_exits_after_the_first_snapshot():
+        # From the second snapshot on, the grandchild's parent is gone and it
+        # is no longer below the root, which taskkill /T cannot see either.
+        table = real_identities()
+        snapshots.append(table)
+        if len(snapshots) == 1:
+            return table
+        return [(pid, 0 if pid == grandchild else parent) for pid, parent in table]
+
     monkeypatch.setattr(pty_module.subprocess, "run", lambda *a, **k: None)
     monkeypatch.setattr(pty_module._k32, "TerminateProcess", terminate_all_but_grandchild)
+    monkeypatch.setattr(process_usage, "process_identities", parent_exits_after_the_first_snapshot)
     monkeypatch.setattr(pty_module, "_KILL_WAIT_S", 0.3)
     monkeypatch.setattr(pty_module, "_TERMINATE_WAIT_S", 0.3)
     try:
         assert sess.kill() is False
+        await asyncio.wait_for(exited.wait(), timeout=15)  # the root is gone
+        assert sess.alive is False
+        assert sess.kill() is False  # the grandchild is not
+        monkeypatch.undo()
+        assert sess.kill() is True
+        assert grandchild not in {pid for pid, _parent in process_usage.process_identities()}
     finally:
         monkeypatch.undo()
         subprocess.run(pty_module._taskkill_command(grandchild), capture_output=True)
-    await asyncio.wait_for(exited.wait(), timeout=15)
+
+
+@windows_only
+async def test_kill_never_addresses_a_root_known_to_be_dead(monkeypatch):
+    """The root's PID must not be reopened or passed to taskkill once it exited.
+
+    The watcher used to close the root handle before flagging the exit, and
+    kill() reopened the root by PID number: a PID reused in between would
+    have had an unrelated process tree killed.
+    """
+    # Hold the watcher back so the root is dead but not yet flagged dead.
+    monkeypatch.setattr(PtySession, "_watch_exit", lambda self: None)
+    calls = []
+    monkeypatch.setattr(pty_module.subprocess, "run", lambda *a, **k: calls.append(a))
+    cmd, args = _short("exit 0")
+    sess, _, _, _ = await _spawn(cmd, args)
+    try:
+        assert pty_module._k32.WaitForSingleObject(sess._hproc, 5000) == 0
+        assert sess.alive is True  # nobody has told the session yet
+        assert sess.kill() is True
+        assert calls == []
+    finally:
+        sess._proc_dead.set()
+        try:
+            sess._pty.cancel_io()
+        except winpty.WinptyError:
+            pass
+        pty_module._k32.CloseHandle(sess._hproc)
 
 
 @windows_only

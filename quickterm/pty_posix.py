@@ -98,6 +98,9 @@ class PtySession(PtyBase):
         # even while trailing output is still being drained.
         self._proc_dead = threading.Event()
         self._last_read = time.monotonic()
+        # Set by a kill() that could not verify; from then on "the leader is
+        # gone" no longer means "the session is gone" (see kill).
+        self._kill_failed = False
 
         merged = merge_environment(env)
         exe = shutil.which(cmd, path=path_value(merged))
@@ -204,8 +207,16 @@ class PtySession(PtyBase):
         the watcher reaped the leader and no process of the session is left
         that has not exited. EPERM is not treated as success: the process it
         protects is still found by the scan, and kill() returns False.
+
+        A shell that exited on its own before any kill keeps its jobs: kill()
+        returns True without touching them, as a terminal emulator does, or
+        the idle reaper would take ``nohup server &`` down 30 s after
+        ``exit``. Once a kill of this session has failed, though, the shell
+        usually died in it while the job that refused the signal lives on, so
+        every later kill() verifies the whole session again. Returning True
+        on the dead leader alone closed the pane over a running process.
         """
-        if self._proc_dead.is_set():
+        if self._proc_dead.is_set() and not self._kill_failed:
             self._stop_writer()
             return True
         deadline = time.monotonic() + _KILL_VERIFY_S
@@ -214,10 +225,18 @@ class PtySession(PtyBase):
             # None: no /proc (macOS, BSD). Then the leader's group is all that
             # can be reached, and the reaped leader is the whole verification.
             members = process_usage.session_process_groups(self._pid)
+            if self._proc_dead.is_set() and members and self._pid in members:
+                # The leader was reaped, yet a live process holds its PID: the
+                # number was reused and leads a new session. Linux reuses a
+                # PID only once no process has it as session id, so ours is
+                # gone and these processes belong to someone else.
+                members = {}
             if self._proc_dead.is_set() and not members:
+                self._kill_failed = False
                 self._stop_writer()
                 return True
             if time.monotonic() >= deadline:
+                self._kill_failed = True
                 log.warning(
                     "session %s could not be stopped (%s)",
                     self._pid,

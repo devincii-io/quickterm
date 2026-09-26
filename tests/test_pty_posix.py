@@ -243,3 +243,54 @@ def test_missing_command_is_a_file_not_found_error():
             )
     finally:
         loop.close()
+
+
+async def test_a_kill_retry_after_a_failed_kill_verifies_the_whole_session(monkeypatch, tmp_path):
+    """The shell dies in a failed kill; a retry must not pass on the dead shell alone."""
+    rec = Recorder()
+    session = _spawn("bash", ["--norc", "--noprofile", "-i"], rec, cwd=str(tmp_path))
+    try:
+        await asyncio.sleep(0.3)
+        session.write(b"sh -c 'trap \"\" HUP; exec sleep 60' &\n")
+
+        def job_groups() -> set[int]:
+            members = process_usage.session_process_groups(session.pid) or {}
+            return set(members.values()) - {session.pid}
+
+        await _wait_until(lambda: len(job_groups()) == 1)
+        (job,) = job_groups()
+        real_killpg = os.killpg
+
+        def job_refuses(group, sig):
+            if group == job:
+                raise PermissionError(1, "Operation not permitted")  # a sudo child
+            real_killpg(group, sig)
+
+        monkeypatch.setattr(pty_posix.os, "killpg", job_refuses)
+        monkeypatch.setattr(pty_posix, "_KILL_VERIFY_S", 0.3)
+        assert session.kill() is False
+        await asyncio.wait_for(rec.exited.wait(), timeout=3)  # the shell is gone
+        assert session.alive is False
+        assert session.kill() is False  # the job is not
+        assert job_groups() == {job}
+
+        monkeypatch.undo()
+        assert session.kill() is True
+        assert process_usage.session_process_groups(session.pid) == {}
+    finally:
+        monkeypatch.undo()
+        _cleanup(session)
+        for pid in (process_usage.session_process_groups(session.pid) or {}):
+            os.kill(pid, 9)
+
+
+async def test_a_shell_that_exited_on_its_own_leaves_its_jobs_alone():
+    rec = Recorder()
+    session = _spawn("/bin/sh", ["-c", "set -m; sleep 30 & echo job=$!; exit 0"], rec)
+    await asyncio.wait_for(rec.exited.wait(), timeout=3)
+    job = int(rec.output.split(b"job=")[1].split()[0])
+    try:
+        assert session.kill() is True
+        assert job in (process_usage.session_process_groups(session.pid) or {})
+    finally:
+        os.kill(job, 9)
