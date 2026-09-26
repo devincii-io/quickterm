@@ -885,7 +885,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `onBinary` never do.
 - `windows.js` is the DOM-free half of multi-window ownership: which workspace
   this window may claim, what a refusal means, and the wording the user sees.
-  `main.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
+  `window_registry.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
   DELETE on `pagehide`); the decisions live here so they can be unit-tested.
   The rule it exists to enforce: two windows must never own one workspace,
   because the layout autosaves on every pane change and the loser's panes would
