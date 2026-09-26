@@ -223,9 +223,15 @@ def test_hardened_process_no_longer_finds_programs_in_the_launch_folder(monkeypa
     home.mkdir()
     empty_path = tmp_path / "bin"
     empty_path.mkdir()
+    from quickterm import pty_base
+
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("PATH", str(empty_path))
-    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    # setenv first, so teardown removes what the hardening sets; a bare
+    # delenv of an absent variable records nothing to restore.
+    monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "x")
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath")
+    monkeypatch.setattr(pty_base, "_PRIVATE_ENV", set())
     monkeypatch.chdir(launch_dir)
     # The hazard: an Explorer launch leaves the process in that folder, and a
     # planted claude.exe there wins over PATH.
@@ -237,6 +243,10 @@ def test_hardened_process_no_longer_finds_programs_in_the_launch_folder(monkeypa
     assert os.path.samefile(os.getcwd(), home)
     monkeypatch.chdir(launch_dir)  # even back in that folder
     assert shutil.which("claude") is None
+    # The guard is QuickTerm's own: a terminal's cmd.exe still runs programs
+    # from its current folder as it would anywhere else.
+    child_env = pty_base.merge_environment({})
+    assert not any(k.casefold() == "nodefaultcurrentdirectoryinexepath" for k in child_env)
 
 
 # --- app launches: autostart, hotkeys, the elevated first terminal ----------

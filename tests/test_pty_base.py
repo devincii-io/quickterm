@@ -56,6 +56,21 @@ def test_real_windows_environment_merges_case_insensitively(monkeypatch):
     assert merged["qt_merge_probe"] == "profile"
 
 
+def test_private_env_stays_out_of_children_unless_the_user_had_it(monkeypatch):
+    fake = SimpleNamespace(name="posix", environ={"PATH": "/bin", "USER_OWN": "1"})
+    monkeypatch.setattr(pty_base, "os", fake)
+    monkeypatch.setattr(pty_base, "_PRIVATE_ENV", set())
+
+    pty_base.set_private_env("QT_GUARD", "1")
+    pty_base.set_private_env("USER_OWN", "1")
+
+    assert fake.environ["QT_GUARD"] == "1"  # QuickTerm's own process has it
+    merged = merge_environment({})
+    assert "QT_GUARD" not in merged
+    assert merged["USER_OWN"] == "1"  # the user's own setting is inherited
+    assert merge_environment({"QT_GUARD": "0"})["QT_GUARD"] == "0"  # a profile may set it
+
+
 def _wait_for(predicate, timeout=2.0):
     deadline = time.monotonic() + timeout
     while not predicate():

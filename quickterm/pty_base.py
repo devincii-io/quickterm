@@ -31,6 +31,25 @@ DRAIN_IDLE_S = 0.15
 DRAIN_MAX_S = 1.0
 
 
+# Variables QuickTerm set on its own process that the user's environment did
+# not have. They protect QuickTerm, not the shells it starts.
+_PRIVATE_ENV: set[str] = set()
+
+
+def set_private_env(name: str, value: str) -> None:
+    """Set a variable for QuickTerm's own process, hidden from every terminal.
+
+    NoDefaultCurrentDirectoryInExePath keeps a planted taskkill.exe or pwsh.exe
+    in the launch folder from running in QuickTerm's place. Inherited, it
+    would also stop cmd.exe in every terminal from running a program in the
+    current folder without `.\\`, which is not QuickTerm's call to make. A
+    value the user had already set is theirs and still reaches the children.
+    """
+    if name not in os.environ:
+        _PRIVATE_ENV.add(name)
+    os.environ[name] = value
+
+
 def merge_environment(override: dict[str, str] | None) -> dict[str, str]:
     """The child's environment: QuickTerm's own, with the profile override on top.
 
@@ -40,6 +59,9 @@ def merge_environment(override: dict[str, str] | None) -> dict[str, str]:
     ``PATH``, and every lookup returned the inherited value first.
     """
     merged = dict(os.environ)
+    for name in _PRIVATE_ENV:
+        merged.pop(name, None)
+        merged.pop(name.upper(), None)
     if os.name == "nt":
         for key in override or {}:
             folded = key.casefold()

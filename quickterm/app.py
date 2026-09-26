@@ -242,7 +242,9 @@ def _harden_program_lookup() -> None:
     """
     if os.name != "nt":
         return
-    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+    from quickterm.pty_base import set_private_env
+
+    set_private_env("NoDefaultCurrentDirectoryInExePath", "1")
     try:
         os.chdir(Path.home())
     except (OSError, RuntimeError):
