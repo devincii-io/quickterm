@@ -122,8 +122,8 @@ test("the store survives a storage that throws", () => {
 test("a failed restore speaks only when nothing came back", () => {
   assert.equal(restoreFailureMessage(["api"], ["docs"]), null);
   assert.equal(restoreFailureMessage([], []), null);
-  assert.match(restoreFailureMessage([], ["docs"]), /“docs” did not come back/);
-  assert.match(restoreFailureMessage([], ["a", "b"]), /views of “a”, “b” did not come back/);
+  assert.match(restoreFailureMessage([], ["docs"]), /"docs" did not come back/);
+  assert.match(restoreFailureMessage([], ["a", "b"]), /views of "a", "b" did not come back/);
 });
 
 // ---- the rebuild, against a DOM stand-in ----
@@ -269,7 +269,7 @@ test("nothing coming back is said once, and the store then forgets the old tree"
   const result = await views.restoreSaved({ exists: (name) => name !== "gone" });
   assert.deepEqual(result, { restored: [], failed: ["api"] });
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /“gone”, “api”/);
+  assert.match(errors[0], /"gone", "api"/);
   assert.equal(views.views().length, 1);
   assert.equal(store.text, null, "a lone primary leaves nothing stored");
 });

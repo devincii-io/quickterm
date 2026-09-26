@@ -204,7 +204,7 @@ export function viewArrangementStore(storage = null) {
 // answer.
 export function restoreFailureMessage(restored, failed) {
   if (restored.length || !failed.length) return null;
-  const names = failed.map((name) => `“${name}”`).join(", ");
+  const names = failed.map((name) => `"${name}"`).join(", ");
   return failed.length === 1
     ? `The tiled view of ${names} did not come back: it is open in another window or no longer saved.`
     : `The tiled views of ${names} did not come back: they are open in another window or no longer saved.`;
