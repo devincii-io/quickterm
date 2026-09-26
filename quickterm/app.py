@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__, launch
+from quickterm import __version__, cli, launch
 from quickterm.server import client_host, create_app
 from quickterm.windows import (
     WindowRegistry,
@@ -174,13 +174,23 @@ class _DesktopApi:
 
 
 def main() -> None:
+    argv = sys.argv[1:]
+    # A verb (`quickterm ls`, `new`, `open`, `send`) drives the running app and
+    # exits; nothing below runs for it. Only `new` with no app to hand its
+    # launch to comes back here, to start the app with that launch.
+    handoff: dict[str, str] | None = None
+    if cli.is_command(argv):
+        outcome = cli.run(argv)
+        if isinstance(outcome, int):
+            sys.exit(outcome)
+        argv, handoff = outcome.argv, outcome.handoff
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
     parser.add_argument(
         "path", nargs="?", help="open a terminal in this directory (Explorer 'Open QuickTerm here')"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     open_dir = None
     if args.path:
         candidate = os.path.abspath(os.path.expanduser(args.path))
@@ -213,6 +223,11 @@ def main() -> None:
     if not elevated and _already_running(cfg.port, cfg.host):
         if open_dir:
             _queue_running_launch(cfg.port, open_dir, cfg.host)
+        if handoff:
+            # Another app came up between the verb's check and this one.
+            failure = cli.post_launch(cfg.port, handoff, cfg.host)
+            if failure:
+                log.error("command-line launch handoff failed: %s", failure)
         if sys.platform == "win32":
             from quickterm.hotkeys import summon_window
 
@@ -221,11 +236,13 @@ def main() -> None:
             _launch_window(cfg.port, cwd=open_dir, host=cfg.host)
         return
     if sys.platform == "win32":
-        if not _run_desktop(cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir):
+        if not _run_desktop(
+            cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir, handoff=handoff
+        ):
             sys.exit("QuickTerm could not create its native desktop window.")
         return
     try:
-        asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir))
+        asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir, handoff=handoff))
     except KeyboardInterrupt:
         pass
 
@@ -357,6 +374,7 @@ async def _serve(
     cwd: str | None = None,
     windows: WindowRegistry | None = None,
     open_window: Callable[[str | None, str | None], str] | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
     from quickterm.ws_protocol import WebSocketProtocol
@@ -402,6 +420,7 @@ async def _serve(
             launch_window=launch_window,
             initial_launch=initial_launch,
             cwd=cwd,
+            handoff=handoff,
         )
     )
     reaper = asyncio.ensure_future(_reap_loop(manager, cfg))
@@ -610,6 +629,7 @@ def _run_desktop(
     initial_launch: dict[str, Any] | None = None,
     elevated: bool = False,
     cwd: str | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> bool:
     """Run the backend beside a native Windows WebView on the main thread."""
     if sys.platform != "win32":
@@ -641,6 +661,7 @@ def _run_desktop(
                     elevated=elevated,
                     windows=registry,
                     open_window=_open_window_hook(viewers),
+                    handoff=handoff,
                 )
             )
         except BaseException as exc:
@@ -822,6 +843,7 @@ async def _after_ready(
     launch_window: bool = True,
     initial_launch: dict[str, Any] | None = None,
     cwd: str | None = None,
+    handoff: dict[str, str] | None = None,
 ) -> None:
     while not server.started:
         await asyncio.sleep(0.05)
@@ -841,10 +863,25 @@ async def _after_ready(
         )
     else:
         await _spawn_autostart(manager, cfg)
+    if handoff:
+        await _queue_startup_handoff(cfg, handoff)
     if ready_event is not None:
         ready_event.set()
     if launch_window:
         _launch_window(cfg.port, cwd=cwd, host=cfg.host)
+
+
+async def _queue_startup_handoff(cfg: "AppConfig", handoff: dict[str, str]) -> None:
+    """Queue the `quickterm new` this app was started for, through its own route.
+
+    Posting to /api/launches runs the same checks as a launch handed to an app
+    that was already up, and the window claims it like any other. Before the
+    window opens, so a refusal lands in `launch_error`, which the window shows
+    once it has booted.
+    """
+    failure = await asyncio.to_thread(cli.post_launch, cfg.port, handoff, cfg.host)
+    if failure:
+        _report_launch_failure(cfg, f"quickterm new: {failure}")
 
 
 async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
