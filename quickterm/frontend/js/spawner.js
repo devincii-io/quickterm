@@ -6,15 +6,19 @@ import { SCRATCH_WS } from "./boot_context.js";
 import { launchOptions, repeatLaunchOptions } from "./launch_options.js";
 import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
 
-// With no personal profiles, fall back to the first available system shell.
-export function defaultSystemSpec(terminalInventory) {
+// With no personal profile to open, the system shell named by `preferred`
+// (a default_profile such as "git-bash"), else the first one available.
+export function defaultSystemSpec(terminalInventory, preferred = "") {
   const types = (terminalInventory && terminalInventory.types) || [];
-  const usable = types.find((type) => type.executable && type.available !== false
-    && !["custom", "claude-code", "ssh", "sftp"].includes(type.id));
+  const isUsable = (type) => type.executable && type.available !== false
+    && !["custom", "claude-code", "ssh", "sftp"].includes(type.id);
+  const usable = types.find((type) => type.id === preferred && isUsable(type)) || types.find(isUsable);
   if (!usable) return null;
+  // The same arguments the new-terminal menu starts these shells with.
   const args = usable.id === "powershell-core" || usable.id === "windows-powershell"
     ? ["-NoLogo"]
-    : usable.id === "wsl" ? ["--cd", "~"] : [];
+    : usable.id === "wsl" ? ["--cd", "~"]
+      : ["git-bash", "bash", "zsh", "fish"].includes(usable.id) ? ["-l"] : [];
   return { cmd: usable.executable, args, name: usable.label, terminalType: usable.id };
 }
 
@@ -62,10 +66,13 @@ export function createSpawner({
   // choice, not "unset". Falling through to profiles[0] made that option a
   // no-op and handed every new pane the first personal profile instead.
   function defaultProfile() {
-    if (state.cfg.default_profile === "") return null;
-    return state.profiles.find((profile) => profile.name === state.cfg.default_profile)
-      || state.profiles[0]
-      || null;
+    const name = state.cfg.default_profile;
+    if (name === "") return null;
+    const profile = state.profiles.find((item) => item.name === name);
+    if (profile) return profile;
+    // A system shell id ("git-bash") is a default of its own, not a profile.
+    if ((state.terminalInventory?.types || []).some((type) => type.id === name)) return null;
+    return state.profiles[0] || null;
   }
 
   // Where a new terminal should start when the caller has no directory of its
@@ -170,7 +177,7 @@ export function createSpawner({
     }
     const profile = defaultProfile();
     if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride), {});
-    const system = defaultSystemSpec(state.terminalInventory);
+    const system = defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
     if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
     pane.showNotice("[no shell found, add one in settings]");
     return Promise.resolve(null);
@@ -208,7 +215,7 @@ export function createSpawner({
         claudeMode: normalClaudeSplitMode(profile),
       });
     }
-    const system = defaultSystemSpec(state.terminalInventory);
+    const system = defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
     if (!system) return spawnDefaultInto(pane);
     const choice = { kind: "system", id: system.terminalType, ...system };
     return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice)) });

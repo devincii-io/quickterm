@@ -538,8 +538,10 @@ export function initLauncher(el, options) {
   const choices = menuChoices.filter(canLaunch);
   let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
   if (!selected && options.defaultProfile) {
-    selected = choices.find((choice) =>
-      choice.key === `profile:${options.defaultProfile}` || choice.key === `system:${options.defaultProfile}`);
+    // A profile name, or a system shell id ("git-bash"; "wsl" is its first
+    // distribution). A profile of the same name wins.
+    selected = choices.find((choice) => choice.key === `profile:${options.defaultProfile}`)
+      || choices.find((choice) => choice.kind === "system" && choice.id === options.defaultProfile);
   }
   selected ||= choices[0] || null;
 

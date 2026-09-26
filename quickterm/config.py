@@ -118,7 +118,9 @@ class AppConfig:
     # Root folder for the disposable scratch workspace. Empty = a QuickTerm
     # folder under the system temp directory, created on demand.
     scratch_dir: str = ""
-    default_profile: str = ""  # empty = first profile, else first system shell
+    # A profile name, or a detected system shell id such as "git-bash".
+    # Empty = first profile, else first system shell.
+    default_profile: str = ""
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)

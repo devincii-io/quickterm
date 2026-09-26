@@ -18,8 +18,13 @@ export function renderGeneralSettings(host) {
       String(cfg.font_size || 14),
     );
     fontSize.addEventListener("change", () => { cfg.font_size = Number(fontSize.value); });
+    // A detected shell is a default of its own (stored as its id, "git-bash"),
+    // so opening Git Bash by default needs no profile.
+    const shells = (this.terminalInventory?.types || []).filter((type) => type.executable
+      && type.available !== false && !["custom", "claude-code", "ssh", "sftp"].includes(type.id));
     const profileOptions = [
       { value: "", label: "System default shell" },
+      ...shells.map((type) => ({ value: type.id, label: type.label })),
       ...(cfg.profiles || []).map((profile) => ({ value: profile.name, label: profile.name })),
     ];
     const defaultProfile = this._select(profileOptions, cfg.default_profile || "");
