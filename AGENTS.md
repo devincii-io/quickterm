@@ -32,7 +32,8 @@ EOF: the Windows process handle, POSIX `waitpid`; then a short drain, then one
 because a full stdin pipe blocks, and on POSIX the fd lock is never held
 across a wait). The shared queue/writer/posting lives in `pty_base.py`; the
 backends keep only spawn, raw I/O, resize and kill. → `session_manager.py`:
-registry, scrollback ring as a deque of chunks (O(chunk) trim; do not go back
+registry (ring in `scrollback.py`, fan-out in `fanout.py`, reaper in
+`reaper.py`), scrollback ring as a deque of chunks (O(chunk) trim; do not go back
 to a flat bytearray) whose front never starts mid-sequence and whose replay
 starts with a preamble restoring the DEC modes (alt screen, bracketed paste,
 mouse, ...) in effect there, byte-bounded per-subscriber fan-out queues

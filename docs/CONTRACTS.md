@@ -269,7 +269,15 @@ than the child (creation times; a link whose times cannot be read is kept,
 a dropped one reports parent 0). Without that, a new session whose root got
 such a PID counted an unrelated orphan as its child and stayed busy forever.
 
-## quickterm/session_manager.py
+## quickterm/session_manager.py (with scrollback.py, fanout.py, reaper.py)
+
+`session_manager.py` holds the registry, `SessionInfo`/`Session`, busy state
+and metrics and the PTY callbacks, and re-exports everything below. The ring
+(`ScrollbackRing`: chunks, cap, the clean-front trim, the DEC mode tracker and
+string handling) lives in `scrollback.py` with no asyncio or PTY code; the
+per-viewer queues (`AttachmentQueue`, `Attachment`, and `Viewers`, whose
+`publish()` holds the overflow-to-resync policy) in `fanout.py`; the keep and
+reap rules and the claim/kill/release pass (`Reaper`) in `reaper.py`.
 
 ```python
 QUEUE_MAX_BYTES = 2 * 1024 * 1024      # pending bytes per viewer before a resync
