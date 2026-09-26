@@ -16,6 +16,7 @@ from quickterm.api import (
     launches,
     sessions,
     system,
+    transcripts,
     windows as window_routes,
     workspaces,
 )
@@ -94,6 +95,7 @@ def create_app(
     app.add_middleware(LocalGuard, ctx=ctx)
     for routes in (system, sessions, launches, window_routes, workspaces, config, assets, attach):
         routes.register(app, ctx)
+    transcripts.register(app, ctx)
     _mount_frontend(app)
     return app
 
