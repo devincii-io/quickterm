@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import functools
 import json
 import logging
 import os
@@ -17,13 +18,14 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__
-from quickterm.server import create_app
+from quickterm import __version__, launch
+from quickterm.server import client_host, create_app
 from quickterm.windows import (
     WindowRegistry,
     WorkspaceClaimed,
@@ -45,6 +47,9 @@ log = logging.getLogger("quickterm")
 # left asking a window that refuses to go away.
 _updating = threading.Event()
 _shutdown_hook: Callable[[], None] | None = None
+# Hotkey launches run as tasks nobody awaits; the loop keeps only weak
+# references, so they are held here until they finish.
+_launch_tasks: set[asyncio.Task] = set()
 
 
 def begin_update_shutdown() -> None:
@@ -181,35 +186,39 @@ def main() -> None:
         candidate = os.path.abspath(os.path.expanduser(args.path))
         if os.path.isdir(candidate):
             open_dir = candidate
+    # The launch folder is captured above, so the process may leave it now.
+    _harden_program_lookup()
     if sys.platform == "win32":
         _check_windows_build()
     from quickterm.config import load_config
 
     cfg = load_config()
+    cfg.runtime_overrides = set()
+    cfg.launch_error = None
     if args.port is not None:
         if not 0 <= args.port <= 65535:
             parser.error("--port must be between 0 and 65535")
-        cfg.port = _free_port() if args.port == 0 else args.port
+        _override_port(cfg, _free_port(cfg.host) if args.port == 0 else args.port)
     initial_launch = None
     elevated = bool(args.elevated_spec)
     if args.elevated_spec:
         from quickterm.elevation import decode_spec
 
         initial_launch = decode_spec(args.elevated_spec)
-        cfg.port = _free_port()
+        _override_port(cfg, _free_port(cfg.host))
     _setup_logging()
     log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
     # One ordinary backend and one viewer: later launches hand work to it and
     # summon it instead of creating another window onto the same session set.
-    if not elevated and _already_running(cfg.port):
+    if not elevated and _already_running(cfg.port, cfg.host):
         if open_dir:
-            _queue_running_launch(cfg.port, open_dir)
+            _queue_running_launch(cfg.port, open_dir, cfg.host)
         if sys.platform == "win32":
             from quickterm.hotkeys import summon_window
 
             summon_window()
         else:
-            _launch_window(cfg.port, cwd=open_dir)
+            _launch_window(cfg.port, cwd=open_dir, host=cfg.host)
         return
     if sys.platform == "win32":
         if not _run_desktop(cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir):
@@ -219,6 +228,49 @@ def main() -> None:
         asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir))
     except KeyboardInterrupt:
         pass
+
+
+def _harden_program_lookup() -> None:
+    """Stop Windows program lookups from searching QuickTerm's own folder.
+
+    CreateProcess with a bare name, and shutil.which, look in the current
+    directory before PATH. "Open QuickTerm here" starts the app in the folder
+    the user clicked (an untrusted clone, Downloads), and an elevated instance
+    inherits that folder, so a taskkill.exe or pwsh.exe planted there ran
+    instead of the real one. The launch folder travels explicitly as ?cwd=, so
+    nothing needs the process to stay in it.
+
+    NoDefaultCurrentDirectoryInExePath would say the same thing, but it is an
+    environment variable: every terminal, the relaunched app after an update
+    and VS Code opened from a pane would inherit it, and cmd.exe there would
+    stop running programs from its own folder. Leaving the folder is enough.
+    """
+    if os.name != "nt":
+        return
+    for folder in (Path.home(), Path(os.environ.get("SystemRoot", r"C:\Windows"))):
+        try:
+            os.chdir(folder)
+            return
+        except (OSError, RuntimeError):
+            continue
+    log.warning("could not leave the launch folder")
+
+
+def _override_port(cfg: "AppConfig", port: int) -> None:
+    """Run on `port` without it ever reaching config.json.
+
+    `runtime_overrides` names what this run changed on the live config; PUT
+    /api/config guards exactly those names against a stale client writing the
+    runtime value back, and nothing else.
+    """
+    cfg.port = port
+    overrides = set(getattr(cfg, "runtime_overrides", None) or ())
+    overrides.add("port")
+    cfg.runtime_overrides = overrides
+
+
+def _base_url(port: int, host: str = "127.0.0.1") -> str:
+    return f"http://{client_host(host)}:{port}"
 
 
 def _setup_logging() -> None:
@@ -256,21 +308,21 @@ def _setup_logging() -> None:
         )
 
 
-def _already_running(port: int) -> bool:
+def _already_running(port: int, host: str = "127.0.0.1") -> bool:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.6) as resp:
+        with urllib.request.urlopen(f"{_base_url(port, host)}/api/health", timeout=0.6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return isinstance(data, dict) and data.get("app") == "quickterm"
     except Exception:
         return False
 
 
-def _queue_running_launch(port: int, cwd: str) -> bool:
+def _queue_running_launch(port: int, cwd: str, host: str = "127.0.0.1") -> bool:
     """Hand Explorer's folder launch to the already-running authenticated app."""
     from quickterm import auth
 
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/launches",
+        f"{_base_url(port, host)}/api/launches",
         data=json.dumps({"cwd": cwd}).encode("utf-8"),
         headers={"Content-Type": "application/json", auth.HEADER: auth.get_or_create_token()},
         method="POST",
@@ -311,6 +363,7 @@ async def _serve(
 
     from quickterm import auth
 
+    _prepare_workspaces(elevated)
     loop = asyncio.get_running_loop()
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
     app = create_app(
@@ -339,9 +392,6 @@ async def _serve(
     )
     if state is not None:
         state.update(server=server, loop=loop, manager=manager)
-    # The "scratch" workspace is ephemeral: it only mirrors the current scratch
-    # layout during a run. Discard at startup too, so a crash can't leak it.
-    _discard_scratch_workspace()
     hotkeys = _start_hotkeys(loop, manager, cfg)
     boot = asyncio.ensure_future(
         _after_ready(
@@ -460,7 +510,9 @@ class _ViewerWindows:
         api = _DesktopApi(self)
         window = webview.create_window(
             window_title(self._base_title, name, primary=False),
-            _window_url(self._cfg.port, cwd, workspace=name, window_id=window_id),
+            _window_url(
+                self._cfg.port, cwd, host=self._cfg.host, workspace=name, window_id=window_id
+            ),
             width=1280,
             height=800,
             min_size=(760, 480),
@@ -607,7 +659,7 @@ def _run_desktop(
     desktop_api = _DesktopApi(viewers)
     window = webview.create_window(
         title,
-        _window_url(cfg.port, cwd, window_id=window_id, primary=True),
+        _window_url(cfg.port, cwd, host=cfg.host, window_id=window_id, primary=True),
         width=1280,
         height=800,
         min_size=(760, 480),
@@ -719,9 +771,15 @@ def _wire_native_file_drop(window: Any) -> None:
     window.events.loaded += install
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+def _free_port(host: str = "127.0.0.1") -> int:
+    # Probe the address family the server will bind: a port free on
+    # 127.0.0.1 says nothing about ::1.
+    address = client_host(host).strip("[]")
+    if address == "localhost":
+        address = "127.0.0.1"
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.bind((address, 0))
         return int(sock.getsockname()[1])
 
 
@@ -729,6 +787,7 @@ def _window_url(
     port: int,
     cwd: str | None = None,
     *,
+    host: str = "127.0.0.1",
     workspace: str | None = None,
     window_id: str | None = None,
     primary: bool = False,
@@ -751,7 +810,7 @@ def _window_url(
     if primary:
         params.append(("primary", "1"))
     query = f"?{urllib.parse.urlencode(params)}" if params else ""
-    return f"http://127.0.0.1:{port}/{query}#t={auth.get_or_create_token()}"
+    return f"{_base_url(port, host)}/{query}#t={auth.get_or_create_token()}"
 
 
 async def _after_ready(
@@ -767,13 +826,25 @@ async def _after_ready(
     while not server.started:
         await asyncio.sleep(0.05)
     if initial_launch:
-        manager.spawn(**initial_launch)
+        # The elevated instance's first terminal goes through the same
+        # resolver as every other launch: its folder is checked and the PuTTY
+        # tools land on its PATH.
+        await _launch_terminal(
+            manager,
+            cfg,
+            initial_launch.get("name") or initial_launch.get("cmd") or "",
+            cmd=initial_launch.get("cmd"),
+            args=initial_launch.get("args"),
+            env=initial_launch.get("env"),
+            name=initial_launch.get("name"),
+            request_cwd=initial_launch.get("cwd"),
+        )
     else:
-        _spawn_autostart(manager, cfg)
+        await _spawn_autostart(manager, cfg)
     if ready_event is not None:
         ready_event.set()
     if launch_window:
-        _launch_window(cfg.port, cwd=cwd)
+        _launch_window(cfg.port, cwd=cwd, host=cfg.host)
 
 
 async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
@@ -782,7 +853,7 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
     while True:
         await asyncio.sleep(REAP_INTERVAL_S)
         try:
-            # Everything in this pass is blocking: _workspace_session_ids()
+            # Everything in this pass is blocking: referenced_session_ids()
             # globs and parses every workspace file, busy_ids() takes a full
             # Toolhelp snapshot, and killing a live shell spawns taskkill /T /F
             # and waits on process handles (hundreds of ms). On the event loop
@@ -804,7 +875,23 @@ async def _reap_loop(manager: "SessionManager", cfg: "AppConfig") -> None:
 
 def _reap_pass(manager: "SessionManager", idle_timeout_s: int) -> list:
     """One reaper pass. Runs in a worker thread, never on the event loop."""
-    return manager.reap_idle(idle_timeout_s, _workspace_session_ids())
+    import quickterm.workspace as workspace
+
+    return manager.reap_idle(idle_timeout_s, workspace.referenced_session_ids())
+
+
+def _prepare_workspaces(elevated: bool) -> None:
+    if elevated:
+        # An elevated instance is a second backend with its own window
+        # registry. Sharing workspace files let both autosave one layout, and
+        # its scratch discard deleted the normal instance's live scratch.json.
+        # So it gets its own folder, before anything reads or deletes a file.
+        import quickterm.workspace as workspace
+
+        workspace.set_namespace("elevated")
+    # The "scratch" workspace is ephemeral: it only mirrors the current scratch
+    # layout during a run. Discard at startup too, so a crash can't leak it.
+    _discard_scratch_workspace()
 
 
 def _discard_scratch_workspace() -> None:
@@ -817,55 +904,43 @@ def _discard_scratch_workspace() -> None:
         log.debug("could not discard scratch workspace", exc_info=True)
 
 
-def _workspace_session_ids() -> set[str]:
-    import quickterm.workspace as workspace
-
-    ids: set[str] = set()
-    for name in workspace.list_workspaces():
-        if name.startswith("."):
-            continue
-        ws = workspace.load_workspace(name)
-        if ws is not None:
-            _collect_session_ids(ws.layout, ids)
-            ids.update(getattr(ws, "session_ids", []) or [])
-    return ids
-
-
-def _collect_session_ids(node: Any, out: set[str]) -> None:
-    if not isinstance(node, dict):
-        return
-    if node.get("type") == "split":
-        for child in node.get("children", []):
-            _collect_session_ids(child, out)
-        return
-    sid = node.get("session_id")
-    if isinstance(sid, str) and sid:
-        out.add(sid)
-
-
-def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
-    for prof in cfg.profiles:
+async def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
+    for prof in list(cfg.profiles):
         if prof.autostart:
-            _spawn_profile(manager, prof, cfg)
+            await _launch_profile(manager, prof, cfg)
 
 
-def _spawn_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
+async def _launch_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
+    # Identical to a launch from the UI, because it is the same resolver: a
+    # profile does not mean something else when a hotkey starts it.
+    await _launch_terminal(manager, cfg, prof.name, profile=prof, name=prof.name)
+
+
+async def _launch_terminal(
+    manager: "SessionManager", cfg: "AppConfig", label: str, **request: Any
+) -> None:
+    """Resolve and spawn one terminal nobody is waiting on; report, never raise.
+
+    Autostart, hotkeys and the elevated first terminal have no request to
+    answer, so a failure used to vanish into `except Exception: pass`. It is
+    logged and kept on the live config as `launch_error`, which the UI shows.
+    """
+    from quickterm.session_manager import SessionLimitError, SpawnError
+
     try:
-        # Keep autostart/global-hotkey launches identical to API/UI launches:
-        # terminal types, WSL distro, and start_command must all be resolved.
-        from quickterm.server import _resolve_profile
+        spec = await asyncio.to_thread(functools.partial(launch.resolve, cfg, **request))
+        await manager.spawn_async(**spec.spawn_kwargs())
+    except (launch.LaunchError, SpawnError, SessionLimitError) as exc:
+        _report_launch_failure(cfg, launch.describe_failure(label, exc))
+    except Exception as exc:
+        # A broken profile must not take down startup or the hotkey thread.
+        log.debug("terminal launch failed", exc_info=True)
+        _report_launch_failure(cfg, launch.describe_failure(label, exc))
 
-        cmd, args, cwd = _resolve_profile(prof)
-        manager.spawn(
-            name=prof.name,
-            profile=prof.name,
-            cmd=cmd,
-            args=args,
-            cwd=cwd,
-            env=dict(prof.env),
-        )
-    except Exception:
-        pass  # a broken profile must not take down startup
+
+def _report_launch_failure(cfg: "AppConfig", message: str) -> None:
+    cfg.launch_error = message
+    log.warning("terminal launch failed: %s", message)
 
 
 def _start_hotkeys(
@@ -888,7 +963,7 @@ def _start_hotkeys(
         for prof in cfg.profiles:
             if not prof.keybinding:
                 continue
-            ok = hk.register(prof.keybinding, _profile_callback(manager, prof, cfg))
+            ok = hk.register(prof.keybinding, _profile_callback(loop, manager, prof, cfg))
             if report and ok is False:
                 failed.append(f"{prof.keybinding} ({prof.name})")
         toggle = getattr(hotkeys_mod, "toggle_window", None) or getattr(
@@ -909,9 +984,16 @@ def _start_hotkeys(
 
 
 def _profile_callback(
-    manager: "SessionManager", prof: "Profile", cfg: "AppConfig"
+    loop: asyncio.AbstractEventLoop, manager: "SessionManager", prof: "Profile", cfg: "AppConfig"
 ) -> Callable[[], None]:
-    return lambda: _spawn_profile(manager, prof, cfg)
+    # HotkeyManager runs callbacks on the loop thread; the launch itself
+    # resolves off the loop, so the callback only schedules it.
+    def fire() -> None:
+        task = loop.create_task(_launch_profile(manager, prof, cfg))
+        _launch_tasks.add(task)
+        task.add_done_callback(_launch_tasks.discard)
+
+    return fire
 
 
 def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> None:
@@ -942,8 +1024,8 @@ def _find_browser() -> str | None:
     return None
 
 
-def _launch_window(port: int, cwd: str | None = None) -> None:
-    url = _window_url(port, cwd)
+def _launch_window(port: int, cwd: str | None = None, host: str = "127.0.0.1") -> None:
+    url = _window_url(port, cwd, host=host)
     browser = _find_browser()
     try:
         if browser:

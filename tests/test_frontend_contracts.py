@@ -148,10 +148,85 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     assert 'releaseFocus(FOCUS_OWNER)' in browser
     # Both places a workspace folder is chosen: naming a new one, and
     # repointing an existing card. Terminal settings has no folder field at all
-    # now, so the dashboard is the only picker left.
+    # now; the only other folder is scratch's, under Settings > General.
     assert "folderPickerControl(" in dashboard
     assert dashboard.count("folderPickerControl(") >= 2
     assert "folderPickerControl(" not in settings
+    general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
+    assert "folderPickerControl(scratch," in general
+
+
+def test_the_scratch_folder_is_a_setting_that_round_trips():
+    # scratch_dir could only be set by hand-editing config.json. Settings PUTs
+    # the whole draft it loaded from /api/config/full, so the field only has to
+    # write into that draft; main.js re-reads the resolved root after a save.
+    general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    panels = PANELS_JS.read_text(encoding="utf-8")
+    assert "this._textInput(cfg.scratch_dir || \"\"" in general
+    assert "cfg.scratch_dir = scratch.value.trim();" in general
+    assert 'this._field("Scratch folder", scratchField,' in general
+    assert "this.settingsDraft = JSON.parse(JSON.stringify(cfg));" in panels
+    assert "await api.putConfig(this.settingsDraft);" in panels
+    assert "scratchRoot = fresh.scratch_dir || scratchRoot;" in main
+
+
+def test_a_background_launch_failure_reaches_the_banner_once():
+    # Autostart and hotkey launches have no pane to report into; app.py keeps
+    # the latest failure as launch_error on GET /api/config.
+    main = MAIN_JS.read_text(encoding="utf-8")
+    start = main.index("  function reportLaunchError(value) {")
+    end = main.index("\n  }\n", start)
+    body = main[start:end]
+    assert "text !== shownLaunchError" in body
+    assert "!embedded && windowIsPrimary" in body
+    assert "showError(" in body
+    assert "shownLaunchError = text;" in body
+    assert "reportLaunchError(cfg.launch_error);" in main
+    assert "reportLaunchError(fresh.launch_error);" in main
+    # Boot reports it after the restore, so the restore cannot overwrite it.
+    assert main.index("reportLaunchError(cfg.launch_error);") > main.index(
+        "const restored = await restoreWorkspace(currentWorkspace);"
+    )
+    # A hotkey fires while the window is in the background: coming back to it
+    # (focus, or the page becoming visible) looks again.
+    assert 'window.addEventListener("focus", checkLaunchError);' in main
+    visible = main[main.index('document.addEventListener("visibilitychange", () => {\n    if (!document.hidden) {'):]
+    assert "checkLaunchError();" in visible[: visible.index("\n  });")]
+
+
+def test_only_real_user_input_marks_a_session_touched():
+    # The backend counted every WebSocket byte as use, including xterm's
+    # automatic replies to terminal queries, so an untyped shell was never
+    # reaped. Only onKey, the native paste shortcut, any paste or IME
+    # composition on xterm's textarea, and sendText (snippets and drops) reach
+    # _markWrote, which sends one touch frame per connection.
+    pane = PANE_JS.read_text(encoding="utf-8")
+    protocol = (FRONTEND_JS / "pane_protocol.js").read_text(encoding="utf-8")
+    assert "this.term.onKey(() => this._markWrote());" in pane
+    # Input that never fires onKey (menu or middle-click paste, IME, dictation).
+    assert 'this.term.textarea?.addEventListener("paste", typed, true);' in pane
+    assert 'this.term.textarea?.addEventListener("compositionend", typed, true);' in pane
+    mark = pane[pane.index("  _markWrote() {"):pane.index("  _sendTouch() {")]
+    assert "this._sendTouch();" in mark
+    touch = pane[pane.index("  _sendTouch() {"):]
+    touch = touch[:touch.index("\n  }\n")]
+    assert 'this.ws.send(JSON.stringify({ type: "touch" }));' in touch
+    assert "this._protocol.takeTouch()" in touch
+    for handler in ("this.term.onData((d) => {", "this.term.onBinary((d) => {"):
+        body = pane[pane.index(handler):]
+        body = body[:body.index("\n    });")]
+        assert "_markWrote" not in body and "touch" not in body
+    replay = protocol[protocol.index("  beginReplay() {"):protocol.index("  takeTouch() {")]
+    assert "this.touchSent = false;" in replay
+
+
+def test_the_api_client_carries_no_dead_wrappers():
+    api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
+    assert "getSnippets" not in api
+    assert "sessionBusy" not in api
+    assert "/api/snippets" not in api
+    assert '".scratch"' not in api
 
 
 def test_dashboard_refreshes_by_patching_instead_of_rebuilding():

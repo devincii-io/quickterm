@@ -1,28 +1,40 @@
 import asyncio
+import ctypes
 import logging
 import os
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
+import pytest
+
+from quickterm import process_usage
+
 if os.name == "nt":
+    from ctypes import wintypes
+
+    import winpty
+
     import quickterm.pty_session as pty_module
     from quickterm.pty_session import PtySession
 else:
     from quickterm.pty_posix import PtySession
 
+windows_only = pytest.mark.skipif(os.name != "nt", reason="ConPTY backend")
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX backend")
 
+
+@windows_only
 def test_raw_io_debug_requires_exact_opt_in(monkeypatch):
-    if os.name != "nt":
-        return
     monkeypatch.setenv("QUICKTERM_DEBUG_IO", "0")
     assert pty_module._debug_io_enabled() is False
     monkeypatch.setenv("QUICKTERM_DEBUG_IO", "1")
     assert pty_module._debug_io_enabled() is True
 
 
+@windows_only
 def test_gui_host_console_is_allocated_hidden_and_reused(monkeypatch):
-    if os.name != "nt":
-        return
-
     calls: list[object] = []
     windows = iter([0, 1234])
 
@@ -51,10 +63,8 @@ def test_gui_host_console_is_allocated_hidden_and_reused(monkeypatch):
     assert calls == ["get", "alloc", "get", ("hide", 1234, 0)]
 
 
+@windows_only
 def test_write_failure_is_available_in_debug_log(caplog):
-    if os.name != "nt":
-        return
-
     class BrokenPty:
         def write(self, _text):
             raise RuntimeError("write broke")
@@ -146,14 +156,12 @@ async def test_kill_terminates_tree():
     assert sess.exit_code is not None
 
 
+@posix_only
 async def test_kill_reports_verified_termination():
-    """kill() must report VERIFIED termination, per CONTRACTS.md.
+    """kill() returns True only once the process is really gone.
 
-    The POSIX backend used to `return True` unconditionally, swallowing EPERM.
-    A surviving process then disappeared from the UI while it kept running.
+    The EPERM case, where it must return False, is in test_pty_posix.py.
     """
-    if os.name == "nt":
-        return  # the Windows backend has its own verification tests
     loop = asyncio.get_running_loop()
     session = PtySession(
         "sleep", ["5"], None, {}, 80, 24, loop,
@@ -167,19 +175,216 @@ async def test_kill_reports_verified_termination():
             session.kill()
 
 
+@posix_only
 async def test_resize_after_exit_does_not_touch_a_recycled_descriptor():
-    """_read_loop closes the fd and clears it; resize must not use a stale one."""
-    if os.name == "nt":
-        return
+    """The watcher closes the fd and clears it; resize must not use a stale one."""
     loop = asyncio.get_running_loop()
+    exited = asyncio.Event()
     session = PtySession(
         "true", [], None, {}, 80, 24, loop,
-        on_output=lambda data: None, on_exit=lambda code: None,
+        on_output=lambda data: None, on_exit=lambda code: exited.set(),
     )
-    for _ in range(200):
-        if not session.alive:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(exited.wait(), timeout=5)
     assert session.alive is False
     assert session._fd == -1
     session.resize(120, 40)  # must be a silent no-op, not an ioctl on a reused fd
+
+
+@windows_only
+def test_taskkill_runs_by_absolute_path():
+    command = pty_module._taskkill_command(4242)
+    system32 = os.path.join(os.environ["SystemRoot"], "System32")
+    assert os.path.isabs(command[0])
+    assert os.path.normcase(command[0]) == os.path.normcase(os.path.join(system32, "taskkill.exe"))
+    assert command[1:] == ["/T", "/F", "/PID", "4242"]
+
+
+@windows_only
+def test_winpty_spawn_failure_is_an_os_error(monkeypatch):
+    class FailingPty:
+        def __init__(self, cols, rows):
+            pass
+
+        def spawn(self, *args, **kwargs):
+            raise winpty.WinptyError("the directory name is invalid")
+
+    monkeypatch.setattr(pty_module.winpty, "PTY", FailingPty)
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(OSError, match="could not start cmd.exe: the directory name"):
+            PtySession(
+                "cmd.exe", [], None, {}, 80, 24, loop,
+                on_output=lambda _d: None, on_exit=lambda _c: None,
+            )
+    finally:
+        loop.close()
+
+
+def test_missing_command_is_file_not_found():
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(FileNotFoundError, match="command not found: no-such-cmd-qt"):
+            PtySession(
+                "no-such-cmd-qt", [], None, {}, 80, 24, loop,
+                on_output=lambda _d: None, on_exit=lambda _c: None,
+            )
+    finally:
+        loop.close()
+
+
+async def _session_with_child(script="import time; time.sleep(30)", count=1):
+    """An interactive shell running a long foreground Python child."""
+    cmd, args, newline = _interactive()
+    sess, chunks, exited, _ = await _spawn(cmd, args)
+    await asyncio.sleep(0.3)
+    sess.write(f'"{sys.executable}" -c "{script}"'.encode() + newline)
+    deadline = time.monotonic() + 10
+    while True:
+        identities = process_usage.process_identities()
+        below = process_usage.descendants(identities, sess.pid)
+        if len(below) >= count:
+            return sess, exited, below, identities
+        assert time.monotonic() < deadline, "the child never started"
+        await asyncio.sleep(0.05)
+
+
+async def test_kill_verifies_the_whole_tree():
+    sess, exited, below, _ = await _session_with_child()
+    assert sess.kill() is True
+    if os.name == "nt":
+        alive = {pid for pid, _parent in process_usage.process_identities()}
+        assert not (below & alive)
+    else:
+        # Killed children may linger as zombies until reaped; they are not alive.
+        assert process_usage.session_process_groups(sess.pid) == {}
+    await asyncio.wait_for(exited.wait(), timeout=15)
+
+
+@windows_only
+async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(monkeypatch):
+    """#38 and the retry after a failed kill.
+
+    A descendant taskkill could not stop went unnoticed once the root died;
+    one whose parent exited during the kill was dropped from verification;
+    and a retry passed on the dead root alone while the descendant ran on.
+    """
+    # The grandchild is detached from the console, so closing the ConPTY does
+    # not take it down with the root; only an explicit kill does.
+    spawner = (
+        "import subprocess,sys,time;"
+        " subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],creationflags=8);"
+        " time.sleep(30)"
+    )
+    sess, exited, below, identities = await _session_with_child(spawner, count=2)
+    (grandchild,) = [pid for pid, parent in identities if pid in below and parent != sess.pid]
+    real_terminate = pty_module._k32.TerminateProcess
+    real_identities = process_usage.process_identities
+    get_pid = ctypes.WinDLL("kernel32").GetProcessId
+    get_pid.argtypes = (wintypes.HANDLE,)
+    get_pid.restype = wintypes.DWORD
+    snapshots = []
+
+    def terminate_all_but_grandchild(handle, code):
+        if get_pid(handle) == grandchild:
+            return 1  # pretend, like an elevated child that denies us
+        return real_terminate(handle, code)
+
+    def parent_exits_after_the_first_snapshot():
+        # From the second snapshot on, the grandchild's parent is gone and it
+        # is no longer below the root, which taskkill /T cannot see either.
+        table = real_identities()
+        snapshots.append(table)
+        if len(snapshots) == 1:
+            return table
+        return [(pid, 0 if pid == grandchild else parent) for pid, parent in table]
+
+    monkeypatch.setattr(pty_module.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(pty_module._k32, "TerminateProcess", terminate_all_but_grandchild)
+    monkeypatch.setattr(process_usage, "process_identities", parent_exits_after_the_first_snapshot)
+    monkeypatch.setattr(pty_module, "_KILL_WAIT_S", 0.3)
+    monkeypatch.setattr(pty_module, "_TERMINATE_WAIT_S", 0.3)
+    try:
+        assert sess.kill() is False
+        await asyncio.wait_for(exited.wait(), timeout=15)  # the root is gone
+        assert sess.alive is False
+        assert sess.kill() is False  # the grandchild is not
+        monkeypatch.undo()
+        assert sess.kill() is True
+        assert grandchild not in {pid for pid, _parent in process_usage.process_identities()}
+    finally:
+        monkeypatch.undo()
+        subprocess.run(pty_module._taskkill_command(grandchild), capture_output=True)
+
+
+@windows_only
+async def test_kill_never_addresses_a_root_known_to_be_dead(monkeypatch):
+    """The root's PID must not be reopened or passed to taskkill once it exited.
+
+    The watcher used to close the root handle before flagging the exit, and
+    kill() reopened the root by PID number: a PID reused in between would
+    have had an unrelated process tree killed.
+    """
+    # Hold the watcher back so the root is dead but not yet flagged dead.
+    monkeypatch.setattr(PtySession, "_watch_exit", lambda self: None)
+    calls = []
+    monkeypatch.setattr(pty_module.subprocess, "run", lambda *a, **k: calls.append(a))
+    cmd, args = _short("exit 0")
+    sess, _, _, _ = await _spawn(cmd, args)
+    try:
+        assert pty_module._k32.WaitForSingleObject(sess._hproc, 5000) == 0
+        assert sess.alive is True  # nobody has told the session yet
+        assert sess.kill() is True
+        assert calls == []
+    finally:
+        sess._proc_dead.set()
+        try:
+            sess._pty.cancel_io()
+        except winpty.WinptyError:
+            pass
+        pty_module._k32.CloseHandle(sess._hproc)
+
+
+@windows_only
+async def test_failed_kill_keeps_the_terminal_usable(monkeypatch):
+    cmd, args, newline = _interactive()
+    sess, chunks, exited, _ = await _spawn(cmd, args)
+    await asyncio.sleep(0.3)
+    monkeypatch.setattr(pty_module.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(pty_module._k32, "TerminateProcess", lambda handle, code: 1)
+    monkeypatch.setattr(pty_module, "_KILL_WAIT_S", 0.2)
+    monkeypatch.setattr(pty_module, "_TERMINATE_WAIT_S", 0.2)
+    try:
+        assert sess.kill() is False
+    finally:
+        monkeypatch.undo()
+    assert sess.alive
+    sess.write(b"echo still_here_42" + newline)
+
+    async def saw_marker() -> None:
+        while b"still_here_42\r\n" not in b"".join(chunks):
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(saw_marker(), timeout=10)
+    assert sess.kill() is True
+    await asyncio.wait_for(exited.wait(), timeout=15)
+
+
+@windows_only
+async def test_kill_passes_a_safe_working_directory(monkeypatch):
+    """#11: taskkill must not start in QuickTerm's (possibly untrusted) cwd."""
+    calls = []
+    real_run = subprocess.run
+
+    def recording_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(pty_module.subprocess, "run", recording_run)
+    cmd, args, _ = _interactive()
+    sess, _, exited, _ = await _spawn(cmd, args)
+    await asyncio.sleep(0.3)
+    assert sess.kill() is True
+    (command, kwargs), = calls
+    assert os.path.isabs(command[0])
+    assert os.path.normcase(kwargs["cwd"]) == os.path.normcase(os.environ["SystemRoot"])
+    await asyncio.wait_for(exited.wait(), timeout=15)

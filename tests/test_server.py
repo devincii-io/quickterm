@@ -108,12 +108,15 @@ class FakeAttachment:
 
 
 class FakeSession:
-    def __init__(self, info: FakeSessionInfo, scrollback: bytes = b"") -> None:
+    def __init__(self, info: FakeSessionInfo, scrollback: bytes | tuple = b"") -> None:
         self.info = info
-        self._scrollback = scrollback
+        # A tuple is the ring as separate chunks, like Session keeps it.
+        self._chunks = scrollback if isinstance(scrollback, tuple) else (
+            (scrollback,) if scrollback else ()
+        )
 
-    def scrollback(self) -> tuple[bytes, int, int]:
-        return self._scrollback, self.info.cols, self.info.rows
+    def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
+        return self._chunks, self.info.cols, self.info.rows
 
 
 class FakeSessionManager:
@@ -126,6 +129,8 @@ class FakeSessionManager:
         self.last_attachment: FakeAttachment | None = None
         self.initial_live: list[bytes] = []
         self.max_sessions = 0
+        self.touched: list[str] = []
+        self.acknowledged: list[str] = []
 
     def add_session(self, scrollback: bytes = b"", **overrides) -> FakeSessionInfo:
         info = FakeSessionInfo(
@@ -145,6 +150,9 @@ class FakeSessionManager:
         return self.add_session(name=name or "s", profile=profile, cols=cols,
                                 rows=rows, workspace=workspace)
 
+    async def spawn_async(self, **kwargs) -> FakeSessionInfo:
+        return self.spawn(**kwargs)
+
     def list(self) -> list[FakeSessionInfo]:
         return [s.info for s in self.sessions.values()]
 
@@ -161,12 +169,21 @@ class FakeSessionManager:
     def write(self, sid: str, data: bytes) -> None:
         self.writes.append((sid, data))
 
+    def touch(self, sid: str) -> None:
+        self.touched.append(sid)
+
+    def acknowledge(self, sid: str) -> None:
+        self.acknowledged.append(sid)
+
     def resize(self, sid: str, cols: int, rows: int) -> None:
         self.resizes.append((sid, cols, rows))
 
     def kill(self, sid: str) -> bool:
+        # Contract K2: an id the registry does not hold raises KeyError.
+        if sid not in self.sessions:
+            raise KeyError(sid)
         self.killed.append(sid)
-        self.sessions.pop(sid, None)
+        self.sessions.pop(sid)
         return True
 
     def has_attachments(self, sid: str) -> bool:
@@ -273,6 +290,7 @@ def fake_workspace(monkeypatch):
     # Complete-interface fake: the folder helpers the server calls are the real
     # ones, so path handling is exercised rather than stubbed away.
     mod.normalize_root = real_workspace.normalize_root
+    mod.layout_session_ids = real_workspace.layout_session_ids
     mod.resolve_start_dir = real_workspace.resolve_start_dir
     mod.root_exists = real_workspace.root_exists
     monkeypatch.setitem(sys.modules, "quickterm.workspace", mod)
@@ -642,6 +660,11 @@ def test_spawn_returns_conflict_when_live_terminal_limit_is_reached(client, mana
     {"cmd": "cmd.exe", "cols": 0},
     {"cmd": "cmd.exe", "rows": "many"},
     {"cmd": ["cmd.exe"]},
+    {"profile": 5},
+    {"profile": ""},
+    {"cmd": "cmd.exe", "cwd": 5},
+    {"cmd": "cmd.exe", "workspace": 5},
+    {"cmd": "cmd.exe", "name": 5},
 ])
 def test_spawn_rejects_malformed_payloads(client, manager, body):
     response = client.post("/api/sessions", json=body)
@@ -785,11 +808,14 @@ def test_spawn_tags_workspace(client, manager):
 # --- REST: profiles / snippets / config ------------------------------------
 
 
-def test_profiles_and_snippets(client):
+def test_profiles_are_listed_and_snippets_ride_on_the_config(client):
     profs = client.get("/api/profiles").json()
     assert [p["name"] for p in profs] == ["powershell", "claude"]
-    snips = client.get("/api/snippets").json()
-    assert snips == [{"name": "greet", "text": "echo hi\n"}]
+    # GET /api/snippets had no client: /api/config already carries them.
+    assert client.get("/api/snippets").status_code == 404
+    assert client.get("/api/config").json()["snippets"] == [
+        {"name": "greet", "text": "echo hi\n"}
+    ]
 
 
 def test_config_endpoint(client, cfg):
@@ -827,7 +853,7 @@ def fake_config_mod(monkeypatch, cfg):
         parsed = FakeConfig()
         for k, v in raw.items():
             if k in {"font_family", "default_profile", "max_sessions", "port",
-                     "host", "summon_hotkey"}:
+                     "host", "summon_hotkey", "scratch_dir", "font_size"}:
                 setattr(parsed, k, v)
         return parsed
 
@@ -1305,6 +1331,7 @@ def test_put_config_keeps_the_persisted_port_for_a_stale_client(
     """A page rendered from the live config must not write the runtime port back."""
     sys.modules["quickterm.config"].disk_config.port = 8620
     cfg.port = 53871
+    cfg.runtime_overrides = {"port"}  # what app.py records for --port / elevated
 
     response = client.put(
         "/api/config", json={"font_family": "Cascadia Mono", "port": 53871}
@@ -1748,3 +1775,378 @@ def test_window_routes_are_token_gated_like_every_other_api_route(manager, cfg):
         assert c.post("/api/windows", json={}).status_code == 403
         assert c.post("/api/windows/open", json={}).status_code == 403
         assert c.get("/api/windows", headers={"X-QuickTerm-Token": "s3cret"}).status_code == 200
+
+
+# --- Explorer handoff: an abandoned long-poll must not eat the next folder ---
+
+
+@contextlib.asynccontextmanager
+async def _live_server(app_factory, cfg):
+    """A real uvicorn server on a port the OS picks, so no two runs collide.
+
+    TestClient cannot model a client that vanishes mid-request; this can.
+    """
+    import socket
+
+    import uvicorn
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    cfg.port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(
+        app_factory(), lifespan="off", log_config=None, http="h11", loop="asyncio",
+        access_log=False,
+    ))
+    serve = asyncio.create_task(server.serve(sockets=[sock]))
+    try:
+        while not server.started:
+            await asyncio.sleep(0.01)
+        yield f"127.0.0.1:{cfg.port}"
+    finally:
+        server.should_exit = True
+        await serve
+        sock.close()
+
+
+async def _abandon_a_launch_poll(host: str) -> None:
+    """A window polls, then reloads: its socket closes mid long-poll."""
+    address, port = host.split(":")
+    _reader, writer = await asyncio.open_connection(address, int(port))
+    writer.write(f"GET /api/launches/next HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+    await writer.drain()
+    await asyncio.sleep(0.3)
+    writer.close()
+    await writer.wait_closed()
+    await asyncio.sleep(0.3)
+
+
+async def test_abandoned_launch_poll_does_not_swallow_the_next_folder(manager, cfg, tmp_path):
+    async with _live_server(lambda: create_app(manager, cfg), cfg) as host:
+        await _abandon_a_launch_poll(host)
+        async with httpx.AsyncClient(base_url=f"http://{host}", trust_env=False) as http:
+            live = asyncio.create_task(http.get("/api/launches/next", timeout=10))
+            await asyncio.sleep(0.3)
+            queued = await http.post("/api/launches", json={"cwd": str(tmp_path)})
+            assert queued.status_code == 200
+            claimed = await asyncio.wait_for(live, 5)
+            # The live window got it, not the dead one...
+            assert claimed.status_code == 200
+            assert claimed.json() == {"cwd": str(tmp_path)}
+            # ...exactly once.
+            again = await http.get("/api/launches/next", params={"wait": "false"})
+            assert again.status_code == 204
+
+
+async def test_a_folder_queued_after_the_poller_left_waits_for_the_next_poll(
+    manager, cfg, tmp_path
+):
+    async with _live_server(lambda: create_app(manager, cfg), cfg) as host:
+        await _abandon_a_launch_poll(host)
+        async with httpx.AsyncClient(base_url=f"http://{host}", trust_env=False) as http:
+            assert (await http.post("/api/launches", json={"cwd": str(tmp_path)})).status_code == 200
+            await asyncio.sleep(0.2)
+            claimed = await http.get("/api/launches/next", params={"wait": "false"})
+        assert claimed.status_code == 200
+        assert claimed.json() == {"cwd": str(tmp_path)}
+
+
+# --- spawn and kill results ---------------------------------------------------
+
+
+def test_a_spawn_failure_is_a_400_that_names_the_terminal(client, manager, monkeypatch, tmp_path):
+    from quickterm.session_manager import SpawnError
+
+    def fail(**kwargs):
+        raise SpawnError(f"command not found: {kwargs['cmd']}")
+
+    monkeypatch.setattr(manager, "spawn", fail)
+    by_profile = client.post("/api/sessions", json={"profile": "claude", "cwd": str(tmp_path)})
+    assert by_profile.status_code == 400
+    assert by_profile.json()["detail"] == 'Terminal "claude": command not found: claude'
+    by_name = client.post("/api/sessions", json={"cmd": "nope-xyz", "name": "Tools"})
+    assert by_name.json()["detail"] == 'Terminal "Tools": command not found: nope-xyz'
+    by_cmd = client.post("/api/sessions", json={"cmd": "nope-xyz"})
+    assert by_cmd.json()["detail"] == 'Terminal "nope-xyz": command not found: nope-xyz'
+
+
+def test_killing_a_session_that_vanished_mid_request_is_a_404(client, manager, monkeypatch):
+    info = manager.add_session()
+
+    def already_gone(sid):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(manager, "kill", already_gone)
+    # A 500 here kept a pane the backend no longer knew about on screen.
+    assert client.delete(f"/api/sessions/{info.id}").status_code == 404
+
+
+def test_bulk_kills_count_a_vanished_session_as_stopped(client, manager, monkeypatch):
+    first = manager.add_session(name="one")
+    second = manager.add_session(name="two")
+    real_kill = manager.kill
+
+    def kill(sid):
+        if sid == second.id:
+            raise KeyError(sid)
+        return real_kill(sid)
+
+    monkeypatch.setattr(manager, "kill", kill)
+    assert client.post("/api/sessions/kill-all").json() == {
+        "killed": 2, "killed_ids": [first.id, second.id], "failed_ids": [],
+    }
+    # first is gone now too: cleanup of ids the registry lost is a success.
+    response = client.post("/api/sessions/cleanup", json={"session_ids": [first.id, second.id]})
+    assert response.status_code == 204
+
+
+# --- config: only real runtime overrides are guarded, partial PUTs merge -----
+
+
+def test_put_config_accepts_a_revert_to_the_running_port(client, cfg, fake_config_mod):
+    """The app runs on 8620, 9000 was saved, the user reverts to 8620."""
+    sys.modules["quickterm.config"].disk_config.port = 9000
+    cfg.port = 8620  # not a runtime override: app.py recorded none
+
+    assert client.put("/api/config", json={"port": 8620}).status_code == 204
+    assert fake_config_mod[-1].port == 8620
+
+
+def test_put_config_never_guards_host_or_the_summon_hotkey(client, cfg, fake_config_mod):
+    sys.modules["quickterm.config"].disk_config.summon_hotkey = "ctrl+alt+x"
+    cfg.runtime_overrides = {"port"}
+
+    response = client.put("/api/config", json={"summon_hotkey": cfg.summon_hotkey})
+
+    assert response.status_code == 204
+    assert fake_config_mod[-1].summon_hotkey == cfg.summon_hotkey
+
+
+def test_an_unreadable_saved_config_is_a_500_never_the_live_one(client, cfg, fake_config_mod):
+    def broken():
+        raise OSError("disk gone")
+
+    sys.modules["quickterm.config"].load_config = broken
+    cfg.port = 53871  # the runtime port must not leak into Settings
+    assert client.get("/api/config/full").status_code == 500
+    assert client.put("/api/config", json={"font_family": "x"}).status_code == 500
+    assert fake_config_mod == []
+
+
+def test_put_config_rejects_a_body_that_is_not_an_object(client, fake_config_mod):
+    assert client.put("/api/config", json=["font_size", 15]).status_code == 400
+    assert fake_config_mod == []
+
+
+def test_a_partial_config_put_keeps_every_omitted_setting(client, cfg, monkeypatch, tmp_path):
+    from quickterm import config as real_config
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    real_config.save_config(real_config.AppConfig(
+        theme="dusk",
+        profiles=[real_config.Profile(name="work", cmd="sh")],
+    ))
+
+    assert client.put("/api/config", json={"font_size": 15}).status_code == 204
+
+    stored = real_config.load_config()
+    assert stored.font_size == 15
+    assert stored.theme == "dusk"
+    assert [p.name for p in stored.profiles] == ["work"]
+    assert [p.name for p in cfg.profiles] == ["work"]  # the live config too
+
+
+def test_scratch_dir_applies_live(client, cfg, fake_config_mod, tmp_path):
+    from quickterm import config as real_config
+
+    sys.modules["quickterm.config"].scratch_root = real_config.scratch_root
+    target = tmp_path / "scratch-here"
+
+    assert client.put("/api/config", json={"scratch_dir": str(target)}).status_code == 204
+
+    assert cfg.scratch_dir == str(target)
+    assert client.get("/api/config").json()["scratch_dir"] == str(target)
+
+
+def test_config_reports_the_latest_launch_failure(client, cfg):
+    assert client.get("/api/config").json()["launch_error"] is None
+    cfg.launch_error = 'Terminal "Claude": Claude Code profile requires a project folder'
+    assert client.get("/api/config").json()["launch_error"] == cfg.launch_error
+
+
+# --- workspaces: absent keys preserve, the delete holds the write lock --------
+
+
+def test_an_autosave_that_omits_logo_and_session_ids_keeps_them(client, manager, fake_workspace):
+    detached = manager.add_session(name="detached")
+    pane = manager.add_session(name="pane")
+    layout = {"type": "pane", "session_id": pane.id}
+    assert client.put("/api/workspaces/dev", json={
+        "layout": layout, "logo": "brand.png", "session_ids": [detached.id, pane.id],
+    }).status_code == 204
+
+    assert client.put("/api/workspaces/dev", json={"layout": layout}).status_code == 204
+
+    saved = client.get("/api/workspaces/dev").json()
+    assert saved["logo"] == "brand.png"
+    assert saved["session_ids"] == sorted([detached.id, pane.id])
+    assert detached.workspace == "dev"
+
+
+def test_explicit_null_or_empty_clears_logo_and_session_ids(client, manager, fake_workspace):
+    detached = manager.add_session(name="detached")
+    layout = {"type": "pane"}
+    client.put("/api/workspaces/dev", json={
+        "layout": layout, "logo": "brand.png", "session_ids": [detached.id],
+    })
+    assert client.put("/api/workspaces/dev", json={
+        "layout": layout, "logo": None, "session_ids": [],
+    }).status_code == 204
+    saved = client.get("/api/workspaces/dev").json()
+    assert (saved["logo"], saved["session_ids"]) == (None, [])
+    assert detached.workspace is None
+
+    client.put("/api/workspaces/dev", json={"layout": layout, "session_ids": [detached.id]})
+    client.put("/api/workspaces/dev", json={"layout": layout, "session_ids": None})
+    assert client.get("/api/workspaces/dev").json()["session_ids"] == []
+
+
+def test_workspace_put_rejects_malformed_logo_and_session_ids(client, fake_workspace):
+    layout = {"type": "pane"}
+    assert client.put("/api/workspaces/dev", json={"layout": layout, "logo": 5}).status_code == 400
+    assert client.put(
+        "/api/workspaces/dev", json={"layout": layout, "session_ids": "abc"}
+    ).status_code == 400
+
+
+async def test_deleting_a_workspace_waits_for_an_autosave_in_flight(
+    manager, cfg, fake_workspace, monkeypatch
+):
+    """The delete used to run beside a PUT, which then wrote the file back."""
+    module = sys.modules["quickterm.workspace"]
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_save(ws):
+        started.set()
+        assert release.wait(3)
+        fake_workspace[ws.name] = ws
+
+    monkeypatch.setattr(module, "save_workspace", slow_save)
+    transport = httpx.ASGITransport(app=create_app(manager, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url=f"http://127.0.0.1:{cfg.port}") as http:
+        put = asyncio.create_task(http.put("/api/workspaces/dev", json={"layout": {"type": "pane"}}))
+        assert await asyncio.to_thread(started.wait, 2)
+        delete = asyncio.create_task(http.delete("/api/workspaces/dev"))
+        await asyncio.sleep(0.05)
+        assert not delete.done()
+        release.set()
+        responses = await asyncio.gather(put, delete)
+    assert [r.status_code for r in responses] == [204, 204]
+    assert "dev" not in fake_workspace
+
+
+# --- GET /api/file ----------------------------------------------------------
+
+
+def test_file_read_expands_home_and_strips_quotes(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("hi", encoding="utf-8")
+
+    assert client.get("/api/file", params={"path": "~/notes.txt"}).json()["text"] == "hi"
+    quoted = f'"{tmp_path / "notes.txt"}"'
+    assert client.get("/api/file", params={"path": quoted}).json()["text"] == "hi"
+
+
+def test_file_read_turns_an_os_error_into_a_sentence(client, tmp_path, monkeypatch):
+    import pathlib
+
+    locked = tmp_path / "locked.txt"
+    locked.write_text("x", encoding="utf-8")
+    real_open = pathlib.Path.open
+
+    def deny(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", deny)
+    response = client.get("/api/file", params={"path": str(locked)})
+    assert response.status_code == 400
+    assert response.json()["detail"] == f"cannot read {locked}: Permission denied"
+
+
+# --- blocking work stays off the event loop -----------------------------------
+
+
+def _on_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False  # a worker thread has no running loop
+
+
+def test_config_and_asset_writes_run_off_the_event_loop(client, fake_config_mod, monkeypatch):
+    module = sys.modules["quickterm.config"]
+    seen: list[tuple[str, bool]] = []
+    load, save = module.load_config, module.save_config
+    monkeypatch.setattr(module, "load_config", lambda: seen.append(("load", _on_loop())) or load())
+    monkeypatch.setattr(
+        module, "save_config", lambda c: seen.append(("save", _on_loop())) or save(c)
+    )
+    assert client.put("/api/config", json={"font_family": "x"}).status_code == 204
+
+    assets = types.ModuleType("quickterm.assets")
+    assets.MAX_ASSET_BYTES = 1024
+    assets.save_asset = lambda data, kind: seen.append(("asset", _on_loop())) or "a.png"
+    monkeypatch.setitem(sys.modules, "quickterm.assets", assets)
+    response = client.post("/api/assets", content=b"png", headers={"content-type": "image/png"})
+    assert response.status_code == 200
+
+    assert seen == [("load", False), ("save", False), ("asset", False)]
+
+
+def test_folder_checks_run_off_the_event_loop(manager, cfg, tmp_path, monkeypatch):
+    from quickterm import launch
+
+    seen: list[bool] = []
+    real = launch.validate_dir
+
+    def record(value, label=None):
+        seen.append(_on_loop())
+        return real(value, label)
+
+    monkeypatch.setattr(launch, "validate_dir", record)
+    app = create_app(manager, cfg, open_window=lambda workspace, cwd: "w1")
+    with TestClient(app, base_url=f"http://127.0.0.1:{cfg.port}") as c:
+        assert c.post("/api/sessions", json={"cmd": "sh", "cwd": str(tmp_path)}).status_code == 200
+        assert c.post("/api/launches", json={"cwd": str(tmp_path)}).status_code == 200
+        assert c.post("/api/windows/open", json={"cwd": str(tmp_path)}).status_code == 200
+    assert seen == [False, False, False]
+
+
+def test_every_folder_check_says_the_same_thing(client, tmp_path):
+    gone = str(tmp_path / "gone")
+    details = [
+        client.post("/api/sessions", json={"cmd": "sh", "cwd": gone}).json()["detail"],
+        client.post("/api/launches", json={"cwd": gone}).json()["detail"],
+        client.post("/api/windows/open", json={"cwd": gone}).json()["detail"],
+    ]
+    assert details[0] == f'Terminal "sh": starting folder does not exist: {gone}'
+    assert details[1:] == [f"starting folder does not exist: {gone}"] * 2
+
+
+# --- IPv6 loopback ------------------------------------------------------------
+
+
+def test_an_ipv6_host_is_bracketed_in_the_allowlists(manager):
+    from quickterm.server import _allowed_origins
+
+    cfg = FakeConfig(host="::1", port=8620)
+    hosts, origins = _allowed_origins(cfg)
+    assert "[::1]:8620" in hosts and "http://[::1]:8620" in origins
+    assert not any(host.startswith("::1") for host in hosts)
+    # TestClient cannot parse a bracketed base URL, so the Host header says it.
+    with TestClient(create_app(manager, cfg), base_url="http://127.0.0.1:8620") as c:
+        assert c.get("/api/sessions", headers={"host": "[::1]:8620"}).status_code == 200

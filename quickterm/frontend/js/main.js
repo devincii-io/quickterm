@@ -850,6 +850,23 @@ async function boot() {
     if (banner) banner.hidden = true;
   }
 
+  // Autostart and global-hotkey launches run in the backend with no pane to
+  // report into, so app.py keeps the latest failure on the config as
+  // `launch_error`. It is shown once when it first appears and again only
+  // when it changes, and only by the primary top-level window: every
+  // workspace view and every second window reads the same config.
+  // A banner already up (a refused workspace claim at boot) keeps its text.
+  let shownLaunchError = null;
+  function reportLaunchError(value) {
+    const text = typeof value === "string" && value.trim() ? value : null;
+    if (text && text !== shownLaunchError && !embedded && windowIsPrimary) {
+      const banner = $("app-error");
+      const current = banner && !banner.hidden ? $("app-error-text")?.textContent : "";
+      showError(current ? `${current} ${text}` : text);
+    }
+    shownLaunchError = text;
+  }
+
   // ---- this window in the registry ---------------------------------------
   //
   // The invariant: two windows must never own the same workspace, because both
@@ -1942,6 +1959,7 @@ async function boot() {
       ]);
       if (!fresh) return;
       cfg = fresh;
+      reportLaunchError(fresh.launch_error);
       scratchRoot = fresh.scratch_dir || scratchRoot;
       profiles = fresh.profiles || [];
       snippets = fresh.snippets || [];
@@ -2206,11 +2224,23 @@ async function boot() {
   }
   window.addEventListener("pagehide", persistOnExit);
 
+  // A global hotkey launches while this window is in the background, and its
+  // failure only lands on the config. Look again when the user comes back to
+  // the window instead of polling the whole config every few seconds.
+  let launchErrorCheckedAt = 0;
+  function checkLaunchError() {
+    if (embedded || !windowIsPrimary || Date.now() - launchErrorCheckedAt < 5000) return;
+    launchErrorCheckedAt = Date.now();
+    api.getConfig().then((fresh) => reportLaunchError(fresh && fresh.launch_error)).catch(() => {});
+  }
+  window.addEventListener("focus", checkLaunchError);
+
   setInterval(refreshStatus, 10000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       refreshStatus();
       layout.fitAll();
+      checkLaunchError();
     }
   });
 
@@ -2268,6 +2298,8 @@ async function boot() {
   };
   buildLauncher();
   refreshStatus();
+  // After the restore, so nothing the boot itself reports replaces it.
+  reportLaunchError(cfg.launch_error);
   if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
   // Off the boot path: one small request per saved workspace.

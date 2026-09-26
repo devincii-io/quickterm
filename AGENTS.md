@@ -24,13 +24,19 @@ python scripts/bench_throughput.py 20                             # output throu
 
 ## Architecture (hot path)
 
-`pty_session.py` (win32; `pty_posix.py` elsewhere) runs one ConPTY and three
-daemon threads: reader (coalesces all immediately-available output into one
-callback, ≤128 KB), watcher (waits on the real process handle; winpty EOF lags
-~8 s), writer (queue-drained; PTY writes must NEVER run on the event loop,
-because a full stdin pipe blocks). → `session_manager.py`: registry, scrollback
-ring as a deque of chunks (O(chunk) trim; do not go back to a flat bytearray),
-bounded per-subscriber fan-out queues (overflow triggers a clean
+`pty_session.py` (win32, ConPTY) and `pty_posix.py` (elsewhere) each run one
+PTY and three daemon threads: reader (coalesces all immediately-available
+output into one callback, ≤128 KB), watcher (exit follows the process, never
+EOF: the Windows process handle, POSIX `waitpid`; then a short drain, then one
+`on_exit`), writer (queue-drained; PTY writes must NEVER run on the event loop,
+because a full stdin pipe blocks, and on POSIX the fd lock is never held
+across a wait). The shared queue/writer/posting lives in `pty_base.py`; the
+backends keep only spawn, raw I/O, resize and kill. → `session_manager.py`:
+registry, scrollback ring as a deque of chunks (O(chunk) trim; do not go back
+to a flat bytearray) whose front never starts mid-sequence and whose replay
+starts with a preamble restoring the DEC modes (alt screen, bracketed paste,
+mouse, ...) in effect there, byte-bounded per-subscriber fan-out queues
+(chunks merge up to 128 KB, overflow past 2 MiB triggers a clean
 replay/resync). → `server.py`: REST + WS attach (`replay_size` → scrollback
 frame → `replay_done` → live); the output pump coalesces queued chunks into one
 WS frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js`: one
@@ -46,9 +52,13 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
 ## Conventions
 
-- Backend I/O is bytes in / bytes out; no decoding on the hot path. Input
-  decode for winpty is strict-UTF-8 with surrogateescape fallback, never
-  `errors="replace"` (that mangles 8-bit input).
+- Backend I/O is bytes in / bytes out; no decoding on the hot path. The one
+  exception is pywinpty, whose API is str: the ConPTY backend re-encodes reads
+  and decodes writes as UTF-8, and that round trip is lossy (pywinpty decodes
+  each read on its own and drops NULs, so a character split across two reads
+  becomes U+FFFD; input bytes that are not valid UTF-8 reach the child as
+  U+FFFD whatever error handler we pick). Only owning the ConPTY pipes would
+  fix it.
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
   Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
   detach, Alt+W confirmed kill, and
@@ -69,12 +79,20 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Server handlers import stubbable modules via
   `importlib.import_module("quickterm.X")`. A plain `import` bypasses test
   `sys.modules` stubs and writes to the real `%APPDATA%`.
-- Session activity tracking uses `touched` (set on user input via `onKey`, not
-  `onData`, because xterm auto-replies to DA/DSR must not count). Explicit detach also
+- Session activity tracking uses `touched`, and only the client sets it: the
+  pane sends a `{"type":"touch"}` WS frame on the first real input of each
+  connection (`onKey`, native paste, `sendText`), and `SessionManager.write`
+  never touches. Input frames also carry xterm's automatic replies (DA, CPR,
+  focus reports), which must not make a shell look used. Explicit detach also
   uses the separate `retained` flag before removing the viewer, so idle cleanup
   cannot turn D/Alt+D into a delayed kill or fake user input.
-- Session termination is verified per process on both backends, and POSIX
-  `kill()` must not swallow EPERM. "Remove only verified kills" guards against
+- Session termination is verified per process on both backends: POSIX kills
+  every process group in the child's session, Windows every process of the
+  tree captured before the kill (through handles, so PID reuse cannot fake a
+  death); after a failed kill, a retry must verify again instead of passing
+  on the dead root. POSIX `kill()` must not swallow EPERM, a PTY `kill()` counts only
+  when it returns exactly `True`, and `SessionManager.kill` raises `KeyError`
+  for an id it does not know. "Remove only verified kills" guards against
   hiding a terminal that is still running, so it applies to a 500. A 404 means
   the registry has already dropped the id (the reaper does this to an exited
   terminal) and there is nothing left to run, so kill and retain must both fall
@@ -168,7 +186,9 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Blocking work never runs on the event loop: `taskkill`/`WaitForSingleObject`
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),
-  and the `ShellExecuteW` UAC handshake all go through `asyncio.to_thread`. The
+  config load/save, asset writes, folder checks (`launch.validate_dir`),
+  starting a PTY (`SessionManager.spawn_async`), and the `ShellExecuteW` UAC
+  handshake all go through `asyncio.to_thread`. The
   session registry is mutated on the loop thread but read from the threadpool
   and the GUI thread, so every iteration snapshots with `list(...)` first.
 - The WS attach must never lose bytes: a fresh subscription is drained from the
@@ -191,9 +211,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   that project.
 - Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
   (`new`, `continue`, `resume`, or `agents`) and a project folder that always
-  comes from the workspace. `_resolve_profile`
+  comes from the workspace. `launch.resolve_profile`
   raises only when nothing resolves (a 400 on the spawn, not a config-save
-  error). Recovery uses Claude's own CLI flags and must remain explicit when
+  error). Every launch path (REST, elevate, autostart, hotkeys, the elevated
+  first terminal) goes through `launch.resolve`; do not add a second one. Recovery uses Claude's own CLI flags and must remain explicit when
   the old PTY is gone.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
@@ -270,7 +291,15 @@ Server binds 127.0.0.1. Three-layer guard in `server.py`: Host allowlist
 /api and as WS subprotocol `qtauth.<token>`. Exempt: `/api/health`,
 `GET /api/assets/*`, static files. The Host/Origin guard alone does NOT stop
 native local programs. The token does. Keep new /api routes token-gated by
-default. `update.py` only fetches https URLs from the pinned repo's release
+default; `tests/test_routes_auth.py` walks the route table and fails on an
+ungated one. The HTTP guard is a plain ASGI middleware (`LocalGuard`):
+`@app.middleware("http")` wraps `receive`, and then `request.is_disconnected()`
+never sees a client leave, which the launch long-poll relies on. There is no
+`/openapi.json`. On Windows `app.py` leaves the launch folder for the home
+folder at startup, so program lookup never searches a folder the user merely
+clicked, and `taskkill.exe` runs by absolute path. Do not "harden" this with
+`NoDefaultCurrentDirectoryInExePath`: every child, terminals included, would
+inherit it. `update.py` only fetches https URLs from the pinned repo's release
 payload and hash-verifies installers.
 
 ## Author / license

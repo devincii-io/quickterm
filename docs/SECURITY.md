@@ -21,7 +21,7 @@ claim a certification or guarantee suitability for every regulated setting.
   session-spawn requests are capped before buffering, and configuration API
   responses use `Cache-Control: no-store`.
 - There are no accounts, analytics, advertising, or usage telemetry. Terminal
-  I/O and resource measurements are not sent to Fichtel Systems or another
+  I/O and resource measurements are not sent to the author or any other
   service.
 - Terminal scrollback is held in backend memory while a session lives. Saved
   workspace files retain layout, profile, folder, and live-session IDs, not a
@@ -104,9 +104,11 @@ For public GitHub distribution, the practical options are:
    managed signing service for non-Store distribution. It requires a paid Azure
    subscription and identity validation. Public Trust organization validation
    is currently offered in the European Union; individual Public Trust
-   validation is currently limited to the USA and Canada. Fichtel Systems must
-   therefore qualify and validate as its legal organization identity to use
-   this route from Germany.
+   validation is currently limited to the USA and Canada. The publisher,
+   Devin Isaac Worbis, is an individual in Germany, so this route needs an
+   organization identity. Signing as an organization changes the publisher
+   name, which must then change in `pyproject.toml`, `LICENSE` and
+   `packaging/quickterm.iss` at the same time.
 2. **A public Authenticode certificate from a trusted commercial CA.** Keep its
    private key in approved protected storage and use the same publisher identity
    consistently across releases.

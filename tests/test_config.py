@@ -253,6 +253,118 @@ def test_save_rejects_non_loopback_host(fake_appdata):
         save_config(AppConfig(host="0.0.0.0"))
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_every_loopback_host_is_accepted(fake_appdata, host):
+    save_config(AppConfig(host=host))
+    assert load_config().host == host
+
+
+def config_text(fake_appdata, name="config.json"):
+    return (fake_appdata / "quickterm" / name).read_text(encoding="utf-8")
+
+
+def test_save_keeps_the_previous_config_as_a_backup(fake_appdata):
+    # A partial PUT used to replace every profile and snippet with nothing to
+    # go back to.
+    save_config(AppConfig(profiles=[Profile(name="work", cmd="cmd.exe")]))
+    before = config_text(fake_appdata)
+    save_config(AppConfig())
+
+    assert config_text(fake_appdata, "config.prev.json") == before
+    assert json.loads(config_text(fake_appdata, "config.prev.json"))["profiles"][0]["name"] == "work"
+    assert json.loads(config_text(fake_appdata))["profiles"] == []
+
+
+def test_an_identical_save_does_not_overwrite_the_backup(fake_appdata):
+    save_config(AppConfig(font_size=12))
+    save_config(AppConfig(font_size=15))
+    save_config(AppConfig(font_size=15))
+    assert json.loads(config_text(fake_appdata, "config.prev.json"))["font_size"] == 12
+
+
+def test_a_save_that_changes_nothing_keeps_the_backup_even_with_secrets(
+    fake_appdata, monkeypatch
+):
+    # DPAPI output differs on every call, so the file text of a config with a
+    # profile secret never repeats; comparing text replaced the backup with a
+    # copy of the current state on every such save.
+    counter = iter(range(1_000_000))
+    monkeypatch.setattr(cfgmod.secret_store, "protection_available", lambda: True)
+    monkeypatch.setattr(
+        cfgmod.secret_store, "protect", lambda data: b"%d:" % next(counter) + data,
+    )
+    monkeypatch.setattr(
+        cfgmod.secret_store, "unprotect", lambda data: data.split(b":", 1)[1],
+    )
+    profiles = [Profile(name="work", cmd="cmd.exe", env={"API_TOKEN": "secret"})]
+    save_config(AppConfig(profiles=profiles, font_size=12))
+    save_config(AppConfig(profiles=profiles, font_size=15))
+    save_config(AppConfig(profiles=profiles, font_size=15))
+
+    assert json.loads(config_text(fake_appdata, "config.prev.json"))["font_size"] == 12
+
+
+def test_the_first_save_has_no_backup_and_a_failed_backup_does_not_fail_the_save(
+    fake_appdata, monkeypatch
+):
+    save_config(AppConfig())
+    assert not (fake_appdata / "quickterm" / "config.prev.json").exists()
+
+    real = cfgmod._atomic_write
+
+    def no_backup(path, text):
+        if path.name == "config.prev.json":
+            raise PermissionError(13, "denied")
+        real(path, text)
+
+    monkeypatch.setattr(cfgmod, "_atomic_write", no_backup)
+    save_config(AppConfig(font_size=20))
+    assert load_config().font_size == 20
+
+
+def test_the_backup_never_keeps_secrets_the_save_is_encrypting(fake_appdata, monkeypatch):
+    monkeypatch.setattr(cfgmod.secret_store, "protection_available", lambda: True)
+    monkeypatch.setattr(cfgmod.secret_store, "protect", lambda data: b"sealed:" + data)
+    monkeypatch.setattr(
+        cfgmod.secret_store, "unprotect", lambda data: data.removeprefix(b"sealed:"),
+    )
+    path = fake_appdata / "quickterm"
+    path.mkdir()
+    legacy = {"profiles": [{"name": "secure", "cmd": "cmd.exe", "env": {"API_TOKEN": "secret"}}]}
+    (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    load_config()  # migrates the plaintext value to a protected one
+
+    assert "secret" not in config_text(fake_appdata)
+    backup = path / "config.prev.json"
+    assert not backup.exists() or "secret" not in backup.read_text(encoding="utf-8")
+
+    # Once protected, later backups are protected copies too.
+    save_config(AppConfig(profiles=load_config().profiles, font_size=16))
+    backup_env = json.loads(config_text(fake_appdata, "config.prev.json"))["profiles"][0]["env"]
+    assert backup_env["API_TOKEN"]["protected"] == "dpapi-v1"
+
+
+def test_a_config_replace_refused_by_a_reader_is_retried(fake_appdata, monkeypatch):
+    import os
+
+    monkeypatch.setattr(cfgmod, "_RETRY_SHARING_VIOLATIONS", True)
+    monkeypatch.setattr(cfgmod.time, "sleep", lambda _: None)
+    real = os.replace
+    calls = []
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError(13, "sharing violation")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    save_config(AppConfig(font_size=18))
+    assert load_config().font_size == 18
+    assert len(calls) == 2
+
+
 def test_load_quarantines_structurally_invalid_config(fake_appdata):
     path = fake_appdata / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
