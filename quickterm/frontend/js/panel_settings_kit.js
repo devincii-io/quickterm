@@ -185,7 +185,7 @@ export function configEmpty({ lead, body, action }) {
  *  is a lie about the user's own configuration. */
 export function configNoMatch(query, what) {
   const box = make("div", "config-empty");
-  box.append(make("p", "config-empty-lead", `No ${what} match “${query}”.`));
+  box.append(make("p", "config-empty-lead", `No ${what} match "${query}".`));
   box.append(make("p", "config-empty-body", "Names, descriptions and commands are all searched."));
   return box;
 }

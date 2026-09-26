@@ -22,7 +22,7 @@ export function createWorkspaceSwitch({
     state.workspaceRoots.set(name, state.workspacePath);
     state.workspacePathExists = saved.path ? saved.path_exists !== false : true;
     if (saved.path && saved.path_exists === false) {
-      showError(`The folder for “${name}” is missing: ${saved.path}. New terminals open in your home folder until you pick another.`);
+      showError(`The folder for "${name}" is missing: ${saved.path}. New terminals open in your home folder until you pick another.`);
     }
     const knownSessions = await api.getSessions({ metrics: false }).catch(() => []);
     const knownById = new Map(knownSessions.map((session) => [session.id, session]));
@@ -104,7 +104,7 @@ export function createWorkspaceSwitch({
         );
       } catch (_) {
         state.transitioning = false;
-        showError(`Could not save “${state.currentWorkspace}”. The workspace was not switched and nothing was closed.`);
+        showError(`Could not save "${state.currentWorkspace}". The workspace was not switched and nothing was closed.`);
         return false;
       }
     }

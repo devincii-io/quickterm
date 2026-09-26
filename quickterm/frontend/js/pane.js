@@ -221,7 +221,7 @@ export class Pane {
       '<div class="pane-tab" title="Drag to move · double-click to rename"><span class="pane-tab-dot"></span><span class="pane-tab-name"></span><span class="pane-tab-activity" hidden></span></div>' +
       '<div class="pane-actions" aria-label="Pane actions">' +
         '<button class="pane-action" type="button" data-action="split-h" title="Split right (Alt+Shift+Right)">|</button>' +
-        '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">—</button>' +
+        '<button class="pane-action" type="button" data-action="split-v" title="Split below (Alt+Shift+Down)">─</button>' +
         '<button class="pane-action" type="button" data-action="zoom" title="Zoom pane (Alt+Z)">□</button>' +
         // "×" means "close this view" everywhere else, so it detaches: the
         // terminal keeps running. Killing is a separate, labelled danger

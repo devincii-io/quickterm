@@ -9,7 +9,7 @@
 //
 // It is exactly why Alt+K did not focus the palette: `togglePalette` closes any
 // open panel first, panel close calls `refocusTerm()`, that schedules three
-// terminal focus calls, and the palette then focuses its input synchronously —
+// terminal focus calls, and the palette then focuses its input synchronously,
 // so the rAF and the timeout stole it straight back a frame later.
 //
 // Overlays claim ownership while they are open. The terminal's deferred focus

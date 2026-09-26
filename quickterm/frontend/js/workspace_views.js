@@ -372,7 +372,7 @@ export class WorkspaceViews {
       this.zoomed = null;
       this.layout();
       this.focusView(shown);
-      this.error(`“${name}” is already shown in this window.`);
+      this.error(`"${name}" is already shown in this window.`);
       return false;
     }
     const beside = this.viewFor(anchor || anchorWindow) || this.active || this.primary;
@@ -390,7 +390,7 @@ export class WorkspaceViews {
       this.activate(beside);
       return true;
     } catch (error) {
-      this.error(error?.detail || `Could not open “${name}” here. It may already be open elsewhere.`);
+      this.error(error?.detail || `Could not open "${name}" here. It may already be open elsewhere.`);
       return false;
     } finally {
       this.busy = false;

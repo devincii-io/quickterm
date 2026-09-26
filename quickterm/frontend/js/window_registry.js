@@ -148,7 +148,7 @@ export function createWindowRegistry({
         state.registryAvailable = false;
         return;
       }
-      refused = `“${wanted}” was taken over by ${describeHolder(conflictHolder(error))} `
+      refused = `"${wanted}" was taken over by ${describeHolder(conflictHolder(error))} `
         + "while this window was unreachable. Nothing here was closed: your terminals "
         + "keep running and this layout carries on as an unnamed scratch layout.";
     }
@@ -212,7 +212,7 @@ export function createWindowRegistry({
   // Same refusal, different consequence: nothing was switched here, the second
   // window simply did not open.
   function claimRefusalMessageForOpen(name, holder) {
-    return `“${name}” is already open in ${describeHolder(holder)}, `
+    return `"${name}" is already open in ${describeHolder(holder)}, `
       + "so no second window was opened. Two windows on one workspace overwrite "
       + "each other's saved layout.";
   }

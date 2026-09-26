@@ -224,7 +224,7 @@ function buildDashboard() {
     if (existing.has(name) && name !== current && confirmOverwrite !== name) {
       confirmOverwrite = name;
       saveButton.textContent = "Overwrite?";
-      saveNote.textContent = `“${name}” already exists. Save again to replace it.`;
+      saveNote.textContent = `"${name}" already exists. Save again to replace it.`;
       return;
     }
     saveButton.disabled = true;
@@ -513,7 +513,7 @@ function createWorkspaceCard(panel, index) {
   remove.addEventListener("click", (event) => {
     event.stopPropagation();
     const name = itemFor(card).name;
-    panel._confirmNear(remove, `Delete workspace “${name}” and stop its detached sessions?`, "Delete", async () => {
+    panel._confirmNear(remove, `Delete workspace "${name}" and stop its detached sessions?`, "Delete", async () => {
       const deleted = panel.app.deleteWorkspace
         ? await panel.app.deleteWorkspace(name)
         : await api.deleteWorkspace(name).then(() => true).catch(() => false);
@@ -637,7 +637,7 @@ function createSessionRow(panel) {
   const kill = panel._button("Kill", "text-button danger-text");
   kill.addEventListener("click", () => {
     const { session, workspaceName } = itemFor(row);
-    panel._confirmNear(kill, `Stop terminal “${session.name || session.id}”?`, "Kill", async () => {
+    panel._confirmNear(kill, `Stop terminal "${session.name || session.id}"?`, "Kill", async () => {
       const stopped = await panel.app.killWorkspaceSession(
         session, workspaceName === UNASSIGNED ? null : workspaceName,
       );

@@ -109,7 +109,7 @@ export function createPaneCommands({
         pane.flashNotice("[no terminal to kill · Alt+D closes the pane]");
         return;
       }
-      pane.confirmAction(`Stop “${pane.displayName()}” and close this pane?`, async () => {
+      pane.confirmAction(`Stop "${pane.displayName()}" and close this pane?`, async () => {
         const sessionId = pane.session.id;
         try {
           await api.killSession(sessionId);
@@ -156,12 +156,12 @@ export function createPaneCommands({
       const body = displaySnippet(snippet.text);
       const send = () => {
         if (pane.sendText(snippet.text)) pane.flashNotice(`[sent: ${snippet.name}]`);
-        else showError(`“${snippet.name}” was not sent. That pane has no live terminal.`);
+        else showError(`"${snippet.name}" was not sent. That pane has no live terminal.`);
       };
       const lines = body ? body.split("\n").length : 0;
       if (lines > 1) {
         pane.confirmAction(
-          `Run “${snippet.name}” (${lines} lines) in ${pane.displayName()}?`,
+          `Run "${snippet.name}" (${lines} lines) in ${pane.displayName()}?`,
           async () => send(),
           "Run",
         );

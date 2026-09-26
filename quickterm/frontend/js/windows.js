@@ -62,7 +62,7 @@ export function describeHolder(entry) {
 // the mechanism: "taken" alone reads like a bug, "would overwrite your layout"
 // reads like a reason.
 export function claimRefusalMessage(name, holder) {
-  return `“${name}” is already open in ${describeHolder(holder)}. `
+  return `"${name}" is already open in ${describeHolder(holder)}. `
     + "Two windows on one workspace overwrite each other's saved layout, "
     + "so this window stayed where it was.";
 }
@@ -92,8 +92,8 @@ export function windowChoices(names, list, selfId, current) {
 export function windowChoiceMessage(row) {
   if (!row || !row.taken) return "";
   return row.mine
-    ? `“${row.name}” is the workspace this window is already on.`
-    : `“${row.name}” is already open in ${describeHolder(row.holder)}. `
+    ? `"${row.name}" is the workspace this window is already on.`
+    : `"${row.name}" is already open in ${describeHolder(row.holder)}. `
       + "Two windows on one workspace overwrite each other's saved layout.";
 }
 

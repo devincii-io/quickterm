@@ -3,6 +3,7 @@
 // registry first, because two windows autosaving one file overwrite each other.
 
 import { SCRATCH_WS, rememberWorkspace } from "./boot_context.js";
+import { launchOptionsToNode } from "./launch_options.js";
 import { layoutWith, removeSessionFromLayout } from "./layout_sessions.js";
 import { sessionAlreadyGone } from "./panel_shared.js";
 import { describeHolder, windowChoiceMessage, workspaceHolder } from "./windows.js";
@@ -13,7 +14,7 @@ export function validateWorkspaceName(name) {
   if (cleanName.startsWith(".")) return "Names starting with a dot are reserved.";
   // "scratch" is reserved: the backend deletes that file at app start and
   // exit, so a user workspace under that name would silently vanish.
-  if (cleanName.toLowerCase() === "scratch") return "“scratch” is reserved for the disposable workspace.";
+  if (cleanName.toLowerCase() === "scratch") return '"scratch" is reserved for the disposable workspace.';
   // The backend stores names through a safe-name filter; a name that does
   // not survive it unchanged would collide or fail to restore on reboot.
   if (cleanName.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\.+$/, "") !== cleanName) {
@@ -39,17 +40,17 @@ export function createWorkspaceActions({
     if (!here || state.transitioning) return false;
     const { folder, name } = here;
     if (here.action === "clash") {
-      showError(`A workspace named “${name}” already exists with a different folder. Name this one in the Dashboard.`);
+      showError(`A workspace named "${name}" already exists with a different folder. Name this one in the Dashboard.`);
       return false;
     }
     const problem = validateWorkspaceName(name);
     if (problem) {
-      showError(`“${name}” cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it in the Dashboard.`);
+      showError(`"${name}" cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it in the Dashboard.`);
       return false;
     }
     const holder = workspaceHolder(await listWindowsSafe(), state.windowId, name);
     if (holder) {
-      showError(`“${name}” is open in ${describeHolder(holder)}. Use “move here” from that view to take this terminal along.`);
+      showError(`"${name}" is open in ${describeHolder(holder)}. Use "move here" from that view to take this terminal along.`);
       return false;
     }
     const pane = layout.focused;
@@ -58,7 +59,7 @@ export function createWorkspaceActions({
     if (here.action === "open") {
       saved = await workspace.details(name).catch(() => null);
       if (!saved) {
-        showError(`Workspace “${name}” could not be read.`);
+        showError(`Workspace "${name}" could not be read.`);
         return false;
       }
     }
@@ -67,6 +68,10 @@ export function createWorkspaceActions({
       carried = { type: "pane", session_id: session.id, cwd: folder };
       if (pane.profileName) carried.profile = pane.profileName;
       if (pane.launchSpec) carried.launch_spec = pane.launchSpec;
+      // Without its options a Claude "new conversation" pane would come back
+      // in the profile's default mode after a restore or a restart.
+      const options = pane.profileName ? launchOptionsToNode(pane.launchOptions) : null;
+      if (options) carried.launch_options = options;
       if (pane.title) carried.title = pane.title;
     }
     const ids = new Set(saved?.session_ids || []);
@@ -77,7 +82,7 @@ export function createWorkspaceActions({
       await workspace.save(name, layoutWith(saved?.layout, carried), saved?.logo || null, [...ids],
         saved ? undefined : folder);
     } catch (error) {
-      showError(error?.detail || `Could not ${saved ? "update" : "create"} workspace “${name}”.`);
+      showError(error?.detail || `Could not ${saved ? "update" : "create"} workspace "${name}".`);
       return false;
     }
     if (session) {
@@ -224,7 +229,7 @@ export function createWorkspaceActions({
       rememberWorkspace(previousWorkspace);
       await claimWorkspaceFor(previousWorkspace); // the rename did not happen
 
-      const message = error?.detail || `Could not save “${cleanName}”. Nothing was changed.`;
+      const message = error?.detail || `Could not save "${cleanName}". Nothing was changed.`;
       showError(message);
       return message;
     }
@@ -260,7 +265,7 @@ export function createWorkspaceActions({
     try {
       await api.deleteWorkspace(name);
     } catch (_) {
-      showError(`Could not delete workspace “${name}”.`);
+      showError(`Could not delete workspace "${name}".`);
       return false;
     }
     const deletingCurrent = state.currentWorkspace === name;
@@ -297,7 +302,7 @@ export function createWorkspaceActions({
     if (!name || name === state.currentWorkspace) return setWorkspacePath(folder);
     const saved = await workspace.details(name).catch(() => null);
     if (!saved) {
-      showError(`Workspace “${name}” could not be read.`);
+      showError(`Workspace "${name}" could not be read.`);
       return false;
     }
     try {
@@ -306,7 +311,7 @@ export function createWorkspaceActions({
         (folder || "").trim() || null,
       );
     } catch (error) {
-      showError(error?.detail || `That folder could not be saved for “${name}”.`);
+      showError(error?.detail || `That folder could not be saved for "${name}".`);
       return false;
     }
     state.workspaceRoots.set(name, (folder || "").trim() || null);

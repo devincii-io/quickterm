@@ -24,6 +24,7 @@ const MODULES = {
   "scratch.js": ["discardScratchWarning", "createScratch"],
   "session_ownership.js": ["createSessionOwnership"],
   "sidebar.js": ["createSidebar"],
+  "terminal_actions.js": ["createTerminalActions", "resultLabel"],
   "spawner.js": [
     "defaultSystemSpec", "serializableSpec", "commandTerminalType", "claudeProfileForPane", "createSpawner",
   ],
@@ -67,7 +68,7 @@ test("a factory builds without touching its dependencies", async () => {
     ["session_ownership.js", "createSessionOwnership"], ["sidebar.js", "createSidebar"],
     ["spawner.js", "createSpawner"], ["window_registry.js", "createWindowRegistry"],
     ["workspace_actions.js", "createWorkspaceActions"], ["workspace_switch.js", "createWorkspaceSwitch"],
-    ["fonts.js", "createFontSize"],
+    ["fonts.js", "createFontSize"], ["terminal_actions.js", "createTerminalActions"],
   ];
   for (const [file, name] of factories) {
     const factory = (await load(file))[name];

@@ -294,7 +294,7 @@ export function createSpawner({
     }
     const targetOwner = state.currentWorkspace || null;
     if (info.workspace && info.workspace !== targetOwner) {
-      showError(`That terminal belongs to workspace “${info.workspace}”. Use “Move here & attach”.`);
+      showError(`That terminal belongs to workspace "${info.workspace}". Use "Move here & attach".`);
       return false;
     }
     let pane = layout.focused || layout.init();

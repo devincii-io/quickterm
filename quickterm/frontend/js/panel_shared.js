@@ -123,7 +123,7 @@ export function formatBytes(bytes) {
 }
 
 export function formatUptime(seconds) {
-  if (!Number.isFinite(seconds)) return "—";
+  if (!Number.isFinite(seconds)) return "-";
   const total = Math.max(0, Math.floor(seconds));
   if (total < 60) return `${total}s`;
   if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;

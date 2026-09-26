@@ -139,8 +139,8 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     # This used to assert the native pywebview dialog *was* the mechanism. It
     # cannot be: that dialog exists only in the installed app, so Browse was
     # dead in a plain browser, and opening it moves focus out of the document.
-    # The invariant that matters is unchanged in shape — one shared control
-    # behind every folder field — but the primary picker is now the in-app
+    # The invariant that matters is unchanged in shape: one shared control
+    # behind every folder field. But the primary picker is now the in-app
     # browser, with the OS dialog kept as a secondary route.
     settings = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
     shared = (FRONTEND_JS / "panel_shared.js").read_text(encoding="utf-8")
