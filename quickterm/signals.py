@@ -214,17 +214,23 @@ class SignalScanner:
                 self._head.clear()
                 self._keep(data[body:])
                 return found
-            found = self._dispatch(data[body:end][:_HEAD_CAP], found)
+            # Slice the head only: an OSC 52 payload can be a megabyte.
+            found = self._dispatch(data[body:min(end, body + _HEAD_CAP)], found)
             pos = self._after(data, end)
         return found
 
     @staticmethod
     def _terminator(data: bytes, start: int) -> int:
         """First BEL or ESC at or after ``start``. Any ESC ends the string:
-        ESC \\ is the proper ST, and any other ESC starts a new sequence."""
-        bel = data.find(_BEL, start)
-        esc = data.find(b"\x1b", start, bel if bel >= 0 else len(data))
-        return esc if esc >= 0 else bel
+        ESC \\ is the proper ST, and any other ESC starts a new sequence.
+
+        ESC first, then BEL only up to it: a string ended by ST carries no
+        BEL, and searching BEL first ran to the end of the burst for every
+        such string, so a burst of OSC 8 hyperlinks cost quadratic time on
+        the event loop."""
+        esc = data.find(b"\x1b", start)
+        bel = data.find(_BEL, start, esc if esc >= 0 else len(data))
+        return bel if bel >= 0 else esc
 
     def _after(self, data: bytes, end: int) -> int:
         """Where scanning resumes after the string that ended at ``end``."""

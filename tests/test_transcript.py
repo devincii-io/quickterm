@@ -64,6 +64,27 @@ def test_delete_and_insert_characters_edit_the_line():
     assert lines(b"ac\r\x1b[1C\x1b[1@b\r\n") == ["abc"]
 
 
+def test_inserted_blanks_push_the_row_end_off_the_margin():
+    # A known width keeps the row as wide as the terminal: what the insert
+    # pushes past the margin is gone, as on screen.
+    assert transcript.plain_lines([b"abcdef\r\x1b[2@\r\n"], cols=6) == ["  abcd"]
+
+
+def test_hostile_inserts_cannot_grow_a_line_without_bound():
+    # "x\r" plus a stream of ESC[4096@ grew one line by 4096 cells per
+    # sequence and shifted all of them every time: 28 KB took 50 s.
+    import time
+
+    hostile = b"x\r" + b"\x1b[4096@" * 20_000
+    for cols in (0, 120):
+        started = time.monotonic()
+        out = transcript.plain_lines([hostile, b"\r\n"], cols=cols)
+        assert time.monotonic() - started < 5
+        assert all(len(line) <= (cols or 4096) for line in out)
+    # With a known width the inserts push the "x" off the margin, as on screen.
+    assert transcript.plain_lines([hostile, b"\r\n"], cols=120) in ([], [""])
+
+
 def test_backspace_and_tab():
     assert lines(b"abx\bc\r\n") == ["abc"]
     assert lines(b"a\tb\r\n") == ["a       b"]
@@ -241,9 +262,15 @@ def test_file_names_are_legal_on_ntfs(name, stem):
 
 def test_export_prefers_downloads_and_falls_back_to_home(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(transcript, "_known_downloads", lambda: None)
     assert transcript.export_dir() == tmp_path / "QuickTerm"
     (tmp_path / "Downloads").mkdir()
     assert transcript.export_dir() == tmp_path / "Downloads" / "QuickTerm"
+    # A Downloads folder the user moved elsewhere wins over ~/Downloads.
+    moved = tmp_path / "D" / "Downloads"
+    moved.mkdir(parents=True)
+    monkeypatch.setattr(transcript, "_known_downloads", lambda: moved)
+    assert transcript.export_dir() == moved / "QuickTerm"
 
 
 def test_export_writes_plain_text_and_never_overwrites(tmp_path):
@@ -382,3 +409,9 @@ def test_export_route_reports_a_write_failure(client, manager, monkeypatch, tmp_
     response = client.post(f"/api/sessions/{info.id}/export")
     assert response.status_code == 500
     assert "could not save the output" in response.json()["detail"]
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="the Windows known-folder lookup")
+def test_exports_go_to_the_folder_windows_calls_downloads():
+    known = transcript._known_downloads()
+    assert known is not None and known.is_dir()

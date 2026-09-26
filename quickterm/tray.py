@@ -202,6 +202,16 @@ def _load_icon() -> int:
     return _user32.LoadIconW(None, _IDI_APPLICATION)
 
 
+def _utf16_prefix(text: str, units: int) -> str:
+    """The longest prefix of ``text`` that fits ``units`` UTF-16 code units.
+
+    The balloon fields are fixed WCHAR arrays. Slicing by code points let
+    a name with emoji overflow them, ctypes raised, and the balloon was
+    silently lost.
+    """
+    return text.encode("utf-16-le")[: units * 2].decode("utf-16-le", "ignore")
+
+
 class TrayIcon:
     """Owns the tray thread. on_open/on_quit are invoked from that thread."""
 
@@ -256,8 +266,8 @@ class TrayIcon:
             return
         nid = self._nid()
         nid.uFlags = _NIF_INFO
-        nid.szInfo = text[:255]
-        nid.szInfoTitle = title[:63]
+        nid.szInfo = _utf16_prefix(text, 255)
+        nid.szInfoTitle = _utf16_prefix(title, 63)
         nid.dwInfoFlags = _NIIF_INFO
         _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
 

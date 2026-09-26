@@ -22,8 +22,11 @@ _T = TypeVar("_T")
 # An exited session that the user retained or typed into, and that printed
 # output nobody has seen, is kept this long after it ended (unless a viewer
 # acknowledges it first). A day covers a build or agent left running
-# overnight; memory stays bounded by the scrollback cap per session, and
-# untouched never-attached exited sessions still go on the next pass.
+# overnight; memory stays bounded by the scrollback cap per session.
+# Untouched, never-attached exited sessions go on the next pass unless they
+# asked for the user: a Claude session started by autostart or `quickterm
+# new` is never attached, and its "needs you" is exactly what must survive
+# until someone opens it from the sidebar.
 EXITED_UNREAD_RETENTION_S = 24 * 60 * 60
 # A reaper claim that the loop does not run within this time (the app is
 # shutting down) is treated as "not reaped".

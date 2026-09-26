@@ -186,3 +186,23 @@ def test_notify_throttle_allows_once_per_interval_per_key():
     assert throttle.allow("a") is False
     now[0] += 2
     assert throttle.allow("a") is True
+
+
+def test_strings_ended_by_st_do_not_rescan_the_burst():
+    # Searching BEL before ESC ran to the end of the burst for every OSC
+    # string ended by ST (OSC 8 hyperlinks from ls, gcc, Claude Code), so a
+    # burst full of them cost quadratic time on the event loop.
+    import time
+
+    st = b"\x1b\\"
+    link = b"\x1b]8;;file:///tmp/a" + st + b"a\x1b]8;;" + st + b" "
+    burst = link * (2 * 1024 * 1024 // len(link))
+    started = time.monotonic()
+    assert SignalScanner().feed(burst) is None
+    assert time.monotonic() - started < 2.0
+
+
+def test_a_bell_before_an_st_string_still_rings():
+    found = one(b"\x1b]0;title\x07ding\x07")
+    assert found is not None and found.attention == "bell"
+    assert one(b"\x1b]8;;x\x1b\\") is None

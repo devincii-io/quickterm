@@ -199,3 +199,12 @@ async def test_reaper_drops_exited_sessions_nobody_cared_about(fake_manager):
     assert sorted(mgr.reap_idle(300, set())) == sorted(
         [never_attached.id, untouched.id, seen.id]
     )
+
+
+async def test_a_bell_from_a_session_someone_opened_keeps_it(fake_manager):
+    mgr = fake_manager
+    info = mgr.spawn(cmd="x.exe")
+    mgr.attach(info.id).detach()
+    mgr._on_output(mgr.get(info.id), b"\x07")
+    mgr.get(info.id).last_activity -= 600
+    assert mgr.reap_idle(300, set()) == []

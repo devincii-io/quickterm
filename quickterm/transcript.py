@@ -19,6 +19,7 @@ Pure and synchronous; callers run it through `asyncio.to_thread`.
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator
@@ -226,9 +227,26 @@ class _Lines:
         del self.cells[self.col : self.col + count]
 
     def insert_blanks(self, count: int) -> None:
-        if self.col < len(self.cells):
-            self._free(self.col)
-            self.cells[self.col : self.col] = [" "] * count
+        # A terminal pushes what passes the right margin off the row. Letting
+        # the line grow instead made "x\r" plus a stream of ESC[4096@ build a
+        # line of millions of cells, each insert shifting all of them: a
+        # hostile 28 KB of output took 50 s to search and held the GIL.
+        cells = self.cells
+        if self.col >= len(cells):
+            return
+        self._free(self.col)
+        if self.cols:
+            end = min(self._row_end(), len(cells))
+            count = min(count, end - self.col)
+            if count <= 0:
+                return
+            self._free(end - count)
+            del cells[end - count : end]
+        else:
+            count = min(count, max(0, _MAX_COLUMN - len(cells)))
+            if count <= 0:
+                return
+        cells[self.col : self.col] = [" "] * count
 
 
 def _numbers(params: str) -> list[int]:
@@ -367,9 +385,53 @@ def search_lines(lines: list[str], pattern: re.Pattern[str]) -> Iterator[Hit]:
             yield Hit(index, text, start)
 
 
+def _known_downloads() -> Path | None:
+    """The Downloads folder Windows knows, wherever the user moved it.
+
+    ~/Downloads is only the default: Explorer's Location tab moves the folder
+    to another drive, and exports then landed in a stale or missing folder.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Guid(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # FOLDERID_Downloads {374DE290-123F-4565-9164-39C4925E467B}
+        folder_id = _Guid(
+            0x374DE290, 0x123F, 0x4565,
+            (ctypes.c_ubyte * 8)(0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B),
+        )
+        # Private DLL handles, so these argtypes never reach another module's.
+        shell32 = ctypes.WinDLL("shell32")
+        ole32 = ctypes.WinDLL("ole32")
+        shell32.SHGetKnownFolderPath.argtypes = (
+            ctypes.POINTER(_Guid), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_void_p),
+        )
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = (ctypes.c_void_p,)
+        raw = ctypes.c_void_p()
+        if shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(raw)) != 0:
+            return None
+        try:
+            return Path(ctypes.wstring_at(raw.value)) if raw.value else None
+        finally:
+            ole32.CoTaskMemFree(raw)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 def export_dir() -> Path:
     home = Path.home()
-    downloads = home / "Downloads"
+    downloads = _known_downloads() or home / "Downloads"
     return (downloads if downloads.is_dir() else home) / "QuickTerm"
 
 

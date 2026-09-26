@@ -114,3 +114,14 @@ def test_the_win32_helpers_answer_without_a_window():
 
     assert tray.own_window("QuickTerm no such window title") is None
     assert tray.foreground_is_ours() in (True, False)
+
+
+def test_balloon_text_is_cut_by_utf16_units_not_code_points():
+    # The balloon fields are fixed WCHAR arrays: 200 emoji are 400 units and
+    # overflowed a 256-unit field, so ctypes raised and the balloon was lost.
+    from quickterm.tray import _utf16_prefix
+
+    cut = _utf16_prefix("\U0001f600" * 200, 255)
+    assert len(cut.encode("utf-16-le")) <= 255 * 2
+    assert cut == "\U0001f600" * 127  # never half a surrogate pair
+    assert _utf16_prefix("short", 63) == "short"
