@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  dwindleDir, insertBeside, layoutRects, leaf, leaves, removeLeaf,
+  dwindleDir, insertBeside, layoutRects, leaf, leaves, mapLeaves, removeLeaf,
 } from "../../quickterm/frontend/js/split_tree.js";
 
 function split(dir, a, b, ratio = 0.5) { return { type: "split", dir, ratio, children: [a, b] }; }
@@ -72,4 +72,23 @@ test("a stored ratio outside the clamp cannot squeeze a leaf away", () => {
   const { leaves: boxes } = layoutRects(root, { left: 0, top: 0, width: 1000, height: 100 }, 0, { min: 0.15, max: 0.85 });
   assert.equal(boxes.get("a").width, 150);
   assert.equal(boxes.get("b").width, 850);
+});
+
+test("mapping leaves copies the splits bare and collapses the ones a dropped leaf leaves", () => {
+  const root = split("h", leaf("a"), split("v", leaf("b"), split("h", leaf("c"), leaf("d"), 0.2), 0.3), 0.6);
+  root.divider = { element: true };
+  root.box = { left: 0 };
+  const seen = [];
+  const upper = mapLeaves(root, (payload) => { seen.push(payload); return payload.toUpperCase(); });
+  assert.deepEqual(seen, ["a", "b", "c", "d"], "payloads are visited in reading order");
+  assert.equal(shape(upper), "h(A,v(B,h(C,D)))");
+  assert.deepEqual(Object.keys(upper).sort(), ["children", "dir", "ratio", "type"]);
+  assert.equal(upper.ratio, 0.6);
+
+  const pruned = mapLeaves(root, (payload) => (payload === "c" || payload === "a" ? null : payload));
+  assert.equal(shape(pruned), "v(b,d)");
+  assert.equal(pruned.ratio, 0.3, "the surviving split keeps its own ratio");
+  assert.equal(mapLeaves(root, () => null), null);
+  assert.equal(mapLeaves(null, (payload) => payload), null);
+  assert.equal(shape(root), "h(a,v(b,h(c,d)))", "the original is untouched");
 });

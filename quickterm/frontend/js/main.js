@@ -6,7 +6,7 @@ import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 import { claimFocus, releaseFocus } from "./focus.js";
-import { WorkspaceViews } from "./workspace_views.js";
+import { WorkspaceViews, viewArrangementStore } from "./workspace_views.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import { createAutosave } from "./autosave.js";
@@ -114,11 +114,17 @@ async function boot() {
   registry.startWindowHeartbeat();
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
+  // Only the primary window's tiling outlives a restart. localStorage is
+  // shared by every window on this origin, so a second window (opened with a
+  // workspace of its own, or a second browser tab) must neither restore it
+  // nor write over it.
+  const keepsViewArrangement = !embedded && requestedWorkspace === undefined && state.windowIsPrimary;
   const views = embedded ? null : new WorkspaceViews({
     current: () => state.currentWorkspace,
     focus: () => layout.focused?.focusSoon(),
     fit: () => layout.fitAll(),
     error: showError,
+    store: keepsViewArrangement ? viewArrangementStore() : null,
   });
   // The view manager this document talks to: its own when it is the window,
   // the parent's when it is one view inside a window. A view names itself to
@@ -390,6 +396,11 @@ async function boot() {
   reportLaunchError(state.cfg.launch_error);
   if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
+  // The tiled views come back around this window's own workspace, which is
+  // restored and claimed by now, so a stored view of the same name is
+  // skipped instead of fighting it for the claim. Not awaited: each view is
+  // a whole document booting on its own.
+  views?.restoreSaved({ exists: (name) => state.workspaceNames.includes(name) });
   // Off the boot path: one small request per saved workspace.
   setTimeout(() => refreshWorkspaceRoots(), 1200);
   if (cachedInventory) refreshCachedInventory();
