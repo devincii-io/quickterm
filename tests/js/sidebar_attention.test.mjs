@@ -8,7 +8,7 @@ import {
   UNASSIGNED_GROUP, attentionText, groupSessionsByWorkspace, groupSummary, isListedSession,
   sessionFolder, sessionState, sessionSummary, sessionTooltip,
 } from "../../quickterm/frontend/js/launcher.js";
-import { finishedAttachRecord, sessionToMarkSeen } from "../../quickterm/frontend/js/sidebar.js";
+import { documentHasKeyboard, finishedAttachRecord, sessionToMarkSeen } from "../../quickterm/frontend/js/sidebar.js";
 import { historySummary, historyTime } from "../../quickterm/frontend/js/panel_settings_about.js";
 
 function session(id, extra = {}) {
@@ -143,4 +143,14 @@ test("settings history rows say what restoring would change", () => {
   assert.equal(historySummary({ summary: "" }), "no difference");
   assert.equal(historyTime("not a date"), "not a date");
   assert.notEqual(historyTime("2026-09-26T10:32:00Z"), "2026-09-26T10:32:00Z");
+});
+
+test("a document whose tiled view has the keyboard does not have it itself", () => {
+  // The primary's document reports focus while one of its iframe views has
+  // it; its own focused pane must then keep its "needs you".
+  const doc = (focused, tag) => ({ hasFocus: () => focused, activeElement: tag ? { tagName: tag } : null });
+  assert.equal(documentHasKeyboard(doc(true, "TEXTAREA")), true);
+  assert.equal(documentHasKeyboard(doc(true, "IFRAME")), false);
+  assert.equal(documentHasKeyboard(doc(false, "TEXTAREA")), false);
+  assert.equal(documentHasKeyboard(doc(true, null)), true);
 });

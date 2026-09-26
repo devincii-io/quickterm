@@ -21,6 +21,15 @@ export function sessionToMarkSeen({ sessions, focusedId, focusChanged, visible, 
   return session?.attention ? focusedId : null;
 }
 
+// Whether this document itself has the keyboard. document.hasFocus() is also
+// true while a tiled workspace view (an iframe inside this document) has it,
+// and then the primary's own focused pane is not what the user is looking at:
+// a bell there was cleared as "seen" while they typed in the other view.
+export function documentHasKeyboard(doc = globalThis.document) {
+  if (!doc || !doc.hasFocus()) return false;
+  return doc.activeElement?.tagName !== "IFRAME";
+}
+
 // The record attachSession is handed for a finished row. It refuses an
 // exited record on purpose (a stale card must not open a dead pane), but a
 // finished row is an explicit request to read one: the pane attaches, the
@@ -159,7 +168,7 @@ export function createSidebar({
         focusedId,
         focusChanged: focusedId !== lastFocusedId,
         visible: !document.hidden,
-        windowFocused: document.hasFocus(),
+        windowFocused: documentHasKeyboard(),
       });
       lastFocusedId = focusedId;
       if (seen) markSeen(seen);
