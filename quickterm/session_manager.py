@@ -131,6 +131,11 @@ class Session:
         """
         return self._ring.snapshot()
 
+    def replay_steps(self) -> tuple[tuple[bytes | tuple[int, int], ...], int, int]:
+        """What a viewer replays: output chunks and ``(cols, rows)`` resizes in
+        stream order, and the size the first step was written at."""
+        return self._ring.replay()
+
     def set_scrollback_cap(self, cap: int) -> None:
         self._ring.set_cap(cap)
 
@@ -493,8 +498,9 @@ class SessionManager:
         s = self._sessions.get(sid)
         if s and s.pty and s.info.alive:
             s.info.cols, s.info.rows = cols, rows
-            # Reconnect geometry must stay current even while the PTY is silent.
-            s._ring.cols, s._ring.rows = cols, rows
+            # Recorded now, not with the next output: the resize belongs
+            # before whatever ConPTY writes for the new size.
+            s._ring.resize(cols, rows)
             s.pty.resize(cols, rows)
 
     def kill(self, sid: str) -> bool:

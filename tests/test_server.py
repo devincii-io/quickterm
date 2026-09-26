@@ -116,6 +116,11 @@ class FakeSession:
         )
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
+        chunks = tuple(c for c in self._chunks if isinstance(c, bytes))
+        return chunks, self.info.cols, self.info.rows
+
+    def replay_steps(self) -> tuple[tuple[bytes | tuple[int, int], ...], int, int]:
+        # A (cols, rows) tuple among the chunks is a resize at that point.
         return self._chunks, self.info.cols, self.info.rows
 
 

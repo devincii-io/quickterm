@@ -371,6 +371,16 @@ class Attachment:
   paste (2004), mouse tracking (1000/1002/1003) and encoding (1006/1015), alt
   screen (47/1047/1049). Synchronized output (2026) is never replayed. RIS
   (`ESC c`) clears the tracked state.
+- Resizes are kept at their place in the byte stream (`ScrollbackRing.resize`,
+  called by `SessionManager.resize` before the PTY resize), and
+  `replay_steps()` returns the chunks with a `(cols, rows)` step at each
+  resize, plus the size the first step was written at. Resizes with no output
+  between them collapse into the last one; one that leaves with the trimmed
+  front becomes the start size. `scrollback_chunks()` keeps returning the
+  chunks and the current size, for search and export. ConPTY writes each
+  byte for the size in effect then, so replaying bytes from several widths at
+  one width broke prompts apart; a viewer that resizes where the session did
+  reflows exactly as the live one.
 - `reap_idle` (every 30 s, from a worker thread) spares a session with a
   viewer attached. It removes an exited session, unless the session was
   retained or touched and still holds background output nobody has seen:
@@ -670,9 +680,14 @@ still sitting in the ring.) A fresh subscription is drained from the moment it
 exists, so output produced during the replay handshake is delivered in order
 once the live phase begins instead of overflowing the bounded queue:
 
-1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (size scrollback was recorded at)
+1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (the size the
+   first retained byte was written at)
 2. server → binary scrollback frames of at most 128 KiB; after xterm finishes
-   parsing each frame, client → text JSON `{"type":"replay_ack"}`
+   parsing each frame, client → text JSON `{"type":"replay_ack"}`. Where the
+   session was resized, the server ends the frame and, once it is
+   acknowledged, sends text JSON `{"type":"replay_resize","cols":C,"rows":R}`
+   (no ack); the client resizes xterm on receipt, which is in stream order
+   because every earlier frame is already parsed
 3. server → text JSON `{"type":"replay_done"}` (an empty replay keeps the
    legacy empty binary frame but requires no acknowledgement)
 4. live phase:
@@ -706,7 +721,8 @@ After a replay-only reattach of an exited session the server calls
 final output once it has been shown.
 
 Client is responsible for replay-then-resize: set xterm to replay size, write
-scrollback, THEN resize to real size and send resize message.
+scrollback (resizing at each `replay_resize`), THEN resize to real size and
+send resize message.
 
 Server binds 127.0.0.1 by default. Host and Origin allowlists protect the local
 HTTP and WebSocket routes against DNS rebinding and cross-origin browser use.
@@ -927,8 +943,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 ## frontend/
 
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
-  pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
-  `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
+  pinned xterm: `@xterm/xterm@6.0.0`, `@xterm/addon-fit@0.11.0`,
+  `@xterm/addon-webgl@0.19.0`, `@xterm/addon-web-links@0.12.0`,
+  `@xterm/addon-unicode11@0.9.0` (the UMD `lib/*.js` builds and `css/xterm.css`,
+  committed). 6.0 is the floor on Windows: pywinpty ships OpenConsole 1.24,
+  and since 1.22 ConPTY does not repaint after a resize, so the terminal must
+  reflow as ConPTY does, which 5.x did not.
 - `main.js` is the composition root (about 400 lines): it builds the modules
   below in order and hands each the dependencies it uses. State more than one
   of them reads lives in one object from `app_state.js`, read at call time;
@@ -1281,6 +1301,16 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Rendering: WebGL renderer (DOM fallback) + Unicode 11 width tables
   (`addon-unicode11`, activeVersion "11") so emoji/wide glyphs measure correctly
   and modern TUIs don't drift the cursor; falls back to xterm's built-in v6.
+- On Windows the terminal gets `windowsPty: {backend: "conpty", buildNumber:
+  22621}` and `reflowCursorLine: true`, the pair VS Code uses with its bundled
+  conpty.dll. The build number describes the shipped OpenConsole, not the OS;
+  any value >= 21376 selects xterm's ConPTY-compatible reflow. Without the
+  cursor line reflowing too, a wrapped prompt split on resize and PSReadLine
+  redrew it over the output above.
+- The scrollbar is xterm's own (VS Code's scrollable element); `app.css`
+  keeps its rail visible and hides the thumb when there is nothing to scroll.
+  `.xterm-viewport` is only a background layer and must not show a native
+  scrollbar.
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
 - File viewer: `viewer.html?path=...`, a separate minimal page. It fetches

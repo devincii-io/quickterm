@@ -19,6 +19,12 @@ def test_replay_frames_are_nonempty_ordered_and_bounded(monkeypatch):
     assert frames == [b"abcd", b"efgh", b"i"]
 
 
+def test_replay_frames_end_at_a_resize(monkeypatch):
+    monkeypatch.setattr(server, "_SEND_COALESCE_BYTES", 4)
+    frames = list(server._coalesce_replay((b"ab", (80, 24), b"cdefg", (90, 30))))
+    assert frames == [b"ab", (80, 24), b"cdef", b"g", (90, 30)]
+
+
 # ---- output pump send coalescing ----
 
 

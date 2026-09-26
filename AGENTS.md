@@ -41,7 +41,8 @@ mouse, ...) in effect there, byte-bounded per-subscriber fan-out queues
 (chunks merge up to 128 KB, overflow past 2 MiB triggers a clean
 replay/resync). → `quickterm/api/` (composed by `server.py`): REST + WS attach
 in `api/attach.py` (`replay_size` → scrollback
-frame → `replay_done` → live); the output pump coalesces queued chunks into one
+frames, with a `replay_resize` wherever the session was resized, since ConPTY
+wrote each byte for the size in effect then → `replay_done` → live); the output pump coalesces queued chunks into one
 WS frame (≤128 KB cap keeps input interleaved). → `frontend/js/pane.js`: one
 xterm.js + one WS per pane; write-callback backpressure; input only forwarded
 in phase "live".
