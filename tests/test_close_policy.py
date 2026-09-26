@@ -138,7 +138,7 @@ def viewers(monkeypatch):
     from quickterm.windows import WindowRegistry
 
     monkeypatch.setattr(app_mod, "_updating", threading.Event())
-    cfg = SimpleNamespace(port=8620)
+    cfg = SimpleNamespace(port=8620, host="127.0.0.1")
     state = {"manager": _Manager([_Info(alive=True, touched=True)])}
     return app_mod._ViewerWindows(
         cfg, state, WindowRegistry(), elevated=False, base_title="QuickTerm"
@@ -201,7 +201,7 @@ def test_an_elevated_window_always_quits_on_close(monkeypatch):
 
     monkeypatch.setattr(app_mod, "_updating", threading.Event())
     viewers = app_mod._ViewerWindows(
-        SimpleNamespace(port=8620),
+        SimpleNamespace(port=8620, host="127.0.0.1"),
         {"manager": _Manager([_Info(alive=True, touched=True)])},
         WindowRegistry(),
         elevated=True,
@@ -320,3 +320,60 @@ def test_window_url_carries_the_window_identity(monkeypatch):
         "http://127.0.0.1:8620/?primary=1#"
     )
     assert app_mod._window_url(8620) == "http://127.0.0.1:8620/#t=tok"
+
+
+def test_client_urls_follow_the_configured_host(monkeypatch):
+    # validate_config accepts ::1, and a window aimed at 127.0.0.1 could then
+    # reach nothing while a second launch started a second backend.
+    from quickterm import app as app_mod
+    from quickterm import auth
+
+    monkeypatch.setattr(auth, "get_or_create_token", lambda: "tok")
+    assert app_mod._window_url(8620, host="::1") == "http://[::1]:8620/#t=tok"
+    assert app_mod._window_url(8620, host="localhost") == "http://localhost:8620/#t=tok"
+    probed = []
+
+    def fake_open(url, timeout):
+        probed.append(url)
+        raise OSError("nothing there")
+
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_open)
+    assert app_mod._already_running(8620, "::1") is False
+    assert probed == ["http://[::1]:8620/api/health"]
+
+
+def test_a_runtime_port_is_recorded_as_an_override():
+    from quickterm import app as app_mod
+
+    cfg = SimpleNamespace(port=8620, host="127.0.0.1")
+    app_mod._override_port(cfg, 53871)
+    assert (cfg.port, cfg.runtime_overrides) == (53871, {"port"})
+
+
+def _ipv6_loopback() -> bool:
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+def test_a_free_port_is_probed_on_ipv4_loopback_by_default():
+    from quickterm import app as app_mod
+
+    assert 0 < app_mod._free_port() < 65536
+    assert 0 < app_mod._free_port("localhost") < 65536
+
+
+@pytest.mark.skipif(not _ipv6_loopback(), reason="no IPv6 loopback on this machine")
+def test_a_free_port_is_probed_on_ipv6_loopback_for_an_ipv6_host():
+    import socket
+
+    from quickterm import app as app_mod
+
+    port = app_mod._free_port("::1")
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+        sock.bind(("::1", port))  # free on the family the server binds

@@ -52,6 +52,10 @@ def test_running_instance_folder_launch_is_forwarded_with_local_token(monkeypatc
     headers = {key.lower(): value for key, value in request.header_items()}
     assert headers[auth.HEADER.lower()] == "local-token"
 
+    # An IPv6 loopback host is bracketed, never left for 127.0.0.1 to miss.
+    assert _queue_running_launch(8620, str(tmp_path), "::1") is True
+    assert captured["request"].full_url == "http://[::1]:8620/api/launches"
+
 
 def test_native_drop_bridge_uses_only_host_verified_full_paths():
     event = {
