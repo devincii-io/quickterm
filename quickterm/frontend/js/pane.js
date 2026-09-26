@@ -1,7 +1,8 @@
 // One pane: xterm.js Terminal + FitAddon (+WebGL when possible) + one WS
 // to /ws/session/{id}. Implements the CONTRACTS.md attach protocol:
-// replay_size -> resize to recorded size, write scrollback, replay_done ->
-// fit to real size and send resize. Client-side backpressure via
+// replay_size -> resize to recorded size, write scrollback (resizing at each
+// replay_resize), replay_done -> fit to real size and send resize.
+// Client-side backpressure via
 // term.write callbacks; reconnect with backoff on unexpected close.
 
 import * as api from "./api.js";
@@ -209,6 +210,7 @@ export class Pane {
     this._resync = false; // last close was a 1013 overflow: reconnect to replay
     this._disposed = false;
     this._exitCode = null;
+    this._exitWatchers = [];
     this._keepScreen = false; // the next attach is a restart in place
     this._keepScreenGeneration = null;
     this._stateBeforeSpawn = null;
@@ -1020,9 +1022,15 @@ export class Pane {
       allowProposedApi: true,
       linkHandler: { activate: activateLink },
       theme: this.theme,
-      // On Windows the backend PTY is ConPTY; telling xterm lets it apply the
-      // ConPTY reflow/sequence handling and fixes Windows-specific key quirks.
-      ...(/Windows/i.test(navigator.userAgent) ? { windowsPty: { backend: "conpty" } } : {}),
+      // On Windows every pane runs on the OpenConsole that pywinpty ships
+      // (1.24), not the inbox ConPTY, so the build number describes that one:
+      // anything >= 21376 makes xterm reflow like it. Since 1.22 ConPTY no
+      // longer repaints the screen after a resize, so xterm has to reflow
+      // every line the way ConPTY does, the cursor line included (VS Code sets
+      // the same pair for its bundled conpty.dll). Leaving the cursor line
+      // alone split a wrapped prompt, and PSReadLine then redrew it over the
+      // output above.
+      ...(clientIsWindows() ? { windowsPty: { backend: "conpty", buildNumber: 22621 }, reflowCursorLine: true } : {}),
     });
     // Unicode 11 width tables. Without this xterm uses its built-in v6 widths,
     // which miscount many emoji and wide glyphs and drift the cursor / corrupt
@@ -1221,6 +1229,13 @@ export class Pane {
         this.term.reset();
         if (msg.cols > 0 && msg.rows > 0) this.term.resize(msg.cols, msg.rows);
         break;
+      case "replay_resize":
+        // The session was resized at this point of its output. The server
+        // sends this only once every earlier frame is acknowledged, and the
+        // ack leaves from the write callback, so xterm has parsed all of it:
+        // resizing now reflows exactly what the live terminal reflowed.
+        if (msg.cols > 0 && msg.rows > 0) this.term.resize(msg.cols, msg.rows);
+        break;
       case "replay_done":
         if (this._protocol.replayComplete()) this._goLive();
         break;
@@ -1365,6 +1380,16 @@ export class Pane {
     this._renderExitBar();
     this.onStateChange(this);
     this._runPendingReveal();
+    const watchers = this._exitWatchers;
+    this._exitWatchers = [];
+    for (const watcher of watchers) {
+      try { watcher(code); } catch (e) { console.warn("QuickTerm: exit watcher failed", e); }
+    }
+  }
+
+  // `callback(code)` runs once, when the session this pane shows next exits.
+  onceExited(callback) {
+    this._exitWatchers.push(callback);
   }
 
   _closed() {

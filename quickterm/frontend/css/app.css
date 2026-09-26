@@ -128,13 +128,19 @@ body.dragging .pane { pointer-events: none; }
 .pane-tab-activity.working { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .pane-tab-input { width: 160px; max-width: 60%; border: 1px solid var(--line-strong); border-radius: 4px; outline: 0; padding: 1px 6px; background: rgba(0, 0, 0, .35); color: var(--text); font-family: var(--mono); font-size: 9.5px; }
 .term-host { position: absolute; inset: 26px 3px 5px 9px; }
-/* xterm owns the scroll container. Keep its rail permanently visible instead
-   of relying on WebView2's nearly invisible overlay-scrollbar treatment. */
-.term-host .xterm-viewport { scrollbar-color: var(--line-hover) var(--surface-raised); scrollbar-width: auto; scrollbar-gutter: stable; }
-.term-host .xterm-viewport::-webkit-scrollbar { width: 12px; }
-.term-host .xterm-viewport::-webkit-scrollbar-track { background: var(--surface-raised); border-left: 1px solid var(--line); }
-.term-host .xterm-viewport::-webkit-scrollbar-thumb { min-height: 28px; background: var(--line-hover); border: 3px solid var(--surface-raised); border-radius: 7px; }
-.term-host .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-soft); }
+/* xterm 6 draws its own scrollbar (VS Code's scrollable element) and fades
+   it out when idle. Keep the rail permanently visible, as the native one was.
+   `.xterm-viewport` is only a background layer now: its native scrollbar
+   would draw an empty second track under this one. The fit addon reserves
+   the rail's 14px. */
+.term-host .xterm .xterm-viewport { overflow: hidden; }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity: 1; pointer-events: auto; background: var(--surface-raised); box-shadow: inset 1px 0 0 var(--line); }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { box-sizing: border-box; border: 3px solid transparent; border-radius: 7px; background-clip: padding-box; background-color: var(--line-hover); }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover,
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { background-color: var(--text-soft); }
+/* Nothing to scroll (xterm hides the bar without a fade then): keep the rail
+   and drop the full-height thumb, as a native scrollbar does. */
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible:not(.fade) > .slider { display: none; }
 .pane-empty { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; user-select: none; pointer-events: none; }
 .pane-dim { position: absolute; inset: 0; z-index: 5; background: rgba(20, 24, 23, .18); pointer-events: none; }
 .pane.focused .pane-dim { display: none; }

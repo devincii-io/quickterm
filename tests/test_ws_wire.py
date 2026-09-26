@@ -87,6 +87,26 @@ def test_replay_is_sent_from_scrollback_chunks_one_ack_per_frame(client, manager
     assert b"".join(frames) == b"".join(chunks)
 
 
+def test_a_resize_in_the_ring_is_sent_after_the_frames_before_it_are_acknowledged(
+    client, manager
+):
+    steps = (b"wide", (60, 20), (61, 21), b"narrow" * 30_000, b"more", (90, 33))
+    info = manager.add_session(scrollback=steps, cols=120, rows=30)
+    with _connect(client, info.id) as ws:
+        assert json.loads(ws.receive_text()) == {"type": "replay_size", "cols": 120, "rows": 30}
+        assert ws.receive_bytes() == b"wide"  # never merged with what follows the resize
+        ws.send_text(json.dumps({"type": "replay_ack"}))
+        assert json.loads(ws.receive_text()) == {"type": "replay_resize", "cols": 60, "rows": 20}
+        assert json.loads(ws.receive_text()) == {"type": "replay_resize", "cols": 61, "rows": 21}
+        received = b""
+        while len(received) < 180_004:
+            received += ws.receive_bytes()
+            ws.send_text(json.dumps({"type": "replay_ack"}))
+        assert received == b"narrow" * 30_000 + b"more"
+        assert json.loads(ws.receive_text()) == {"type": "replay_resize", "cols": 90, "rows": 33}
+        assert json.loads(ws.receive_text()) == {"type": "replay_done"}
+
+
 def test_an_empty_ring_sends_one_empty_frame_without_an_ack(client, manager):
     info = manager.add_session()
     with _connect(client, info.id) as ws:

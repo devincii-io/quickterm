@@ -35,15 +35,10 @@ TATHAM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
 ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-## winpty / pywinpty (winpty.dll, winpty-agent.exe)
-
-Bundled in the `winpty/` folder via the pywinpty package
-(https://github.com/andfoy/pywinpty, MIT, copyright Spyder project
-contributors). winpty itself is copyright (c) 2011-2016 Ryan Prichard and
-released under the MIT License (https://github.com/rprichard/winpty).
-
 ## Windows Console / ConPTY host (OpenConsole.exe, conpty.dll)
 
-Bundled in the `winpty/` folder via pywinpty; built from Microsoft's Windows
-Terminal / Console repository (https://github.com/microsoft/terminal),
-copyright (c) Microsoft Corporation, released under the MIT License.
+Bundled in the `conpty/` folder, taken from the pywinpty package
+(https://github.com/andfoy/pywinpty, MIT, copyright Spyder project
+contributors); built from Microsoft's Windows Terminal / Console repository
+(https://github.com/microsoft/terminal), copyright (c) Microsoft
+Corporation, released under the MIT License.

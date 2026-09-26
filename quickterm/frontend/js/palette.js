@@ -230,6 +230,12 @@ export class Palette {
       { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal() },
       { kind: "action", label: "previous new-terminal profile", hint: "Alt+Shift+Left", run: () => a.cycleTerminal(-1) },
       { kind: "action", label: "next new-terminal profile", hint: "Alt+Shift+Up", run: () => a.cycleTerminal(1) },
+      ...(a.shellInstalls?.() || []).map((install) => ({
+        kind: "action",
+        label: `install ${install.label}`,
+        hint: install.cmd ? "winget, in a new terminal" : "opens the download page",
+        run: () => a.installShell(install),
+      })),
       { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH() },
       { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV() },
       { kind: "action", label: a.isZoomed?.() ? "show all panes" : "zoom pane", hint: "Alt+Z", run: () => a.zoom() },

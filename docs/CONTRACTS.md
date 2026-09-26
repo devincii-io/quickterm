@@ -82,7 +82,7 @@ class AppConfig:
     update_check: bool = True               # UI probes GitHub releases when on
     summon_hotkey: str = "ctrl+alt+grave"   # quake-style summon/hide
     scratch_dir: str = ""                   # "" = <system temp>/QuickTerm/scratch
-    default_profile: str = ""
+    default_profile: str = ""                # a profile name or a shell id ("git-bash")
     profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
     voice: VoiceConfig = ...
@@ -155,7 +155,8 @@ fails the same way and the failure is reported as `launch_error`.
 
 ## quickterm/pty_session.py and quickterm/pty_posix.py
 
-One PTY each: ConPTY through pywinpty on Windows, `pty.fork` elsewhere. Both
+One PTY each: ConPTY on Windows (the ctypes binding in `conpty.py`), `pty.fork`
+elsewhere. Both
 subclass `pty_base.PtyBase` and expose the same interface, so
 `SessionManager` uses either unchanged. Set `QUICKTERM_DEBUG_IO=1` to log raw
 in/out bytes; `0` and every other value leave tracing disabled.
@@ -189,12 +190,15 @@ Threads, per session:
   in chunks of up to 256 KiB. A full stdin pipe blocks only this thread,
   never the loop. It stops only after a verified kill or a natural exit, so a
   terminal whose kill failed still takes input.
-- **Watcher**: exit detection follows the process, not EOF. Windows waits on
-  the process handle (winpty's EOF lags about 8 s); POSIX owns `waitpid`,
-  because a background job that inherited the terminal keeps the slave open
-  after the shell is gone. After the exit the reader drains until the PTY has
-  been quiet 0.15 s (at most 1 s), then `on_exit` is posted exactly once,
-  after the final output.
+- **Watcher**: exit detection follows the process, not EOF, because a
+  background job that inherited the terminal keeps it open after the shell
+  is gone. Windows waits on the CreateProcess handle; POSIX owns `waitpid`.
+  On Windows the pseudoconsole is released right after the spawn, so the
+  console host ends by itself once its last client is gone and the reader
+  reads EOF after the final output; when that does not come, the watcher
+  closes the host once the output has been quiet 0.15 s (at most 1 s), and
+  the reader still reads what is left in the pipe. POSIX drains the same way.
+  `on_exit` is posted exactly once, after the final output.
 
 POSIX specifics: the master is non-blocking and non-inheritable (a later
 terminal must not hold an earlier one's master), the fd lock is held for one
@@ -229,12 +233,15 @@ Kill:
   exited. A retry can never turn a failure into a success by finding the shell
   already dead.
 
-Bytes: the POSIX backend is bytes in, bytes out. pywinpty's API is str, so the
-ConPTY backend re-encodes reads and decodes writes as UTF-8, and that round
-trip is lossy: pywinpty decodes each read separately and drops NULs, so a
-character split across two reads becomes U+FFFD, and input bytes that are not
-valid UTF-8 reach the child as U+FFFD. Only owning the ConPTY pipes would fix
-it.
+Bytes: both backends are bytes in, bytes out. On Windows `conpty.py` owns
+both pipes (128 KiB each; with the default few KiB the console host blocked
+on every write) and passes bytes through untouched; the console host decodes
+input as UTF-8 itself. The pseudoconsole comes from the `conpty.dll` and
+`OpenConsole.exe` in the pywinpty wheel (the frozen app's `conpty/` folder),
+falling back to kernel32's inbox ConPTY without them. Children get
+`STARTF_USESTDHANDLES` with null handles, so they never inherit QuickTerm's own
+redirected stdout. pywinpty's str API, used before, turned a UTF-8 character
+split across two reads into U+FFFD.
 
 ## quickterm/pty_base.py
 
@@ -371,6 +378,16 @@ class Attachment:
   paste (2004), mouse tracking (1000/1002/1003) and encoding (1006/1015), alt
   screen (47/1047/1049). Synchronized output (2026) is never replayed. RIS
   (`ESC c`) clears the tracked state.
+- Resizes are kept at their place in the byte stream (`ScrollbackRing.resize`,
+  called by `SessionManager.resize` before the PTY resize), and
+  `replay_steps()` returns the chunks with a `(cols, rows)` step at each
+  resize, plus the size the first step was written at. Resizes with no output
+  between them collapse into the last one; one that leaves with the trimmed
+  front becomes the start size. `scrollback_chunks()` keeps returning the
+  chunks and the current size, for search and export. ConPTY writes each
+  byte for the size in effect then, so replaying bytes from several widths at
+  one width broke prompts apart; a viewer that resizes where the session did
+  reflows exactly as the live one.
 - `reap_idle` (every 30 s, from a worker thread) spares a session with a
   viewer attached. It removes an exited session, unless the session was
   retained or touched and still holds background output nobody has seen:
@@ -642,7 +659,7 @@ REST (JSON, under `/api`):
 | POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry) → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
 | PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. `port`, `host` and `summon_hotkey` need a restart and are not applied live; everything else, `scratch_dir` included, applies at once. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
-| GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
@@ -670,9 +687,14 @@ still sitting in the ring.) A fresh subscription is drained from the moment it
 exists, so output produced during the replay handshake is delivered in order
 once the live phase begins instead of overflowing the bounded queue:
 
-1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (size scrollback was recorded at)
+1. server → text JSON `{"type":"replay_size","cols":C,"rows":R}` (the size the
+   first retained byte was written at)
 2. server → binary scrollback frames of at most 128 KiB; after xterm finishes
-   parsing each frame, client → text JSON `{"type":"replay_ack"}`
+   parsing each frame, client → text JSON `{"type":"replay_ack"}`. Where the
+   session was resized, the server ends the frame and, once it is
+   acknowledged, sends text JSON `{"type":"replay_resize","cols":C,"rows":R}`
+   (no ack); the client resizes xterm on receipt, which is in stream order
+   because every earlier frame is already parsed
 3. server → text JSON `{"type":"replay_done"}` (an empty replay keeps the
    legacy empty binary frame but requires no acknowledgement)
 4. live phase:
@@ -706,7 +728,8 @@ After a replay-only reattach of an exited session the server calls
 final output once it has been shown.
 
 Client is responsible for replay-then-resize: set xterm to replay size, write
-scrollback, THEN resize to real size and send resize message.
+scrollback (resizing at each `replay_resize`), THEN resize to real size and
+send resize message.
 
 Server binds 127.0.0.1 by default. Host and Origin allowlists protect the local
 HTTP and WebSocket routes against DNS rebinding and cross-origin browser use.
@@ -927,8 +950,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 ## frontend/
 
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
-  pinned xterm: `@xterm/xterm@5.5.0`, `@xterm/addon-fit@0.10.0`,
-  `@xterm/addon-webgl@0.18.0`, `@xterm/addon-web-links@0.11.0` (js+css committed).
+  pinned xterm: `@xterm/xterm@6.0.0`, `@xterm/addon-fit@0.11.0`,
+  `@xterm/addon-webgl@0.19.0`, `@xterm/addon-web-links@0.12.0`,
+  `@xterm/addon-unicode11@0.9.0` (the UMD `lib/*.js` builds and `css/xterm.css`,
+  committed). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
+  and since 1.22 ConPTY does not repaint after a resize, so the terminal must
+  reflow as ConPTY does, which 5.x did not.
 - `main.js` is the composition root (about 400 lines): it builds the modules
   below in order and hands each the dependencies it uses. State more than one
   of them reads lives in one object from `app_state.js`, read at call time;
@@ -1078,7 +1105,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
   chevron beside it opens a `menu.js` menu over Personal profiles, System
   shells and the built-in Claude choices (`claude:continue|new|resume`, the
-  CLI plus one flag, no profile needed); the workspace row is a menu button
+  CLI plus one flag, no profile needed), and an **Install** group from the
+  inventory's `installs` (`install:powershell-core`). An install row is never
+  selected, cycled or remembered (`canLaunch`): it opens a terminal running
+  the installer (`spawner.runInstaller`, or the download page), and when that
+  session exits (`Pane.onceExited`) the inventory is fetched with
+  `fresh=true`, so the new shell appears; the palette offers the same
+  installs; the workspace row is a menu button
   (scratch, every saved workspace with its folder, the ones shown in another
   view marked in that view's colour, a **show beside** row action, the
   **workspace here** offer when applicable, **new scratch**), with the folder
@@ -1281,6 +1314,16 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Rendering: WebGL renderer (DOM fallback) + Unicode 11 width tables
   (`addon-unicode11`, activeVersion "11") so emoji/wide glyphs measure correctly
   and modern TUIs don't drift the cursor; falls back to xterm's built-in v6.
+- On Windows the terminal gets `windowsPty: {backend: "conpty", buildNumber:
+  22621}` and `reflowCursorLine: true`, the pair VS Code uses with its bundled
+  conpty.dll. The build number describes the shipped OpenConsole, not the OS;
+  any value >= 21376 selects xterm's ConPTY-compatible reflow. Without the
+  cursor line reflowing too, a wrapped prompt split on resize and PSReadLine
+  redrew it over the output above.
+- The scrollbar is xterm's own (VS Code's scrollable element); `app.css`
+  keeps its rail visible and hides the thumb when there is nothing to scroll.
+  `.xterm-viewport` is only a background layer and must not show a native
+  scrollbar.
 - On session exit: show `[exited: code N]` bar in pane, keep last frame visible.
 - Reconnect with backoff on WS drop.
 - File viewer: `viewer.html?path=...`, a separate minimal page. It fetches

@@ -358,7 +358,27 @@ export function terminalChoices(options) {
       });
     }
   }
+  // A missing shell one step away (PowerShell 7 through winget, or its
+  // download page). Choosing it installs once; it is never what "+" starts,
+  // so it is not selected, cycled or remembered (`canLaunch`).
+  for (const install of options.inventory?.installs || []) {
+    choices.push({
+      key: `install:${install.id}`,
+      group: "Install",
+      kind: "install",
+      id: install.id,
+      cmd: install.cmd || null,
+      args: install.args || [],
+      url: install.url || null,
+      label: install.label,
+      detail: install.cmd ? "install with winget" : "open the download page",
+    });
+  }
   return choices;
+}
+
+export function canLaunch(choice) {
+  return Boolean(choice) && choice.kind !== "install";
 }
 
 function choiceKey(choice) {
@@ -514,11 +534,14 @@ export function initLauncher(el, options) {
   // opens the list of choices as a menu (menu.js): personal profiles, system
   // shells and the built-in Claude choices, grouped, the current one marked.
   const launch = make("div", "sidebar-launch");
-  const choices = terminalChoices(options);
+  const menuChoices = terminalChoices(options);
+  const choices = menuChoices.filter(canLaunch);
   let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
   if (!selected && options.defaultProfile) {
-    selected = choices.find((choice) =>
-      choice.key === `profile:${options.defaultProfile}` || choice.key === `system:${options.defaultProfile}`);
+    // A profile name, or a system shell id ("git-bash"; "wsl" is its first
+    // distribution). A profile of the same name wins.
+    selected = choices.find((choice) => choice.key === `profile:${options.defaultProfile}`)
+      || choices.find((choice) => choice.kind === "system" && choice.id === options.defaultProfile);
   }
   selected ||= choices[0] || null;
 
@@ -544,12 +567,12 @@ export function initLauncher(el, options) {
   const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Choose what a new terminal runs");
   pick.setAttribute("aria-haspopup", "menu");
   pick.setAttribute("aria-expanded", "false");
-  pick.disabled = !choices.length;
+  pick.disabled = !menuChoices.length;
   const openTerminalMenu = () => {
-    if (!choices.length) return;
+    if (!menuChoices.length) return;
     const items = [];
     let group = null;
-    for (const choice of choices) {
+    for (const choice of menuChoices) {
       if (choice.group !== group) {
         group = choice.group;
         items.push({ heading: group });
@@ -557,8 +580,13 @@ export function initLauncher(el, options) {
       items.push({
         label: choice.label,
         detail: choice.detail,
+        icon: canLaunch(choice) ? undefined : "plus",
         selected: choice === selected,
         run: () => {
+          if (!canLaunch(choice)) {
+            options.onInstall?.(choice);
+            return;
+          }
           selected = choice;
           options.onSelectTerminal?.(selected);
           describeOpen();

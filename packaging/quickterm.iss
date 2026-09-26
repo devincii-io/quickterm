@@ -45,6 +45,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 Name: "contextmenu"; Description: "Add ""Open QuickTerm here"" to the folder right-click menu"; GroupDescription: "Explorer integration:"
 
+[InstallDelete]
+; Up to 3.11 the ConPTY host lived in the pywinpty package folder, next to
+; winpty files nothing uses any more. An update would leave it behind.
+Type: filesandordirs; Name: "{app}\_internal\winpty"
+
 [Files]
 Source: "..\dist\QuickTerm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -96,7 +101,7 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait
 // amount of care on the update path can prevent. Killing by image name reaches
 // every copy of the app, which is what holds the lock on QuickTerm.exe.
 //
-// The pseudoconsole hosts (winpty\OpenConsole.exe) and the bundled PuTTY tools
+// The pseudoconsole hosts (conpty\OpenConsole.exe) and the bundled PuTTY tools
 // are NOT killed by name. They live in {app} and do hold locks, but those image
 // names are shared with other software (Windows Terminal ships OpenConsole.exe)
 // and killing them by name would reach processes that are none of our business.

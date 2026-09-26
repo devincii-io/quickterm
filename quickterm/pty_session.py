@@ -1,21 +1,18 @@
 """One ConPTY: spawn, reader thread -> loop callbacks, write, resize, tree kill.
 
-Bytes path: winpty.PTY only exposes str, so output is re-encoded to UTF-8 and
-input decoded from it. That round trip is NOT lossless. pywinpty 3.0.x
-(winpty-rs) decodes each ReadFile result on its own and drops NUL characters,
-so a UTF-8 character split across two reads arrives as U+FFFD; a 300 000
-character box-drawing burst showed a few dozen of them. Writes go back through
-WideCharToMultiByte, which turns any byte that is not valid UTF-8 into U+FFFD.
-Only reading and writing the ConPTY pipes directly would keep bytes intact.
+Bytes path: the pipes are QuickTerm's own (conpty.py), so output and input
+pass through untouched. pywinpty's str API used to turn a UTF-8 character
+split across two reads into U+FFFD and drop NULs.
 
 Throughput: the reader coalesces every chunk immediately available into a single
 callback (one thread-hop / ring edit / WS frame per burst instead of per read),
 and writes go through a dedicated writer thread (pty_base) so a full stdin pipe
 (a big paste, a slow consumer) can never block the asyncio loop.
 
-Exit detection: winpty's blocking read reports EOF ~8s late and isalive() lags
-~3s, so a watcher thread waits on the real process handle, then unblocks the
-reader via cancel_io() once trailing output has drained.
+Exit detection: a watcher thread waits on the process handle. The console host
+ends by itself once its last client is gone, which the reader sees as EOF
+after the final output; a background job that inherited the console keeps it
+open, so after a short drain the watcher closes the host itself.
 """
 
 from __future__ import annotations
@@ -31,9 +28,7 @@ import time
 from ctypes import wintypes
 from typing import Callable
 
-import winpty
-
-from . import process_usage
+from . import conpty, process_usage
 from .pty_base import (
     DRAIN_IDLE_S,
     DRAIN_MAX_S,
@@ -50,16 +45,18 @@ _PROCESS_TERMINATE = 0x0001
 _INFINITE = 0xFFFFFFFF
 _WAIT_OBJECT_0 = 0
 _EXIT_WAIT_S = 10.0
+# How long a closed console host may take to end the reader's read.
+_CLOSE_WAIT_S = 2.0
 _KILL_WAIT_S = 2.0
 _TERMINATE_WAIT_S = 1.0
 
-# pywinpty 3.0.x tries to allocate and hide a process console in GUI-subsystem
-# applications.  Its ShowWindow(SW_HIDE).unwrap() path treats the perfectly
-# valid "window was already hidden" return as an error and can panic with an
-# unrelated stale HRESULT.  More importantly, a PTY that allocates the console
-# also frees that process-wide console when it is dropped, disrupting sibling
-# panes.  Give the frozen GUI one hidden host console up front so every PTY sees
-# an existing console that QuickTerm, rather than an individual pane, owns.
+# One hidden, process-wide console for the frozen GUI. The pseudoconsole does
+# not need it (conpty.dll starts OpenConsole.exe without a window), but the
+# console programs QuickTerm itself starts do: ``code`` is code.cmd, and a
+# GUI process without a console gives such a child a visible console window
+# of its own. With this one they inherit a hidden console instead. It used to
+# exist for pywinpty, which allocated and freed a console per PTY and could
+# panic on a valid ShowWindow return.
 _HOST_CONSOLE_LOCK = threading.Lock()
 _HOST_CONSOLE_READY = False
 _SW_HIDE = 0
@@ -198,6 +195,7 @@ class PtySession(PtyBase):
         self._proc_dead = threading.Event()
         self._exited = threading.Event()
         self._last_read = time.monotonic()
+        self._eof = threading.Event()
         # kill() runs under this lock, and the watcher closes the root handle
         # only under it, so a kill never outlives the handle it relies on.
         self._kill_lock = threading.Lock()
@@ -211,26 +209,22 @@ class PtySession(PtyBase):
         exe = shutil.which(cmd, path=path_value(merged))
         if exe is None:
             raise FileNotFoundError(f"command not found: {cmd}")
-        # CreateProcess documents the block as sorted case-insensitively.
-        env_block = (
-            "\0".join(f"{k}={v}" for k, v in sorted(merged.items(), key=lambda kv: kv[0].upper()))
-            + "\0"
-        )
-
         _ensure_host_console()
-        cmdline = " " + subprocess.list2cmdline(args) if args else None
         try:
-            self._pty = winpty.PTY(cols, rows)
-            self._pty.spawn(exe, cmdline=cmdline, cwd=cwd or os.getcwd(), env=env_block)
-        except winpty.WinptyError as exc:
-            # Every failure to start is an OSError, so callers handle one
-            # exception type (a missing folder, a blocked executable, ...).
+            self._console = conpty.PseudoConsole(
+                conpty.command_line(exe, args), cwd or os.getcwd(),
+                conpty.env_block(merged), cols, rows,
+            )
+        except OSError as exc:
+            # Every failure to start is an OSError with the command in it, so
+            # callers handle one exception type (a missing folder, a blocked
+            # executable, ...).
             raise OSError(f"could not start {cmd}: {exc}") from exc
-        self._pid: int = self._pty.pid or 0
-        # Held from spawn until the process is dead and no kill can run: while
-        # it is open Windows cannot hand the root's PID to another process, so
-        # taskkill /PID never reaches a stranger's tree.
-        self._hproc = _open_for_kill(self._pid) if self._pid else None
+        self._pid: int = self._console.pid
+        # The CreateProcess handle, held until the process is dead and no kill
+        # can run: while it is open Windows cannot hand the root's PID to
+        # another process, so taskkill /PID never reaches a stranger's tree.
+        self._hproc: int | None = self._console.process
 
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pty-reader-{self._pid}", daemon=True
@@ -245,25 +239,15 @@ class PtySession(PtyBase):
     def _do_write(self, data: bytes) -> bool:
         if _DEBUG_IO:
             log.info("pty %s <- in %r", self._pid, data)
-        # winpty.write takes str. Valid UTF-8 (all keyboard input) decodes
-        # exactly. Other 8-bit input (onBinary, e.g. X10 mouse reports past
-        # column 95) cannot reach the child intact through this API:
-        # surrogateescape only keeps Python from raising, and pywinpty then
-        # encodes each escaped byte as U+FFFD, just as errors="replace" would.
-        text = data.decode("utf-8", errors="surrogateescape")
-        try:
-            self._pty.write(text)
-        except Exception:
-            # Usually a dead PTY, but keep the original exception available in
-            # debug logs so encoding/runtime regressions are distinguishable.
-            log.debug("PTY write failed for process %s", self._pid, exc_info=True)
-        return True
+        if self._console.write(data):
+            return True
+        # The console host is gone; the error code tells a dead PTY from
+        # anything stranger.
+        log.debug("PTY write failed for process %s (error %s)", self._pid, ctypes.get_last_error())
+        return False
 
     def resize(self, cols: int, rows: int) -> None:
-        try:
-            self._pty.set_size(cols, rows)
-        except winpty.WinptyError:
-            pass  # dead pty
+        self._console.resize(cols, rows)  # a no-op once the host is closed
 
     @property
     def alive(self) -> bool:
@@ -321,12 +305,9 @@ class PtySession(PtyBase):
         root_handle = self._hproc  # None once the watcher has seen the root exit
         owned, self._held = self._held, {}
         unheld, self._unheld = self._unheld, {}
-        if root_handle is not None:
-            root_alive = not _is_dead(root_handle)
-        else:
-            # Either the root is known dead, or OpenProcess failed at spawn and
-            # only the unpinned PID is left to go by.
-            root_alive = not self._proc_dead.is_set() and self._pty_alive()
+        # CreateProcess always hands over the root's handle, and the watcher
+        # drops it only after the root died.
+        root_alive = root_handle is not None and not _is_dead(root_handle)
         survivors: list[int] = []
         try:
             if root_alive:
@@ -367,8 +348,6 @@ class PtySession(PtyBase):
                     _k32.TerminateProcess(targets[pid], 1)
                 deadline = time.monotonic() + _TERMINATE_WAIT_S
                 survivors = [pid for pid in survivors if not _wait_until(targets[pid], deadline)]
-            if root_alive and root_handle is None and self._pty_alive():
-                survivors.append(root)
             if unheld:
                 # No handle at all: fall back to the process table. A PID that
                 # is still listed counts as a survivor; were it reused, the
@@ -386,82 +365,58 @@ class PtySession(PtyBase):
                     _k32.CloseHandle(handle)
         return sorted(set(survivors))
 
-    def _pty_alive(self) -> bool:
-        try:
-            return bool(self._pty.isalive())
-        except winpty.WinptyError:
-            return False
-
     def _watch_exit(self) -> None:
         hproc = self._hproc
-        if hproc:
-            _k32.WaitForSingleObject(hproc, _INFINITE)
-            code = wintypes.DWORD()
-            if _k32.GetExitCodeProcess(hproc, ctypes.byref(code)):
-                self._proc_exit_code = int(code.value)
-        else:  # no handle: fall back to polling winpty
-            while self._pty_alive():
-                time.sleep(0.05)
+        _k32.WaitForSingleObject(hproc, _INFINITE)
+        code = wintypes.DWORD()
+        if _k32.GetExitCodeProcess(hproc, ctypes.byref(code)):
+            self._proc_exit_code = int(code.value)
         # Before the handle is closed: from here on kill() treats the root as
         # dead and never addresses its PID again.
         self._proc_dead.set()
-        # let the reader drain trailing output before breaking its blocking read
+        # The released console host ends by itself once its last client is
+        # gone and its output is written out, which the reader sees as EOF. A
+        # background job that inherited the console keeps the host open, so
+        # once the output has been quiet for a moment (never longer than
+        # DRAIN_MAX_S) the host is closed, and the reader still reads what is
+        # left in the pipe before its EOF.
         deadline = time.monotonic() + DRAIN_MAX_S
-        while (
-            time.monotonic() < deadline
-            and time.monotonic() - self._last_read < DRAIN_IDLE_S
-        ):
-            time.sleep(0.03)
-        try:
-            self._pty.cancel_io()
-        except winpty.WinptyError:
-            pass
-        if hproc:
-            with self._kill_lock:
-                self._hproc = None
-                _k32.CloseHandle(hproc)
+        if not self._eof.wait(DRAIN_IDLE_S):
+            while not self._eof.wait(0.03):
+                now = time.monotonic()
+                if now >= deadline or now - self._last_read >= DRAIN_IDLE_S:
+                    break
+        self._console.close()
+        if not self._eof.wait(_CLOSE_WAIT_S):
+            self._console.cancel_read()
+        with self._kill_lock:
+            self._hproc = None
+            _k32.CloseHandle(hproc)
 
     def _read_loop(self) -> None:
-        pty = self._pty
+        console = self._console
         while True:
-            try:
-                chunk = pty.read(blocking=True)  # raises WinptyError on EOF/cancel
-            except Exception:
+            # Everything already waiting comes back in one callback, so a
+            # burst is one thread hop, ring edit and WS frame, not one per read.
+            data = console.read(READ_COALESCE_BYTES)
+            if not data:
                 break
-            if chunk:
-                self._last_read = time.monotonic()
-                # Drain everything already buffered into one callback so a burst
-                # is one thread-hop / ring edit / WS frame, not one per read.
-                first = chunk.encode("utf-8")
-                parts = [first]
-                total = len(first)
-                while total < READ_COALESCE_BYTES:
-                    try:
-                        more = pty.read(blocking=False)  # "" when nothing ready
-                    except Exception:
-                        break
-                    if not more:
-                        break
-                    encoded = more.encode("utf-8")
-                    parts.append(encoded)
-                    total += len(encoded)
-                data = b"".join(parts)
-                if _DEBUG_IO:
-                    log.info("pty %s -> out %d bytes", self._pid, len(data))
-                self._post(self._on_output, data)
-            try:
-                if pty.iseof():
-                    break
-            except Exception:
-                break
+            self._last_read = time.monotonic()
+            if _DEBUG_IO:
+                log.info("pty %s -> out %d bytes", self._pid, len(data))
+            self._post(self._on_output, data)
+        self._eof.set()
         self._proc_dead.wait(timeout=_EXIT_WAIT_S)
         code = self._proc_exit_code
-        if code is None:
-            try:
-                code = pty.get_exitstatus()
-            except Exception:
-                code = None
         self._exit_code = code if code is not None else 1
         self._exited.set()
         self._stop_writer()  # release the writer thread on natural exit
         self._post(self._on_exit, self._exit_code)
+        # The writer fails its next write now that the host is gone. A writer
+        # still stuck in a write keeps its pipe; closing it under the write
+        # would be worse than the leak.
+        writer = self._writer
+        if writer is not None:
+            writer.join(timeout=_CLOSE_WAIT_S)
+        if writer is None or not writer.is_alive():
+            console.release_pipes()

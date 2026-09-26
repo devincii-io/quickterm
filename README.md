@@ -34,7 +34,9 @@ version is published, the app shows a small **Update** pill; Settings → About
 has the details and a one-click, checksum-verified install. The sidebar
 detects installed PowerShell, Command Prompt, WSL distributions, Git Bash, and
 Nushell, and offers Claude Code directly (continue, new, resume) when the CLI
-is on this computer, no profile needed. The shield beside **+** starts the
+is on this computer, no profile needed. Without PowerShell 7, the list under
+**+** offers to install it: winget runs in a new terminal, where you answer its
+prompts yourself (without winget, the download page opens). The shield beside **+** starts the
 selected terminal in a separate UAC-approved window. Both the
 window and the session are labeled `Administrator`.
 

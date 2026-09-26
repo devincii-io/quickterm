@@ -65,6 +65,75 @@ def test_scrollback_chunk_snapshot_avoids_full_join():
     assert (cols, rows) == (80, 24)
 
 
+# ---- resizes replay at their place in the stream ----
+
+
+def test_replay_puts_each_resize_between_the_output_around_it():
+    s = _new(100)
+    s.record(b"at 80", 80, 24)
+    s.resize(120, 30)
+    s.record(b"at 120", 120, 30)
+    s.record(b"at 60", 60, 20)  # output that arrives with a new size marks it too
+    assert s.replay() == ((b"at 80", (120, 30), b"at 120", (60, 20), b"at 60"), 80, 24)
+    # snapshot() keeps its meaning: the chunks and the size now.
+    assert s.snapshot() == ((b"at 80", b"at 120", b"at 60"), 60, 20)
+
+
+def test_resizes_without_output_between_them_collapse_into_the_last():
+    s = _new(100)
+    s.record(b"a", 80, 24)
+    for cols in range(81, 120):  # a splitter drag
+        s.resize(cols, 24)
+    s.resize(100, 24)
+    assert s.replay() == ((b"a", (100, 24)), 80, 24)
+    s.resize(80, 24)  # dragged back: nothing to replay
+    assert s.replay() == ((b"a",), 80, 24)
+
+
+def test_a_resize_after_the_last_output_is_replayed_last():
+    s = _new(100)
+    s.record(b"a", 80, 24)
+    s.resize(100, 40)
+    assert s.replay() == ((b"a", (100, 40)), 80, 24)
+
+
+def test_resizes_that_leave_with_the_trimmed_front_become_the_start_size():
+    s = _new(4)
+    s.record(b"aa", 80, 24)
+    s.resize(100, 30)
+    s.record(b"bb", 100, 30)
+    s.resize(120, 40)
+    s.record(b"cc", 120, 40)  # "aa" leaves, and with it the need for (100, 30)
+    assert s.replay() == ((b"bb", (120, 40), b"cc"), 100, 30)
+    s.record(b"dd", 120, 40)
+    assert s.replay() == ((b"cc", b"dd"), 120, 40)
+
+
+def test_a_resize_on_an_empty_ring_is_just_the_start_size():
+    s = _new(100)
+    s.resize(100, 30)
+    s.record(b"a", 100, 30)
+    assert s.replay() == ((b"a",), 100, 30)
+
+
+def test_replay_starts_with_the_mode_preamble_at_the_start_size():
+    s = _new(8)
+    s.record(b"\x1b[?2004h", 80, 24)
+    s.resize(100, 30)
+    s.record(b"abcdefgh", 100, 30)  # the mode sequence leaves the ring
+    steps, cols, rows = s.replay()
+    assert steps == (b"\x1b[?2004h", b"abcdefgh")
+    assert (cols, rows) == (100, 30)
+
+
+def test_replay_slices_a_partly_trimmed_front_chunk():
+    s = _new(6)
+    s.record(b"aaaaaa", 80, 24)
+    s.resize(90, 24)
+    s.record(b"bb", 90, 24)
+    assert s.replay() == ((b"aaaa", (90, 24), b"bb"), 80, 24)
+
+
 # ---- the ring front never starts inside a sequence ----
 
 

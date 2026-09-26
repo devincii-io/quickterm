@@ -1,6 +1,6 @@
 [project]
 name = "quickterm"
-version = "3.11.0"
+version = "3.12.0"
 description = "A calm, local terminal workspace with persistent sessions, split panes, profiles, and WSL support."
 readme = "README.md"
 license = "MIT"
@@ -19,6 +19,8 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    # Only for the OpenConsole.exe and conpty.dll it ships (quickterm/conpty.py);
+    # its Python API is not used.
     "pywinpty>=2.0; sys_platform == 'win32'",
     "pywebview>=6.2.1; sys_platform == 'win32'",
     "fastapi>=0.115",

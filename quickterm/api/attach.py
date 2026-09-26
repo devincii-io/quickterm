@@ -140,10 +140,18 @@ class _HandshakeBuffer:
 
 async def _send_replay(ws: WebSocket, session: Any) -> bool:
     """Run the replay handshake. Returns False if the socket was closed."""
-    replay_chunks, cols, rows = session.scrollback_chunks()
+    steps, cols, rows = session.replay_steps()
     await ws.send_text(json.dumps({"type": "replay_size", "cols": cols, "rows": rows}))
     sent_replay = False
-    for frame in coalesce_replay(replay_chunks):
+    for frame in coalesce_replay(steps):
+        if isinstance(frame, tuple):
+            # Every frame before this one is acknowledged, so xterm has parsed
+            # it: the viewer resizes at the same point in the stream as the
+            # session did.
+            await ws.send_text(
+                json.dumps({"type": "replay_resize", "cols": frame[0], "rows": frame[1]})
+            )
+            continue
         sent_replay = True
         await ws.send_bytes(frame)
         # receive(), not receive_text(): the latter indexes message["text"] and
@@ -178,10 +186,20 @@ def _is_replay_ack(message: Any) -> bool:
 
 
 def coalesce_replay(chunks: Any, cap: int | None = None):
-    """Yield non-empty replay frames no larger than the live-frame cap."""
+    """Yield non-empty replay frames no larger than the live-frame cap.
+
+    A ``(cols, rows)`` resize among the chunks ends the frame before it and is
+    yielded as it is, so frames never merge output across a resize.
+    """
     limit = SEND_COALESCE_BYTES if cap is None else cap
     pending = bytearray()
     for raw in chunks:
+        if isinstance(raw, tuple):
+            if pending:
+                yield bytes(pending)
+                pending.clear()
+            yield raw
+            continue
         if not raw:
             continue
         view = memoryview(raw)

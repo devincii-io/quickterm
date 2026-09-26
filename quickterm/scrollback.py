@@ -238,7 +238,14 @@ class ScrollbackRing:
     """The last ``cap`` bytes of a session's output, kept as separate chunks.
 
     ``cols`` and ``rows`` are the terminal size the retained bytes were last
-    written at (or last resized to), which a replay has to start with.
+    written at (or last resized to).
+
+    The ring also keeps every resize at its place in the byte stream. ConPTY
+    writes each byte for the size in effect when it was written, and since
+    1.22 it no longer repaints the screen after a resize. Replaying bytes
+    written at 180, 90 and 120 columns into one 120-column terminal broke
+    prompts apart and drew them over earlier output; replaying each resize at
+    its place makes the viewer reflow exactly as the live one did.
     """
 
     def __init__(self, cap: int, cols: int, rows: int) -> None:
@@ -253,6 +260,13 @@ class ScrollbackRing:
         self._modes = _ModeTracker()
         self.cols = cols
         self.rows = rows
+        # Bytes ever recorded, so a resize can be placed by stream offset.
+        self._total = 0
+        # Resizes after the ring front as (offset, cols, rows). record()
+        # appends whole chunks, so every offset is a chunk boundary. A resize
+        # at or before the front becomes the size the replay starts at.
+        self._marks: deque[tuple[int, int, int]] = deque()
+        self._start = (cols, rows)
 
     def __len__(self) -> int:
         """Retained bytes, without the replay preamble."""
@@ -273,22 +287,67 @@ class ScrollbackRing:
             chunks.insert(0, preamble)
         return tuple(chunks), self.cols, self.rows
 
+    def replay(self) -> tuple[tuple[bytes | tuple[int, int], ...], int, int]:
+        """Replay steps and the size the first of them was written at.
+
+        A step is a chunk of output or a ``(cols, rows)`` resize, in stream
+        order. Like ``snapshot()``, the mode preamble comes first.
+        """
+        steps: list[bytes | tuple[int, int]] = []
+        preamble = self._modes.preamble()
+        if preamble:
+            steps.append(preamble)
+        marks = iter(self._marks)
+        mark = next(marks, None)
+        offset = self._total - self._size
+        for index, chunk in enumerate(self._chunks):
+            if index == 0 and self._head:
+                chunk = chunk[self._head :]
+            while mark is not None and mark[0] <= offset:
+                steps.append(mark[1:])
+                mark = next(marks, None)
+            steps.append(chunk)
+            offset += len(chunk)
+        while mark is not None:
+            steps.append(mark[1:])
+            mark = next(marks, None)
+        cols, rows = self._start
+        return tuple(steps), cols, rows
+
     def preamble(self) -> bytes:
         """The mode-restoring prefix a replay would start with right now."""
         return self._modes.preamble()
 
+    def resize(self, cols: int, rows: int) -> None:
+        """The terminal now has ``cols`` x ``rows``; later output is written at it."""
+        if cols == self.cols and rows == self.rows:
+            return
+        self.cols = cols
+        self.rows = rows
+        if not self._size:
+            self._start = (cols, rows)
+            return
+        marks = self._marks
+        if marks and marks[-1][0] == self._total:
+            # No output since the last resize (a splitter drag): replace it.
+            marks.pop()
+            if (marks[-1][1:] if marks else self._start) == (cols, rows):
+                return
+        marks.append((self._total, cols, rows))
+
     def record(self, data: bytes, cols: int, rows: int) -> None:
         """Append output written at ``cols`` x ``rows`` (the output hot path)."""
+        if cols != self.cols or rows != self.rows:
+            self.resize(cols, rows)
         if data:
             self._chunks.append(data)
             self._size += len(data)
+            self._total += len(data)
             # A non-ground tracker state means an earlier trim emptied the
             # ring inside a string, so the new bytes are its payload and go
             # too, even below the cap.
             if self._size > self._cap or self._modes.state:
                 self._trim()
-        self.cols = cols
-        self.rows = rows
 
     def set_cap(self, cap: int) -> None:
         self._cap = cap
@@ -402,4 +461,9 @@ class ScrollbackRing:
                 count = 0
         for chunk, start, end in spans:
             self._modes.feed(chunk, start, end)
+        marks = self._marks
+        if marks:
+            front = self._total - self._size
+            while marks and marks[0][0] <= front:
+                self._start = marks.popleft()[1:]
         return spans

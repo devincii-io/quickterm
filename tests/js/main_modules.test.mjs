@@ -167,6 +167,13 @@ test("spawn specs are derived without any window state", async () => {
   assert.equal(defaultSystemSpec(null), null);
   assert.deepEqual(defaultSystemSpec({ types: [{ id: "wsl", executable: "wsl.exe", label: "WSL" }] }).args,
     ["--cd", "~"]);
+  // default_profile may name a system shell; it wins over the first one, and
+  // Git Bash starts as a login shell, as from the menu.
+  const withBash = { types: [...inventory.types, { id: "git-bash", executable: "bash.exe", label: "Git Bash" }] };
+  assert.deepEqual(defaultSystemSpec(withBash, "git-bash"), {
+    cmd: "bash.exe", args: ["-l"], name: "Git Bash", terminalType: "git-bash",
+  });
+  assert.equal(defaultSystemSpec(withBash, "cmd").terminalType, "windows-powershell");  // unavailable
 
   const spec = { cmd: "bash", args: ["-l"], label: "Bash", terminalType: "bash", extra: 1 };
   const out = serializableSpec(spec);
