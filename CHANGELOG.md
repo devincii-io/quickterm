@@ -2,7 +2,7 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
-## Unreleased
+## QuickTerm 3.10.0
 
 Fixes for the 55 issues filed by the September audit (#9 to #63).
 
