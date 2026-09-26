@@ -2,9 +2,13 @@
    clamped inside the viewport, and drawn in the same monospace voice as the
    sidebar so it reads as part of the trigger, not a dialog. */
 
+/* A menu is always the topmost thing its trigger opened, so it sits over
+   every layer a trigger can live in: the sheet (100), the palette (110), a
+   confirmation bar and the folder browser (120). Only the error banner (140)
+   stays above it, because a failure must never be hidden. */
 .qt-menu {
   position: fixed;
-  z-index: 60;
+  z-index: 130;
   overflow: auto;
   padding: 4px;
   border: 1px solid var(--line-strong);
