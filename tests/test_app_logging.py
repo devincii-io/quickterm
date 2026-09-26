@@ -104,3 +104,29 @@ def test_desktop_folder_picker_returns_only_a_selected_existing_directory(tmp_pa
     assert picker.pick_folder(str(tmp_path)) is None
     window.selected = (str(tmp_path / "missing"),)
     assert picker.pick_folder(str(tmp_path)) is None
+
+
+def test_a_peer_reset_while_closing_a_connection_is_not_logged(caplog):
+    # WebView2 resets its sockets when a window closes; the proactor loop's
+    # shutdown of the same socket then raised and was logged on every quit.
+    import asyncio
+
+    from quickterm.app import _quiet_connection_resets
+
+    class Handle:
+        def __repr__(self):
+            return "<Handle _ProactorBasePipeTransport._call_connection_lost(None)>"
+
+    loop = asyncio.new_event_loop()
+    try:
+        with caplog.at_level("ERROR", logger="asyncio"):
+            _quiet_connection_resets(loop, {
+                "message": "Exception in callback", "exception": ConnectionResetError(10054, "reset"),
+                "handle": Handle(),
+            })
+            assert not caplog.records
+            # Anything else still reaches asyncio's default handler.
+            _quiet_connection_resets(loop, {"message": "boom", "exception": ValueError("x")})
+            assert caplog.records
+    finally:
+        loop.close()
