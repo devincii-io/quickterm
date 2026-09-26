@@ -369,6 +369,22 @@ def _check_windows_build() -> None:
         )
 
 
+def _quiet_connection_resets(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Drop the one asyncio error that is not an error: a peer that is gone.
+
+    On Windows the proactor loop shuts a socket down when it closes the
+    connection, and when the peer (a WebView2 window that just closed, a
+    browser tab) has already reset it, that shutdown raises and asyncio logs
+    "Exception in callback _call_connection_lost" at ERROR, which reached the
+    log on every quit. Everything else goes to the default handler.
+    """
+    exc = context.get("exception")
+    handle = repr(context.get("handle", ""))
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError)) and "_call_connection_lost" in handle:
+        return
+    loop.default_exception_handler(context)
+
+
 async def _serve(
     cfg: "AppConfig",
     *,
@@ -390,6 +406,7 @@ async def _serve(
 
     _prepare_workspaces(elevated)
     loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_quiet_connection_resets)
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
     app = create_app(
         manager,
