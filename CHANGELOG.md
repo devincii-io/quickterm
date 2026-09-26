@@ -2,6 +2,76 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## Unreleased
+
+Fixes for the 55 issues filed by the September audit (#9 to #63).
+
+### Terminals that stay usable under load
+
+- On Linux, pasting a lot into a busy program froze every pane, the REST API
+  and the WebSocket until the program read its input. The writer no longer
+  holds the terminal while it waits.
+- Fast output (`yes`, a big build) made the Linux viewer reset and replay the
+  terminal hundreds of times a second. Output is now collected into large
+  chunks as on Windows, and a viewer is only resynchronised once it is 2 MiB
+  behind instead of eight reads behind. The throughput benchmark went from
+  failing every run to about 55 MB/s.
+- Re-opening a terminal after its scrollback wrapped could print stray
+  characters and switch off modes set at startup. Replay now never starts in
+  the middle of an escape sequence or a character, and restores bracketed
+  paste, the alternate screen, mouse reporting and cursor modes, so a long
+  Claude Code session keeps working after a reload or a workspace switch.
+
+### Kill, exit and cleanup
+
+- On Linux, killing a terminal now ends every job in it, including background
+  jobs, and a shell that exits while a background job still holds the
+  terminal is reported as exited at once.
+- A kill that fails leaves the terminal able to take input.
+- On Windows, a kill is only reported as done when every process of the tree
+  is gone.
+- The idle reaper rechecks each terminal right before it stops it, so a
+  terminal you open or type into during a cleanup pass survives.
+- A detached terminal that finishes while you are away keeps its final output
+  until you open it (up to 24 hours).
+- Automatic replies from the terminal (cursor position, focus reports) no
+  longer count as typing, so an untouched shell can be cleaned up and no
+  longer keeps QuickTerm in the tray.
+
+### Starting terminals
+
+- A missing program now says which terminal and which command failed, with a
+  hint that QuickTerm reads PATH when it starts, instead of "Internal Server
+  Error".
+- PowerShell and Command Prompt profiles use the executable the inventory
+  found and keep their own arguments. Git Bash and Nushell profiles run their
+  start command.
+- Autostart and global-hotkey profiles resolve exactly like terminals started
+  from the sidebar, get the PuTTY tools on PATH, and report a failure in the
+  error banner instead of failing silently.
+- A profile that sets `Path` now really replaces PATH on Windows.
+- Linux terminals always advertise `TERM=xterm-256color` and truecolor.
+- On Windows, QuickTerm no longer runs a `taskkill.exe` or shell planted in
+  the folder "Open QuickTerm here" was used on.
+
+### Workspaces, windows and settings
+
+- "Open QuickTerm here" within 20 seconds of a reload is no longer lost.
+- Deleting a workspace while an autosave is running no longer brings it back.
+- A partial settings save no longer wipes profiles and their secrets, and
+  every save keeps the previous file as `config.prev.json`.
+- Changing the port back to its old value now sticks.
+- A hidden or minimized window keeps its workspace claim.
+- An administrator window keeps its own workspaces and no longer deletes the
+  normal window's scratch layout.
+- A corrupt workspace file is set aside as `*.invalid-*.json` instead of
+  becoming an entry that cannot be opened or deleted. Workspace names such as
+  `con.txt` save on Windows 10.
+- A workspace autosave without a logo no longer clears the logo.
+- Settings > General has a Scratch folder field.
+- Splits on Linux open in the pane's real folder instead of a `\\host\path`
+  UNC path.
+
 ## QuickTerm 3.9.1
 
 ### Closing a pane gives its space back

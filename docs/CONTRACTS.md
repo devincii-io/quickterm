@@ -8,7 +8,18 @@ first for the architecture, conventions, and packaging rules.
 
 - Config dir: `%APPDATA%/quickterm/` (`config.config_dir() -> pathlib.Path`, creates it)
 - `config.json` in config dir; workspaces in `workspaces/*.json` under config dir.
-- All persistence is stdlib `json`.
+  An elevated instance keeps its own workspaces in `workspaces/elevated/`
+  (`workspace.set_namespace("elevated")`), because it is a second backend with
+  its own window registry and must never autosave the normal instance's files.
+- All persistence is stdlib `json`, written atomically (temp file, fsync,
+  `os.replace`). On Windows a replace or read that meets a sharing violation
+  (another thread has the file open) retries 5 times, 20 ms apart
+  (`config.replace_file`, `config.read_text`).
+- Every successful config save first copies the file it replaces to
+  `config.prev.json` (best effort; skipped for an identical save and for the
+  one save that encrypts a legacy plaintext config). A `config.json` or
+  workspace file that cannot be parsed is renamed to
+  `<stem>.invalid-<ns>.json` so it can be recovered, never silently overwritten.
 - Windows serializes each profile environment value as a current-user DPAPI
   object (`{"protected":"dpapi-v1","data":"..."}`); the in-memory/API shape
   remains `dict[str, str]`. Plaintext legacy values migrate on load. POSIX
@@ -62,6 +73,7 @@ class AppConfig:
     port: int = 8620
     scrollback_bytes: int = 512 * 1024
     font_family: str = "JetBrains Mono"
+    font_size: int = 14
     theme: str = "graphite"
     custom_theme: dict[str, str] = {}
     logo: str | None = None
@@ -69,6 +81,7 @@ class AppConfig:
     max_sessions: int = 0                    # 0 = unlimited; otherwise 1..100 live
     update_check: bool = True               # UI probes GitHub releases when on
     summon_hotkey: str = "ctrl+alt+grave"   # quake-style summon/hide
+    scratch_dir: str = ""                   # "" = <system temp>/QuickTerm/scratch
     default_profile: str = ""
     profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
@@ -76,10 +89,21 @@ class AppConfig:
 
 def config_dir() -> Path
 def default_cwd() -> str
+def scratch_root(configured: str = "") -> str
+def config_from_dict(raw: dict) -> AppConfig
+def validate_config(cfg: AppConfig) -> None
 def load_config() -> AppConfig
-def save_config(cfg: AppConfig) -> None
+def save_config(cfg: AppConfig) -> None      # keeps config.prev.json
 def validate_environment(env: object) -> dict[str, str]
+def replace_file(source, target) -> None     # os.replace, retried on Windows sharing errors
+def read_text(path) -> str                   # read, retried the same way
 ```
+
+`app.py` sets two attributes on the live `AppConfig` that are not dataclass
+fields and are never persisted: `runtime_overrides: set[str]` (the fields it
+overrode for this run only, today `{"port"}` for `--port` and an elevated
+instance) and `launch_error: str | None` (the latest autostart or global-hotkey
+launch failure). `hotkey_error` follows the same pattern.
 
 Saving validates runtime-facing field types (including font family, update
 toggle, profile terminal type, startup command, autostart, and shortcut) so a
@@ -92,7 +116,11 @@ psftp prompt interactively inside the terminal.
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
 pairs, empty names, `=`, control characters, NUL values, and names that collide
 case-insensitively. Both PTY backends merge the validated override over the
-QuickTerm process environment.
+QuickTerm process environment with `pty_base.merge_environment`: on Windows the
+merge is case-insensitive (a profile `Path` replaces the inherited `PATH` and
+keeps its own spelling); on POSIX `TERM=xterm-256color` and
+`COLORTERM=truecolor` are set before the override, so only a profile changes
+them.
 
 ### Where a session starts
 
@@ -120,17 +148,17 @@ created on demand, reused across runs, and its contents are never deleted by
 QuickTerm. Scratch terminals start there rather than in the user's home folder.
 
 Claude Code profiles need a project folder and cannot carry one, so the
-workspace root is the only source. `_resolve_profile` raises when nothing
+workspace root is the only source. `launch.resolve_profile` raises when nothing
 resolves, which surfaces as a 400 on the spawn rather than a config-save error.
+Autostart and global hotkeys have no workspace, so a Claude Code profile there
+fails the same way and the failure is reported as `launch_error`.
 
-## quickterm/pty_session.py
+## quickterm/pty_session.py and quickterm/pty_posix.py
 
-One ConPTY. Reader thread pushes bytes into the owner's callback via
-`loop.call_soon_threadsafe`, which never blocks the event loop. The reader coalesces
-all immediately-available output into one callback (bounded). `write()` only
-enqueues; a dedicated writer thread performs the (possibly blocking) PTY write,
-so a full stdin pipe never stalls the loop. Set `QUICKTERM_DEBUG_IO=1` to log
-raw in/out bytes; `0` and every other value leave tracing disabled.
+One PTY each: ConPTY through pywinpty on Windows, `pty.fork` elsewhere. Both
+subclass `pty_base.PtyBase` and expose the same interface, so
+`SessionManager` uses either unchanged. Set `QUICKTERM_DEBUG_IO=1` to log raw
+in/out bytes; `0` and every other value leave tracing disabled.
 
 ```python
 class PtySession:
@@ -139,7 +167,9 @@ class PtySession:
                  loop: asyncio.AbstractEventLoop,
                  on_output: Callable[[bytes], None],       # called on loop thread
                  on_exit: Callable[[int], None]) -> None    # exit code, on loop thread
-    def write(self, data: bytes) -> None
+        # raises OSError for every failure to start the child;
+        # a missing executable is FileNotFoundError("command not found: <cmd>")
+    def write(self, data: bytes) -> None       # enqueue only; BufferError when full
     def resize(self, cols: int, rows: int) -> None
     @property
     def alive(self) -> bool
@@ -147,29 +177,120 @@ class PtySession:
     def exit_code(self) -> int | None
     @property
     def pid(self) -> int
-    def kill(self) -> bool    # verified process TREE kill; false when the process survives
+    def kill(self) -> bool    # True only when every process it targeted is gone
 ```
 
-- Exit detection: watch the process (pywinpty `isalive()` poll thread or wait on
-  handle), not EOF alone.
-- Bytes in / bytes out. No decoding anywhere in the backend.
+Threads, per session:
+
+- **Reader**: drains everything immediately available into one `on_output`
+  callback of at most 128 KiB (`pty_base.READ_COALESCE_BYTES`): one thread
+  hop, one ring edit and one WS frame per burst.
+- **Writer** (`PtyBase`): a bounded queue of 64 items; queued input is written
+  in chunks of up to 256 KiB. A full stdin pipe blocks only this thread,
+  never the loop. It stops only after a verified kill or a natural exit, so a
+  terminal whose kill failed still takes input.
+- **Watcher**: exit detection follows the process, not EOF. Windows waits on
+  the process handle (winpty's EOF lags about 8 s); POSIX owns `waitpid`,
+  because a background job that inherited the terminal keeps the slave open
+  after the shell is gone. After the exit the reader drains until the PTY has
+  been quiet 0.15 s (at most 1 s), then `on_exit` is posted exactly once,
+  after the final output.
+
+POSIX specifics: the master is non-blocking and non-inheritable (a later
+terminal must not hold an earlier one's master), the fd lock is held for one
+`write(2)` at a time and never across a wait, and the master is closed in one
+place, after reader and writer stopped, so a recycled descriptor number is
+never touched. Children get `TERM=xterm-256color` and `COLORTERM=truecolor`
+unless a profile sets them.
+
+Kill:
+
+- POSIX signals every process group in the child's session (read from
+  `/proc/<pid>/stat`; the leader's group where `/proc` is missing) with
+  SIGKILL, retries for up to 2 s, and returns True only when the leader has
+  been reaped and no other process in that session is still running. EPERM is
+  never swallowed. A kill after the shell already exited returns True and
+  leaves jobs that outlived it (`nohup`) alone, as Windows does.
+- Windows captures the process tree first and opens a handle to each process,
+  so a reused PID cannot pass for one that died. It runs
+  `%SystemRoot%\System32\taskkill.exe /T /F` by absolute path with
+  `cwd=%SystemRoot%` (a bare `taskkill` searched the current folder first),
+  terminates what survives, and returns False if any captured process is
+  still running. No Job Objects: a job would also kill programs started from
+  the terminal that taskkill never touched (`code .`, `explorer .`).
+
+Bytes: the POSIX backend is bytes in, bytes out. pywinpty's API is str, so the
+ConPTY backend re-encodes reads and decodes writes as UTF-8, and that round
+trip is lossy: pywinpty decodes each read separately and drops NULs, so a
+character split across two reads becomes U+FFFD, and input bytes that are not
+valid UTF-8 reach the child as U+FFFD. Only owning the ConPTY pipes would fix
+it.
+
+## quickterm/pty_base.py
+
+```python
+READ_COALESCE_BYTES = 128 * 1024
+WRITE_COALESCE_BYTES = 256 * 1024
+WRITE_QUEUE_ITEMS = 64
+
+def merge_environment(override: dict[str, str] | None) -> dict[str, str]
+def path_value(env: dict[str, str]) -> str | None   # PATH whatever the key's case
+def set_private_env(name: str, value: str) -> None   # QuickTerm's process only
+class PtyBase: ...                                   # write queue, writer, _post
+```
+
+`set_private_env` exists for `NoDefaultCurrentDirectoryInExePath=1`, which
+`app.py` sets on Windows so a program planted in the launch folder never runs
+in place of `taskkill.exe` or a shell; `merge_environment` leaves such a
+variable out of every terminal unless the user had it set already or a
+profile sets it, because inherited it would change how cmd.exe runs programs
+from its own folder.
+
+## quickterm/process_usage.py
+
+The only module that walks the OS process table (Toolhelp on Windows,
+`/proc` on Linux; empty results where neither exists).
+
+```python
+def process_identities() -> list[tuple[int, int]]     # (pid, parent_pid)
+def pids_with_children(identities=None) -> set[int]
+def descendants(identities, root: int) -> set[int]    # root excluded
+def reachable_pids(identities, root_pids: set[int]) -> set[int]
+def snapshot_processes(roots=None, identities=None) -> dict[int, ProcessSample]
+def summarize_trees(processes, root_pids) -> dict[int, TreeUsage]
+def session_process_groups(session_id: int) -> dict[int, int] | None  # POSIX only
+```
+
+Windows reuses PIDs quickly and an orphan keeps naming its dead parent, so
+`process_identities` keeps a parent link only when the parent is not younger
+than the child (creation times; a link whose times cannot be read is kept,
+a dropped one reports parent 0). Without that, a new session whose root got
+such a PID counted an unrelated orphan as its child and stayed busy forever.
 
 ## quickterm/session_manager.py
 
 ```python
+QUEUE_MAX_BYTES = 2 * 1024 * 1024      # pending bytes per viewer before a resync
+QUEUE_MERGE_BYTES = 128 * 1024         # consecutive chunks merge up to this size
+EXITED_UNREAD_RETENTION_S = 24 * 3600  # see reap_idle
+
+class SessionLimitError(RuntimeError)  # spawn would pass max_sessions (HTTP 409)
+class SpawnError(ValueError)           # the backend could not start the child (HTTP 400)
+
 @dataclass
 class SessionInfo:
     id: str; name: str; profile: str | None
     alive: bool; exit_code: int | None; cols: int; rows: int
-    touched: bool               # True once the user typed/pasted into it
-    retained: bool              # explicit detach; keep even if untouched/idle
+    touched: bool = False       # the user typed/pasted into it (client touch frame only)
+    retained: bool = False      # explicit detach; keep even if untouched/idle
     workspace: str | None = None  # workspace this session belongs to
+    cwd: str | None = None      # folder the process started in
 
 class Session:
     info: SessionInfo
-    # ring buffer of raw output bytes, cap = scrollback_bytes
-    # (deque of chunks + byte count; O(chunk) append/trim, joined only at attach)
-    def scrollback(self) -> tuple[bytes, int, int]   # (data, cols_at_record, rows_at_record)
+    reaping: bool               # the reaper has claimed it; attach() refuses it
+    def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]
+        # (chunks, cols_at_record, rows_at_record); never joined into one buffer
 
 class SessionManager:
     def __init__(self, loop, scrollback_bytes: int = 512*1024,
@@ -177,29 +298,71 @@ class SessionManager:
     def spawn(self, *, name: str | None = None, profile: str | None = None,
               cmd: str, args: list[str] = ..., cwd: str | None = None,
               env: dict[str, str] = ..., cols: int = 120, rows: int = 30,
-              workspace: str | None = None) -> SessionInfo
+              workspace: str | None = None) -> SessionInfo      # loop thread
+    async def spawn_async(self, **same_kwargs) -> SessionInfo  # PTY built off the loop
     def list(self) -> list[SessionInfo]
     def get(self, sid: str) -> Session | None
     def sync_workspace(self, name: str, session_ids: set[str]) -> None
-    def write(self, sid: str, data: bytes) -> None
+    def write(self, sid: str, data: bytes) -> None   # input; never sets touched
+    def touch(self, sid: str) -> None                # real user input: touched = True
     def resize(self, sid: str, cols: int, rows: int) -> None
-    def kill(self, sid: str) -> bool          # verified tree kill + remove after grace
-    def attach(self, sid: str) -> "Attachment"
-    def busy_ids(self) -> set[str]            # sessions whose shell has a child process
+    def kill(self, sid: str) -> bool                 # True verified, False survived,
+                                                     # KeyError when sid is unknown
+    def attach(self, sid: str) -> "Attachment"       # KeyError: unknown or being reaped
+    def acknowledge(self, sid: str) -> None          # background output seen, no subscription
+    def busy_ids(self) -> set[str]                   # sessions whose shell has a child process
     def session_metrics(self) -> tuple[set[str], dict[str, dict]]
     def session_activity(self, sid: str) -> dict[str, int | None]
+    def has_attachments(self, sid: str) -> bool
+    def attachment_count(self, sid: str) -> int
+    def live_count(self) -> int
     def set_max_sessions(self, limit: int) -> None
-    def shutdown(self) -> None                # kill all
+    def set_scrollback_bytes(self, cap: int) -> None # applies to live rings too
+    def reap_idle(self, timeout_s: int, protected: set[str] | None = None) -> list[str]
+    def shutdown(self) -> None                       # kill all
 
 class Attachment:
-    # bounded queue; slow viewers receive an explicit resync sentinel
-    queue: asyncio.Queue
+    queue: AttachmentQueue      # await get(), get_nowait() (asyncio.QueueEmpty),
+                                # put_nowait(), qsize(), empty()
+    overflow_sentinel: object
+    overflowed: bool
     def detach(self) -> None
 ```
 
-- Flow control: subscriber queues are bounded. A slow viewer is disconnected
-  with an explicit resync signal and replays the current ring; terminal bytes
-  are never silently dropped or delivered in a corrupt partial sequence.
+- `spawn` and `spawn_async` raise `SessionLimitError` before starting
+  anything (in-flight async spawns count against the limit) and `SpawnError`
+  when the backend constructor raises `OSError`. A missing command reads
+  `command not found: <cmd>. QuickTerm reads PATH when it starts; restart it
+  after installing a program.` `spawn_async` registers the session on the loop
+  thread even if the awaiting request was cancelled, so no process is ever
+  started without a registry entry.
+- `kill` counts a backend kill as verified only when it returns exactly `True`.
+  A 404 and a 500 must stay distinguishable to clients, hence the `KeyError`.
+- Busy has one definition: alive, and the root PID has a direct child in one
+  `process_usage.process_identities()` snapshot. `busy_ids` and
+  `session_metrics` share it.
+- Flow control: each viewer's queue is bounded by bytes, not items.
+  Consecutive output chunks merge into items of at most 128 KiB; a viewer with
+  more than 2 MiB pending is sent the overflow sentinel, told to reconnect and
+  replays the current ring. Terminal bytes are never silently dropped.
+- Replay: after any trim the ring never starts inside an escape sequence or a
+  UTF-8 character (the front skips forward, bounded at 4 KiB). DEC private
+  modes are tracked as bytes leave the ring, and `scrollback_chunks()` puts
+  one synthesized chunk first that restores those in effect at the ring start:
+  cursor keys (1), cursor visibility (25), focus reports (1004), bracketed
+  paste (2004), mouse tracking (1000/1002/1003) and encoding (1006/1015), alt
+  screen (47/1047/1049). Synchronized output (2026) is never replayed. RIS
+  (`ESC c`) clears the tracked state.
+- `reap_idle` (every 30 s, from a worker thread) spares a session with a
+  viewer attached. It removes an exited session, unless the session was
+  retained or touched and still holds background output nobody has seen:
+  that one stays until `attach`/`acknowledge` or 24 hours after it ended,
+  because the ring is the only copy of a build result or an agent's last
+  message. A live session is spared when a saved workspace protects it, or it
+  is touched, retained or busy; otherwise it is killed once idle for
+  `timeout_s` (0 disables). Each candidate is rechecked and marked `reaping` on
+  the loop thread right before its kill, so a session picked up during a slow
+  pass survives; a failed kill clears the mark.
 - Session ids: full random hex (`uuid4().hex`).
 
 ## quickterm/workspace.py
@@ -229,12 +392,27 @@ def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
 def save_workspace(ws: Workspace) -> None      # normalizes `path` before writing
 def delete_workspace(name: str) -> None
+def set_namespace(name: str | None) -> None    # "elevated" = workspaces/elevated/
+def layout_session_ids(node: object) -> set[str]   # the one layout-tree walker
+def referenced_session_ids() -> set[str]       # every file's layout + session_ids
 
 # folder helpers (also used by config validation and the spawn path)
 def normalize_root(value: object) -> str | None      # expands ~/env vars, absolutizes
 def resolve_start_dir(root: str | None) -> str | None # the root if it exists, else None
 def root_exists(root: str | None) -> bool
 ```
+
+File names: a lowercase name that needs no sanitizing is stored as
+`<name>.json`; anything else gets a digest suffix (`<safe>--<sha256[:10]>.json`)
+because NTFS is case-insensitive and `dev`/`Dev` are different workspaces. A
+reserved device name before the first dot (`con.txt`, `aux.tools`) gets a
+leading underscore, since Windows 10 still maps `con.txt--x.json` to the
+console. Older shapes are read and migrated on the next save. A file that
+cannot be parsed is quarantined as `<stem>.invalid-<ns>.json` and not listed;
+a file is listed only when its stored name leads back to it, so every listed
+name can be opened and deleted. `referenced_session_ids` is what the reaper
+protects; it raises when a file cannot be read, so the reaper skips that pass
+instead of losing protection.
 
 ## quickterm/browse.py
 
@@ -263,7 +441,7 @@ word, so a workspace has at most one live owner and a colliding claim FAILS.
 There is no force-take.
 
 ```python
-DEFAULT_TTL_S: float = 45.0
+DEFAULT_TTL_S: float = 150.0   # above Chromium's 1/min timer throttling of hidden pages
 DEFAULT_MAX_WINDOWS: int = 12
 KEEP: object                      # "this call is not about the claim"
 
@@ -294,13 +472,8 @@ class WindowRegistry:
                  primary=False, now=None) -> WindowInfo
     def heartbeat(self, window_id, *, now=None) -> WindowInfo
     def claim(self, window_id, workspace, *, now=None) -> WindowInfo
-    def release(self, window_id, *, now=None) -> WindowInfo
     def forget(self, window_id, *, now=None) -> bool
-    def prune(self, *, now=None) -> list[WindowInfo]
-    def list(self, *, now=None) -> list[WindowInfo]
-    def get(self, window_id, *, now=None) -> WindowInfo | None
     def owner_of(self, workspace, *, now=None) -> WindowInfo | None
-    def count(self, *, now=None) -> int
     def snapshot(self, *, now=None) -> list[dict]   # payload + idle/age seconds
 ```
 
@@ -319,7 +492,10 @@ Rules:
 - **Liveness is a heartbeat, not a process handle**, because a viewer can be a
   browser tab that dies without a word. An entry older than `ttl_s` expires and
   its workspace is free again; otherwise one crashed window would lock its
-  project out of the app for the life of the backend. Every method prunes
+  project out of the app for the life of the backend. The TTL is 150 s because
+  WebView2, like Chromium, wakes the timers of a page hidden for five minutes
+  only once a minute; a native close and a closing page free the claim at
+  once, so the long TTL only delays recovery from a window that vanished. Every method prunes
   first, so expiry needs no timer.
 - A heartbeat or claim for an unknown or already expired id raises
   `UnknownWindow`. The client must re-register rather than keep autosaving a
@@ -350,40 +526,67 @@ id` exists only when a pywebview shell is running; it blocks, so the route
 calls it through `asyncio.to_thread`.
 
 Static: serve packaged `quickterm/frontend/` at `/` and its viewer at `/viewer`.
+There is no `/docs`, `/redoc` or `/openapi.json`: the schema listed every route
+without asking for the token.
+
+### Authentication
+
+Three layers, all in `server.py`. The HTTP side runs in a plain ASGI
+middleware (`LocalGuard`), not `@app.middleware("http")`, whose wrapped
+`receive` hides a client disconnect from `request.is_disconnected()`; the
+WebSocket route checks the same rules itself before `accept`.
+
+1. **Host allowlist** (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`,
+   plus the configured host): defeats DNS rebinding.
+2. **Origin allowlist** (`http://` + each allowed host) when an `Origin` header
+   is present: defeats cross-origin pages, including WebSockets.
+3. **Per-install token** from `auth.py` (`get_or_create_token()`, stored in
+   `<config dir>/runtime.token`), delivered to the page in the URL fragment
+   `#t=<token>`. HTTP clients send it as the `X-QuickTerm-Token` header
+   (`auth.HEADER`), WebSocket clients as the subprotocol `qtauth.<token>`
+   (`auth.SUBPROTOCOL_PREFIX`), which the server echoes back. Exempt:
+   `GET /api/health`, `GET /api/assets/{id}` (an `<img>` cannot send headers)
+   and the static frontend. Every other `/api` route answers 403 without it,
+   and new routes are gated by default. `tests/test_routes_auth.py` walks the
+   route table to keep it that way.
+
+The Host/Origin guard alone does not stop native local programs; the token
+does.
 
 REST (JSON, under `/api`):
 
 | Method | Path | Body → Response |
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity}]`; `?metrics=false` skips process-tree sampling and returns lifecycle/activity data with unavailable usage for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides); 409 when the live-terminal limit is reached. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
+| GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
 | POST | /api/launches | `{cwd}` → queue one authenticated Explorer folder handoff for the existing viewer |
-| GET | /api/launches/next | Long-poll and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. |
+| GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued folder handoff → `{cwd}` or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` one should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
 | GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, idle_seconds, age_seconds}]}`, oldest window first |
 | POST | /api/windows | `{id?, workspace?, title?, primary?}` → `{id, workspace, title, primary}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. 409 on a claimed workspace or too many windows, 400 on a junk name |
 | POST | /api/windows/{id}/heartbeat | → `{id, workspace, title, primary}`; **404 when the id is unknown or already expired**, which is the client's signal to re-register instead of carrying on autosaving a workspace it may have lost |
 | PUT | /api/windows/{id}/workspace | `{workspace: name\|null}` → `{id, workspace, title, primary}`. 404 unknown window, 400 missing key/junk name, 409 `{detail, error: "workspace_claimed", workspace, owner: {id, workspace, title, primary}}` when another live window holds it. Never merged, never force-taken: both windows would autosave the same layout file |
 | DELETE | /api/windows/{id} | Drop a window and free its claim now instead of waiting out the TTL → 204, idempotent (this is a closing page's goodbye and may arrive twice) |
 | POST | /api/windows/open | `{workspace?, cwd?}` → `{opened: true, target: "native", window_id}`. Asks the desktop shell for another native window. 409 (same shape as above) when the workspace is already open, so nothing is drawn before the refusal; 400 on a junk name or a missing `cwd`; 500 when the shell refuses. Without a pywebview shell (plain browser, POSIX, tests) it answers **200** `{opened: false, target: "unavailable"}` so the caller degrades to opening the URL itself. The frontend's own routes are the JS bridge and `window.open`; this exists for callers that have neither, above all a second QuickTerm process handing work to the resident one |
-| POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204 |
+| POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204; an id that is already gone counts as stopped; 500 when a process survives |
 | POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
-| DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id, 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
+| DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id (also when `kill` raises `KeyError` because the id vanished during the call), 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
 | GET | /api/profiles | → `[Profile]` |
-| GET | /api/snippets | → `[Snippet]` |
 | GET | /api/workspaces | → `[name]` |
 | GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool` |
-| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path` is three-valued: **absent preserves** the stored folder (every layout autosave relies on this), `null` clears it, a string sets it (normalized; existence is NOT required so a temporarily missing folder cannot break autosave). 400 on a non-string/oversized/control-character path |
-| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204 |
-| GET | /api/config | → `{font_family, profiles, snippets, voice_available: bool, hotkey_error: str\|null}`. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. |
-| GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. |
-| PUT | /api/config | complete `AppConfig` → 204. `port`, `host` and `summon_hotkey` need a restart and are not applied live; a submitted value identical to the running one is treated as unedited and the persisted value is kept, so a stale page can never write an ephemeral port to disk. |
+| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
+| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. |
+| GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, default_profile, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it); Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the primary window shows it in the error banner. |
+| GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
+| PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. `port`, `host` and `summon_hotkey` need a restart and are not applied live; everything else, `scratch_dir` included, applies at once. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions. Includes `ssh`/`sftp` entries backed by the bundled PuTTY tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`); `available: false` when absent (e.g. pip installs). The launcher lists them as profile-only (a hostless plink just prints usage). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
-| GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory. |
+| POST | /api/elevate | same body as POST /api/sessions → `{launched: true}`. Windows only (else 400). Resolved by `launch.resolve` like an ordinary terminal (an explicit `cwd` wins over the workspace root), then started by a separate elevated QuickTerm through UAC; 500 when the launch fails. |
+| GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Strips surrounding quotes and expands `~` like `/api/open`. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory or unreadable (`cannot read <path>: <reason>`). |
 | GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
 | GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
 | POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
@@ -414,10 +617,30 @@ once the live phase begins instead of overflowing the bounded queue:
    - server → text JSON `{"type":"exit","code":N}` then close, on session death
    - client → binary frames: raw keyboard input bytes (written to PTY verbatim)
    - client → text JSON `{"type":"resize","cols":C,"rows":R}`
+   - client → text JSON `{"type":"touch"}` on the first real user input of a
+     connection (a key, a native paste, a sent snippet or drop). Only this sets
+     `SessionInfo.touched`: input frames also carry xterm's automatic replies
+     (DA, CPR, focus reports), which must never make a shell look used.
+   - unknown control frames are ignored
 
 If a viewer falls behind its bounded queue, the server sends
 `{"type":"overflow"}` and closes the socket. The client reconnects and replays
 the current bounded scrollback instead of continuing with missing VT bytes.
+
+Close codes:
+
+| Code | Meaning | Client |
+|---|---|---|
+| 4403 | Host, Origin or token refused, before accept (browsers see an HTTP 403) | stop |
+| 4404 | unknown session, or one the reaper is killing | show unavailable |
+| 1002 | anything but a text `replay_ack` during the replay handshake, or no ack within 30 s | reconnect |
+| 1009 | an input frame over 256 KiB | reconnect |
+| 1013 | viewer fell behind (after `{"type":"overflow"}`), or the PTY input queue is full | reconnect and replay, even if the session has exited |
+| 1000 | normal close after `{"type":"exit"}` | show the exit bar |
+
+After a replay-only reattach of an exited session the server calls
+`manager.acknowledge(sid)`, so the reaper may drop that session's unread
+final output once it has been shown.
 
 Client is responsible for replay-then-resize: set xterm to replay size, write
 scrollback, THEN resize to real size and send resize message.
@@ -449,8 +672,18 @@ class _ViewerWindows:                       # the native windows this process ow
   directory, a first launch carries `?cwd=<dir>` in the window URL. A later
   ordinary process posts the folder to the authenticated `/api/launches` queue,
   summons the existing native viewer, and exits. The viewer opens it in Scratch.
+- Right after reading its arguments (the launch folder is captured by then),
+  Windows sets `NoDefaultCurrentDirectoryInExePath=1` through
+  `pty_base.set_private_env` and changes to the home folder: "Open QuickTerm
+  here" starts the process in the folder the user clicked, and CreateProcess
+  and `shutil.which` search the current folder before PATH.
 - load_config → SessionManager → hotkeys thread → uvicorn (asyncio loop) →
-  native Edge WebView2 viewer. The viewer receives `_DesktopApi` as its
+  native Edge WebView2 viewer. `--port` and an elevated instance record
+  `{"port"}` in `cfg.runtime_overrides`. Every client URL (window, running
+  instance probe, launch handoff) and the free-port probe follow `cfg.host`,
+  bracketing IPv6 (`server.client_host`).
+- An elevated instance calls `workspace.set_namespace("elevated")` before it
+  serves or discards scratch, so it never touches the normal instance's files. The viewer receives `_DesktopApi` as its
   pywebview JS bridge; `pick_folder` opens only an OS folder dialog and returns
   one existing selected directory or `None` on Cancel/failure. It is the
   secondary picker now, offered from inside the in-app folder browser; its
@@ -460,12 +693,15 @@ class _ViewerWindows:                       # the native windows this process ow
   bridge is for, not a new trust boundary: behind the same token
   `GET /api/file` already reads any file and `POST /api/sessions` already
   spawns arbitrary processes.
-- Spawn autostart profiles on startup.
+- Spawn autostart profiles on startup. Autostart, global hotkeys and the
+  elevated instance's first terminal resolve through `launch.resolve` like a
+  REST spawn; a failure is logged and stored as `cfg.launch_error` instead of
+  being swallowed.
 - Clean shutdown: manager.shutdown() on exit.
 
 ### Several windows, one backend
 
-The window URL is `http://127.0.0.1:<port>/?<params>#t=<token>`, where the
+The window URL is `http://<client host>:<port>/?<params>#t=<token>`, where the
 params are `cwd` (Explorer handoff), `workspace` (what this window should open
 and claim), `window` (**the id this window MUST register with**, so a native
 close can free its claim at once instead of waiting out the TTL) and `primary`
@@ -508,6 +744,47 @@ applying. Tray menu: Open / Quit, where Open restores every live window and the
 summon hotkey also restores a tray-hidden one. When the window holding the bare
 title closes, the oldest survivor is retitled to it, because `hotkeys.py`
 summons by exact title match and would otherwise have nothing to aim at.
+
+## quickterm/launch.py
+
+Every way of starting a terminal resolves it here: POST /api/sessions, POST
+/api/elevate, autostart, global hotkeys and the elevated instance's first
+terminal. Nothing here touches the session registry, but resolving blocks on
+the file system, so async callers run it in a worker thread.
+
+```python
+class LaunchError(ValueError):  status: int; label: str | None
+@dataclass(frozen=True)
+class LaunchSpec:
+    cmd: str; args: list[str]; cwd: str | None; env: dict[str, str]
+    name: str | None; profile: str | None; label: str
+    def spawn_kwargs(self) -> dict
+
+def resolve(cfg, *, profile=None, cmd=None, args=None, env=None, name=None,
+            start_command=None, claude_mode=None, request_cwd=None,
+            workspace_root=None, append_tools=True) -> LaunchSpec
+def resolve_profile(prof, cwd=None) -> tuple[str, list[str], str | None]
+def validate_dir(value: str, label: str | None = None) -> str
+def workspace_start(name: str | None) -> str | None
+def append_tools_path(env: dict[str, str]) -> dict[str, str]
+```
+
+- Folder precedence: `request_cwd`, else `workspace_root`, else None (the
+  session manager then uses `default_cwd()`). A folder that does not exist is
+  `LaunchError("starting folder does not exist: <value>")`, named after the
+  terminal; a workspace whose folder is gone yields None, never an error.
+- `resolve_profile` per terminal type: PowerShell 7 and Windows PowerShell run
+  the profile's `cmd` (the inventory stores an absolute path because a
+  tray-resident app's PATH is stale) or the bare default, with `-NoLogo`, the
+  profile's own args, then `-NoExit -Command <start>`; cmd.exe runs its args,
+  then `/K <start>`. Arguments go before the start command because both
+  shells read the rest of the line after `-Command`/`/K` as the command.
+  bash/zsh/fish and Git Bash run `-l`, or `-lc "<start>; exec <shell> -l"`;
+  Nushell runs `-e <start>`; WSL gets `-d <distro> --cd <folder or ~>` and no
+  Windows process folder; ssh/sftp resolve to plink/psftp argv. Claude Code
+  needs a folder and raises without one.
+- The bundled PuTTY tools directory is appended to the child's PATH (its key
+  matched case-insensitively), so a user-installed plink still wins.
 
 ## quickterm/hotkeys.py
 
@@ -554,7 +831,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   new tabs/large sections out of the coordinator.
 - `pane_protocol.js` is the DOM-free attach/replay/backpressure state machine
   used by `pane.js`; `node --test tests/js/*.test.mjs` verifies replay gating,
-  stale generations, transition to live input, and overflow-driven resync.
+  stale generations, transition to live input, and overflow-driven resync. It
+  also owns the once-per-connection `touch` frame (`takeTouch()`): real input
+  (a key, a native paste, `sendText`) says so to the server, `onData` and
+  `onBinary` never do.
 - `windows.js` is the DOM-free half of multi-window ownership: which workspace
   this window may claim, what a refusal means, and the wording the user sees.
   `main.js` holds the effects (register, claim, 5 s heartbeat, `keepalive`
@@ -776,6 +1056,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Split actions launch the selected terminal choice in the source pane's
   best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
   signals, falling back to their launch folder; prompt text is never parsed.
+  An OSC 7 `file://<host>/path` is a local path on a non-Windows client
+  whatever the host (a POSIX shell names its own machine there); on Windows a
+  drive-letter path is local, and only a host other than `localhost` makes a
+  UNC path.
   Sidebar Open and Alt+N keep the selected profile's configured folder. A
   Claude split always uses its project folder and substitutes a normal
   conversation when that profile's default mode is `agents`; the palette's

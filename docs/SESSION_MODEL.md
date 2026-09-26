@@ -47,6 +47,12 @@ A destructive action always has an in-app confirmation. Kill failures remain
 visible. Detach first calls the retain endpoint so an untouched shell cannot be
 mistaken for disposable background clutter by the idle reaper.
 
+A detached terminal that was retained or typed into and then exits keeps its
+final output (the build result, the agent's last message) until it is opened
+again, or for 24 hours. The ring is the only copy, so the reaper waits for
+someone to have seen it. An exited terminal nobody attached to or typed into
+is cleaned up on the next reaper pass, as before.
+
 ## Claude Code is an application session on top of a terminal session
 
 A Claude conversation and its PTY are different identities. QuickTerm profiles
