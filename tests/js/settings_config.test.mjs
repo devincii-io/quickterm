@@ -1,17 +1,17 @@
 // The rules the Settings screens state about a configured thing: what it
 // actually runs, and what is wrong with it. These are pure functions on the
 // draft config, so they are testable without a DOM, and they are the part that
-// must not quietly disagree with the backend validation in config.py.
+// must not quietly disagree with the backend validation.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { commandPreview, snippetProblems } from "../../quickterm/frontend/js/panel_settings_snippets.js";
 import {
-  commandLineText, defaultArgsFor, fitsCommandLine, joinCommandLine, kindForCommand, moreStartsOpen,
-  profileProblems, purposeFor, runLine, splitCommandLine, takesStartCommand,
-} from "../../quickterm/frontend/js/panel_settings_terminals.js";
-import { FILTER_THRESHOLD, matchesQuery } from "../../quickterm/frontend/js/panel_settings_kit.js";
+  agentConflicts, agentModeOf, commandLineText, defaultArgsFor, fitsCommandLine, joinCommandLine,
+  kindForCommand, profileProblems, purposeFor, runLine, splitCommandLine, sshProblems, takesStartCommand,
+} from "../../quickterm/frontend/js/profile_model.js";
+import { matchesQuery } from "../../quickterm/frontend/js/panel_settings_kit.js";
 
 test("a snippet preview hides the carriage return that runs it", () => {
   assert.equal(commandPreview("git status\r"), "git status");
@@ -29,24 +29,35 @@ test("a snippet reports its own missing name, command and duplicate", () => {
 });
 
 test("a profile's run line reflects what was typed, per kind", () => {
-  assert.equal(
-    runLine({ cmd: "claude", claude_mode: "agents" }, "claude-code"),
-    "claude agents",
-  );
-  assert.equal(
-    runLine({ cmd: "wsl.exe", wsl_distro: "Ubuntu" }, "wsl"),
-    "wsl.exe -d Ubuntu --cd ~",
-  );
+  assert.equal(runLine({ cmd: "claude", claude_mode: "agents" }, "claude-code"), "claude agents");
+  assert.equal(runLine({ cmd: "claude", agent_mode: "resume", claude_mode: "agents" }, "claude-code"), "claude --resume");
+  assert.equal(runLine({ cmd: "" }, "codex"), "codex", "codex starts a new conversation by default");
+  assert.equal(runLine({ cmd: "codex", agent_mode: "continue" }, "codex"), "codex resume --last");
+  assert.equal(runLine({ cmd: "codex", agent_mode: "fork" }, "codex"), "codex fork");
+  assert.equal(runLine({ cmd: "wsl.exe", wsl_distro: "Ubuntu" }, "wsl"), "wsl.exe -d Ubuntu --cd ~");
   assert.equal(
     runLine({ ssh_host: "box", ssh_user: "deploy", ssh_port: 2222 }, "ssh"),
     "plink -ssh -P 2222 deploy@box",
+    "no client means PuTTY, as every profile before 4.0",
   );
+  assert.equal(
+    runLine({ ssh_host: "box", ssh_port: 2222, ssh_client: "openssh", ssh_proxy_jump: "jump" }, "ssh"),
+    "ssh -p 2222 -J jump box",
+  );
+  assert.equal(runLine({ ssh_host: "box", ssh_port: 2222, ssh_client: "openssh" }, "sftp"), "sftp -P 2222 box");
   assert.equal(
     runLine({ cmd: "pwsh.exe", args: ["-NoLogo"], start_command: "uv run dev" }, "powershell-core"),
     "pwsh.exe -NoLogo · then uv run dev",
   );
-  // Claude takes no start command, so the line must not imply one runs.
+  // Agents take no start command, so the line must not imply one runs.
   assert.equal(runLine({ cmd: "claude", start_command: "ignored" }, "claude-code"), "claude --continue");
+});
+
+test("the agent mode reads agent_mode, then the legacy claude_mode, then the type's default", () => {
+  assert.equal(agentModeOf({ agent_mode: "fork" }, "codex"), "fork");
+  assert.equal(agentModeOf({ claude_mode: "resume" }, "claude-code"), "resume");
+  assert.equal(agentModeOf({}, "claude-code"), "continue");
+  assert.equal(agentModeOf({}, "codex"), "new");
 });
 
 test("a profile reports the problem that would stop it from starting", () => {
@@ -56,7 +67,7 @@ test("a profile reports the problem that would stop it from starting", () => {
   assert.match(profileProblems({ name: "a", cmd: "", env: {} }, [], "custom")[0], /No executable/);
   assert.match(profileProblems({ name: "a", cmd: "", env: {} }, [], "ssh")[0], /No host/);
   const clash = { name: "dev", cmd: "x", env: {} };
-  assert.match(profileProblems(ok, [ok, clash], "custom")[1] || profileProblems(ok, [ok, clash], "custom")[0], /unique/);
+  assert.match(profileProblems(ok, [ok, clash], "custom")[0], /unique/);
   // The environment rule is the shared one, not a second copy of it.
   assert.match(
     profileProblems({ name: "a", cmd: "x", env: { "A=B": "1" } }, [], "custom")[0],
@@ -64,14 +75,31 @@ test("a profile reports the problem that would stop it from starting", () => {
   );
 });
 
+test("ssh fields refuse what the server refuses", () => {
+  assert.deepEqual(sshProblems({ ssh_host: "box", ssh_user: "me" }), []);
+  assert.match(sshProblems({ ssh_host: "-oProxyCommand=x" })[0], /Host must not start with -/);
+  assert.match(sshProblems({ ssh_host: "box", ssh_user: "a b" })[0], /User must not contain spaces/);
+  assert.equal(sshProblems({ ssh_host: "box", ssh_proxy_jump: "bastion" })[0], "ProxyJump needs the OpenSSH client");
+  assert.deepEqual(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_proxy_jump: "me@bastion:22,other" }), []);
+  assert.match(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_proxy_jump: "-J x" })[0], /ProxyJump must be/);
+  assert.match(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_key: "C:\\k\\id.PPK" })[0], /OpenSSH cannot read PuTTY \.ppk keys/);
+  assert.deepEqual(sshProblems({ ssh_host: "box", ssh_client: "putty", ssh_key: "C:\\k\\id.ppk" }), []);
+});
+
+test("codex bypass cannot be combined with approval or sandbox", () => {
+  assert.deepEqual(agentConflicts("codex", { bypass: "true" }), []);
+  assert.deepEqual(agentConflicts("codex", { bypass: "true", sandbox: "read-only" }), ["bypass replaces approval and sandbox; clear them first"]);
+  assert.equal(agentConflicts("codex", { bypass: "true", approve_for_me: "true" }).length, 1);
+  assert.deepEqual(agentConflicts("claude-code", { bypass: "true", sandbox: "x" }), []);
+});
+
 test("every kind of profile has a purpose sentence, including unknown ones", () => {
-  for (const kind of ["claude-code", "wsl", "ssh", "sftp", "custom", "powershell-core", "nushell"]) {
+  for (const kind of ["claude-code", "codex", "wsl", "ssh", "sftp", "custom", "powershell-core", "nushell"]) {
     assert.ok(purposeFor(kind).length > 40, kind);
   }
 });
 
-test("filtering searches every field and only appears for a list worth filtering", () => {
-  assert.ok(FILTER_THRESHOLD >= 4);
+test("filtering searches every field", () => {
   assert.ok(matchesQuery("", "anything"));
   assert.ok(matchesQuery("LOG", "tail logs", "Follow the app log"));
   assert.ok(matchesQuery("follow", "tail logs", "Follow the app log"));
@@ -96,16 +124,17 @@ test("a custom command line splits on spaces, groups on quotes and joins back th
   assert.equal(fitsCommandLine(["x", "a b"]), true);
 });
 
-test("a typed command infers its kind from where the card started, never from the last keystroke", () => {
-  // A shell card follows its command, to another shell or to custom.
+test("a typed command infers its kind from where the editor started, never from the last keystroke", () => {
+  // A shell follows its command, to another shell or to custom.
   assert.equal(kindForCommand("powershell-core", "C"), "custom");
   assert.equal(kindForCommand("powershell-core", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "powershell-core");
   assert.equal(kindForCommand("powershell-core", "nu"), "nushell");
-  // A custom card becomes a shell only when the command names one.
+  // A custom command becomes a shell only when the command names one.
   assert.equal(kindForCommand("custom", "bash"), "bash");
   assert.equal(kindForCommand("custom", "python"), "custom");
-  // Claude Code is opt-in and remote kinds are a host, not a command.
+  // Agents are opt-in and remote kinds are a host, not a command.
   assert.equal(kindForCommand("custom", "claude"), "custom");
+  assert.equal(kindForCommand("custom", "codex"), "custom");
   assert.equal(kindForCommand("claude-code", "C:\\bin\\claude.exe"), "claude-code");
   assert.equal(kindForCommand("claude-code", "pwsh"), "powershell-core");
   assert.equal(kindForCommand("custom", "plink"), "custom");
@@ -119,21 +148,9 @@ test("the kinds that take a start command are the ones launch.py starts one in",
   for (const kind of ["powershell-core", "windows-powershell", "command-prompt", "wsl", "bash", "git-bash", "nushell", "ssh"]) {
     assert.equal(takesStartCommand(kind), true, kind);
   }
-  for (const kind of ["custom", "sftp", "claude-code"]) assert.equal(takesStartCommand(kind), false, kind);
+  for (const kind of ["custom", "sftp", "claude-code", "codex"]) assert.equal(takesStartCommand(kind), false, kind);
   assert.deepEqual(defaultArgsFor("powershell-core"), ["-NoLogo"]);
   assert.deepEqual(defaultArgsFor("git-bash"), []);
   // The run line does not promise a start command a custom command never runs.
   assert.equal(runLine({ cmd: "python", args: ["app.py"], start_command: "x" }, "custom"), "python app.py");
-});
-
-test("More starts open for a problem or a type the command does not show", () => {
-  const ok = { cmd: "C:\\Windows\\System32\\cmd.exe", args: [] };
-  assert.equal(moreStartsOpen(ok, "command-prompt", []), false);
-  assert.equal(moreStartsOpen(ok, "command-prompt", ["No name"]), true);
-  assert.equal(moreStartsOpen({ cmd: "pwsh.exe", args: [] }, "custom"), true);
-  assert.equal(moreStartsOpen({ cmd: "python.exe", args: [] }, "powershell-core"), true);
-  assert.equal(moreStartsOpen({ cmd: "python.exe", args: ["x"] }, "custom"), false);
-  // These say what they are in the main row and the run line.
-  assert.equal(moreStartsOpen({ cmd: "C:\\bin\\claude.exe", args: [] }, "claude-code"), false);
-  assert.equal(moreStartsOpen({ cmd: "", args: [] }, "ssh"), false);
 });

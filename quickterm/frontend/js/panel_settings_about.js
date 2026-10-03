@@ -1,9 +1,9 @@
 import * as api from "./api.js";
 import { icon } from "./icons.js";
-import { make } from "./panel_shared.js";
-import { configPurpose } from "./panel_settings_kit.js";
+import { folderPickerControl, make } from "./panel_shared.js";
+import { configChoice, configPurpose, configToggle } from "./panel_settings_kit.js";
+import { shortcutInput } from "./shortcut_input.js";
 export function renderAboutSettings(host) {
-    const cfg = this.settingsDraft;
     const version = this.app.version || "";
 
     const hero = make("section", "about-hero");
@@ -38,6 +38,7 @@ export function renderAboutSettings(host) {
     host.append(links);
 
     const card = make("section", "about-update");
+    card.dataset.setting = "updates";
     card.append(
       make("h4", "", "Updates"),
       configPurpose("Checking asks GitHub for the latest release and compares it with the version you are running. Installing downloads that release's installer, verifies its SHA-256, and runs it; QuickTerm closes while it does."),
@@ -87,13 +88,6 @@ export function renderAboutSettings(host) {
       }
     });
 
-    const toggle = make("label", "toggle-row standalone");
-    const checkbox = make("input", "sr-only");
-    checkbox.type = "checkbox";
-    checkbox.checked = cfg.update_check !== false;
-    checkbox.addEventListener("change", () => { cfg.update_check = checkbox.checked; });
-    toggle.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Tell me when a new version is available"));
-    card.append(toggle);
     host.append(card);
     host.append(renderSettingsHistory.call(this));
   }
@@ -116,6 +110,7 @@ export function historyTime(savedAt) {
 // the draft still holds the settings from before.
 function renderSettingsHistory() {
   const section = make("section", "about-update settings-history");
+  section.dataset.setting = "config_history";
   section.append(
     make("h4", "", "Settings history"),
     configPurpose("Every save keeps the version it replaced, the last 20 of them, on this device. Restoring one saves it again, so the settings it replaces are kept here too."),
@@ -159,58 +154,111 @@ function renderSettingsHistory() {
 }
 
 
-export function renderVoiceSettings(host) {
-    const cfg = this.settingsDraft;
-    cfg.voice ||= { enabled: true, model_size: "small", hotkey: "ctrl+alt+v", language: null };
-    host.append(this._sectionHeading("Voice input", "Private, local speech-to-text for your focused terminal."));
-    const callout = make("div", "voice-callout");
-    callout.append(make("span", "voice-wave", "|||||"), make("div", "", undefined));
-    callout.lastElementChild.append(make("h3", "", "Push to talk, then keep typing"), make("p", "", "Audio is transcribed locally with Whisper. Nothing is sent to a cloud service."));
-    host.append(callout);
-    const group = make("div", "settings-group");
-    const enabled = make("label", "toggle-row standalone");
-    const enabledInput = make("input", "sr-only");
-    enabledInput.type = "checkbox";
-    enabledInput.checked = Boolean(cfg.voice.enabled);
-    enabledInput.addEventListener("change", () => { cfg.voice.enabled = enabledInput.checked; });
-    enabled.append(enabledInput, make("span", "toggle-control"), make("span", "toggle-copy", "Enable voice input"));
-    group.append(enabled);
-    const model = this._select(["tiny", "base", "small", "medium", "large-v3"].map((value) => ({ value, label: value })), cfg.voice.model_size);
-    model.addEventListener("change", () => { cfg.voice.model_size = model.value; });
-    const hotkey = this._textInput(cfg.voice.hotkey, "ctrl+alt+v");
-    hotkey.addEventListener("input", () => { cfg.voice.hotkey = hotkey.value; });
-    const language = this._select([{ value: "", label: "Auto-detect" }, { value: "en", label: "English" }, { value: "de", label: "German" }], cfg.voice.language || "");
-    language.addEventListener("change", () => { cfg.voice.language = language.value || null; });
-    const fields = make("div", "settings-grid two-column");
-    fields.append(this._field("Whisper model", model, "Larger models are more accurate and use more memory."), this._field("Push-to-talk shortcut", hotkey), this._field("Spoken language", language));
-    group.append(fields);
-    host.append(group);
-  }
-
+const SCROLLBACK_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+const IDLE_TIMEOUTS = [["0", "Never"], ["300", "5 minutes"], ["900", "15 minutes"], ["1800", "30 minutes"], ["3600", "1 hour"]];
+const VOICE_DEFAULTS = { enabled: true, model_size: "small", hotkey: "ctrl+alt+v", language: null };
 
 export function renderAdvancedSettings(host) {
     const cfg = this.settingsDraft;
-    host.append(this._sectionHeading("Server", "Changes apply after restart."));
-    const server = make("div", "settings-grid two-column");
-    const bind = this._select(["127.0.0.1", "localhost", "::1"].map((value) => ({ value, label: value })), cfg.host || "127.0.0.1");
-    bind.addEventListener("change", () => { cfg.host = bind.value; });
-    server.append(this._field("Loopback address", bind));
-    host.append(server);
-    cfg.voice ||= { enabled: true, model_size: "small", hotkey: "ctrl+alt+v", language: null };
-    host.append(this._sectionHeading("Voice preferences", "Voice capture is currently unavailable."));
-    const voice = make("div", "settings-grid two-column");
-    const enabled = make("label", "toggle-row");
-    const checkbox = make("input", "sr-only");
-    checkbox.type = "checkbox";
-    checkbox.checked = Boolean(cfg.voice.enabled);
-    checkbox.addEventListener("change", () => { cfg.voice.enabled = checkbox.checked; });
-    enabled.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Voice enabled"));
-    const model = this._select(["tiny", "base", "small", "medium", "large-v3"].map((value) => ({ value, label: value })), cfg.voice.model_size);
-    model.addEventListener("change", () => { cfg.voice.model_size = model.value; });
-    const language = this._textInput(cfg.voice.language || "", "Auto-detect");
-    language.addEventListener("input", () => { cfg.voice.language = language.value || null; });
-    const hotkey = this._textInput(cfg.voice.hotkey || "", "ctrl+alt+v");
-    hotkey.addEventListener("input", () => { cfg.voice.hotkey = hotkey.value; });
-    voice.append(enabled, this._field("Model", model), this._field("Language code", language), this._field("Voice shortcut", hotkey));
-    host.append(voice);
+    host.append(this._sectionHeading("Advanced", "The local server, terminal memory and cleanup, and updates."));
+
+    const server = make("div", "settings-group");
+    server.append(make("h3", "settings-group-title", "Server"), configPurpose("Only reachable from this computer. Both apply after a restart."));
+    const serverFields = make("div", "settings-grid two-column");
+    const bind = configChoice({
+      label: "Loopback address",
+      value: cfg.host || "127.0.0.1",
+      options: ["127.0.0.1", "localhost", "::1"].map((value) => ({ value, label: value })),
+      onChange: (value) => { cfg.host = value; },
+    });
+    const port = this._textInput(cfg.port, "8620");
+    port.type = "number";
+    port.setAttribute("aria-label", "Local server port");
+    port.addEventListener("input", () => { cfg.port = Number(port.value) || 8620; });
+    serverFields.append(
+      this._field("Loopback address", bind.el, "Applies after restart.", { id: "host" }),
+      this._field("Local server port", port, "Applies after restart.", { id: "port" }),
+    );
+    server.append(serverFields);
+
+    const sessions = make("div", "settings-group");
+    sessions.append(make("h3", "settings-group-title", "Terminals"));
+    const sessionFields = make("div", "settings-grid two-column");
+    const scrollback = configChoice({
+      label: "In-memory scrollback",
+      value: String(cfg.scrollback_bytes),
+      options: SCROLLBACK_SIZES.map((kb) => ({ value: String(kb * 1024), label: kb < 1024 ? `${kb} KB` : `${kb / 1024} MB` })),
+      onChange: (value) => { cfg.scrollback_bytes = Number(value); },
+    });
+    const idleTimeout = configChoice({
+      label: "Clean unused shells",
+      value: String(cfg.idle_timeout_s ?? 300),
+      options: IDLE_TIMEOUTS.map(([value, label]) => ({ value, label })),
+      onChange: (value) => { cfg.idle_timeout_s = Number(value); },
+    });
+    const maxSessions = this._textInput(cfg.max_sessions ?? 0, "0");
+    maxSessions.type = "number";
+    maxSessions.min = "0";
+    maxSessions.max = "100";
+    maxSessions.step = "1";
+    maxSessions.setAttribute("aria-label", "Live terminal limit");
+    maxSessions.addEventListener("input", () => {
+      cfg.max_sessions = Math.max(0, Math.min(100, Number(maxSessions.value) || 0));
+    });
+    // The partial settings save applies this root live. Empty means the default.
+    const scratch = this._textInput(cfg.scratch_dir || "", "Default: a QuickTerm folder in the system temp folder");
+    scratch.setAttribute("aria-label", "Scratch folder");
+    scratch.addEventListener("input", () => { cfg.scratch_dir = scratch.value.trim(); });
+    const scratchField = folderPickerControl(scratch, { label: "Choose the scratch folder" });
+    sessionFields.append(
+      this._field("In-memory scrollback", scrollback.el, "Per live terminal. Never written to disk; released when the terminal is removed.", { id: "scrollback_bytes" }),
+      this._field("Clean unused shells", idleTimeout.el, "Only untouched, detached shells are ended after this time; used and busy terminals are kept.", { id: "idle_timeout_s" }),
+      this._field("Live terminal limit", maxSessions, "0 means unlimited. At the limit, new terminals are blocked; existing terminals are never stopped.", { id: "max_sessions" }),
+      this._field("Scratch folder", scratchField, "Where scratch terminals start. Leave empty for a QuickTerm folder in the system temp folder. QuickTerm never deletes anything in it.", { id: "scratch_dir" }),
+    );
+    sessions.append(sessionFields);
+
+    const updates = make("div", "settings-group");
+    updates.append(make("h3", "settings-group-title", "Updates"), configToggle({
+      id: "update_check",
+      label: "Tell me when a new version is available",
+      checked: cfg.update_check !== false,
+      onChange: (checked) => { cfg.update_check = checked; },
+    }).el);
+
+    host.append(server, sessions, updates, renderVoice.call(this));
+  }
+
+// Voice capture is parked until it has a real capture overlay; the backend
+// hotkey wiring is disabled in app.py for the same reason. Its preferences
+// stay editable so a saved config keeps round-tripping.
+function renderVoice() {
+    const cfg = this.settingsDraft;
+    const voice = { ...VOICE_DEFAULTS, ...(cfg.voice || {}) };
+    const set = (key, value) => {
+      voice[key] = value;
+      cfg.voice = { ...voice };
+    };
+    const group = make("div", "settings-group");
+    group.dataset.setting = "voice";
+    group.append(make("h3", "settings-group-title", "Voice input"), configPurpose("Voice capture is currently unavailable."));
+    group.append(configToggle({ label: "Voice enabled", checked: voice.enabled, onChange: (checked) => set("enabled", checked) }).el);
+    const fields = make("div", "settings-grid two-column");
+    const model = configChoice({
+      label: "Whisper model",
+      value: voice.model_size,
+      options: ["tiny", "base", "small", "medium", "large-v3"].map((value) => ({ value, label: value })),
+      onChange: (value) => set("model_size", value),
+    });
+    const language = this._textInput(voice.language || "", "Auto-detect");
+    language.setAttribute("aria-label", "Language code");
+    language.addEventListener("input", () => set("language", language.value || null));
+    const hotkey = shortcutInput({ value: voice.hotkey, label: "Voice shortcut", onChange: (binding) => set("hotkey", binding || "") });
+    fields.append(
+      this._field("Model", model.el),
+      this._field("Language code", language),
+      this._field("Voice shortcut", hotkey.el),
+    );
+    group.append(fields);
+    return group;
   }

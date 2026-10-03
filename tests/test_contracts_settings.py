@@ -1,19 +1,36 @@
+import re
 from pathlib import Path
 
-
-FRONTEND_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js"
-PANELS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "panels.js"
+ROOT = Path(__file__).parents[1]
+FRONTEND_JS = ROOT / "quickterm" / "frontend" / "js"
+FRONTEND_CSS = ROOT / "quickterm" / "frontend" / "css"
+PANELS_JS = FRONTEND_JS / "panels.js"
 CONFIG_SYNC_JS = FRONTEND_JS / "config_sync.js"
-KEYS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "keys.js"
-PALETTE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "palette.js"
-TERMINAL_SETTINGS_JS = (
-    Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "panel_settings_terminals.js"
-)
+KEYS_JS = FRONTEND_JS / "keys.js"
+PALETTE_JS = FRONTEND_JS / "palette.js"
+CONNECTIONS_JS = FRONTEND_JS / "panel_connections.js"
+SNIPPETS_JS = FRONTEND_JS / "panel_settings_snippets.js"
+ABOUT_JS = FRONTEND_JS / "panel_settings_about.js"
+CONFIG_LIST_JS = FRONTEND_JS / "config_list.js"
+SHORTCUT_INPUT_JS = FRONTEND_JS / "shortcut_input.js"
 FOCUS_JS = FRONTEND_JS / "focus.js"
+
+SETTINGS_SOURCES = (
+    "panels.js",
+    "panel_settings_general.js",
+    "panel_settings_window.js",
+    "panel_settings_shortcuts.js",
+    "panel_settings_about.js",
+    "panel_settings_kit.js",
+)
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport():
-    source = PANELS_JS.read_text(encoding="utf-8")
+    source = read(PANELS_JS)
     start = source.index("  _confirmNear(")
     end = source.index("\n  _field(", start)
     implementation = source[start:end]
@@ -24,97 +41,96 @@ def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport()
     )
     assert "window.innerHeight - boxRect.height - margin" in implementation
     assert "window.innerWidth - boxRect.width - margin" in implementation
+    # AGENTS.md: Cancel owns the initial focus when a pointer opened the bar;
+    # only the keyboard path lands on the destructive button.
+    assert "{ keyboard = false } = {}" in implementation
+    assert "(keyboard ? confirm : cancel).focus()" in implementation
+    assert "requestAnimationFrame(() => confirm.focus())" not in implementation
 
 
 def test_panels_coordinator_stays_split_into_section_modules():
-    source = PANELS_JS.read_text(encoding="utf-8")
+    source = read(PANELS_JS)
     assert len(source.splitlines()) < 600
     for module in (
         "panel_dashboard.js",
         "panel_help.js",
         "panel_settings_general.js",
         "panel_settings_appearance.js",
-        "panel_settings_terminals.js",
+        "panel_settings_window.js",
+        "panel_settings_shortcuts.js",
+        "panel_connections.js",
         "panel_settings_snippets.js",
         "panel_settings_about.js",
     ):
         assert f'from "./{module}"' in source
+    # The card editor is gone; its pure rules live in profile_model.js.
+    assert not (FRONTEND_JS / "panel_settings_terminals.js").exists()
+    assert "export function runLine" in read(FRONTEND_JS / "profile_model.js")
 
 
 def test_shortcuts_keep_detach_and_confirmed_kill_distinct():
-    keys = KEYS_JS.read_text(encoding="utf-8")
+    keys = read(KEYS_JS)
     assert "n: actions.newTerminal" in keys
     assert "d: actions.closePane" in keys
     assert "w: actions.killSession" in keys
 
-    palette = PALETTE_JS.read_text(encoding="utf-8")
+    palette = read(PALETTE_JS)
     assert 'label: "new terminal", hint: "Alt+N"' in palette
     assert 'label: "detach pane", hint: "Alt+D"' in palette
     assert 'label: "kill session and close pane", hint: "Alt+W"' in palette
 
 
-def test_claude_code_is_an_explicit_project_profile_type():
-    source = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
-    assert 'kind === "claude-code"' in source
-    assert 'value: "continue"' in source
-    assert 'value: "resume"' in source
-    assert 'value: "agents"' in source
-    assert 'value: "new"' in source
-    # No folder field of any kind: the workspace places every Claude session.
-    assert 'profile.cwd' not in source
-    assert 'profile.subpath' not in source
+def test_agents_are_explicit_profile_types_with_schema_driven_options():
+    connections = read(CONNECTIONS_JS)
+    fields = read(FRONTEND_JS / "panel_agent_fields.js")
+    assert '{ id: "claude-code", label: "Claude Code", group: "Agents", cmd: "claude" }' in connections
+    assert '{ id: "codex", label: "Codex", group: "Agents", cmd: "codex" }' in connections
+    # The options come from GET /api/system/agents through the api namespace;
+    # the frontend names no CLI flag of its own.
+    assert "getAgentCatalog?.()" in connections
+    assert 'import * as api from "./api.js";' in connections
+    for flag in ("permission_mode", "approve_for_me", "--model", "bypassPermissions"):
+        assert flag not in fields, flag
+        assert flag not in connections, flag
+    # No folder field of any kind: the workspace places every agent session.
+    assert "profile.cwd" not in connections
+    assert "profile.subpath" not in connections
 
 
 def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog():
-    # This used to assert the native pywebview dialog *was* the mechanism. It
-    # cannot be: that dialog exists only in the installed app, so Browse was
-    # dead in a plain browser, and opening it moves focus out of the document.
-    # The invariant that matters is unchanged in shape: one shared control
-    # behind every folder field. But the primary picker is now the in-app
-    # browser, with the OS dialog kept as a secondary route.
-    settings = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
-    shared = (FRONTEND_JS / "panel_shared.js").read_text(encoding="utf-8")
-    dashboard = (FRONTEND_JS / "panel_dashboard.js").read_text(encoding="utf-8")
-    browser = (FRONTEND_JS / "folder_browser.js").read_text(encoding="utf-8")
-    app = (Path(__file__).parents[1] / "quickterm" / "app.py").read_text(encoding="utf-8")
+    # One shared control backs every folder field. The primary picker is the
+    # in-app browser; the native dialog is a secondary route where it exists.
+    shared = read(FRONTEND_JS / "panel_shared.js")
+    dashboard = read(FRONTEND_JS / "panel_dashboard.js")
+    browser = read(FRONTEND_JS / "folder_browser.js")
+    app = read(ROOT / "quickterm" / "app.py")
 
-    # One shared control backs every folder field, so a fix reaches all of them.
     assert "export function folderPickerControl" in shared
-    assert 'folder-picker-control' in shared
-    # Primary: the in-app browser, opened from whatever the field already holds.
+    assert "folder-picker-control" in shared
     assert 'from "./folder_browser.js"' in shared
     assert "openFolderBrowser({" in shared
     assert "startPath: input.value || options.startIn" in shared
-    # Browse must never be disabled again: that is what made it useless outside
-    # the installed app.
     assert "browse.disabled = !nativeFolderPickerAvailable()" not in shared
-    # Secondary: the OS dialog, still reachable, still only where it exists.
-    assert 'class _DesktopApi:' in app
-    assert 'js_api=desktop_api' in app
+    assert "class _DesktopApi:" in app
+    assert "js_api=desktop_api" in app
     assert "pick: pickNativeFolder" in shared
     assert "nativeBtn.hidden = !(native && native.available())" in browser
-    # The modal owns the keyboard while it is open, or the focused terminal
-    # pane re-asserts term.focus() a frame later and steals the path bar.
-    assert 'claimFocus(FOCUS_OWNER)' in browser
-    assert 'releaseFocus(FOCUS_OWNER)' in browser
-    # Both places a workspace folder is chosen: naming a new one, and
-    # repointing an existing card. Terminal settings has no folder field at all
-    # now; the only other folder is scratch's, under Settings > General.
-    assert "folderPickerControl(" in dashboard
+    assert "claimFocus(FOCUS_OWNER)" in browser
+    assert "releaseFocus(FOCUS_OWNER)" in browser
+    # Workspace folders are chosen on the dashboard. Terminal configs have no
+    # folder at all; the only other folder is scratch's, under Advanced.
     assert dashboard.count("folderPickerControl(") >= 2
-    assert "folderPickerControl(" not in settings
-    general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
-    assert "folderPickerControl(scratch," in general
+    assert "folderPickerControl(" not in read(CONNECTIONS_JS)
+    assert "folderPickerControl(scratch," in read(ABOUT_JS)
 
 
 def test_the_scratch_folder_is_a_setting_that_round_trips():
-    # The form edits the draft and its partial save re-reads the resolved root.
-    general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
-    sync = CONFIG_SYNC_JS.read_text(encoding="utf-8")
-    panels = PANELS_JS.read_text(encoding="utf-8")
-    assert "this._textInput(cfg.scratch_dir || \"\"" in general
-    assert "cfg.scratch_dir = scratch.value.trim();" in general
-    assert 'this._field("Scratch folder", scratchField,' in general
+    advanced = read(ABOUT_JS)
+    sync = read(CONFIG_SYNC_JS)
+    panels = read(PANELS_JS)
+    assert 'this._textInput(cfg.scratch_dir || ""' in advanced
+    assert "cfg.scratch_dir = scratch.value.trim();" in advanced
+    assert 'this._field("Scratch folder", scratchField,' in advanced
     assert "this.settingsDraft = JSON.parse(JSON.stringify(cfg));" in panels
     assert "settingsPatch(this.settingsDraft, this.settingsBaseline, fresh)" in panels
     assert "await api.putConfig(patch);" in panels
@@ -122,105 +138,137 @@ def test_the_scratch_folder_is_a_setting_that_round_trips():
 
 
 def test_dashboard_refreshes_by_patching_instead_of_rebuilding():
-    dashboard = (FRONTEND_JS / "panel_dashboard.js").read_text(encoding="utf-8")
-    panels = PANELS_JS.read_text(encoding="utf-8")
+    dashboard = read(FRONTEND_JS / "panel_dashboard.js")
+    panels = read(PANELS_JS)
 
-    # The dashboard reloads itself every 5 s. Emptying the panel body and
-    # rebuilding it destroyed whatever the user was in the middle of, including
-    # the <input> the folder picker had captured before awaiting the chooser.
     assert 'from "./render.js"' in dashboard
     assert "patchList(" in dashboard
     assert 'this.bodyEl.textContent = ""' not in dashboard.split("function buildDashboard")[1]
-
-    # The refresh used to pause only while focus sat inside the panel body. The
-    # picker disables its Browse button before awaiting, a disabled button drops
-    # focus to <body>, and the guard let the refresh through. Callers now take
-    # an explicit counted lock instead.
     assert "this.bodyEl.contains(document.activeElement)" not in panels
     assert "holdDashboardRefresh()" in panels
     assert "this._dashBusy > 0" in panels
     assert "panel.holdDashboardRefresh()" in dashboard
+    # "open workspace" is the wording; the app maps it to open or focus a view.
+    assert '"Open workspace"' in dashboard
+    assert "panel.app.loadWorkspace(" in dashboard
 
 
 def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():
-    keys = KEYS_JS.read_text(encoding="utf-8")
+    keys = read(KEYS_JS)
     assert 'if (key === "arrowleft") return done(() => actions.cycleTerminal(-1));' in keys
     assert 'if (key === "arrowup") return done(() => actions.cycleTerminal(1));' in keys
-    ctrl_layer = keys[keys.index("if (e.ctrlKey"):keys.index("if (!e.altKey")]
+    ctrl_layer = keys[keys.index("if (e.ctrlKey") : keys.index("if (!e.altKey")]
     assert "arrowleft" not in ctrl_layer
     assert "arrowright" not in ctrl_layer
 
 
 def test_every_configurable_thing_carries_its_own_description():
-    """No configured thing is a bare name plus a value.
+    """Terminals and snippets each declare what they are for and say what they run.
 
-    A profile and a snippet each declare what they are for, are searchable by
-    it, and say what they actually run. This is the invariant the whole
-    Settings rework exists for, so it is asserted rather than left to review.
+    Both are a master-detail list: a compact row with the problem marker, and
+    an editor with a Description field. A problem is marked at the item; the
+    footer check stays as the backstop that refuses the save.
     """
-    terminals = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
-    snippets = (FRONTEND_JS / "panel_settings_snippets.js").read_text(encoding="utf-8")
-    kit = (FRONTEND_JS / "panel_settings_kit.js").read_text(encoding="utf-8")
-
-    for source in (terminals, snippets):
-        assert 'from "./panel_settings_kit.js"' in source
-        # A first-class field with its own label and hint, not a placeholder
-        # bolted onto something else.
-        assert 'this._field("Description"' in source
-        # A row shows the description and a compact line of what it runs.
-        assert "configDescription(" in source
-        assert "configSummary(" in source
-        # A problem is marked at the item. The footer check in panels.js
-        # `_settings()` stays as the backstop that refuses the save.
+    for source in (read(CONNECTIONS_JS), read(SNIPPETS_JS)):
+        assert 'from "./config_list.js"' in source
+        assert "renderConfigList({" in source
+        assert '"Description"' in source
         assert "configProblems(" in source
-        # An empty state names what to make; a filter searches every field.
         assert "configEmpty({" in source
-        assert "matchesQuery(" in source
-        # A newly added item is created with the key its editor binds to.
-        assert 'description: ""' in source
-
-    assert "export const FILTER_THRESHOLD" in kit
-    assert "export function configEmpty" in kit
-    # Terminal profiles have a kind, so they are grouped by it.
-    assert "configGroupHeading(" in terminals
-    assert "inferTerminalType(profile) === kind" in terminals
+        assert re.search(r"\bproblems[,:]", source)
+        assert "summary:" in source
+        assert "itemDirty(this.savedSnapshots," in source
+    assert 'description: ""' in read(CONNECTIONS_JS)
+    assert 'description: ""' in read(SNIPPETS_JS)
+    assert "settingsProblems(this.settingsDraft" in read(PANELS_JS)
 
 
-def test_profile_card_is_a_name_a_command_and_one_more_disclosure():
-    """A profile shows a name, a command and a start command; the rest is under More.
+def test_config_pages_are_rows_and_a_side_editor_not_cards():
+    """No tile grid and no card per item: rows patched in place beside one editor."""
+    config_list = read(CONFIG_LIST_JS)
+    kit = read(FRONTEND_JS / "panel_settings_kit.js")
+    panels_css = read(FRONTEND_CSS / "panels.css")
+    connections_css = read(FRONTEND_CSS / "connections.css")
 
-    The user found eight to twelve controls per card, each with a line of
-    prose, too much for what is usually "PowerShell, then uv run dev". Every
-    chooser on the card is a menu.js menu, and the menu has to close on
-    Escape before the sheet's own Escape handler closes the whole sheet.
-    """
-    terminals = TERMINAL_SETTINGS_JS.read_text(encoding="utf-8")
-    kit = (FRONTEND_JS / "panel_settings_kit.js").read_text(encoding="utf-8")
-    panels_css = (
-        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "panels.css"
-    ).read_text(encoding="utf-8")
-
-    assert "this._select(" not in terminals
-    assert "configChoice({" in terminals
-    assert "configPurpose(" not in terminals
-    assert 'make("div", "profile-more")' in terminals
-    assert 'toggle.setAttribute("aria-expanded", String(open));' in terminals
-    assert "moreStartsOpen(profile, kind, profileProblems(profile, cfg.profiles, kind))" in terminals
-    # Typing re-infers the type in place; only an explicit type choice redraws.
-    command_input = terminals[terminals.index('command.addEventListener("input", () => {'):]
-    command_input = command_input[: command_input.index("\n        });\n")]
-    assert "rerender()" not in command_input
-    assert "syncKind();" in command_input
-
+    assert "patchList(rowsEl, shown," in config_list
+    assert "setText(p.name, title)" in config_list
+    assert 'NARROW_QUERY = "(max-width: 820px)"' in config_list
+    # Typing patches the row; only a change of selection draws the editor.
+    select = config_list[config_list.index("function select(") :]
+    select = select[: select.index("\n  }\n")]
+    assert "if (item !== current)" in select
+    for source in (read(CONNECTIONS_JS), read(SNIPPETS_JS)):
+        assert 'make("article"' not in source
+        assert "rerender()" not in source
+    for selector in (".terminal-profile-card", ".profile-main", ".profile-more", ".snippet-card", ".connection-type"):
+        assert selector not in panels_css, selector
+        assert selector not in connections_css, selector
+    # Menus opened from the sheet close on Escape before the sheet does.
     assert 'import { closeMenu, toggleMenu } from "./menu.js";' in kit
     assert 'window.addEventListener("keydown", escape, true);' in kit
     assert "event.stopImmediatePropagation();" in kit
     assert ".qt-menu.in-panel { z-index: 105; }" in panels_css
 
 
+def test_one_save_persists_everything():
+    connections = read(CONNECTIONS_JS)
+    panels = read(PANELS_JS)
+    assert "putConfig" not in connections
+    assert "Save connection" not in connections
+    assert panels.count("api.putConfig(") == 1
+    # The editors' Save and Ctrl+S in the sheet reach the same method.
+    assert "this._saveSettings?.()" in connections
+    assert "this._saveSettings?.()" in read(SNIPPETS_JS)
+    assert 'event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "s"' in panels
+    assert '"ctrl+s"' not in read(KEYS_JS)
+
+
+def test_no_native_select_anywhere_in_the_frontend():
+    for path in FRONTEND_JS.glob("*.js"):
+        text = read(path)
+        assert 'make("select"' not in text, path.name
+        assert 'createElement("select")' not in text, path.name
+        assert "this._select(" not in text, path.name
+    assert "_select(" not in read(PANELS_JS)
+
+
+def test_every_settings_field_stamps_its_search_id():
+    panels = read(PANELS_JS)
+    field = panels[panels.index("  _field(") :]
+    field = field[: field.index("\n  }\n")]
+    assert "field.dataset.setting = id" in field
+    index = read(FRONTEND_JS / "settings_index.js")
+    ids = re.findall(r'\{ id: "([^"]+)", tab:', index)
+    assert len(ids) > 20
+    sources = "\n".join(read(FRONTEND_JS / name) for name in SETTINGS_SOURCES)
+    for setting in ids:
+        stamped = f'"{setting}"' in sources
+        if setting.startswith("overlay.") and not stamped:
+            stamped = f'["{setting.split(".", 1)[1]}",' in read(FRONTEND_JS / "panel_settings_window.js")
+        assert stamped, setting
+    for method in ("async showSetting(id)", "async showConfig(kind, name = null)", "settingEntries()"):
+        assert method in panels
+
+
+def test_shortcut_capture_claims_the_keyboard_and_pauses_global_hotkeys():
+    source = read(SHORTCUT_INPUT_JS)
+    assert 'import { claimFocus, releaseFocus } from "./focus.js";' in source
+    assert 'import * as api from "./api.js";' in source
+    assert "api.suspendHotkeys?.(on)" in source
+    start = source[source.index("  const start = () => {") :]
+    start = start[: start.index("\n  };\n")]
+    assert start.index('claimFocus("shortcut")') < start.index("button.focus()")
+    assert 'window.addEventListener("keydown", onKey, true)' in start
+    assert "event.stopImmediatePropagation();" in source
+    assert 'releaseFocus("shortcut")' in source
+    # The in-app layer is registered first, so it must step aside by itself.
+    assert 'focusOwners().includes("shortcut")' in read(KEYS_JS)
+    assert "capturing: captureActive()" in read(PANELS_JS)
+
+
 def test_text_zoom_leaves_readline_undo_and_star_to_the_shell():
     """Ctrl+_ is readline's undo and Ctrl+* no zoom key; a code alone never zooms."""
-    keys = KEYS_JS.read_text(encoding="utf-8")
+    keys = read(KEYS_JS)
     assert 'key === "_"' not in keys
     assert 'key === "*"' not in keys
     for code in ('e.code === "Minus"', 'e.code === "Digit0"', 'e.code === "Numpad0"'):
@@ -233,19 +281,21 @@ def test_settings_infers_a_profile_type_for_display_only():
 
     A hand-edited profile without a type launches as a plain command; the
     stamp saved it with the inferred type on the next Save and changed how it
-    starts. Only the user's own choice in a card sets `terminal_type`.
+    starts. Only an edit of a type-bound field in the editor sets it.
     """
-    panels = PANELS_JS.read_text(encoding="utf-8")
+    panels = read(PANELS_JS)
     assert "profile.terminal_type = inferTerminalType(profile)" not in panels
     assert "profile.terminal_type =" not in panels
+    connections = read(CONNECTIONS_JS)
+    assert "if (!profile.terminal_type) profile.terminal_type = kind;" in connections
 
 
 def test_menus_draw_above_the_sheet_and_below_the_error_banner():
-    css = (FRONTEND_JS.parent / "css" / "menu.css").read_text(encoding="utf-8")
-    rule = css[css.index(".qt-menu {"):]
+    css = read(FRONTEND_CSS / "menu.css")
+    rule = css[css.index(".qt-menu {") :]
     rule = rule[: rule.index("}")]
     assert "z-index: 130;" in rule
-    app_css = (FRONTEND_JS.parent / "css" / "app.css").read_text(encoding="utf-8")
+    app_css = read(FRONTEND_CSS / "app.css")
     assert ".panel-overlay { position: fixed; inset: 0; z-index: 100;" in app_css
     assert "z-index: 140;" in app_css  # #app-error
 
@@ -254,11 +304,9 @@ def test_every_overlay_claims_the_keyboard_before_focusing_its_own_control():
     # A pane re-asserts term.focus() on a frame and on a timeout, so an overlay
     # that only focuses its input loses it again one frame later. Alt+K opened a
     # palette you could not type into for exactly this reason.
-    # main.js used to own an overlay of its own (the quick-settings drawer);
-    # it no longer has one, so only the palette and the panels are checked.
     assert FOCUS_JS.exists()
-    for source in (PALETTE_JS, PANELS_JS):
-        text = source.read_text(encoding="utf-8")
+    for source in (PALETTE_JS, PANELS_JS, SHORTCUT_INPUT_JS):
+        text = read(source)
         assert 'from "./focus.js"' in text, source.name
         assert "claimFocus(" in text, source.name
         assert "releaseFocus(" in text, source.name

@@ -1,4 +1,13 @@
 import { make } from "./panel_shared.js";
+import { SHORTCUTS } from "./keys.js";
+
+// Pointer gestures have no key to claim, so they are not in SHORTCUTS.
+const GESTURES = [
+  ["Right click", "Copy the current selection"],
+  ["Drag a pane header", "Move the pane: an edge of another pane docks it there, the middle swaps the two"],
+  ["Ctrl click", "Open a link or file path printed in the terminal"],
+];
+
 export function renderHelp() {
     const intro = make("div", "help-intro");
     intro.append(make("h2", "", "Your terminals stay organized."), make("p", "", "Alt+D detaches a terminal without stopping it. X or Alt+W always asks before killing its process tree."));
@@ -7,24 +16,9 @@ export function renderHelp() {
     tour.addEventListener("click", () => this.show("setup"));
     this.bodyEl.append(tour);
     const grid = make("div", "help-grid");
-    const shortcuts = [
-      ["Alt K", "Open command palette"], ["Alt Shift →", "Split selected profile right in current folder"],
-      ["Alt Shift ↓", "Split selected profile below in current folder"], ["Alt arrows", "Move between panes"],
-      ["Alt N", "New default terminal"], ["Alt Z", "Zoom the focused pane; again shows all panes"],
-      ["Alt Shift ← / ↑", "Previous / next new-terminal profile"],
-      ["Alt Shift E", "Open the focused terminal's folder in Explorer"],
-      ["Alt Shift C", "Open the focused terminal's folder in VS Code"],
-      ["Alt D", "Detach current pane"], ["Alt W", "Arm the kill bar; Alt W or Enter again kills, Escape cancels"],
-      ["Ctrl +", "Bigger terminal text"], ["Ctrl -", "Smaller terminal text"],
-      ["Ctrl 0", "Reset terminal text size"],
-      ["Ctrl C", "Copy selection (otherwise interrupt)"], ["Ctrl V", "Paste into terminal"],
-      ["Right click", "Copy the current selection"],
-      ["Drag a pane header", "Move the pane: an edge of another pane docks it there, the middle swaps the two"],
-      ["Ctrl click", "Open a link or file path printed in the terminal"],
-    ];
     const keyCard = make("section", "help-card");
     keyCard.append(make("h3", "", "Keyboard shortcuts"));
-    for (const [key, label] of shortcuts) {
+    for (const [key, label] of [...SHORTCUTS.map((item) => [item.keys, item.label]), ...GESTURES]) {
       const row = make("div", "shortcut-row");
       row.append(make("kbd", "", key), make("span", "", label));
       keyCard.append(row);
@@ -33,14 +27,13 @@ export function renderHelp() {
     conceptCard.append(make("h3", "", "A few useful ideas"));
     for (const [title, copy] of [
       ["Your keys stay yours", "Ctrl+C copies only when text is selected; otherwise it interrupts the terminal. Plain Alt+V (Claude Code image paste), Alt+P (model switch), Ctrl+P, the Alt+B/F word motions and other shell keys pass through untouched."],
-      ["Profiles", "A named terminal with a description, a type, a start command and a shortcut. Write the description for the moment you are looking through a list of them. A profile carries no folder: it always opens in the folder of the workspace you launch it from, so one profile works in every project."],
+      ["Terminals", "A saved terminal has a name, a description, a type and an optional global shortcut. It carries no folder: it always opens in the folder of the workspace you launch it from, so one config works in every project."],
+      ["Agents", "Claude Code and Codex are terminals too. Settings lists their options from the installed CLI, and the palette offers new, continue, choose session and the agent manager for each."],
       ["Split folders", "Splits use OSC 7 or OSC 9;9 shell directory signals, falling back to the pane launch folder. Open and Alt+N start in the workspace folder."],
-      ["Claude agent view", "Normal Claude splits stay in the profile project and never surprise-open the agent manager. Use the explicit Split Claude agent view command in Alt+K."],
-      ["Workspaces", "A workspace is a folder plus a saved split layout. Every terminal you open in it starts in that folder, so switching workspace switches project. Set or change the folder from the Dashboard."],
-      ["Sessions live in workspaces", "Detached sessions stay with their workspace and do not expire. The palette only shows the current workspace; moving a session from another workspace requires the explicit menu."],
-      ["Scratch is temporary", "Scratch opens in a throwaway folder under your system temp directory, keeps its detached sessions for this run, and is deleted when QuickTerm quits. Name it in the Dashboard to keep it; you choose the real folder then."],
+      ["Workspaces", "A workspace is a folder plus a saved split layout. Every terminal you open in it starts in that folder. Open one from the sidebar; it tiles beside the ones already open."],
+      ["Scratch is temporary", "Scratch opens in a throwaway folder under your system temp directory and is deleted when QuickTerm quits. Name it in the Dashboard to keep it; you choose the real folder then."],
       ["Snippets", "A command you keep: a name, a description of what it does, and the exact keystrokes. Alt+K finds it and types it into the focused terminal, Enter included."],
-      ["Everything configurable describes itself", "Profiles and snippets both carry a description. Settings groups them by kind, filters them by name, description or command, and marks a problem at the item it belongs to rather than only when you press Save."],
+      ["Find any setting", "Type in the search box at the top of Settings, or press / while Settings is open. The palette (Alt+K) finds settings too."],
     ]) {
       const item = make("div", "concept-row");
       item.append(make("strong", "", title), make("p", "", copy));
