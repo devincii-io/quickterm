@@ -32,8 +32,7 @@ def read(path: Path) -> str:
 def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport():
     source = read(PANELS_JS)
     start = source.index("  _confirmNear(")
-    end = source.index("
-  _field(", start)
+    end = source.index("\n  _field(", start)
     implementation = source[start:end]
     # Settings, the dashboard and the sidebar share one confirmation box.
     assert 'import { confirmNear } from "./confirm_popover.js";' in source
@@ -51,7 +50,7 @@ def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport()
     # only the keyboard path lands on the destructive button.
     assert 'return keyboard ? "confirm" : "cancel";' in popover
     assert '(initialFocus(keyboard) === "confirm" ? confirm : cancel).focus()' in popover
-    assert opener.index("claimFocus(owner)") < opener.index(".focus()")
+    assert opener.index("claimFocus(owner);") < opener.index("(initialFocus(keyboard)")
 
 
 def test_panels_coordinator_stays_split_into_section_modules():

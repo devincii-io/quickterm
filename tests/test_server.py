@@ -683,12 +683,12 @@ def test_terminal_inventory_marks_putty_missing(client):
 def test_terminal_inventory_offers_ssh_through_openssh_without_putty(client, monkeypatch):
     from quickterm import ssh_config
 
-    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: f"C:\OpenSSH\{kind}.exe")
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: rf"C:\OpenSSH\{kind}.exe")
     entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
     assert entries["ssh"]["available"] is True
-    assert entries["ssh"]["openssh"] == "C:\OpenSSH\ssh.exe"
+    assert entries["ssh"]["openssh"] == r"C:\OpenSSH\ssh.exe"
     assert entries["ssh"]["putty"] is None
-    assert entries["sftp"]["executable"] == "C:\OpenSSH\sftp.exe"
+    assert entries["sftp"]["executable"] == r"C:\OpenSSH\sftp.exe"
 
 
 def _inventory_with(monkeypatch, found: dict[str, str | None]) -> dict:

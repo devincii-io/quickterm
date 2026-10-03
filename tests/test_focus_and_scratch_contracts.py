@@ -105,7 +105,7 @@ def test_new_scratch_opens_its_own_view_and_replaces_nothing():
     assert "return Boolean(await views.open(null));" in new_scratch
     assert "newScratchWorkspace" not in shell and "newScratchWorkspace" not in main
     assert "discardScratch" not in shell
-    assert "newScratch: newScratchView," in shell
+    assert "newScratch: reported(newScratchView)," in shell
 
 
 def test_closing_a_scratch_view_kills_nothing():

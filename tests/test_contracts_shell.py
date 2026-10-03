@@ -476,7 +476,7 @@ def test_the_sidebar_kill_routes_through_the_owning_view():
     assert "scheduleWorkspaceSave();" in by_id
 
     assert "killTerminal: routing.killTerminal," in shell
-    assert "detachTerminal: routing.detachTerminal," in shell
+    assert "detachTerminal: reported(routing.detachTerminal)," in shell
     # Moving a terminal: its view lets go (retain, close, forget, save) first.
     move = _function(routing, "  async function moveTerminalHere(session) {", "\n  return {")
     assert move.index("detachSessionById(session.id, { forget: true })") < move.index(
