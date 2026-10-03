@@ -24,8 +24,46 @@
 // selection Ctrl+C still reaches the PTY as the terminal interrupt. The
 // Ctrl+Shift+C/V aliases remain available too.
 
+import { focusOwners } from "./focus.js";
+
+// The one list of in-app keys. Help and the Settings Shortcuts tab render
+// from it, and `bindings` (in the hotkey grammar of shortcut_input.js) is what
+// initKeys claims, so a global shortcut on one of them can be warned about.
+// Rows with no bindings are handled by the pane, not by this layer.
+const arrows = (prefix) => ["left", "right", "up", "down"].map((key) => `${prefix}+${key}`);
+export const SHORTCUTS = [
+  { id: "palette", keys: "Alt+K", label: "Open the command palette", group: "Panels", bindings: ["alt+k"] },
+  { id: "dashboard", keys: "Alt+G", label: "Dashboard", group: "Panels", bindings: ["alt+g"] },
+  { id: "settings", keys: "Alt+S", label: "Settings", group: "Panels", bindings: ["alt+s"] },
+  { id: "help", keys: "Alt+I", label: "Quick guide", group: "Panels", bindings: ["alt+i"] },
+  { id: "new-terminal", keys: "Alt+N", label: "New default terminal", group: "Terminals", bindings: ["alt+n"] },
+  { id: "zoom", keys: "Alt+Z", label: "Zoom the focused pane; again shows all panes", group: "Terminals", bindings: ["alt+z"] },
+  { id: "detach", keys: "Alt+D", label: "Detach the pane; the process keeps running", group: "Terminals", bindings: ["alt+d"] },
+  { id: "kill", keys: "Alt+W", label: "Arm the kill bar; Alt+W or Enter again kills, Escape cancels", group: "Terminals", bindings: ["alt+w"] },
+  { id: "focus", keys: "Alt+Arrows", label: "Move between panes", group: "Panes", bindings: arrows("alt") },
+  { id: "split-right", keys: "Alt+Shift+→ or Alt+Shift+H", label: "Split the selected terminal to the right", group: "Panes", bindings: ["alt+shift+right", "alt+shift+h"] },
+  { id: "split-down", keys: "Alt+Shift+↓ or Alt+Shift+V", label: "Split the selected terminal below", group: "Panes", bindings: ["alt+shift+down", "alt+shift+v"] },
+  { id: "cycle-terminal", keys: "Alt+Shift+← / ↑", label: "Previous / next new-terminal choice", group: "Panes", bindings: ["alt+shift+left", "alt+shift+up"] },
+  { id: "sidebar", keys: "Alt+Shift+S", label: "Sidebar: full, rail, hidden", group: "Window", bindings: ["alt+shift+s"] },
+  { id: "explorer", keys: "Alt+Shift+E", label: "Open the focused terminal's folder in Explorer", group: "Window", bindings: ["alt+shift+e"] },
+  { id: "editor", keys: "Alt+Shift+C", label: "Open the focused terminal's folder in VS Code", group: "Window", bindings: ["alt+shift+c"] },
+  { id: "font-bigger", keys: "Ctrl++", label: "Bigger terminal text", group: "Text", bindings: ["ctrl+equal", "ctrl+shift+equal"] },
+  { id: "font-smaller", keys: "Ctrl+-", label: "Smaller terminal text", group: "Text", bindings: ["ctrl+minus"] },
+  { id: "font-reset", keys: "Ctrl+0", label: "Reset terminal text size", group: "Text", bindings: ["ctrl+0"] },
+  { id: "copy", keys: "Ctrl+C", label: "Copy the selection; without one it interrupts", group: "Text", bindings: [] },
+  { id: "paste", keys: "Ctrl+V", label: "Paste into the terminal", group: "Text", bindings: [] },
+];
+
+// Plain Alt keys that shells and agents bind (AGENTS.md). initKeys never
+// claims them, and a global shortcut on one takes it from every terminal.
+export const PASS_THROUGH_ALT = ["v", "p", "h", "b", "f", "minus", ..."0123456789"];
+
 export function initKeys(actions) {
   window.addEventListener("keydown", (e) => {
+    // A shortcut field is recording (shortcut_input.js). Its own capture
+    // listener is registered after this one, so this layer has to step aside
+    // or Alt+S would close Settings instead of being recorded.
+    if (focusOwners().includes("shortcut")) return;
     // Windows-style text zoom. Use both key and code because WebView2 reports
     // the shifted plus key differently across keyboard layouts. Claim only
     // these exact Ctrl gestures; Ctrl+Alt and Meta combinations stay untouched.

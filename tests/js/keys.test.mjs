@@ -229,6 +229,49 @@ test("the numpad and the US = key still zoom", async () => {
   assert.deepEqual(calls, ["fontBigger", "fontSmaller", "fontReset", "fontBigger"]);
 });
 
+// US layout: what each physical key types, unshifted and shifted.
+const US = {
+  Digit0: ["0", ")"], Digit1: ["1", "!"], Digit2: ["2", "@"], Digit3: ["3", "#"], Digit4: ["4", "$"],
+  Digit5: ["5", "%"], Digit6: ["6", "^"], Digit7: ["7", "&"], Digit8: ["8", "*"], Digit9: ["9", "("],
+  Minus: ["-", "_"], Equal: ["=", "+"], ArrowLeft: ["ArrowLeft", "ArrowLeft"], ArrowRight: ["ArrowRight", "ArrowRight"],
+  ArrowUp: ["ArrowUp", "ArrowUp"], ArrowDown: ["ArrowDown", "ArrowDown"],
+};
+for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") US[`Key${letter}`] = [letter.toLowerCase(), letter];
+
+test("SHORTCUTS lists every key the layer claims, and nothing it leaves to the shell", async () => {
+  const { SHORTCUTS, PASS_THROUGH_ALT } = await import("../../quickterm/frontend/js/keys.js");
+  const { bindingFromEvent } = await import("../../quickterm/frontend/js/shortcut_input.js");
+  const listed = new Set(SHORTCUTS.flatMap((item) => item.bindings));
+  const { handler } = await captureHandler();
+  const claimed = [];
+  for (const mods of [{ altKey: true }, { altKey: true, shiftKey: true }, { ctrlKey: true }, { ctrlKey: true, shiftKey: true }]) {
+    for (const [code, [plain, shifted]] of Object.entries(US)) {
+      const event = keyEvent({ code, key: mods.shiftKey ? shifted : plain, ...mods });
+      handler(event);
+      if (event.defaultPrevented) claimed.push(bindingFromEvent(event).binding);
+    }
+  }
+  assert.ok(claimed.length > 20);
+  for (const binding of claimed) assert.ok(listed.has(binding), `${binding} is claimed but not in SHORTCUTS`);
+  for (const binding of listed) assert.ok(claimed.includes(binding), `${binding} is listed but not claimed`);
+  for (const key of PASS_THROUGH_ALT) {
+    assert.equal(listed.has(`alt+${key}`), false, `Alt+${key} belongs to the shell`);
+    assert.equal(claimed.includes(`alt+${key}`), false, `Alt+${key} belongs to the shell`);
+  }
+  for (const item of SHORTCUTS) assert.ok(item.id && item.keys && item.label && item.group, item.id);
+});
+
+test("the layer steps aside while a shortcut field records", async () => {
+  const { claimFocus, releaseFocus } = await import("../../quickterm/frontend/js/focus.js");
+  const { handler, calls } = await captureHandler();
+  claimFocus("shortcut");
+  const press = keyEvent({ key: "s", code: "KeyS", altKey: true });
+  handler(press);
+  releaseFocus("shortcut");
+  assert.equal(press.defaultPrevented, false, "Alt+S is recorded, not Settings");
+  assert.deepEqual(calls, []);
+});
+
 test("Ctrl+0 resets on AZERTY, where the 0 key types a grave-accented a unshifted", async () => {
   const { handler, calls } = await captureHandler();
   const reset = keyEvent({ key: "à", code: "Digit0", ctrlKey: true });
