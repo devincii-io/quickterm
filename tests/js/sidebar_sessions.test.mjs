@@ -116,3 +116,10 @@ test("the extra row line unlocks only once the sidebar is wide enough for it", (
   assert.equal(isWideSidebar(SIDEBAR_WIDE_AT - 1), false);
   assert.equal(isWideSidebar(undefined), false);
 });
+
+test("a terminal shown in another workspace remains in its group and counts as open", () => {
+  const groups = groupSessionsByWorkspace([{ id: "other", alive: true, workspace: "Operations" }], { currentWorkspace: "Project", visibleIds: ["other"] });
+  const group = groups.find((item) => item.name === "Operations");
+  assert.equal(group.sessions[0].isHere, false);
+  assert.equal(group.sessions[0].state.key, "open");
+});

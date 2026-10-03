@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  VIEW_COLORS, VIEW_MIN_PX, clampViewRatio, companionUrl, pickViewColor, ratioBounds,
+  VIEW_COLORS, VIEW_MIN_PX, clampViewRatio, companionUrl, nextScratchLabel, pickViewColor, ratioBounds,
 } from "../../quickterm/frontend/js/workspace_views.js";
 
 test("a companion has a distinct explicit identity and carries auth only in the fragment", () => {
@@ -40,4 +40,11 @@ test("every open view gets its own colour before any colour repeats", () => {
   assert.equal(pickViewColor([VIEW_COLORS[0]]), VIEW_COLORS[1]);
   assert.equal(pickViewColor([VIEW_COLORS[0], VIEW_COLORS[2]]), VIEW_COLORS[1], "a closed view's colour is reused");
   assert.equal(pickViewColor(VIEW_COLORS), VIEW_COLORS[0]);
+});
+
+test("scratch views get distinct identities and labels without replacing another layout", () => {
+  const url = new URL(companionUrl("/", null, "view-12345678", "token"), "http://localhost");
+  assert.equal(url.searchParams.get("workspace"), "");
+  assert.equal(url.searchParams.get("scratch"), "scratch-view-view-12345678");
+  assert.equal(nextScratchLabel(["scratch 1", "scratch 3"]), "scratch 2");
 });

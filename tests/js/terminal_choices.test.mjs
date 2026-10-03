@@ -50,3 +50,11 @@ test("an inventory from before installs existed has no install rows", () => {
   const { installs: _gone, ...older } = inventory;
   assert.equal(terminalChoices({ profiles: [], inventory: older }).some((c) => !canLaunch(c)), false);
 });
+
+test("the configured launcher exposes only saved terminal configurations", () => {
+  const local = { name: "Console", cmd: "cmd.exe", terminal_type: "command-prompt" };
+  const desktop = { name: "Desktop", cmd: "", terminal_type: "rdp", connection: { host: "server" } };
+  const inventory = { types: [{ id: "claude-code", executable: "claude", available: true }, { id: "wsl", executable: "wsl.exe", available: true }] };
+  assert.deepEqual(terminalChoices({ configuredOnly: true, profiles: [], inventory }), []);
+  assert.deepEqual(terminalChoices({ configuredOnly: true, profiles: [local, desktop], inventory }).map((item) => item.label), ["Console"]);
+});

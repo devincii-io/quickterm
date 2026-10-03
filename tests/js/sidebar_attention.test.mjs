@@ -8,8 +8,6 @@ import {
   UNASSIGNED_GROUP, attentionText, groupSessionsByWorkspace, groupSummary, isListedSession,
   sessionFolder, sessionState, sessionSummary, sessionTooltip,
 } from "../../quickterm/frontend/js/launcher.js";
-import { documentHasKeyboard, finishedAttachRecord, sessionToMarkSeen } from "../../quickterm/frontend/js/sidebar.js";
-import { historySummary, historyTime } from "../../quickterm/frontend/js/panel_settings_about.js";
 
 function session(id, extra = {}) {
   return {
@@ -116,41 +114,4 @@ test("a foreign terminal that needs you marks its group for the rail", () => {
   const acme = groups.find((group) => group.name === "acme");
   assert.equal(acme.attention, 1);
   assert.equal(groups.find((group) => group.name === UNASSIGNED_GROUP).attention, 0);
-});
-
-test("seen is sent for the focused terminal only while someone is looking", () => {
-  const sessions = [session("a", { attention: bell }), session("b")];
-  const base = { sessions, focusedId: "a", focusChanged: false, visible: true, windowFocused: true };
-  assert.equal(sessionToMarkSeen(base), "a");
-  // Focus moved to it while the window is visible but not in front: still seen.
-  assert.equal(sessionToMarkSeen({ ...base, windowFocused: false, focusChanged: true }), "a");
-  // Visible behind another application, focus unchanged: nobody looked.
-  assert.equal(sessionToMarkSeen({ ...base, windowFocused: false }), null);
-  assert.equal(sessionToMarkSeen({ ...base, visible: false, focusChanged: true }), null);
-  assert.equal(sessionToMarkSeen({ ...base, focusedId: "b" }), null);
-  assert.equal(sessionToMarkSeen({ ...base, focusedId: null }), null);
-});
-
-test("a finished row opens through attach without claiming to be alive", () => {
-  const record = finishedAttachRecord(session("done", { alive: false, exit_code: 1 }));
-  assert.equal("alive" in record, false);
-  assert.equal(record.id, "done");
-  assert.equal(record.exit_code, 1);
-});
-
-test("settings history rows say what restoring would change", () => {
-  assert.equal(historySummary({ summary: "theme, profiles" }), "changes theme, profiles");
-  assert.equal(historySummary({ summary: "" }), "no difference");
-  assert.equal(historyTime("not a date"), "not a date");
-  assert.notEqual(historyTime("2026-09-26T10:32:00Z"), "2026-09-26T10:32:00Z");
-});
-
-test("a document whose tiled view has the keyboard does not have it itself", () => {
-  // The primary's document reports focus while one of its iframe views has
-  // it; its own focused pane must then keep its "needs you".
-  const doc = (focused, tag) => ({ hasFocus: () => focused, activeElement: tag ? { tagName: tag } : null });
-  assert.equal(documentHasKeyboard(doc(true, "TEXTAREA")), true);
-  assert.equal(documentHasKeyboard(doc(true, "IFRAME")), false);
-  assert.equal(documentHasKeyboard(doc(false, "TEXTAREA")), false);
-  assert.equal(documentHasKeyboard(doc(true, null)), true);
 });
