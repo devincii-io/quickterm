@@ -32,20 +32,26 @@ def read(path: Path) -> str:
 def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport():
     source = read(PANELS_JS)
     start = source.index("  _confirmNear(")
-    end = source.index("\n  _field(", start)
+    end = source.index("
+  _field(", start)
     implementation = source[start:end]
+    # Settings, the dashboard and the sidebar share one confirmation box.
+    assert 'import { confirmNear } from "./confirm_popover.js";' in source
+    assert "{ keyboard = false } = {}" in implementation
+    assert "confirmNear(button, {" in implementation
+    assert "keyboard, owner: \"confirm\"" in implementation
 
-    assert "button.hidden = true" not in implementation
-    assert implementation.index("button.getBoundingClientRect()") < implementation.index(
-        "button.disabled = true"
-    )
-    assert "window.innerHeight - boxRect.height - margin" in implementation
-    assert "window.innerWidth - boxRect.width - margin" in implementation
+    popover = read(FRONTEND_JS / "confirm_popover.js")
+    assert "trigger.hidden = true" not in popover
+    opener = popover[popover.index("export function confirmNear("):]
+    assert opener.index("trigger.getBoundingClientRect()") < opener.index("trigger.disabled = true")
+    assert "viewport.height - boxSize.height - margin" in popover
+    assert "viewport.width - boxSize.width - margin" in popover
     # AGENTS.md: Cancel owns the initial focus when a pointer opened the bar;
     # only the keyboard path lands on the destructive button.
-    assert "{ keyboard = false } = {}" in implementation
-    assert "(keyboard ? confirm : cancel).focus()" in implementation
-    assert "requestAnimationFrame(() => confirm.focus())" not in implementation
+    assert 'return keyboard ? "confirm" : "cancel";' in popover
+    assert '(initialFocus(keyboard) === "confirm" ? confirm : cancel).focus()' in popover
+    assert opener.index("claimFocus(owner)") < opener.index(".focus()")
 
 
 def test_panels_coordinator_stays_split_into_section_modules():

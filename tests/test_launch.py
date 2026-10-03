@@ -533,6 +533,9 @@ def test_an_elevated_instance_uses_its_own_workspace_folder_before_touching_scra
     calls: list[tuple] = []
     monkeypatch.setattr(real_workspace, "set_namespace", lambda name: calls.append(("ns", name)))
     monkeypatch.setattr(real_workspace, "delete_workspace", lambda name: calls.append(("del", name)))
+    # The real %APPDATA% may hold temporary scratch-view files; they are not
+    # what this test is about.
+    monkeypatch.setattr(real_workspace, "list_workspaces", lambda: [])
     monkeypatch.setitem(sys.modules, "quickterm.workspace", real_workspace)
 
     app_mod._prepare_workspaces(elevated=True)

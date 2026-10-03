@@ -1548,10 +1548,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   popover and relabels Kill as **Retry**; a 404 counts as gone. The shell's
   `killTerminal(session)` routes it: a view with a pane on the session runs
   `app.killSessionById(id)` (kill, 404 falls through, forget, close the pane,
-  autosave); else the owner workspace's open view runs
-  `app.killWorkspaceSession(session, workspace)` so its ownership drops the id
-  before the next autosave; else the shell calls `api.killSession(id)` and
+  autosave); else the owner workspace's open view runs the same
+  `app.killSessionById(id)`, so its in-memory ownership drops the id before
+  the next autosave; else the shell calls `api.killSession(id)` and
   `removeSessionsFromSavedWorkspaces`. A 500 is thrown back to the popover.
+  The pure decisions are `rowAction` and `killRoute` in `shell_routing.js`.
 - Dashboard: dense saved-workspace rows, global/current ownership and resource
   statistics, detached-session management, and quick profile launch.
 - Workspaces: named workspaces autosave layout and session IDs and restore the
@@ -1586,7 +1587,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 
   `Panels#showSetting(id)`, `Panels#showConfig("terminal"|"snippet",
   name|null)` and `Panels#settingEntries()` are the entry points for the
-  palette and search. Every chooser is `configChoice` (a `menu.js` menu);
+  palette and search. `Panels#showWorkspace(name)` opens the Dashboard with
+  that workspace's folder and logo editor open (the sidebar's "Workspace
+  settings"). Every chooser is `configChoice` (a `menu.js` menu);
   `Panels._select` and every native `<select>` are gone. Every field stamps
   `data-setting=<id>`.
 - Master and detail (`config_list.js`): on the left a filter input (always
@@ -1815,8 +1818,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   The primary window's shell atomically claims folder requests and opens each
   in a new scratch view.
 - Destructive UI actions use an in-app confirmation placed by the triggering
-  control (`confirm_popover.js` in the sidebar, `Panels._confirmNear` in
-  panels, or the kill bar inside the focused pane for keyboard actions). When a
+  control: `confirm_popover.js` (the sidebar calls it directly, and
+  `Panels._confirmNear` delegates to it with owner `"confirm"`), or the kill
+  bar inside the focused pane for keyboard actions. When a
   pointer opened it, **Cancel** receives focus, so a reflexive Enter on a bar
   the user did not expect can never complete a destructive action; a keyboard
   path (Alt+W, Delete on a sidebar row, the palette) asked for it and focuses

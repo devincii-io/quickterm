@@ -384,6 +384,16 @@ export async function bootShell() {
   };
 
   // ---- the sidebar ----
+  // launcher.js shows only kill and delete failures itself, in their
+  // confirmation. Every other row or group gesture reports here.
+  const reported = (gesture) => async (...args) => {
+    try {
+      return await gesture(...args);
+    } catch (error) {
+      showError(error?.detail || error?.message || "That did not work. Try again.");
+      return false;
+    }
+  };
   const sidebar = createSidebar({
     api, state, views, panels, palette, folders,
     actions: {
@@ -395,9 +405,9 @@ export async function bootShell() {
       elevateSystem: (choice) => chromeApp.elevateSystemTerminal(choice),
       selectTerminal: (choice) => { state.selectedTerminal = choice; },
       setup: () => shell.setupTerminals(),
-      openWorkspace,
-      closeWorkspace: closeWorkspaceView,
-      newScratch: newScratchView,
+      openWorkspace: reported(openWorkspace),
+      closeWorkspace: reported(closeWorkspaceView),
+      newScratch: reported(newScratchView),
       openWorkspaceInWindow: (name) => registry.openNewWindow(name),
       newWindow: () => {
         panels.close();
@@ -405,18 +415,18 @@ export async function bootShell() {
       },
       editWorkspace: (name) => (panels.showWorkspace ? panels.showWorkspace(name) : panels.show("dashboard")),
       deleteWorkspace,
-      activateTerminal: routing.activateTerminal,
-      detachTerminal: routing.detachTerminal,
+      activateTerminal: reported(routing.activateTerminal),
+      detachTerminal: reported(routing.detachTerminal),
       killTerminal: routing.killTerminal,
-      moveTerminalHere: routing.moveTerminalHere,
-      renameTerminal: async (session, name) => {
+      moveTerminalHere: reported(routing.moveTerminalHere),
+      renameTerminal: reported(async (session, name) => {
         const app = views.appFor(views.viewForSession(session.id));
         if (app) return app.renameSession(session.id, name);
         await api.renameSession(session.id, name);
         refresh();
         return true;
-      },
-      workspaceHere: () => chromeApp.createWorkspaceHere(),
+      }),
+      workspaceHere: reported(() => chromeApp.createWorkspaceHere()),
       openFolder: (app) => chromeApp.openHere(app),
       sidebarResized: () => setTimeout(() => views.layout({ animate: false }), 160),
       handBack: () => views.focusView(views.active),

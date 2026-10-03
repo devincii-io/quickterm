@@ -282,12 +282,14 @@ def cfg() -> FakeConfig:
 def no_putty_tools(monkeypatch):
     # Hermetic default: tests must not depend on whether vendor/putty exists on
     # the machine. Tests that need the tools use the putty_dir fixture.
-    from quickterm import putty_tools
+    from quickterm import putty_tools, ssh_config
 
     monkeypatch.setattr(putty_tools, "tools_dir", lambda: None)
     monkeypatch.setattr(putty_tools, "plink_path", lambda: None)
     monkeypatch.setattr(putty_tools, "psftp_path", lambda: None)
     monkeypatch.setattr(putty_tools, "pscp_path", lambda: None)
+    # Nor on whether this machine has the OpenSSH client.
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
 
 
 @pytest.fixture
@@ -676,6 +678,17 @@ def test_terminal_inventory_marks_putty_missing(client):
     entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
     assert entries["ssh"]["available"] is False
     assert entries["ssh"]["executable"] is None
+
+
+def test_terminal_inventory_offers_ssh_through_openssh_without_putty(client, monkeypatch):
+    from quickterm import ssh_config
+
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: f"C:\OpenSSH\{kind}.exe")
+    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
+    assert entries["ssh"]["available"] is True
+    assert entries["ssh"]["openssh"] == "C:\OpenSSH\ssh.exe"
+    assert entries["ssh"]["putty"] is None
+    assert entries["sftp"]["executable"] == "C:\OpenSSH\sftp.exe"
 
 
 def _inventory_with(monkeypatch, found: dict[str, str | None]) -> dict:

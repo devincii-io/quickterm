@@ -287,15 +287,15 @@ def _codex_entry() -> dict:
 def _ssh_entries(putty_ssh: str | None, putty_sftp: str | None, *, windows: bool) -> list[dict]:
     """ssh and sftp with both clients' paths.
 
-    On Windows `executable` and `available` still describe the bundled PuTTY
-    client, as before OpenSSH was an option; `openssh` names the other one.
-    POSIX has no PuTTY build, so there they describe OpenSSH.
+    `available` is true when either client exists. On Windows `executable`
+    prefers the bundled PuTTY client, as before OpenSSH was an option. POSIX
+    has no PuTTY build, so there it is OpenSSH.
     """
     ssh_config = importlib.import_module("quickterm.ssh_config")
     entries = []
     for type_id, label, putty in (("ssh", "SSH", putty_ssh), ("sftp", "SFTP", putty_sftp)):
         openssh = _optional_str(ssh_config.openssh_path(type_id))
-        executable = putty if windows else openssh
+        executable = (putty or openssh) if windows else openssh
         entries.append({
             "id": type_id,
             "label": label,

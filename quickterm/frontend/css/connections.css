@@ -30,8 +30,6 @@
 #app-error-text { overflow-wrap: anywhere; }
 body.embedded #app > .app-error { display: none; }
 .dashboard .workspace-folder-editor .logo-picker { flex-basis: 100%; width: 100%; }
-.sidebar-setup { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
-body.sidebar-collapsed .sidebar-setup { display: none; }
 @media (max-width: 600px) {
   .connection-fields.two-column { grid-template-columns: 1fr; }
 }

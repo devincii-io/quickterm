@@ -140,6 +140,18 @@ export async function renderDashboard() {
     this.bodyEl.append(this._dash.root);
   }
   applyDashboard.call(this, this._dash, data);
+  const reveal = this._revealWorkspace;
+  this._revealWorkspace = null;
+  if (reveal) revealWorkspaceCard(this, this._dash, reveal);
+}
+
+// The sidebar's "Workspace settings" lands here: the card of that workspace,
+// scrolled into view with its folder and logo editor open.
+function revealWorkspaceCard(panel, view, name) {
+  const card = [...view.grid.children].find((node) => itemFor(node)?.name === name);
+  if (!card) return;
+  card.scrollIntoView?.({ block: "center" });
+  openFolderEditor(panel, card, cardParts.get(card).editFolder);
 }
 
 function buildDashboard() {
@@ -550,7 +562,7 @@ function createWorkspaceCard(panel, index) {
 
   card.append(top, folderLine, preview, actions);
   card.addEventListener("dblclick", () => open.click());
-  cardParts.set(card, { logo, title, badge, folderLine, preview, actions, layout: undefined });
+  cardParts.set(card, { logo, title, badge, folderLine, preview, actions, editFolder, layout: undefined });
   return card;
 }
 
@@ -562,8 +574,10 @@ function updateWorkspaceCard(panel, card, workspace, index) {
     && panel.app.currentWorkspace() === workspace.name;
   setClass(card, "current", isCurrent);
 
+  // Every view of this window counts, not only the active one.
+  const shown = (panel.app.openWorkspaces?.() || []).some((view) => (view?.workspace ?? view) === workspace.name);
   const panes = countPanes(layout);
-  setText(parts.badge, isCurrent ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
+  setText(parts.badge, isCurrent || shown ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
   setText(parts.title, workspaceLabel(workspace.name));
 
   const logo = workspace.data && workspace.data.logo;

@@ -93,7 +93,6 @@ button .icon { pointer-events: none; }
 /* Elevated window: a persistent red frame so an admin session is unmistakable. */
 body.elevated::after { content: ""; position: fixed; inset: 0; border: 2px solid var(--danger); border-radius: 2px; pointer-events: none; z-index: 9999; }
 
-.ui-select option { color: var(--text); background: var(--surface-raised); }
 
 
 /* Terminal workspace */
@@ -199,10 +198,9 @@ body.dragging .pane { pointer-events: none; }
 .danger-text { color: var(--danger) !important; }
 .danger-text:hover { background: var(--danger-soft); }
 
-.ui-input, .ui-select { width: 100%; min-width: 0; height: 40px; border: 1px solid var(--line-strong); border-radius: 8px; outline: 0; background: var(--field); color: var(--text); padding: 0 11px; transition: border-color .16s ease, box-shadow .16s ease; }
+.ui-input { width: 100%; min-width: 0; height: 40px; border: 1px solid var(--line-strong); border-radius: 8px; outline: 0; background: var(--field); color: var(--text); padding: 0 11px; transition: border-color .16s ease, box-shadow .16s ease; }
 .ui-input::placeholder { color: var(--muted); }
-.ui-input:focus, .ui-select:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-ring); }
-.ui-select { appearance: none; padding-right: 34px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 18px, calc(100% - 13px) 18px; background-size: 5px 5px; background-repeat: no-repeat; }
+.ui-input:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-ring); }
 
 /* Command palette */
 
@@ -390,7 +388,6 @@ body.dragging .pane { pointer-events: none; }
 .logo-picker-actions { display: flex; align-items: center; gap: 5px; }
 .branding-scratch-note { margin: 5px 0 0; padding: 11px 12px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); font-size: 10px; }
 
-.terminal-profile-card { margin-top: 13px; padding: 17px 18px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
 .terminal-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .terminal-identity { display: flex; align-items: center; gap: 11px; }
 .terminal-identity h3 { margin: 0; font-size: 14px; }
@@ -413,9 +410,6 @@ body.dragging .pane { pointer-events: none; }
 .toggle-row input:checked + .toggle-control::after { transform: translateX(14px); background: var(--accent); }
 .toggle-copy { user-select: none; }
 
-.snippet-card { margin-top: 13px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
-.snippet-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
-.snippet-card-head .ui-input { flex: 1; }
 .snippet-text { height: auto; min-height: 46px; padding: 9px 11px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
 .env-input { height: auto; min-height: 46px; padding: 9px 11px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
 
@@ -562,7 +556,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .hero-text { margin-top: 6px; line-height: 1.4; }
 .dashboard-stat { border-radius: 3px; background: var(--bg); }
 .workspace-grid { gap: 8px; }
-.workspace-card, .detached-group, .other-workspace-sessions, .dashboard-list-card, .settings-group, .terminal-profile-card, .snippet-card, .help-card, .about-hero, .about-update { border-radius: 4px; animation: none; box-shadow: none; }
+.workspace-card, .detached-group, .other-workspace-sessions, .dashboard-list-card, .settings-group, .help-card, .about-hero, .about-update { border-radius: 4px; animation: none; box-shadow: none; }
 .workspace-card:hover { transform: none; border-color: var(--line-hover); box-shadow: none; }
 .workspace-preview, .workspace-preview-pane, .workspace-empty-card, .detached-empty { border-radius: 3px; }
 .workspace-preview-pane::before, .workspace-preview-pane::after, .empty-orbit { display: none; }
@@ -586,9 +580,9 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .settings-tab.active strong { color: var(--text); }
 .settings-content { padding: 18px 22px 28px; }
 .settings-footer { min-height: 56px; }
-.settings-group, .terminal-profile-card { padding: 15px; }
+.settings-group { padding: 15px; }
 .theme-card.active { box-shadow: inset 0 0 0 1px var(--accent); }
-.theme-strip, .custom-theme-editor, .settings-json, .ui-input, .ui-select { border-radius: 3px; }
+.theme-strip, .custom-theme-editor, .settings-json, .ui-input { border-radius: 3px; }
 .primary-button, .secondary-button { min-height: 34px; border-radius: 3px; }
 .text-button, .icon-button, .card-open-button { border-radius: 3px; }
 .voice-callout { border-radius: 4px; background: var(--card); }
@@ -750,7 +744,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .detached-group, .other-workspace-sessions, .dashboard-list-card { border-radius: 0; background: transparent; }
 .dashboard-list-card { padding: 10px; }
 
-.settings-group, .terminal-profile-card, .snippet-card, .help-card, .about-hero, .about-update { border-width: 1px 0 0; border-radius: 0; background: transparent; }
+.settings-group, .help-card, .about-hero, .about-update { border-width: 1px 0 0; border-radius: 0; background: transparent; }
 .settings-group { padding: 13px 2px; }
 .settings-group-title { font-family: var(--mono); }
 
@@ -799,12 +793,6 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
   .save-workspace-form { width: 100%; }
   .workspace-folder-editor { grid-template-columns: minmax(0, 1fr); }
 }
-
-/* A profile card is a field grid followed by loose fields. Without this the
-   last hint in the grid and the next label sat 2 px apart and read as one
-   run-on block. */
-.terminal-profile-card .settings-grid + .settings-field,
-.terminal-profile-card .settings-field + .toggle-row { margin-top: 15px; }
 
 /* Pane chrome ---------------------------------------------------------------
    A lone pane has no header at all: the sidebar row already names it and

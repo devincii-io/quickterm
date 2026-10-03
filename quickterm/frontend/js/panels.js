@@ -1,3 +1,4 @@
+import { confirmNear } from "./confirm_popover.js";
 import * as api from "./api.js";
 import { DASHBOARD_REFRESH_MS, TERMINAL_TYPES, make } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
@@ -242,87 +243,29 @@ export class Panels {
   }
 
   _clearInlineConfirmation(restoreButton = true) {
-    if (!this._inlineConfirmation) return;
-    const { box, button, wasDisabled, reposition } = this._inlineConfirmation;
+    const entry = this._inlineConfirmation;
+    if (!entry) return;
     this._inlineConfirmation = null;
-    if (reposition) {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
-    }
-    box.remove();
-    if (button.isConnected) {
-      button.disabled = wasDisabled;
-      button.setAttribute("aria-expanded", "false");
-      if (restoreButton) button.focus();
-    }
+    entry.handle.close("close");
+    if (restoreButton && entry.button.isConnected) entry.button.focus();
   }
 
+  // One confirmation box for the whole app: confirm_popover.js measures the
+  // trigger before disabling it, clamps the box to the viewport, follows the
+  // trigger while the body scrolls and claims the keyboard in focus.js.
   // `keyboard`: the keyboard asked for this (Delete on a row), so the
   // destructive button takes the focus and Enter completes it. A pointer
   // gets Cancel first (AGENTS.md).
   _confirmNear(button, message, confirmLabel, action, { keyboard = false } = {}) {
     this._clearInlineConfirmation(false);
-    // Measure before changing the trigger. Hiding it first made
-    // getBoundingClientRect() return a zero rectangle and placed the box at
-    // the top-right of the window. Keep the trigger visible and disabled.
-    const rect = button.getBoundingClientRect();
-    const wasDisabled = button.disabled;
-    button.disabled = true;
-    button.setAttribute("aria-expanded", "true");
-    const box = make("div", "inline-confirmation");
-    box.setAttribute("role", "group");
-    box.setAttribute("aria-label", "Confirm destructive action");
-    const copy = make("span", "inline-confirmation-copy", message);
-    const actions = make("span", "inline-confirmation-actions");
-    const confirm = this._button(confirmLabel, "secondary-button danger-text compact");
-    const cancel = this._button("Cancel", "text-button compact");
-    actions.append(confirm, cancel);
-    box.append(copy, actions);
-    document.body.append(box);
-    // The box is position:fixed but the panel body scrolls underneath it, so
-    // it follows its trigger, and gives up if the trigger scrolls away.
-    const place = (triggerRect = button.getBoundingClientRect()) => {
-      const boxRect = box.getBoundingClientRect();
-      const margin = 12;
-      const gap = 6;
-      const maxLeft = Math.max(margin, window.innerWidth - boxRect.width - margin);
-      const left = Math.max(margin, Math.min(maxLeft, triggerRect.right - boxRect.width));
-      let top = triggerRect.bottom + gap;
-      if (top + boxRect.height > window.innerHeight - margin) top = triggerRect.top - boxRect.height - gap;
-      top = Math.max(margin, Math.min(window.innerHeight - boxRect.height - margin, top));
-      box.style.left = `${left}px`;
-      box.style.top = `${top}px`;
-    };
-    place(rect);
-    const reposition = () => {
-      if (!this._inlineConfirmation || !button.isConnected) return;
-      const triggerRect = button.getBoundingClientRect();
-      const offscreen = triggerRect.bottom < 0 || triggerRect.top > window.innerHeight
-        || (triggerRect.width === 0 && triggerRect.height === 0);
-      if (offscreen) { this._clearInlineConfirmation(false); return; }
-      place(triggerRect);
-    };
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    this._inlineConfirmation = { box, button, wasDisabled, reposition };
-
-    const run = async () => {
-      confirm.disabled = true;
-      cancel.disabled = true;
-      try {
-        await action();
-        this._clearInlineConfirmation(false);
-      } catch (error) {
-        copy.textContent = error?.detail || "Action failed. Try again.";
-        confirm.textContent = "Retry";
-        confirm.disabled = false;
-        cancel.disabled = false;
-        confirm.focus();
-      }
-    };
-    confirm.addEventListener("click", run);
-    cancel.addEventListener("click", () => this._clearInlineConfirmation());
-    requestAnimationFrame(() => (keyboard ? confirm : cancel).focus());
+    const handle = confirmNear(button, {
+      message, confirmLabel, action, keyboard, owner: "confirm",
+      onClose: (reason) => {
+        if (this._inlineConfirmation?.handle === handle) this._inlineConfirmation = null;
+        if ((reason === "cancel" || reason === "escape") && button.isConnected) button.focus();
+      },
+    });
+    this._inlineConfirmation = { handle, button };
   }
 
   // `id` stamps data-setting, which settings search reveals and focuses.
@@ -561,6 +504,12 @@ export class Panels {
   async showConfig(kind, name = null) {
     this.configFocus = { kind: kind === "snippet" ? "snippet" : "terminal", name: name || null };
     await this._openSettingsTab(kind === "snippet" ? "snippets" : "connections");
+  }
+
+  /** Open the Dashboard with the editor of workspace `name` open. */
+  showWorkspace(name) {
+    this._revealWorkspace = name || null;
+    this.show("dashboard");
   }
 
   /** Every settings field for the palette's "setting:" rows. */
