@@ -5,8 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  UNASSIGNED_GROUP, attentionText, groupSessionsByWorkspace, groupSummary, isListedSession,
-  sessionFolder, sessionState, sessionSummary, sessionTooltip,
+  UNASSIGNED_GROUP, attentionText, groupSummary, isListedSession,
+  sessionFolder, sessionState, sessionSummary, sessionTooltip, sidebarGroups,
 } from "../../quickterm/frontend/js/launcher.js";
 
 function session(id, extra = {}) {
@@ -28,6 +28,7 @@ function session(id, extra = {}) {
 
 const bell = { kind: "bell", text: null, age_seconds: 5 };
 const ask = { kind: "notify", text: "Approve the edit?", age_seconds: 70 };
+const ws = [{ name: "ws", path: null, pathExists: null }];
 
 test("attention is its own state and outranks being open here", () => {
   assert.deepEqual(sessionState(session("a", { attention: bell }), false), { key: "attention", label: "needs you" });
@@ -35,16 +36,17 @@ test("attention is its own state and outranks being open here", () => {
   assert.equal(sessionState(session("a"), true).key, "open");
 });
 
-test("a terminal that needs you sorts first in its group", () => {
-  const groups = groupSessionsByWorkspace([
+test("a terminal that needs you keeps its place and is counted for its group", () => {
+  const groups = sidebarGroups([
     session("open"),
     session("quiet"),
     session("zz-asks", { attention: ask }),
     session("busy", { busy: true }),
-  ], { currentWorkspace: "ws", ownedIds: ["open", "quiet", "zz-asks", "busy"], attachedIds: ["open"] });
+  ], { workspaces: ws, owned: { quiet: "ws", "zz-asks": "ws", busy: "ws" }, attached: { open: "ws" } });
 
-  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["zz-asks", "open", "busy", "quiet"]);
-  assert.equal(groups[0].attention, 1);
+  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["busy", "open", "quiet", "zz-asks"]);
+  assert.equal(groups[0].sessions[3].state.key, "attention");
+  assert.equal(groups[0].counts.attention, 1);
   assert.equal(groupSummary(groups[0]), "1 needs you · 1 open · 1 busy · 1 background");
 });
 
@@ -61,17 +63,17 @@ test("an exited terminal is listed only while the backend holds it for you", () 
   })), true);
   assert.equal(isListedSession(null), false);
 
-  const groups = groupSessionsByWorkspace([
+  const groups = sidebarGroups([
     session("live"),
     session("gone", { alive: false }),
     session("done", { alive: false, exit_code: 0, activity: { background_output_bytes: 900 } }),
     session("failed", { alive: false, exit_code: 2, attention: { kind: "exit", text: "exited with code 2", age_seconds: 1 } }),
-  ], { currentWorkspace: "ws", ownedIds: ["live", "gone", "done", "failed"], attachedIds: [] });
+  ], { workspaces: ws, owned: { live: "ws", gone: "ws", done: "ws", failed: "ws" } });
 
   const rows = groups[0].sessions;
-  assert.deepEqual(rows.map((entry) => entry.session.id), ["failed", "live", "done"]);
-  assert.deepEqual(rows.map((entry) => entry.state.key), ["attention", "idle", "finished"]);
-  assert.deepEqual(rows.map((entry) => entry.finished), [true, false, true]);
+  assert.deepEqual(rows.map((entry) => entry.session.id), ["done", "failed", "live"]);
+  assert.deepEqual(rows.map((entry) => entry.state.key), ["finished", "attention", "idle"]);
+  assert.deepEqual(rows.map((entry) => entry.finished), [true, true, false]);
   assert.equal(groupSummary(groups[0]), "1 needs you · 1 background · 1 finished");
 });
 
@@ -105,13 +107,13 @@ test("the folder is where the shell is now, and the tooltip names both when they
   assert.ok(!still.some((line) => line.startsWith("started in")));
 });
 
-test("a foreign terminal that needs you marks its group for the rail", () => {
-  const groups = groupSessionsByWorkspace([
+test("a terminal that needs you in another workspace marks that group for the rail", () => {
+  const groups = sidebarGroups([
     session("mine"),
     session("theirs", { workspace: "acme", attention: bell }),
     session("stray"),
-  ], { currentWorkspace: "ws", ownedIds: ["mine"], attachedIds: [] });
+  ], { workspaces: [...ws, { name: "acme" }], owned: { mine: "ws" } });
   const acme = groups.find((group) => group.name === "acme");
-  assert.equal(acme.attention, 1);
-  assert.equal(groups.find((group) => group.name === UNASSIGNED_GROUP).attention, 0);
+  assert.equal(acme.counts.attention, 1);
+  assert.equal(groups.find((group) => group.label === UNASSIGNED_GROUP).counts.attention, 0);
 });
