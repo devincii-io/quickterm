@@ -131,7 +131,8 @@ export function sshProblems(profile) {
   for (const [value, label] of [[profile.ssh_host, "Host"], [profile.ssh_user, "User"]]) {
     if (!value) continue;
     if (String(value).startsWith("-")) problems.push(`${label} must not start with -.`);
-    else if (UNSAFE_ARGUMENT.test(String(value))) problems.push(`${label} must not contain spaces or control characters.`);
+    // PuTTY takes a saved-session name as host, so only OpenSSH is strict.
+    else if (usesOpenSsh(profile) && UNSAFE_ARGUMENT.test(String(value))) problems.push(`${label} must not contain spaces or control characters.`);
   }
   const jump = profile.ssh_proxy_jump;
   if (jump) {

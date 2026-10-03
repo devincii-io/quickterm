@@ -141,8 +141,11 @@ export function newConnection(type, inventory, profiles, extra = {}) {
   const remote = type.id === "ssh" || type.id === "sftp";
   const profile = {
     name: uniqueName(extra.name || type.label, profiles),
-    // ssh and sftp pick their client by `ssh_client`, never by `cmd`.
-    cmd: remote ? "" : (known?.executable || type.cmd), terminal_type: type.id, description: "",
+    // ssh and sftp pick their client by `ssh_client`, never by `cmd`. An
+    // agent resolves its executable at launch (agents.resolve prefers the
+    // native exe behind npm's shim), so pinning today's path would outlive
+    // the next update; empty means "the one on PATH".
+    cmd: remote || agent ? "" : (known?.executable || type.cmd), terminal_type: type.id, description: "",
     args: [], env: {}, keybinding: null, autostart: false,
     start_command: null, agent_mode: agent ? "new" : null,
     wsl_distro: null, ssh_host: null, ssh_port: null, ssh_user: null, ssh_key: null,

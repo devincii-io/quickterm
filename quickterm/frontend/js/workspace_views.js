@@ -51,10 +51,22 @@ export function clampViewRatio(value) {
   return Math.max(VIEW_RATIO_MIN, Math.min(VIEW_RATIO_MAX, Number.isFinite(value) ? value : 50));
 }
 
-// The first palette colour no open view uses; past six views they repeat.
-export function pickViewColor(used = []) {
+// A workspace's own colour, the same on every open and after a restart: a
+// stable hash of its name into the palette.
+export function viewColorFor(name) {
+  let hash = 0;
+  for (const char of String(name || "")) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return VIEW_COLORS[hash % VIEW_COLORS.length];
+}
+
+// A named workspace keeps its own colour unless an open view already shows
+// it; otherwise (and for scratch) the first palette colour no open view
+// uses. Past six views they repeat.
+export function pickViewColor(used = [], name = null) {
   const taken = new Set(used);
-  return VIEW_COLORS.find((color) => !taken.has(color)) || VIEW_COLORS[used.length % VIEW_COLORS.length];
+  const own = name ? viewColorFor(name) : null;
+  if (own && !taken.has(own)) return own;
+  return VIEW_COLORS.find((color) => !taken.has(color)) || own || VIEW_COLORS[used.length % VIEW_COLORS.length];
 }
 
 export function nextScratchLabel(names) {
@@ -265,8 +277,19 @@ export class WorkspaceViews {
   // read it, so an early boot cannot erase what it is about to restore.
   // `fit` re-fits the terminals after the boxes moved; `newScratch` is the
   // empty stage's button.
-  constructor({ fit = () => {}, error, store = null, newScratch = null }) {
+  // `parentId` is this shell window's registry id: every view registers
+  // under it, so closing the native window frees the views' claims at once.
+  // `reservedNames()` are the saved workspaces: a scratch label never takes
+  // one, so a label can never be mistaken for a workspace.
+  constructor({
+    fit = () => {}, error, store = null, newScratch = null, parentId = () => null, reservedNames = () => [],
+  }) {
     this.fit = fit;
+    this.parentId = parentId;
+    this.reservedNames = reservedNames;
+    // Opens, closes and rebuilds run one after another. Refusing while one
+    // was running dropped a sidebar click or an Explorer handoff silently.
+    this.queue = Promise.resolve();
     this.error = error;
     this.store = store;
     this.persisting = false;
@@ -436,9 +459,9 @@ export class WorkspaceViews {
   }
 
   // The view showing `name`, brought back from zoom if needed. False when
-  // no view shows it.
+  // no view shows it. A scratch view also answers to its label.
   focusWorkspace(name) {
-    const view = this.viewForWorkspace(name) || this.views().find((each) => this.nameOf(each) === name);
+    const view = this.viewForWorkspace(name) || this.scratchViewLabelled(name);
     if (!view) return false;
     this._unzoomFor(view);
     this.focusView(view);
@@ -455,20 +478,44 @@ export class WorkspaceViews {
     return true;
   }
 
+  // The scratch view a person calls `label`, or null. Only scratch views:
+  // a saved workspace is found by its name, never by a label.
+  scratchViewLabelled(label) {
+    if (!label) return null;
+    return this.views().find((each) => isScratchWorkspace(this.workspaceOf(each)) && this.nameOf(each) === label) || null;
+  }
+
   // ---- open / close / zoom ----
+
+  // One operation at a time, in the order asked; a failure does not stop
+  // the ones queued behind it.
+  _serial(task) {
+    const run = this.queue.then(task, task);
+    this.queue = run.then(() => {}, () => {});
+    return run;
+  }
 
   // Opens `name` (null for a new scratch view) beside the active view, or
   // focuses the view that already shows it. Resolves with the view once its
   // document has booted, or false when nothing was opened.
-  async open(name, { anchorWindow = null, anchor = null, cwd = null, first = false } = {}) {
+  async open(name, options = {}) {
     const shown = name && this.viewForWorkspace(name);
-    if (shown) {
-      this._unzoomFor(shown);
-      this.focusView(shown);
-      await this.whenReady(shown);
-      return shown;
-    }
-    if (this.busy) return false;
+    const view = shown ? this._focusShown(shown) : await this._serial(() => this._open(name, options));
+    if (!view) return false;
+    await this.whenReady(view);
+    return view;
+  }
+
+  _focusShown(view) {
+    this._unzoomFor(view);
+    this.focusView(view);
+    return view;
+  }
+
+  async _open(name, { anchorWindow = null, anchor = null, cwd = null, first = false } = {}) {
+    // Another open of the same workspace may have finished while this waited.
+    const shown = name && this.viewForWorkspace(name);
+    if (shown) return this._focusShown(shown);
     const beside = this.viewFor(anchor || anchorWindow) || this.active;
     this.busy = true;
     let view = null;
@@ -492,7 +539,6 @@ export class WorkspaceViews {
     } finally {
       this.busy = false;
     }
-    await this.whenReady(view);
     return view;
   }
 
@@ -501,13 +547,16 @@ export class WorkspaceViews {
   // to the stage exactly once. Throws when the registry refuses the claim.
   async _claimView(name, usedColors, { cwd = null, first = false } = {}) {
     // Reserve first: a failed registry must never create two layout writers.
-    const info = await api.registerWindow({ workspace: name || null, title: `View: ${name || "scratch"}` });
+    const parent = this.parentId() || undefined;
+    const info = await api.registerWindow({ workspace: name || null, title: `View: ${name || "scratch"}`, parent });
     if (!info?.id) throw new Error("Missing workspace view identity");
     const id = String(info.id);
     const scratchLabels = window.quicktermChrome?.scratchLabels;
     const view = this._makeView({
-      color: pickViewColor(usedColors),
-      label: name || nextScratchLabel([...this.names(), ...(scratchLabels?.values() || [])]),
+      color: pickViewColor(usedColors, name),
+      label: name || nextScratchLabel([
+        ...this.names(), ...(scratchLabels?.values() || []), ...(this.reservedNames() || []),
+      ]),
       id,
       workspace: name || `scratch-view-${id}`,
     });
@@ -530,7 +579,11 @@ export class WorkspaceViews {
   // leaf and its split collapses. Views are built where they will stay: each
   // element is appended to the stage once and only its box is written
   // afterwards.
-  async rebuild(tree, { active = null, zoomed = null } = {}) {
+  rebuild(tree, options = {}) {
+    return this._serial(() => this._rebuild(tree, options));
+  }
+
+  async _rebuild(tree, { active = null, zoomed = null } = {}) {
     const result = { restored: [], failed: [] };
     if (this.busy || this.views().length || !tree) return result;
     this.busy = true;
@@ -595,7 +648,11 @@ export class WorkspaceViews {
 
   // Any view closes the same way: its document saves, retains every terminal
   // it owns and releases its claim, then the iframe goes. Nothing is killed.
-  async close(view) {
+  close(view) {
+    return this._serial(() => this._close(view));
+  }
+
+  async _close(view) {
     if (!view || this.busy || !this.views().includes(view)) return false;
     const child = view.frame?.contentWindow?.quicktermView;
     if (!child) {

@@ -139,6 +139,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             for name in sorted(getattr(cfg, "runtime_overrides", None) or ()):
                 if getattr(new_cfg, name, None) == getattr(cfg, name, None):
                     setattr(new_cfg, name, getattr(on_disk, name))
+            config_mod.validate_new_bindings(new_cfg, on_disk)
             await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc

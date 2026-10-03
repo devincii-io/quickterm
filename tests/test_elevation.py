@@ -72,3 +72,22 @@ def test_launch_uses_windows_runas_and_reenters_quickterm(monkeypatch):
     assert "-m quickterm.app --elevated-spec" in params
     assert cwd == r"C:\work"
     assert show == 1
+
+
+def test_the_overlay_hold_is_renewed_once_consent_is_answered(monkeypatch):
+    # ShellExecuteW blocks while the UAC dialog is up, which can outlast the
+    # first 3 s hold; the admin window takes the foreground only afterwards.
+    events = []
+
+    class Shell32:
+        def ShellExecuteW(self, *args):
+            events.append("consent")
+            return 42
+
+    monkeypatch.setattr(
+        elevation, "os", types.SimpleNamespace(name="nt", getcwd=lambda: r"C:\work", path=os.path),
+    )
+    monkeypatch.setattr(elevation.ctypes, "windll", types.SimpleNamespace(shell32=Shell32()), raising=False)
+    monkeypatch.setattr(elevation.overlay, "hold_open", lambda *a, **k: events.append("hold"))
+    elevation.launch({"cmd": "cmd.exe"})
+    assert events == ["hold", "consent", "hold"]

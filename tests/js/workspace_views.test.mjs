@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   EMPTY_STAGE_TEXT, VIEW_COLORS, VIEW_MIN_PX, WorkspaceViews, clampViewRatio, companionUrl, nextScratchLabel,
-  pickViewColor, ratioBounds,
+  pickViewColor, ratioBounds, viewColorFor,
 } from "../../quickterm/frontend/js/workspace_views.js";
 
 test("a companion has a distinct explicit identity and carries auth only in the fragment", () => {
@@ -53,6 +53,17 @@ test("every open view gets its own colour before any colour repeats", () => {
   assert.equal(pickViewColor([VIEW_COLORS[0]]), VIEW_COLORS[1]);
   assert.equal(pickViewColor([VIEW_COLORS[0], VIEW_COLORS[2]]), VIEW_COLORS[1], "a closed view's colour is reused");
   assert.equal(pickViewColor(VIEW_COLORS), VIEW_COLORS[0]);
+});
+
+test("a workspace keeps its own colour across opens and restarts", () => {
+  // The same name lands on the same colour whatever opened before it.
+  const alpha = viewColorFor("alpha");
+  assert.equal(pickViewColor([], "alpha"), alpha);
+  assert.equal(pickViewColor([viewColorFor("beta")].filter((color) => color !== alpha), "alpha"), alpha);
+  assert.equal(viewColorFor("alpha"), alpha);
+  // Only an open view already showing that colour moves it.
+  assert.notEqual(pickViewColor([alpha], "alpha"), alpha);
+  assert.ok(VIEW_COLORS.includes(viewColorFor("anything at all")));
 });
 
 test("scratch views get distinct identities and labels without replacing another layout", () => {
@@ -200,13 +211,44 @@ test("list names each view's workspace, label, colour, focus and window", async 
   assert.equal(scratch.frame.src.includes("first=1"), true);
   views.activate(scratch);
   assert.deepEqual(views.list(), [
-    { workspace: "api", label: "api", color: VIEW_COLORS[0], active: false, window: api.frame.contentWindow },
+    { workspace: "api", label: "api", color: viewColorFor("api"), active: false, window: api.frame.contentWindow },
     {
-      workspace: `scratch-view-${scratch.id}`, label: "scratch 1", color: VIEW_COLORS[1], active: true,
+      workspace: `scratch-view-${scratch.id}`, label: "scratch 1", color: pickViewColor([viewColorFor("api")]), active: true,
       window: scratch.frame.contentWindow,
     },
   ]);
   assert.equal(window.quicktermChrome.scratchLabels.get(`scratch-view-${scratch.id}`), "scratch 1");
+});
+
+test("an open asked for while a close is running waits for it instead of being dropped", async () => {
+  installDom();
+  const { views, errors } = makeViews();
+  const api = await views.open("api");
+  let finish;
+  api.frame.contentWindow.quicktermView.close = () => new Promise((resolve) => { finish = resolve; });
+  const closing = views.close(api);
+  const opening = views.open(null);
+  const docs = views.open("docs");
+  await Promise.resolve();
+  finish(true);
+  assert.equal(await closing, true);
+  const scratch = await opening;
+  assert.ok(scratch, "the scratch view opened after the close");
+  assert.equal((await docs).workspace, "docs");
+  assert.deepEqual(views.names(), ["scratch 1", "docs"]);
+  assert.deepEqual(errors, []);
+});
+
+test("a scratch label never takes a saved workspace's name, and only names scratch views", async () => {
+  installDom();
+  const errors = [];
+  const views = new WorkspaceViews({ fit() {}, error: (message) => errors.push(message), reservedNames: () => ["scratch 1"] });
+  const scratch = await views.open(null);
+  assert.equal(views.nameOf(scratch), "scratch 2");
+  assert.equal(views.scratchViewLabelled("scratch 2"), scratch);
+  const named = await views.open("work");
+  assert.equal(views.scratchViewLabelled("work"), null, "a workspace is found by name, not label");
+  assert.equal(views.viewForWorkspace("work"), named);
 });
 
 test("a view is found by a session its pane holds", async () => {

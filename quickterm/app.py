@@ -801,7 +801,12 @@ def _run_desktop(
 
     window_id = new_window_id()
     desktop_api = _DesktopApi(viewers)
-    geometry = _initial_geometry(cfg, webview.screens)
+    # Remembered bounds belong to the normal primary window. The administrator
+    # window shares %APPDATA%, so it neither restores them nor records its own.
+    geometry = (
+        {"width": _window_cfg(cfg).width, "height": _window_cfg(cfg).height}
+        if elevated else _initial_geometry(cfg, webview.screens)
+    )
     window = webview.create_window(
         title,
         _window_url(cfg.port, cwd, host=cfg.host, window_id=window_id, primary=True),
@@ -813,7 +818,8 @@ def _run_desktop(
     )
     desktop_api._bind_window(window)
     viewers.adopt(window, window_id)
-    _BoundsRecorder(window, cfg, initial=geometry).wire()
+    if not elevated:
+        _BoundsRecorder(window, cfg, initial=geometry).wire()
 
     # Hide-to-tray: closing the LAST window keeps terminals alive in the
     # background when they hold real work; otherwise it quits. Closing any

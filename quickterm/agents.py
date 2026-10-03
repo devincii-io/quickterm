@@ -366,6 +366,23 @@ def _prefer_native(path: str) -> str:
     return path
 
 
+def codex_launch_env(executable: str) -> dict[str, str]:
+    """What npm's bin/codex.js adds when it starts the vendored codex.exe.
+
+    QuickTerm starts that exe directly instead of through the shim, so it
+    passes the same two variables; Codex reads them to know it is an npm
+    install and offer the npm upgrade. Any other executable gets none.
+    """
+    parts = Path(executable).parts
+    lowered = [part.lower() for part in parts]
+    for at in range(len(lowered) - 2, -1, -1):
+        if lowered[at:at + 3] == ["node_modules", "@openai", "codex"] and lowered[-1] == "codex.exe":
+            root = Path(*parts[: at + 3])
+            if at + 3 < len(lowered):  # the exe lives inside the package
+                return {"CODEX_MANAGED_BY_NPM": "1", "CODEX_MANAGED_PACKAGE_ROOT": str(root)}
+    return {}
+
+
 def codex_executable() -> str | None:
     """The Codex program to start, or None when it is not installed.
 
@@ -404,7 +421,7 @@ def _codex_models() -> list[dict]:
     """Listed models from Codex's own cache, best effort."""
     try:
         raw = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, RecursionError):
         return []
     models = raw.get("models") if isinstance(raw, dict) else None
     out = []
@@ -415,7 +432,8 @@ def _codex_models() -> list[dict]:
         if not isinstance(slug, str) or not re.fullmatch(_MODEL, slug):
             continue
         levels = []
-        for level in model.get("supported_reasoning_levels") or []:
+        listed = model.get("supported_reasoning_levels")
+        for level in listed if isinstance(listed, list) else []:
             effort = level.get("effort") if isinstance(level, dict) else level
             if isinstance(effort, str) and re.fullmatch(r"[a-z]{2,16}", effort):
                 levels.append(effort)

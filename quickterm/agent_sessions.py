@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 READ_CAP = 256 * 1024
-FIRST_LINE_CAP = 64 * 1024
+# A rollout's first line carries the base instructions (tens of KB), but
+# every field read here comes before them.
+META_CAP = 8 * 1024
 INDEX_CAP = 4 * 1024 * 1024
 CODEX_SCAN_MAX = 2000
 TITLE_MAX = 120
@@ -97,20 +99,26 @@ def _user_text(record: dict) -> str | None:
 
 
 def _claude_title(path: Path) -> str | None:
+    # A title the user chose (/rename, `--name`) beats the generated one, and
+    # the last of each wins because both can be rewritten.
+    custom_title = None
     ai_title = None
     first_user = None
     for line in _read_bounded(path).splitlines():
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(record, dict):
             continue
-        if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
+        kind = record.get("type")
+        if kind == "custom-title" and isinstance(record.get("customTitle"), str) and record["customTitle"].strip():
+            custom_title = record["customTitle"]
+        elif kind == "ai-title" and isinstance(record.get("aiTitle"), str):
             ai_title = record["aiTitle"]
         elif first_user is None:
             first_user = _user_text(record)
-    chosen = ai_title or first_user
+    chosen = custom_title or ai_title or first_user
     return _title(chosen) if chosen else None
 
 
@@ -175,7 +183,7 @@ def _codex_index(home: Path) -> dict[str, dict]:
     for line in text.splitlines():
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(record, dict) and isinstance(record.get("id"), str):
             index[record["id"]] = record
@@ -224,12 +232,13 @@ def _rollouts(home: Path):
 
 def _session_meta(path: Path) -> dict | None:
     with path.open("rb") as handle:
-        first = handle.readline(FIRST_LINE_CAP).decode("utf-8", errors="replace")
+        first = handle.readline(META_CAP).decode("utf-8", errors="replace")
     try:
         record = json.loads(first)
-    except ValueError:
-        # A long first line (it can carry the instructions) is cut off by the
-        # cap; id and cwd come early in it, so take them from the raw text.
+    except (ValueError, RecursionError):
+        # The first line carries the instructions and is cut off by the cap;
+        # every field read here comes before them, so take them from the raw
+        # text. The first match is the payload's own field.
         found_id = re.search(r'"id"\s*:\s*"([^"]+)"', first)
         found_cwd = re.search(r'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"', first)
         if not (found_id and found_cwd):
@@ -238,11 +247,30 @@ def _session_meta(path: Path) -> dict | None:
             cwd = json.loads(f'"{found_cwd.group(1)}"')
         except ValueError:
             return None
-        return {"id": found_id.group(1), "cwd": cwd}
+        meta: dict = {"id": found_id.group(1), "cwd": cwd}
+        source = re.search(r'"source"\s*:\s*(?:"([^"]*)"|\{)', first)
+        if source:
+            meta["source"] = source.group(1) if source.group(1) is not None else {}
+        if re.search(r'"parent_thread_id"\s*:\s*"', first):
+            meta["parent_thread_id"] = True
+        return meta
     if not isinstance(record, dict) or record.get("type") != "session_meta":
         return None
     payload = record.get("payload")
     return payload if isinstance(payload, dict) else None
+
+
+# Sources of a conversation a person had. Subagent threads (source
+# {"subagent": ...} with a parent_thread_id) and `codex exec` runs are hidden
+# by Codex's own resume picker; a missing source is an older interactive one.
+_INTERACTIVE_SOURCES = {"cli", "vscode"}
+
+
+def _interactive(meta: dict) -> bool:
+    if meta.get("parent_thread_id"):
+        return False
+    source = meta.get("source")
+    return source is None or (isinstance(source, str) and source in _INTERACTIVE_SOURCES)
 
 
 def codex_sessions(cwd: str, limit: int = 20) -> list[dict]:
@@ -258,7 +286,7 @@ def codex_sessions(cwd: str, limit: int = 20) -> list[dict]:
                 meta = _session_meta(path)
             except OSError:
                 continue
-            if not meta:
+            if not meta or not _interactive(meta):
                 continue
             session_id, folder = meta.get("id"), meta.get("cwd")
             if not isinstance(session_id, str) or not _UUID.fullmatch(session_id):
@@ -292,6 +320,7 @@ def sessions(kind: str, cwd: str, limit: int = 20) -> list[dict]:
             return claude_sessions(cwd, limit)
         if kind == "codex":
             return codex_sessions(cwd, limit)
-    except (OSError, ValueError):
+    except Exception:
+        # Internal formats: anything unexpected lists nothing rather than 500.
         return []
     raise ValueError(f"unknown agent type: {kind}")

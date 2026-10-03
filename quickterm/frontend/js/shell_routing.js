@@ -68,14 +68,23 @@ export function killRoute(session, { attached = {}, owned = {}, openWorkspaces =
 // the sidebar's confirmation can show it and keep the row.
 export function createTerminalRouting({
   api, views, context, removeSessionsFromSavedWorkspaces, markSeen = () => {}, refreshSoon = () => {},
+  forgetSession = () => {},
 }) {
-  const appOf = (workspace) => views.appFor(views.viewForWorkspace(workspace));
+  // A view restored at boot, or opened a moment ago, may still be booting:
+  // its app exists only once its document is ready, so every gesture waits
+  // for that instead of finding no app and doing nothing.
+  const readyApp = async (view) => {
+    if (!view) return null;
+    if (views.whenReady && !(await views.whenReady(view))) return null;
+    return views.appFor(view);
+  };
+  const appOf = (workspace) => readyApp(views.viewForWorkspace(workspace));
 
   async function activeApp() {
     const view = views.active || await views.open(null);
     if (!view) return null;
     views.focusView(view);
-    return views.appFor(view);
+    return readyApp(view);
   }
 
   async function activateTerminal(session) {
@@ -87,11 +96,11 @@ export function createTerminalRouting({
     if (route.kind === "focus") return views.focusSession(session.id);
     if (route.kind === "attach") {
       views.focusWorkspace(route.workspace);
-      return Boolean(await appOf(route.workspace)?.attachSession(record));
+      return Boolean(await (await appOf(route.workspace))?.attachSession(record));
     }
     if (route.kind === "open-then-focus") {
       const view = await views.open(route.workspace);
-      const app = views.appFor(view);
+      const app = view ? await readyApp(view) : null;
       if (!app) return false;
       // The restore attaches every terminal its layout holds; one the
       // workspace only owns is attached here.
@@ -110,7 +119,7 @@ export function createTerminalRouting({
   async function killTerminal(session) {
     if (!session?.id) return false;
     const route = killRoute(session, context());
-    const app = route.kind === "shell" ? null : appOf(route.workspace);
+    const app = route.kind === "shell" ? null : await appOf(route.workspace);
     if (app?.killSessionById) {
       await app.killSessionById(session.id);
     } else {
@@ -121,6 +130,7 @@ export function createTerminalRouting({
       }
       await removeSessionsFromSavedWorkspaces(new Set([session.id]));
     }
+    forgetSession(session.id);
     refreshSoon();
     return true;
   }
@@ -128,7 +138,7 @@ export function createTerminalRouting({
   async function detachTerminal(session) {
     if (!session?.id) return false;
     const { attached = {} } = context();
-    const app = attached[session.id] ? appOf(attached[session.id]) : null;
+    const app = attached[session.id] ? await appOf(attached[session.id]) : null;
     if (!app?.detachSessionById) return false;
     await app.detachSessionById(session.id);
     refreshSoon();
@@ -142,13 +152,13 @@ export function createTerminalRouting({
     const ctx = context();
     const from = sessionOwner(session, ctx);
     const target = views.active || await views.open(null);
-    const targetApp = views.appFor(target);
+    const targetApp = await readyApp(target);
     if (!targetApp) return false;
     const here = views.workspaceOf(target);
     if (from && from === here) return activateTerminal(session);
     const fromView = from ? views.viewForWorkspace(from) : null;
     if (fromView && fromView !== target) {
-      await views.appFor(fromView)?.detachSessionById(session.id, { forget: true });
+      await (await readyApp(fromView))?.detachSessionById(session.id, { forget: true });
     }
     views.focusView(target);
     const moved = await targetApp.moveSessionHere(session, fromView ? null : from);

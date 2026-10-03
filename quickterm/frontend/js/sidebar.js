@@ -86,6 +86,11 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   let lastSessions = [];
   let statusTimer = null;
   let lastFocusedId = null;
+  // Terminals killed from this window. The backend lists a killed session as
+  // exited for a grace period, and once its owner is gone that row would sit
+  // under "Unassigned" until the next poll; a verified kill removes it now.
+  const killed = new Set();
+  const visible = (list) => (list || []).filter((session) => !(killed.has(session?.id) && session.alive !== true));
 
   const activeApp = () => views.appFor(views.active);
 
@@ -148,7 +153,9 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   function refreshStatus() {
     if (document.hidden) return;
     api.getSessions({ metrics: false }).then((list) => {
-      lastSessions = list || [];
+      const listed = new Set((list || []).map((session) => session?.id));
+      for (const id of [...killed]) if (!listed.has(id)) killed.delete(id);
+      lastSessions = visible(list);
       // Views call refreshSoon on every focus change, so this poll is also
       // the moment a pane that needs you gains focus.
       const focusedId = activeApp()?.focusedSessionId?.() || null;
@@ -173,8 +180,17 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
     statusTimer = setTimeout(refreshStatus, 250);
   }
 
+  // A verified kill: the row goes at once instead of turning into a finished
+  // row for the backend's grace period.
+  function forget(sessionId) {
+    if (!sessionId) return;
+    killed.add(sessionId);
+    lastSessions = visible(lastSessions);
+    render();
+  }
+
   return {
-    init, render, refreshStatus, refreshSoon, markSeen,
+    init, render, refreshStatus, refreshSoon, markSeen, forget,
     sessions: () => lastSessions,
     context: () => collectViewContext(views),
   };

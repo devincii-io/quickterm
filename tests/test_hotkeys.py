@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from quickterm import hotkeys
 from quickterm.hotkeys import (
     MOD_ALT,
     MOD_CONTROL,
@@ -37,10 +38,31 @@ def test_parse_win_f12():
     assert parse_binding("win+f12") == (MOD_WIN | MOD_NOREPEAT, VK_F12)
 
 
-def test_parse_grave_and_backtick():
+def test_parse_grave_and_backtick(monkeypatch):
+    monkeypatch.setattr(hotkeys, "_vk_for_scan", lambda scan, fallback: fallback)
     expected = (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_OEM_3)
     assert parse_binding("ctrl+alt+grave") == expected
     assert parse_binding("ctrl+alt+backtick") == expected
+
+
+def test_named_punctuation_resolves_the_physical_key(monkeypatch):
+    # Settings records `e.code`, a position. On QWERTZ the US "-" position is
+    # the ß key, whose virtual key is VK_OEM_4, so the layout decides the VK.
+    seen = []
+
+    def qwertz(scan, fallback):
+        seen.append(scan)
+        return {0x0C: 0xDB, 0x29: 0xDC}.get(scan, fallback)
+
+    monkeypatch.setattr(hotkeys, "_vk_for_scan", qwertz)
+    assert parse_binding("ctrl+alt+minus") == (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0xDB)
+    assert parse_binding("ctrl+alt+grave") == (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0xDC)
+    assert seen == [0x0C, 0x29]
+
+
+def test_scan_code_falls_back_to_the_us_key_off_windows(monkeypatch):
+    monkeypatch.setattr(hotkeys.os, "name", "posix")
+    assert hotkeys._vk_for_scan(0x0C, 0xBD) == 0xBD
 
 
 def test_parse_shift_space():
@@ -131,7 +153,9 @@ def test_manager_register_invalid_returns_false():
         ("numpad9", 0x69),
     ],
 )
-def test_named_keys_from_the_shared_grammar(key, vk):
+def test_named_keys_from_the_shared_grammar(monkeypatch, key, vk):
+    # The US layout's answer; the layout lookup itself is tested above.
+    monkeypatch.setattr(hotkeys, "_vk_for_scan", lambda scan, fallback: fallback)
     assert parse_binding(f"ctrl+alt+{key}") == (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, vk)
 
 

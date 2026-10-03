@@ -106,6 +106,7 @@ export function confirmNear(trigger, {
     if (current?.box === box) current = null;
     window.removeEventListener("scroll", reposition, true);
     window.removeEventListener("resize", reposition);
+    window.removeEventListener("blur", onBlur);
     document.removeEventListener("pointerdown", onOutside, true);
     box.remove();
     if (trigger.isConnected) {
@@ -129,6 +130,13 @@ export function confirmNear(trigger, {
   const onOutside = (event) => {
     if (busy || box.contains(event.target)) return;
     close("outside");
+  };
+  // A click into a workspace view's iframe never reaches this document's
+  // pointerdown; the window losing focus is how that press shows here (the
+  // rule menu.js follows). Left open, the bar kept the keyboard owner and
+  // every view's terminal stood down.
+  const onBlur = () => {
+    if (!busy) close("blur");
   };
 
   const run = async () => {
@@ -170,6 +178,7 @@ export function confirmNear(trigger, {
   place(triggerRect);
   window.addEventListener("scroll", reposition, true);
   window.addEventListener("resize", reposition);
+  window.addEventListener("blur", onBlur);
   document.addEventListener("pointerdown", onOutside, true);
 
   const handle = { close, box };

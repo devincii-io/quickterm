@@ -14,7 +14,7 @@ full path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test 
 ```
 uv run quickterm                  # run the app (native window; --port N to override)
 uv run quickterm ls|new|open|send # drive the running app (quickterm/cli.py)
-uv run --no-sync pytest -q        # tests (~30 s, Windows + Linux parametrized)
+uv run --no-sync pytest -q        # tests (~90 s on Windows, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
@@ -263,7 +263,10 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
   style); server tests use TestClient + complete-interface fakes; frontend
-  protocol tests use Node's built-in test runner. Keep the Python suite < 40 s.
+  protocol tests use Node's built-in test runner. The Python suite takes about
+  90 s on Windows, almost all of it the real-PTY tests at about 3 s each, so a
+  new PTY test needs a reason; anything else patches its timers (as
+  `test_overlay.py` does) instead of sleeping, and stays under a second.
 - CI is intentionally manual: run `uv run --no-sync python scripts/check.py`.
   After building release files, add `--artifacts` to enforce the three-way
   version invariant, JavaScript checks, exact asset names, and SHA-256 manifest.
@@ -312,8 +315,9 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   bundled), null or `"putty"` keeps plink/psftp, so every pre-4.0 profile is
   unchanged. `~/.ssh/config` is parsed by `ssh_config.py` and resolved with
   `ssh -G`; key files are never read. Host, user and ProxyJump values are
-  checked against argument injection (no leading `-`, no whitespace) for both
-  clients.
+  checked against argument injection: no leading `-` for both clients, no
+  whitespace for OpenSSH only (plink takes a saved-session name such as "Prod
+  Server" as its host, and `load_config` must keep loading 3.x profiles).
 
 ## Local release workflow
 

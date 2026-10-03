@@ -14,6 +14,15 @@ import {
 // window's workspace to someone else.
 const WINDOW_HEARTBEAT_MS = 5000;
 
+// An embedded workspace view names the shell window it lives in, so the
+// registry forgets it with that window and never makes it primary.
+function parentWindowId() {
+  try {
+    if (window.parent === window) return undefined;
+    return window.parent.quicktermChrome?.windowId || undefined;
+  } catch (_) { return undefined; }
+}
+
 export function createWindowRegistry({
   api, state, identity, showError, cancelWorkspaceSave, buildLauncher, refreshStatusSoon,
 }) {
@@ -40,6 +49,7 @@ export function createWindowRegistry({
       const info = await api.registerWindow({
         id: identity.id || rememberedWindowId(),
         primary: identity.primary,
+        parent: parentWindowId(),
       });
       state.windowId = info && info.id ? String(info.id) : null;
       state.registryAvailable = Boolean(state.windowId);
@@ -133,6 +143,7 @@ export function createWindowRegistry({
         id: state.windowId,
         workspace: wanted || null,
         primary: identity.primary,
+        parent: parentWindowId(),
       });
       if (info && info.id) {
         state.windowId = String(info.id);

@@ -342,6 +342,25 @@ test("a press outside cancels, but not while the action is running", async (t) =
   assert.deepEqual(other.closes.map((item) => item.reason), ["outside"]);
 });
 
+test("a click into a view's frame (the window losing focus) cancels and frees the keyboard", async (t) => {
+  // That press never reaches this document's pointerdown.
+  const dom = setup(t);
+  const opened = openKill(dom);
+  dom.fire("window", "blur");
+  assert.deepEqual(opened.closes.map((item) => item.reason), ["blur"]);
+  assert.deepEqual(focusOwners(), []);
+  assert.equal(dom.listeners.length, 0);
+  // Not while the action runs: its answer has to land somewhere.
+  let finish;
+  const running = openKill(dom, { action: () => new Promise((resolve) => { finish = resolve; }) });
+  running.kill.click();
+  dom.fire("window", "blur");
+  assert.equal(running.box.isConnected, true);
+  finish();
+  await settle();
+  assert.deepEqual(running.closes.map((item) => item.reason), ["done"]);
+});
+
 test("opening a second confirmation replaces the first", (t) => {
   const dom = setup(t);
   const first = openKill(dom);

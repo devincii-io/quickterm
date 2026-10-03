@@ -74,7 +74,7 @@ function fakeApp(name, calls, { attached = [] } = {}) {
   };
 }
 
-function setup({ open = ["api", "docs"], active = "docs", context = {}, api = {}, opened = {} } = {}) {
+function setup({ open = ["api", "docs"], active = "docs", context = {}, api = {}, opened = {}, whenReady } = {}) {
   const calls = [];
   const views = new Map(open.map((name) => [name, { name, app: fakeApp(name, calls, opened[name]) }]));
   const fake = {
@@ -92,8 +92,10 @@ function setup({ open = ["api", "docs"], active = "docs", context = {}, api = {}
       views.set(key, view);
       return view;
     },
+    ...(whenReady ? { whenReady } : {}),
   };
   const removed = [];
+  const forgotten = [];
   const routing = createTerminalRouting({
     api: { killSession: async () => {}, ...api },
     views: fake,
@@ -103,9 +105,30 @@ function setup({ open = ["api", "docs"], active = "docs", context = {}, api = {}
     removeSessionsFromSavedWorkspaces: async (ids) => { removed.push([...ids]); },
     markSeen: (id) => calls.push(["markSeen", id]),
     refreshSoon: () => {},
+    forgetSession: (id) => forgotten.push(id),
   });
-  return { routing, calls, removed };
+  return { routing, calls, removed, forgotten };
 }
+
+test("a click into a view that is still loading waits for its document", async () => {
+  const waited = [];
+  const { routing, calls } = setup({ whenReady: async (view) => { waited.push(view.name); return true; } });
+  assert.equal(await routing.activateTerminal(live("s", { workspace: "api" })), true);
+  assert.deepEqual(waited, ["api"]);
+  assert.ok(calls.some((call) => call[1] === "attachSession"));
+  const gone = setup({ whenReady: async () => false });
+  assert.equal(await gone.routing.activateTerminal(live("s", { workspace: "api" })), false);
+});
+
+test("a verified kill drops the row at once, not after the backend's grace period", async () => {
+  const { routing, forgotten } = setup();
+  await routing.killTerminal(live("s", { workspace: "closed-scratch" }));
+  assert.deepEqual(forgotten, ["s"]);
+  const failed = Object.assign(new Error("500"), { status: 500 });
+  const refused = setup({ api: { killSession: async () => { throw failed; } } });
+  await assert.rejects(refused.routing.killTerminal(live("s")));
+  assert.deepEqual(refused.forgotten, []);
+});
 
 test("a click marks the row seen first, then focuses the pane that shows it", async () => {
   const { routing, calls } = setup({ context: { attached: { s: "api" } } });

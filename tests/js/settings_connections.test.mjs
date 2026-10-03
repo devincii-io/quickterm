@@ -35,7 +35,9 @@ test("a new agent starts a new conversation with no options", () => {
     assert.equal(profile.terminal_type, id);
   }
   const codex = newConnection(type("codex"), { types: [{ id: "codex", executable: "C:/bin/codex.exe" }] }, []);
-  assert.equal(codex.cmd, "C:/bin/codex.exe");
+  // The executable resolves at launch; a path pinned now (npm's vendored
+  // codex.exe) would outlive the next update.
+  assert.equal(codex.cmd, "");
   assert.equal("claude_mode" in codex, false);
   assert.equal(connectionLabel(codex), "Codex · new conversation");
   assert.deepEqual(connectionProblems(codex, []), []);

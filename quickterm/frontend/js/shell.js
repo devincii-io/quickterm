@@ -114,6 +114,8 @@ export async function bootShell() {
     error: showError,
     store: keepsViewArrangement ? viewArrangementStore() : null,
     newScratch: () => newScratchView(),
+    parentId: () => state.windowId,
+    reservedNames: () => state.workspaceNames,
   });
   window.quicktermViews = views;
   const activeApp = () => views.appFor(views.active);
@@ -140,9 +142,11 @@ export async function bootShell() {
   async function newScratchView() {
     return Boolean(await views.open(null));
   }
-  // True when no view of this window shows `name` any more.
+  // True when no view of this window shows `name` any more. A label only
+  // names a scratch view, and never when it is also a saved workspace's name.
   async function closeWorkspaceView(name) {
-    const view = views.viewForWorkspace(name) || views.views().find((each) => views.nameOf(each) === name);
+    const view = views.viewForWorkspace(name)
+      || (state.workspaceNames.includes(name) ? null : views.scratchViewLabelled(name));
     return view ? views.close(view) : true;
   }
   let lastActionError = null;
@@ -162,6 +166,10 @@ export async function bootShell() {
     attachedSessionIds: () => [],
     forgetSession: noop,
     refreshWorkspaceRoots: () => refreshFolders(),
+    viewSessionIds: (name) => {
+      const view = views.viewForWorkspace(name);
+      return view ? views.appFor(view)?.attachedSessionIds?.() || [] : [];
+    },
     showError: (text) => { lastActionError = text; showError(text); },
     clearError,
     buildLauncher: () => refresh(),
@@ -208,6 +216,7 @@ export async function bootShell() {
     removeSessionsFromSavedWorkspaces: (ids) => actions.removeSessionsFromSavedWorkspaces(ids),
     markSeen: (id) => sidebar.markSeen(id),
     refreshSoon: () => refresh(),
+    forgetSession: (id) => sidebar.forget(id),
   });
   const search = createTerminalActions({
     api, layout: { panes: () => [], focused: null }, attachSession: () => false, restartSavedPane: noop, showError,
@@ -378,6 +387,8 @@ export async function bootShell() {
     get selectedTerminal() { return state.selectedTerminal; },
     set selectedTerminal(choice) { state.selectedTerminal = choice; },
     get launcherView() { return state.launcherView; },
+    // A view re-registering after its entry expired names this window again.
+    get windowId() { return state.windowId; },
     onConfigSaved,
     onWorkspacesChanged,
     deleteWorkspace,
@@ -469,6 +480,7 @@ export async function bootShell() {
     openView: (name, options) => views.open(name, options),
     appFor: (view) => views.appFor(view),
     activeView: () => views.active,
+    whenReady: (view) => views.whenReady(view),
     showError,
   });
   const { persistOnExit } = createLifecycle({

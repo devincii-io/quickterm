@@ -178,7 +178,13 @@ export class Panels {
       this.bodyEl.textContent = "";
       this._help();
     }
-    if (!refreshing) requestAnimationFrame(() => this.closeButton.focus());
+    // showSetting may already have revealed and focused a field by the next
+    // frame; Close is only the landing spot when nothing in the sheet has it.
+    if (!refreshing) {
+      requestAnimationFrame(() => {
+        if (!this.panelEl.contains(document.activeElement)) this.closeButton.focus();
+      });
+    }
   }
 
   // Live data on the dashboard keeps itself fresh. A refresh patches the
@@ -337,10 +343,16 @@ export class Panels {
     nav.append(searchBox);
     let results = [];
     let resultButtons = [];
+    let shownResults = [];
 
     const render = () => {
       if (this.settingsTab === "terminals") this.settingsTab = "connections";
-      for (const button of nav.querySelectorAll(".settings-tab")) button.classList.toggle("active", button.dataset.tab === this.settingsTab);
+      for (const button of nav.querySelectorAll(".settings-tab")) {
+        const current = button.dataset.tab === this.settingsTab;
+        button.classList.toggle("active", current);
+        if (current) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      }
       content.textContent = "";
       this._configList = null;
       const query = search.value.trim();
@@ -348,6 +360,7 @@ export class Panels {
         results = searchSettings(query, this.settingsDraft);
         const list = settingsSearchResults({ results, tabs: SETTINGS_TABS, query, onPick: pick, onLeave: () => search.focus() });
         resultButtons = list.buttons;
+        shownResults = list.shown || results;
         content.append(list.el);
         return;
       }
@@ -372,9 +385,9 @@ export class Panels {
     };
     search.addEventListener("input", render);
     search.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && results.length) {
+      if (event.key === "Enter" && shownResults.length) {
         event.preventDefault();
-        pick(results[0]);
+        pick(shownResults[0]);
       } else if (event.key === "ArrowDown" && resultButtons.length) {
         event.preventDefault();
         resultButtons[0].focus();
@@ -433,7 +446,7 @@ export class Panels {
       message.title = text;
       message.classList.add("error");
     };
-    const problem = settingsProblems(this.settingsDraft, { profileProblem: connectionProblems });
+    const problem = settingsProblems(this.settingsDraft, { profileProblem: connectionProblems, baseline: this.settingsBaseline });
     if (problem) { fail(problem); return; }
     this._saving = true;
     save.disabled = true;
@@ -455,10 +468,15 @@ export class Panels {
       this._snapshot();
       await this.app.onConfigSaved();
       this._themePreviewDirty = false; // committed, so nothing to revert on close
-      message.textContent = "Saved. New terminals use these settings.";
-      message.title = "";
+      // Windows can refuse a binding another program holds; the save stands,
+      // but the shortcut does nothing, so the footer says which one.
+      const hotkeyError = this.app.hotkeyError?.() || "";
+      message.textContent = hotkeyError ? `Saved, but ${hotkeyError}.` : "Saved. New terminals use these settings.";
+      message.title = hotkeyError;
+      message.classList.toggle("error", Boolean(hotkeyError));
       if (this._settingsView !== view) return;
-      if (outside) view.render();
+      // The summon field reads hotkeyError when it is drawn.
+      if (outside || ["shortcuts", "window"].includes(this.settingsTab)) view.render();
       else this._configList?.refresh();
     } catch (error) {
       fail(error.detail || error.message || `Could not save (${error.status || "connection error"}).`);

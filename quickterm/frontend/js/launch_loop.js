@@ -63,10 +63,11 @@ export function createLaunchTarget({
 
 // The shell half. `openView(name, {cwd})` focuses the view that shows `name`
 // or opens one (null opens a scratch view) and resolves with it once its
-// document is up, or false; `appFor(view)` is that document's app and
-// `activeView()` the view the keyboard is in.
+// document is up, or false; `appFor(view)` is that document's app,
+// `activeView()` the view the keyboard is in and `whenReady(view)` resolves
+// once that view's document has booted (false when it never did).
 export function createLaunchLoop({
-  api, state, openView, appFor, activeView, showError,
+  api, state, openView, appFor, activeView, showError, whenReady = async () => true,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now(),
 }) {
@@ -108,7 +109,9 @@ export function createLaunchLoop({
     const view = launch.workspace
       ? await openView(launch.workspace)
       : activeView() || await openView(null);
-    const app = view ? appFor(view) : null;
+    // A boot that restored a stored arrangement claims launches while the
+    // restored views are still loading; wait for the one this goes to.
+    const app = view && await whenReady(view) ? appFor(view) : null;
     if (!app?.startLaunch) {
       if (view) showError("That view cannot start command-line launches. The request was dropped.");
       return false;

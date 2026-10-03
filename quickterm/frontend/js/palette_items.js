@@ -55,6 +55,12 @@ function list(value) {
   return Array.isArray(value) ? value : [];
 }
 
+// SETTINGS_INDEX and Panels.settingEntries() write keywords as one
+// space-separated string; an array is accepted too.
+function keywordList(value) {
+  return Array.isArray(value) ? value : String(value || "").split(/\s+/).filter(Boolean);
+}
+
 function viewName(view) {
   return typeof view === "string" ? view : view?.workspace ?? null;
 }
@@ -133,7 +139,7 @@ export function settingRows(app) {
     kind: "setting",
     label: `setting: ${entry.label}`,
     hint: entry.hint || entry.tab || "",
-    search: [`setting: ${entry.label}`, entry.tab, entry.hint, ...list(entry.keywords)].filter(Boolean).join(" "),
+    search: [`setting: ${entry.label}`, entry.tab, entry.hint, ...keywordList(entry.keywords)].filter(Boolean).join(" "),
     run: () => app?.openSetting?.(entry.id),
   }));
 }

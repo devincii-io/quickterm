@@ -30,6 +30,7 @@ export function createWorkspaceActions({
   openWorkspaceView, closeWorkspaceView, persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
   ownedSessionIds, attachedSessionIds, forgetSession,
   refreshWorkspaceRoots, buildLauncher, refreshStatusSoon, showError, clearError,
+  viewSessionIds = () => [],
 }) {
   // Make the focused terminal's folder a workspace (or open the one it already
   // belongs to) and take the terminal along. The terminal is what the user
@@ -259,6 +260,11 @@ export function createWorkspaceActions({
   // kills sessions nobody is attached to, and deleting the workspace you're
   // in simply turns the live layout into a scratch layout in place.
   async function deleteWorkspace(name) {
+    // The terminals on screen in a view of it are spared, whatever the timing.
+    // Closing the view retains them, but its iframe (and every pane socket)
+    // goes only after the slide, and the server reaps each owned terminal
+    // nobody is attached to at the moment the DELETE arrives.
+    const onScreen = name !== state.currentWorkspace ? [...(viewSessionIds(name) || [])] : [];
     // A view of this window showing it is closed first (saved, its terminals
     // retained, its claim released), or it would autosave the file back.
     if (name !== state.currentWorkspace && closeWorkspaceView && !(await closeWorkspaceView(name))) return false;
@@ -270,6 +276,9 @@ export function createWorkspaceActions({
         + " Close it there first.");
       return false;
     }
+    // Out of the file before the DELETE reads it: the server reaps only what
+    // the file lists, so these become unassigned and keep running.
+    for (const id of onScreen) await removeWorkspaceOwnership(name, id);
     try {
       await api.deleteWorkspace(name);
     } catch (_) {

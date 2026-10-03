@@ -54,6 +54,17 @@ test("the footer refuses a draft the backend would refuse, naming the first prob
   );
 });
 
+test("a new global shortcut without Ctrl, Alt or Win blocks the save", () => {
+  const draft = (summon, key) => ({ summon_hotkey: summon, profiles: [{ name: "Dev", env: {}, keybinding: key }] });
+  assert.match(settingsProblems(draft("enter", null)), /^Summon shortcut: Add Ctrl, Alt or Win/);
+  assert.match(settingsProblems(draft("ctrl+alt+grave", "shift+f5")), /^"Dev" shortcut: Add Ctrl, Alt or Win/);
+  assert.match(settingsProblems(draft("ctrl+alt+1", "alt+ctrl+1")), /Already used by "Dev"/);
+  assert.equal(settingsProblems(draft("ctrl+alt+grave", "ctrl+alt+1")), "");
+  // 3.x took free text: a plain key already saved does not block other saves.
+  const saved = draft("ctrl+alt+grave", "f5");
+  assert.equal(settingsProblems(saved, { baseline: structuredClone(saved) }), "");
+});
+
 test("unrelated config refreshes preserve pane-local font zoom", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = { documentElement: { style: { setProperty() {} }, dataset: {} } };

@@ -257,6 +257,27 @@ def test_codex_prefers_the_native_exe_behind_the_npm_shim(tmp_path, monkeypatch,
     assert agents.resolve(codex("new", cmd=str(shim)), CWD)[0] == str(native)
 
 
+def test_the_vendored_exe_gets_what_the_npm_shim_would_set(tmp_path):
+    shim, native = _npm_tree(tmp_path, "codex-win32-x64", "x86_64-pc-windows-msvc")
+    assert agents.codex_launch_env(str(native)) == {
+        "CODEX_MANAGED_BY_NPM": "1",
+        "CODEX_MANAGED_PACKAGE_ROOT": str(tmp_path / "npm" / "node_modules" / "@openai" / "codex"),
+    }
+    assert agents.codex_launch_env(str(shim)) == {}
+    assert agents.codex_launch_env("codex") == {}
+    assert agents.codex_launch_env(str(tmp_path / "bin" / "codex.exe")) == {}
+
+
+def test_a_broken_models_cache_lists_no_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": "gpt-6", "visibility": "list", "supported_reasoning_levels": 3},
+    ]}), encoding="utf-8")
+    assert agents._codex_models()[0]["efforts"] == []
+    (tmp_path / "models_cache.json").write_text("[" * 100_000, encoding="utf-8")
+    assert agents._codex_models() == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="npm shims are a Windows install layout")
 def test_codex_falls_back_to_the_shim_then_the_bare_name(tmp_path, monkeypatch):
     shim = tmp_path / "codex.cmd"

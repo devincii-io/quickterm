@@ -159,8 +159,11 @@ Migration and validation added in 4.0:
   newlines. Choices come from their sets with `""` meaning unset; toggles are
   `"true"`, `"false"` or `""`. Errors read
   `Terminal profile "<name>": <agent/ssh error>`.
-- `ssh_host` and `ssh_user` must not start with `-` and hold no whitespace or
-  control characters (argument injection, both clients). `ssh_proxy_jump`
+- `ssh_host` and `ssh_user` must not start with `-` (argument injection,
+  both clients). With OpenSSH they also hold no whitespace or control
+  characters; PuTTY profiles may (plink takes a saved-session name such as
+  "Prod Server" as its host, and a Windows account name may hold a space), so
+  a 3.x config keeps loading. `ssh_proxy_jump`
   must match `^[A-Za-z0-9._@:,\[\]%-]+$`, must not start with `-`, and with
   PuTTY is an error: "ProxyJump needs the OpenSSH client". A `.ppk` key with
   OpenSSH is an error: "OpenSSH cannot read PuTTY .ppk keys; choose the PuTTY
@@ -724,8 +727,8 @@ REST (JSON, under `/api`):
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
 | POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's shell runs the launch loop: a workspace is focused when a view of this window already shows it, else opened as a new view (never switched into another view in place); a profile starts in the given folder or the workspace root, in the named workspace's view or the active one; a folder alone opens a new scratch view there. Route and payload shapes are unchanged from 3.x. |
 | GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued handoff → the queued item (`{cwd?, profile?, workspace?}`, as POST /api/launches validated it) or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` window's shell should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
-| GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, idle_seconds, age_seconds}]}`, oldest window first |
-| POST | /api/windows | `{id?, workspace?, title?, primary?}` → `{id, workspace, title, primary}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. 409 on a claimed workspace or too many windows, 400 on a junk name |
+| GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, parent, idle_seconds, age_seconds}]}`, oldest window first |
+| POST | /api/windows | `{id?, workspace?, title?, primary?, parent?}` → `{id, workspace, title, primary, parent}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. `parent` is the shell window's id for an embedded workspace view; once set it stays. Forgetting a window (DELETE, a native close) forgets every entry whose `parent` it is, and only an entry without a parent is ever primary. 409 on a claimed workspace or too many windows, 400 on a junk name |
 | POST | /api/windows/{id}/heartbeat | → `{id, workspace, title, primary}`; **404 when the id is unknown or already expired**, which is the client's signal to re-register instead of carrying on autosaving a workspace it may have lost |
 | PUT | /api/windows/{id}/workspace | `{workspace: name\|null}` → `{id, workspace, title, primary}`. 404 unknown window, 400 missing key/junk name, 409 `{detail, error: "workspace_claimed", workspace, owner: {id, workspace, title, primary}}` when another live window holds it. Never merged, never force-taken: both windows would autosave the same layout file |
 | DELETE | /api/windows/{id} | Drop a window and free its claim now instead of waiting out the TTL → 204, idempotent (this is a closing page's goodbye and may arrive twice) |
@@ -742,12 +745,12 @@ REST (JSON, under `/api`):
 | GET | /api/config/history | → `[{id, saved_at, summary}]`, newest first: the last 20 configs a save replaced (`<config dir>/history/`, same DPAPI protection as `config.json`; a save that changes nothing adds none). `summary` names the top-level settings that differ from the next newer version, or from the current config for the newest. |
 | POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry) → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
-| PUT | /api/config | `AppConfig` object → 204; 400 for anything else. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. Only `port` and `host` need a restart; everything else applies at once, `scratch_dir`, `window` (the next window), `overlay` (the next summon) and `summon_hotkey` included. When `summon_hotkey` or any profile `keybinding` differs from the live config, the route awaits `asyncio.to_thread(ctx.rebind_hotkeys, cfg)`, which re-registers the global hotkeys and sets `hotkey_error`; a save that leaves the keys alone does not rebind. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
+| PUT | /api/config | `AppConfig` object → 204; 400 for anything else, including a summon or profile key without Ctrl, Alt or Win that is not already saved ("Summon shortcut needs Ctrl, Alt or Win", `config.validate_new_bindings`; a 3.x plain key on disk stays accepted so load and unrelated saves work). The footer Save refuses the same through `settingsProblems(draft, {baseline})`. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. Only `port` and `host` need a restart; everything else applies at once, `scratch_dir`, `window` (the next window), `overlay` (the next summon) and `summon_hotkey` included. When `summon_hotkey` or any profile `keybinding` differs from the live config, the route awaits `asyncio.to_thread(ctx.rebind_hotkeys, cfg)`, which re-registers the global hotkeys and sets `hotkey_error`; a save that leaves the keys alone does not rebind. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
 | POST | /api/hotkeys/suspend | `{suspended: bool}` → 204; 400 "suspended must be true or false" for any other body. `true` unregisters every global hotkey on the hotkey thread so a Settings key capture records a combination QuickTerm already owns instead of firing it; `false` registers them again, and they come back on their own after 20 s. A no-op without a hotkey manager (browser, POSIX, tests). |
 | GET | /api/system/agents | → `{types: [{id, label, executable, available, modes: [{value, label, detail}], default_mode, options: [{key, label, kind: "choice"\|"combo"\|"text"\|"lines"\|"toggle", choices?: [{value, label, detail?}], hint, advanced: bool, placeholder?}]}]}` for `claude-code` and `codex`. Settings generates the agent editor from it and hardcodes no option list. Cached 60 s in `ctx.inventory_cache`; `?fresh=true` rescans. |
 | GET | /api/system/ssh-hosts | → `{path, exists, openssh: path\|null, hosts: [{alias, hostname, user, port, identity_file, proxy_jump}]}` from the static `~/.ssh/config` parser (`quickterm/ssh_config.py`), off the loop. |
 | GET | /api/system/ssh-hosts/{alias} | → `{alias, hostname, user, port, identity_files: [..], proxy_jump}` from `ssh.exe -G <alias>` (CREATE_NO_WINDOW, 3 s timeout, off the loop), falling back to the parser. 400 when the alias starts with `-` or does not match `^[A-Za-z0-9._@:%-]{1,255}$`; 404 when the parser does not know it and `ssh -G` fails. |
-| GET | /api/agent-sessions?type=claude-code\|codex&workspace=<name>&limit=20 | → `{sessions: [{id, title, updated_at, cwd}]}`, newest first, for the workspace folder (or `cwd=<path>` instead of `workspace`). Claude from `~/.claude/projects/<slug>/*.jsonl`, Codex from `$CODEX_HOME/session_index.jsonl` joined with each rollout's `session_meta.cwd`. `limit` is clamped to 1..100. 400 for a bad type, 404 for an unknown workspace; an unreadable store answers `[]`. Off the loop. |
+| GET | /api/agent-sessions?type=claude-code\|codex&workspace=<name>&limit=20 | → `{sessions: [{id, title, updated_at, cwd}]}`, newest first, for the workspace folder (or `cwd=<path>` instead of `workspace`). Claude from `~/.claude/projects/<slug>/*.jsonl`, titled by the last `custom-title` (`/rename`, `--name`), else the last `ai-title`, else the first prompt. Codex from `$CODEX_HOME/session_index.jsonl` joined with each rollout's `session_meta` (first 8 KB only), listing interactive threads only: no `parent_thread_id`, and `source` absent, `cli` or `vscode` (subagent threads and `exec` runs are hidden, as Codex's own picker hides them). `limit` is clamped to 1..100. 400 for a bad type, 404 for an unknown workspace; an unreadable store answers `[]`. Off the loop. |
 | GET | /api/system/terminals | → detected terminal types and WSL distributions, plus `{id: "codex", label: "Codex CLI", executable, available}`. The `ssh`/`sftp` entries are `{id, label: "SSH"/"SFTP", executable, available, openssh: path\|null, putty: path\|null}`, `available` when either client exists. PuTTY is the bundled tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`), OpenSSH is `%SystemRoot%\System32\OpenSSH\ssh.exe` or `shutil.which`. The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
@@ -856,7 +859,9 @@ def hotkey_error_text(failed: list[str]) -> str | None
   finds them still overlapping a monitor by at least 64 px both ways. The
   minimum size stays 760 x 480.
 - Secondary windows open at the configured size, 32 px down and right of the
-  primary when its position is known.
+  primary when its position is known. The elevated "QuickTerm -
+  Administrator" window shares `%APPDATA%`, so it opens at the configured size
+  and records no bounds.
 - `_BoundsRecorder` listens to the primary window's `resized`, `moved`,
   `maximized`, `restored` and `minimized` events. The events only set flags
   and restart a 500 ms `threading.Timer`; the timer reads the geometry from
@@ -1118,8 +1123,10 @@ features > OpenSSH Client.", a 400 on the spawn.
 `quickterm/ssh_config.py` is pure: it parses `~/.ssh/config` (one keyword per
 line, `keyword value` or `keyword=value`, case-insensitive keywords, `#`
 comments, double quotes group an argument, first value wins), follows
-`Include` with globbing relative to `~/.ssh` up to depth 8 with a loop guard,
-skips `Match` blocks, and keeps only literal `Host` patterns (no `*`, `?` or
+`Include` with globbing relative to `~/.ssh` up to depth 8 with a loop guard
+(the Host state before an Include comes back after the file, and the Host
+lines of a file included inside a block that does not apply never match, as
+OpenSSH's readconf does), skips `Match` blocks, and keeps only literal `Host` patterns (no `*`, `?` or
 leading `!`), de-duplicated. Per alias it returns `{alias, hostname, user,
 port, identity_file, proxy_jump}`; unknown fields are null, `identity_file` is
 the first entry with `~` expanded, and key files are never read.
@@ -1242,8 +1249,13 @@ Binding grammar, shared with the Settings key capture (`shortcut_input.js`):
   `tab`, `esc`, `enter`, `minus`, `equal`, `comma`, `period`, `slash`,
   `semicolon`, `quote`, `bracketleft`, `bracketright`, `backslash`, `left`,
   `up`, `right`, `down`, `home`, `end`, `pageup`, `pagedown`, `insert`,
-  `delete`, `numpad0`-`numpad9`. The named keys map to fixed virtual keys, so
-  they mean the same physical key on every layout.
+  `delete`, `numpad0`-`numpad9`. Letters and digits are `VK_<char>`, which
+  Windows places by layout (Settings records the letter the layout prints).
+  The named punctuation keys (`grave` through `backslash`) are physical
+  positions: each has a set-1 scan code that `MapVirtualKeyW(scan,
+  MAPVK_VSC_TO_VK_EX)` turns into the virtual key under the current layout,
+  with the US virtual key as the fallback off Windows. The other named keys
+  map to fixed virtual keys.
 - a single punctuation character from an older config (`ctrl+alt+-`) still
   parses through `VkKeyScanW` under the current layout.
 
@@ -1396,7 +1408,15 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
     session, the elevated first terminal.
   - `window.quicktermChrome` (shell) holds `{palette, panels, saveState(text,
     status), showError, clearError, ownsKeyboard(), refreshSoon(),
-    settingsEvents, selectedTerminal, scratchLabels}`. `window.quicktermView`
+    settingsEvents, selectedTerminal, scratchLabels, launcherView (getter),
+    windowId (getter, the shell's registry id), onConfigSaved(),
+    onWorkspacesChanged(), deleteWorkspace(name)}`. `onConfigSaved()` and
+    `onWorkspacesChanged()` are how a view's Settings or Dashboard reaches
+    every other view; `deleteWorkspace(name)` closes this window's view of it
+    first (its on-screen terminals are taken out of the file, so the server
+    spares them as unassigned), then calls DELETE /api/workspaces/{name}, and
+    throws `{detail}` on failure. Every view registers with
+    `parent: windowId`. `window.quicktermView`
     (each view) holds `{workspace(), app, suspend, close, syncConfig,
     syncWorkspaces, previewTheme, whenRestored}`. A view app adds
     `killSessionById(id)`, `detachSessionById(id)` and `hereState()`.
@@ -1650,11 +1670,21 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   QuickTerm already registered is recorded instead of fired. Finish, blur or
   cancel calls `api.suspendHotkeys(false)` and releases focus; the server
   resumes on its own after 20 s. The pure `bindingFromEvent(e)` ignores lone
-  modifiers and returns `{binding, label}` built from `e.code` (layout
-  independent), modifiers in the order ctrl, alt, shift, win, in the hotkeys.py
-  grammar. `shortcutWarnings(binding, {summon, profiles, selfIndex})` reports
-  errors (no ctrl, alt or win; a duplicate of the summon key or another
-  profile's key, as `validate_config` does) and warnings (a cold Alt key
+  modifiers and returns `{binding, label}`, modifiers in the order ctrl, alt,
+  shift, win, in the hotkeys.py grammar. A letter is the one the active layout
+  prints on the pressed key (`navigator.keyboard.getLayoutMap()`, US reading
+  without it), because hotkeys.py registers `VK_<letter>`, which Windows places
+  by layout; Ctrl+Alt is AltGr, so `e.key` cannot tell. Digits, F-keys,
+  numpad and named keys come from `e.code`; named punctuation (`grave`,
+  `minus`, `equal`, `comma`, `period`, `slash`, `semicolon`, `quote`,
+  `bracketleft`, `bracketright`, `backslash`) is a physical position that
+  hotkeys.py resolves through its set-1 scan code with
+  `MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)`, and its chip shows what the
+  layout prints there (ß, not -, on QWERTZ). The button's accessible name is
+  `<label>: <binding | "Not set" | the capture prompt>`.
+  `shortcutWarnings(binding, {summon, profiles, selfIndex})` reports errors
+  (no ctrl, alt or win, flagged `modifier: true`; a duplicate of the summon
+  key or another profile's key) and warnings (a cold Alt key
   `keys.js` claims; a plain Alt pass-through key such as Alt+V/P/H/0-9/-,
   Alt+B/F). The capture input serves the summon key, every profile
   `keybinding` and the parked voice hotkey. `keys.js` exports one `SHORTCUTS`

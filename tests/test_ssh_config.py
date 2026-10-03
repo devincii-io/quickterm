@@ -104,8 +104,8 @@ def test_include_follows_globs_relative_to_the_ssh_folder(tmp_path):
 
 
 def test_include_loops_and_depth_are_bounded(tmp_path):
-    (tmp_path / "a").write_text("Host from-a\nInclude b\n")
-    (tmp_path / "b").write_text("Host from-b\nInclude a\n")
+    (tmp_path / "a").write_text("Include b\nHost from-a\n")
+    (tmp_path / "b").write_text("Include a\nHost from-b\n")
     reads = []
 
     def read(path):
@@ -113,13 +113,35 @@ def test_include_loops_and_depth_are_bounded(tmp_path):
         return path.read_text()
 
     entries = _entries("Include a\n", tmp_path, read=read)
-    assert list(entries) == ["from-a", "from-b"]
+    assert list(entries) == ["from-b", "from-a"]
     assert reads == ["a", "b"]  # a is not read again from b
     # A chain deeper than the cap stops quietly instead of recursing.
     for i in range(12):
-        (tmp_path / f"d{i}").write_text(f"Host deep{i}\nInclude d{i + 1}\n")
+        (tmp_path / f"d{i}").write_text(f"Include d{i + 1}\nHost deep{i}\n")
     deep = _entries("Include d0\n", tmp_path)
     assert len(deep) == ssh_config.MAX_INCLUDE_DEPTH
+
+
+def test_the_host_state_before_an_include_comes_back_after_it(tmp_path):
+    # OpenSSH's readconf restores the active flag after an included file, so
+    # a top-level line after the Include applies to every host, not only to
+    # the Host block the included file ended in.
+    (tmp_path / "conf.d").mkdir()
+    (tmp_path / "conf.d" / "work").write_text("Host jump\n  Port 2200\n")
+    entries = _entries("Include conf.d/*\nUser alice\nHost box\n  HostName box.example\n", tmp_path)
+    assert entries["jump"]["user"] == "alice"
+    assert entries["box"]["user"] == "alice"
+    assert entries["box"]["port"] is None
+
+
+def test_an_include_in_another_hosts_block_never_matches_inside(tmp_path):
+    # ssh reads such a file with SSHCONF_NEVERMATCH: its Host lines select
+    # nothing, so "hidden" is no alias and its Port never reaches "box".
+    (tmp_path / "inner").write_text("Host hidden\n  User nobody\nHost box\n  Port 2022\n")
+    entries = _entries("Host gate\n  Include inner\n  User g\nHost box\n  User b\n", tmp_path)
+    assert list(entries) == ["gate", "box"]
+    assert entries["gate"]["user"] == "g"
+    assert (entries["box"]["user"], entries["box"]["port"]) == ("b", None)
 
 
 def test_hosts_reads_the_file_and_tolerates_its_absence(tmp_path):

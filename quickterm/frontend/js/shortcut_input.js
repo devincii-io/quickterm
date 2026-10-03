@@ -1,9 +1,13 @@
 // A global shortcut is set by pressing it, never by typing "ctrl+alt+1".
 //
 // The binding grammar is shared with hotkeys.parse_binding: modifiers in the
-// order ctrl, alt, shift, win, then one key name. Keys come from `e.code`, the
-// physical key, so a binding does not change with the keyboard layout. Old
-// configs may still hold a single punctuation character; it is shown as typed.
+// order ctrl, alt, shift, win, then one key name. A letter is the character
+// the active layout prints on the pressed key (hotkeys.py registers VK_<letter>,
+// which Windows places by layout too), so Ctrl+Alt+Z on QWERTZ stays the key
+// labelled Z. `e.key` cannot say which, because Ctrl+Alt is AltGr; the layout
+// map can. Punctuation is the physical position (`e.code`), which hotkeys.py
+// resolves through the scan code. Old configs may still hold a single
+// punctuation character; it is shown as typed.
 
 import * as api from "./api.js";
 import { claimFocus, releaseFocus } from "./focus.js";
@@ -29,10 +33,37 @@ const KEY_LABELS = {
 
 const MODIFIER_LABELS = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", win: "Win" };
 
+const CODE_FOR_NAME = Object.fromEntries(Object.entries(NAMED_CODES).map(([code, name]) => [name, code]));
+CODE_FOR_NAME.backtick = "Backquote";
+const PHYSICAL = new Set([
+  "grave", "backtick", "minus", "equal", "comma", "period", "slash", "semicolon",
+  "quote", "bracketleft", "bracketright", "backslash",
+]);
+
+// code -> character on the active layout (navigator.keyboard.getLayoutMap),
+// or null where the API is missing; the US reading applies then.
+let layoutMap = null;
+
+/** Replace the layout map; Settings loads it, tests pass a Map. */
+export function setKeyboardLayout(map) {
+  layoutMap = map || null;
+}
+
+function loadKeyboardLayout() {
+  try {
+    const pending = globalThis.navigator?.keyboard?.getLayoutMap?.();
+    Promise.resolve(pending).then((map) => { if (map) layoutMap = map; }).catch(() => {});
+  } catch (_) { /* not offered here: the US reading stays */ }
+}
+loadKeyboardLayout();
+
 function keyFromCode(code) {
   const text = String(code || "");
   let match = /^Key([A-Z])$/.exec(text);
-  if (match) return match[1].toLowerCase();
+  if (match) {
+    const printed = String(layoutMap?.get?.(text) || "");
+    return /^[a-z]$/i.test(printed) ? printed.toLowerCase() : match[1].toLowerCase();
+  }
   match = /^Digit([0-9])$/.exec(text);
   if (match) return match[1];
   match = /^F([1-9]|1[0-9]|2[0-4])$/.exec(text);
@@ -68,6 +99,13 @@ export function normalizeBinding(binding) {
 export function bindingLabels(binding) {
   return bindingParts(binding).map((part, index, all) => {
     if (index < all.length - 1 && MODIFIER_LABELS[part]) return MODIFIER_LABELS[part];
+    // A punctuation position shows what this layout prints there: the US
+    // "-" position is ß on QWERTZ.
+    const printed = PHYSICAL.has(part) ? String(layoutMap?.get?.(CODE_FOR_NAME[part]) || "") : "";
+    if ([...printed].length === 1 && printed.trim()) {
+      const upper = printed.toUpperCase();
+      return [...upper].length === 1 ? upper : printed; // ß, not SS
+    }
     if (KEY_LABELS[part]) return KEY_LABELS[part];
     if (/^numpad[0-9]$/.test(part)) return `Num ${part.slice(6)}`;
     if (/^f[0-9]+$/.test(part)) return part.toUpperCase();
@@ -114,7 +152,7 @@ export function shortcutWarnings(binding, { summon = "", profiles = [], selfInde
   const mods = parts.slice(0, -1);
   const key = parts[parts.length - 1];
   if (!mods.some((mod) => mod === "ctrl" || mod === "alt" || mod === "win")) {
-    rows.push({ level: "error", text: "Add Ctrl, Alt or Win. Without one, the shortcut would swallow normal typing." });
+    rows.push({ level: "error", modifier: true, text: "Add Ctrl, Alt or Win. Without one, the shortcut would swallow normal typing." });
   }
   if (selfIndex !== -1 && summon && normalizeBinding(summon) === wanted) {
     rows.push({ level: "error", text: "This is already the summon shortcut." });
@@ -158,12 +196,14 @@ export function shortcutInput({
   const button = make("button", "shortcut-input");
   button.type = "button";
   button.disabled = disabled;
-  button.setAttribute("aria-label", label);
   button.title = `${label}: click, then press the keys`;
 
   const paint = () => {
     button.textContent = "";
     button.classList.toggle("capturing", active);
+    // The label alone as the accessible name would hide the binding and the
+    // prompt that says the next keys are being recorded.
+    button.setAttribute("aria-label", `${label}: ${active ? PROMPT : (bindingLabel(current) || "Not set")}`);
     if (active) {
       button.append(make("span", "shortcut-prompt", PROMPT));
       return;
@@ -213,6 +253,7 @@ export function shortcutInput({
 
   const start = () => {
     if (active || button.disabled) return;
+    loadKeyboardLayout();
     claimFocus("shortcut");
     active = true;
     capturing += 1;

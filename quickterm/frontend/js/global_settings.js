@@ -1,4 +1,5 @@
 import { environmentError } from "./panel_shared.js";
+import { normalizeBinding, shortcutWarnings } from "./shortcut_input.js";
 
 const REVISION_KEY = "quickterm.settingsRevision";
 
@@ -26,10 +27,12 @@ export function settingsPatch(draft, baseline, fresh) {
  * footer shows it, or "". `profileProblem(profile, profiles)` adds the
  * per-type rules the Terminals tab knows about.
  */
-export function settingsProblems(draft, { profileProblem } = {}) {
+export function settingsProblems(draft, { profileProblem, baseline = null } = {}) {
   const profiles = draft.profiles || [];
   const typed = profileProblem ? profiles.flatMap((profile) => profileProblem(profile, profiles)) : [];
   if (typed.length) return typed[0];
+  const binding = bindingProblem(draft, baseline);
+  if (binding) return binding;
   if (profiles.some((profile) => !(profile.name || "").trim())) return "Every terminal needs a name.";
   const names = profiles.map((profile) => profile.name.trim().toLowerCase());
   if (new Set(names).size !== names.length) return "Terminal names must be unique.";
@@ -41,6 +44,25 @@ export function settingsProblems(draft, { profileProblem } = {}) {
   }
   const snippetNames = snippets.map((snippet) => snippet.name.trim().toLowerCase());
   if (new Set(snippetNames).size !== snippetNames.length) return "Snippet names must be unique.";
+  return "";
+}
+
+// The red lines under the shortcut fields, as the save refuses them. A
+// binding already saved (3.x took free text) is not refused again, the same
+// rule as config.validate_new_bindings.
+function bindingProblem(draft, baseline) {
+  const profiles = draft.profiles || [];
+  const kept = new Set([baseline?.summon_hotkey, ...(baseline?.profiles || []).map((profile) => profile?.keybinding)]
+    .filter(Boolean).map(normalizeBinding));
+  const rows = [["Summon shortcut", draft.summon_hotkey, -1]];
+  profiles.forEach((profile, index) => rows.push([`"${profile.name || "Terminal"}" shortcut`, profile.keybinding, index]));
+  for (const [label, binding, selfIndex] of rows) {
+    if (!binding) continue;
+    const legacy = kept.has(normalizeBinding(binding));
+    const error = shortcutWarnings(binding, { summon: draft.summon_hotkey, profiles, selfIndex })
+      .find((row) => row.level === "error" && !(legacy && row.modifier));
+    if (error) return `${label}: ${error.text}`;
+  }
   return "";
 }
 

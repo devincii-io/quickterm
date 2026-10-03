@@ -360,13 +360,18 @@ def _validate_ssh(profile: Profile) -> None:
     for field_label, value in (("username", profile.ssh_user), ("private key", profile.ssh_key)):
         if value is not None and not isinstance(value, str):
             raise ValueError(f"{field_label} must be a string")
-    for field_label, value in (("host", profile.ssh_host), ("username", profile.ssh_user)):
-        text = (value or "").strip()
-        if text.startswith("-") or _SSH_UNSAFE.search(text):
-            raise ValueError(f"{field_label} must not start with - or contain spaces or control characters")
     if profile.ssh_client not in (None, "openssh", "putty"):
         raise ValueError("SSH client must be openssh or putty")
     openssh = profile.ssh_client == "openssh"
+    for field_label, value in (("host", profile.ssh_host), ("username", profile.ssh_user)):
+        text = (value or "").strip()
+        if text.startswith("-"):
+            raise ValueError(f"{field_label} must not start with -")
+        # plink takes a saved-session name as its host and Windows account
+        # names may hold a space, so PuTTY profiles from 3.x keep loading.
+        # OpenSSH profiles are new in 4.0 and get the strict rule.
+        if openssh and _SSH_UNSAFE.search(text):
+            raise ValueError(f"{field_label} must not contain spaces or control characters")
     jump = (profile.ssh_proxy_jump or "").strip()
     if jump:
         if jump.startswith("-") or not _PROXY_JUMP.fullmatch(jump):
@@ -533,6 +538,39 @@ def validate_config(cfg: AppConfig) -> None:
         if folded in snippet_names:
             raise ValueError("Snippet names must be unique")
         snippet_names.add(folded)
+
+
+def _global_bindings(cfg: AppConfig) -> list[tuple[str, str]]:
+    rows = [("Summon shortcut", cfg.summon_hotkey)]
+    rows += [
+        (f'Terminal profile "{profile.name}": shortcut', profile.keybinding)
+        for profile in cfg.profiles
+    ]
+    return [(label, binding) for label, binding in rows if isinstance(binding, str) and binding.strip()]
+
+
+def validate_new_bindings(cfg: AppConfig, previous: AppConfig | None = None) -> None:
+    """Refuse a new global binding without Ctrl, Alt or Win.
+
+    RegisterHotKey on a plain key (Enter, F5, a letter) takes that key from
+    every program on the desktop. Settings only records pressed keys, and the
+    capture commits any plain key at once. 3.x took free text, so a binding
+    already in `previous` stays accepted: load_config must never discard a
+    config over it, and saving an unrelated setting must still work.
+    """
+    from .hotkeys import MOD_ALT, MOD_CONTROL, MOD_WIN, parse_binding
+
+    kept: set[tuple[int, int]] = set()
+    for _label, binding in _global_bindings(previous) if previous is not None else []:
+        try:
+            kept.add(parse_binding(binding))
+        except ValueError:
+            continue
+    for label, binding in _global_bindings(cfg):
+        parsed = parse_binding(binding)
+        if parsed[0] & (MOD_CONTROL | MOD_ALT | MOD_WIN) or parsed in kept:
+            continue
+        raise ValueError(f"{label} needs Ctrl, Alt or Win")
 
 
 def load_config() -> AppConfig:

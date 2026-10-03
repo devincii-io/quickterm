@@ -23,6 +23,10 @@ MAX_INCLUDE_DEPTH = 8
 _ALIAS = re.compile(r"^[A-Za-z0-9._@:%-]{1,255}$")
 _KEYWORD = re.compile(r"([^\s=]+)(?:\s*=\s*|\s+)(.*)")
 _FIELDS = {"hostname", "user", "port", "identityfile", "proxyjump"}
+# Bracket an included file's lines, so the Host/Match state can be restored
+# after it the way OpenSSH's readconf does.
+_INCLUDE_BEGIN = " include begin"
+_INCLUDE_END = " include end"
 
 
 @dataclass
@@ -118,7 +122,9 @@ def _directives(
                     continue
                 included = read(Path(name))
                 if included is not None:
+                    out.append((_INCLUDE_BEGIN, []))
                     out += _directives(included, base_dir, read, depth + 1, stack | {key})
+                    out.append((_INCLUDE_END, []))
     return out
 
 
@@ -152,15 +158,34 @@ def parse(
             for pattern in args:
                 if _literal(pattern) and pattern not in aliases:
                     aliases.append(pattern)
-    return [_entry(alias, directives) for alias in aliases]
+    entries = (_entry(alias, directives) for alias in aliases)
+    # A Host line that can never match (inside an Include placed in another
+    # host's block) does not make an alias ssh would answer to.
+    return [entry for entry, reachable in entries if reachable]
 
 
-def _entry(alias: str, directives: list[tuple[str, list[str]]]) -> HostEntry:
+def _entry(alias: str, directives: list[tuple[str, list[str]]]) -> tuple[HostEntry, bool]:
+    """The entry for `alias`, and whether any Host line can select it.
+
+    Follows OpenSSH's readconf: an Include keeps the active state for its
+    lines, the state before it comes back after the file, and an Include in
+    a block that does not apply never matches a Host or Match inside it.
+    """
     values: dict[str, str] = {}
     active = True  # lines before the first Host apply to every host
+    never = False
+    saved: list[tuple[bool, bool]] = []
+    reachable = False
     for keyword, args in directives:
-        if keyword == "host":
-            active = _applies(args, alias)
+        if keyword == _INCLUDE_BEGIN:
+            saved.append((active, never))
+            never = never or not active
+        elif keyword == _INCLUDE_END:
+            if saved:
+                active, never = saved.pop()
+        elif keyword == "host":
+            active = not never and _applies(args, alias)
+            reachable = reachable or (active and alias in args)
         elif keyword == "match":
             active = False
         elif active and keyword in _FIELDS and args and keyword not in values:
@@ -175,7 +200,7 @@ def _entry(alias: str, directives: list[tuple[str, list[str]]]) -> HostEntry:
         entry.identity_file = os.path.expanduser(values["identityfile"])
     jump = values.get("proxyjump")
     entry.proxy_jump = None if jump is None or jump.lower() == "none" else jump
-    return entry
+    return entry, reachable
 
 
 def hosts(path: Path | None = None) -> list[dict]:

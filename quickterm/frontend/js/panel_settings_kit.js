@@ -277,6 +277,9 @@ export function settingsSearchResults({ results, tabs, query, onPick, onLeave })
   box.setAttribute("role", "listbox");
   box.setAttribute("aria-label", "Settings search results");
   const buttons = [];
+  // The results in the order they are drawn (grouped by tab), which is the
+  // order Enter and ArrowDown must follow, not the score order of `results`.
+  const shown = [];
   box.addEventListener("keydown", (event) => {
     const at = buttons.indexOf(event.target);
     if (at < 0 || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
@@ -287,7 +290,7 @@ export function settingsSearchResults({ results, tabs, query, onPick, onLeave })
   });
   if (!results.length) {
     box.append(make("p", "config-empty-lead", `Nothing in Settings matches "${query}".`));
-    return { el: box, buttons };
+    return { el: box, buttons, shown };
   }
   for (const [tab, title] of tabs) {
     const inTab = results.filter((result) => result.tab === tab);
@@ -302,7 +305,8 @@ export function settingsSearchResults({ results, tabs, query, onPick, onLeave })
       button.addEventListener("click", () => onPick(result));
       box.append(button);
       buttons.push(button);
+      shown.push(result);
     }
   }
-  return { el: box, buttons };
+  return { el: box, buttons, shown };
 }

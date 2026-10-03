@@ -190,6 +190,28 @@ test("a view without the launch hook says so instead of starting a stray termina
   assert.match(errors[0], /cannot start command-line launches/);
 });
 
+test("a launch into a restored view that is still loading waits for it", async () => {
+  // The boot restores a stored arrangement and claims launches at once; the
+  // active view's document has no app until it is ready.
+  let ready = false;
+  const { loop, calls, errors } = harness({
+    shown: ["dev"],
+    active: "dev",
+    appFor: (view) => (ready ? { startLaunch: async (launch) => { calls.push(["startLaunch", view.name, launch]); return true; } } : null),
+    whenReady: async () => { ready = true; return true; },
+  });
+  const launch = { profile: "pwsh" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["startLaunch", "dev", launch]]);
+  assert.deepEqual(errors, []);
+});
+
+test("a launch into a view that never finished loading is dropped quietly", async () => {
+  const { loop, calls } = harness({ shown: ["dev"], active: "dev", whenReady: async () => false });
+  assert.equal(await loop.handleLaunch({ profile: "pwsh" }), false);
+  assert.deepEqual(calls, []);
+});
+
 // ---- the view side ----
 
 function target({ state = {}, focused = { canReplace: true } } = {}) {

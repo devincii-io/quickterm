@@ -19,6 +19,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from quickterm import config as real_config
 from quickterm import workspace as real_workspace
 from quickterm.server import create_app
 
@@ -1021,6 +1022,7 @@ def fake_config_mod(monkeypatch, cfg):
         saved.append(new_cfg)
 
     mod.save_config = save_config
+    mod.validate_new_bindings = real_config.validate_new_bindings
     monkeypatch.setitem(sys.modules, "quickterm.config", mod)
     return saved
 
@@ -1855,6 +1857,7 @@ def test_a_window_registers_claims_and_is_listed(window_client):
         "workspace": "dev",
         "title": "QuickTerm",
         "primary": True,
+        "parent": None,
     }
     listed = window_client.get("/api/windows").json()
     assert listed["ttl_seconds"] > 0
@@ -2174,6 +2177,22 @@ def test_a_save_that_leaves_the_keys_alone_does_not_rebind(
     )
     assert response.status_code == 204
     assert hotkey_calls["rebind"] == []
+
+
+def test_a_new_global_key_without_ctrl_alt_or_win_is_refused(hotkey_client, cfg, fake_config_mod):
+    # RegisterHotKey on plain Enter would take Enter from every program.
+    for binding in ("enter", "shift+f5", "a"):
+        response = hotkey_client.put("/api/config", json={"summon_hotkey": binding})
+        assert response.status_code == 400, binding
+        assert "needs Ctrl, Alt or Win" in response.json()["detail"]
+    assert fake_config_mod == []
+
+
+def test_a_saved_plain_key_from_3x_still_saves(hotkey_client, cfg, fake_config_mod):
+    # 3.x took free text; a binding already on disk must not block every save.
+    sys.modules["quickterm.config"].disk_config.summon_hotkey = "f5"
+    response = hotkey_client.put("/api/config", json={"font_family": "Cascadia Mono", "summon_hotkey": "f5"})
+    assert response.status_code == 204
 
 
 def test_hotkeys_can_be_suspended_and_resumed(hotkey_client, hotkey_calls):

@@ -4,8 +4,8 @@
 //
 // Rows are patched with render.js, never rebuilt, and the editor is drawn only
 // when the selection changes. Typing in the editor calls `updateRow`, which
-// rewrites that one row's text in place, so the field under the caret is never
-// replaced. Filtering hides rows but keeps the selection and its editor.
+// rewrites the rows' text in place (an edit can change another row's problem
+// marker), so the field under the caret is never replaced. Filtering hides rows but keeps the selection and its editor.
 // Below 820 px the detail replaces the list and offers a Back button.
 
 import { icon } from "./icons.js";
@@ -207,7 +207,9 @@ export function renderConfigList({
       pane.append(make("p", "config-detail-placeholder", list().length ? placeholder : ""));
       return;
     }
-    editor(current, pane, { updateRow: () => updateRow(current) });
+    // An edit can change other rows' problems too (two terminals with one
+    // name both carry the marker), so every drawn row is patched.
+    editor(current, pane, { updateRow: () => { for (const item of list()) updateRow(item); } });
   };
 
   function updateRow(item = current) {

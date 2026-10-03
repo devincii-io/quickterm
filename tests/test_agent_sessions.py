@@ -136,10 +136,62 @@ def test_codex_joins_the_index_with_rollouts_of_the_folder(codex_home):
 
 def test_codex_reads_id_and_cwd_from_a_first_line_longer_than_the_cap(codex_home):
     meta = {"type": "session_meta", "payload": {
-        "id": IDS[5], "cwd": PROJECT, "instructions": "z" * (agent_sessions.FIRST_LINE_CAP * 2),
+        "id": IDS[5], "cwd": PROJECT, "instructions": "z" * (agent_sessions.META_CAP * 2),
     }}
     _rollout(codex_home, "04", "08-00-00", IDS[5], PROJECT, raw=json.dumps(meta))
     assert [s["id"] for s in agent_sessions.codex_sessions(PROJECT, 5)] == [IDS[5]]
+
+
+def test_codex_hides_subagent_threads_and_non_interactive_runs(codex_home):
+    def meta(session_id, **payload):
+        return json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": PROJECT, **payload}})
+
+    _rollout(codex_home, "05", "01-00-00", IDS[0], PROJECT, raw=meta(IDS[0], source="cli"))
+    _rollout(codex_home, "05", "02-00-00", IDS[1], PROJECT, raw=meta(IDS[1], source="vscode"))
+    _rollout(codex_home, "05", "03-00-00", IDS[2], PROJECT, raw=meta(IDS[2]))  # older format
+    _rollout(codex_home, "05", "04-00-00", IDS[3], PROJECT, raw=meta(
+        IDS[3], source={"subagent": {"thread_spawn": {"parent_thread_id": IDS[0], "depth": 1}}},
+    ))
+    _rollout(codex_home, "05", "05-00-00", IDS[4], PROJECT, raw=meta(IDS[4], source="exec"))
+    _rollout(codex_home, "05", "06-00-00", IDS[5], PROJECT, raw=meta(IDS[5], parent_thread_id=IDS[1]))
+    # The same subagent shape cut off by the cap: the raw-text reading decides.
+    long = agent_sessions.META_CAP * 2
+    _rollout(codex_home, "05", "07-00-00", IDS[6], PROJECT, raw=meta(
+        IDS[6], source={"subagent": {"thread_spawn": {"parent_thread_id": IDS[0]}}}, instructions="z" * long,
+    ))
+    _rollout(codex_home, "05", "08-00-00", IDS[7], PROJECT, raw=meta(IDS[7], source="cli", instructions="z" * long))
+    assert {s["id"] for s in agent_sessions.codex_sessions(PROJECT, 20)} == {IDS[0], IDS[1], IDS[2], IDS[7]}
+
+
+def test_claude_prefers_the_title_the_user_chose(claude_home):
+    path = claude_home / f"{IDS[0]}.jsonl"
+    path.write_text(_jsonl(
+        {"type": "user", "message": {"content": "first question"}},
+        {"type": "ai-title", "aiTitle": "Generated"},
+        {"type": "custom-title", "customTitle": "Old name"},
+        {"type": "custom-title", "customTitle": "Custom terminal emulator"},
+    ), encoding="utf-8")
+    assert agent_sessions.claude_sessions(PROJECT, 5)[0]["title"] == "Custom terminal emulator"
+
+
+def test_deeply_nested_lines_are_skipped_not_raised(claude_home, codex_home):
+    nested = "[" * 100_000
+    (claude_home / f"{IDS[0]}.jsonl").write_text(_jsonl(
+        nested, {"type": "user", "message": {"content": "still here"}},
+    ), encoding="utf-8")
+    (codex_home / "session_index.jsonl").write_text(_jsonl(nested, {"id": IDS[1], "thread_name": "Named"}))
+    _rollout(codex_home, "06", "01-00-00", IDS[1], PROJECT)
+    _rollout(codex_home, "06", "02-00-00", IDS[2], PROJECT, raw=nested)
+    assert agent_sessions.sessions("claude-code", PROJECT, 5)[0]["title"] == "still here"
+    assert [s["title"] for s in agent_sessions.sessions("codex", PROJECT, 5)] == ["Named"]
+
+
+def test_an_unexpected_failure_lists_nothing(monkeypatch):
+    def broken(cwd, limit):
+        raise TypeError("format changed")
+
+    monkeypatch.setattr(agent_sessions, "codex_sessions", broken)
+    assert agent_sessions.sessions("codex", PROJECT, 5) == []
 
 
 def test_codex_stops_at_the_limit_and_the_scan_cap(codex_home, monkeypatch):

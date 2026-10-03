@@ -84,3 +84,6 @@ def launch(spec: dict[str, Any]) -> None:
     )
     if result <= 32:
         raise OSError(f"Windows elevation failed ({result})")
+    # ShellExecuteW returns only once the consent dialog is answered, which
+    # can outlast the first hold; the admin window comes up after this.
+    overlay.hold_open()

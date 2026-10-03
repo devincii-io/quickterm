@@ -192,9 +192,10 @@ def test_window_bounds_are_inclusive(fake_appdata):
 
 @pytest.mark.parametrize(("fields", "message"), [
     ({"ssh_host": "-oProxyCommand=calc"}, "host must not start with -"),
-    ({"ssh_host": "two words"}, "host must not start with -"),
+    ({"ssh_host": "two words", "ssh_client": "openssh"}, "host must not contain spaces"),
     ({"ssh_user": "-l"}, "username must not start with -"),
-    ({"ssh_user": "a\tb"}, "username must not"),
+    ({"ssh_user": "-l", "ssh_client": "putty"}, "username must not start with -"),
+    ({"ssh_user": "a\tb", "ssh_client": "openssh"}, "username must not"),
     ({"ssh_client": "dropbear"}, "SSH client must be openssh or putty"),
     ({"ssh_proxy_jump": "jump"}, "ProxyJump needs the OpenSSH client"),
     ({"ssh_proxy_jump": "jump", "ssh_client": "putty"}, "ProxyJump needs the OpenSSH client"),
@@ -208,6 +209,20 @@ def test_ssh_fields_that_could_become_options_are_refused(fake_appdata, fields, 
         setattr(profile, key, value)
     with pytest.raises(ValueError, match=f'Terminal profile "box": {message}'):
         save_config(AppConfig(profiles=[profile]))
+
+
+def test_pre_40_putty_profile_with_spaces_still_loads(fake_appdata):
+    # plink loads a saved session whose name matches the host, and Windows
+    # account names may hold a space; 3.x accepted both, so loading must too.
+    path = cfgmod.config_dir() / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"profiles": [{
+        "name": "prod", "cmd": "", "terminal_type": "ssh",
+        "ssh_host": "Prod Server", "ssh_user": "John Smith",
+    }]}), encoding="utf-8")
+    loaded = load_config().profiles[0]
+    assert (loaded.ssh_host, loaded.ssh_user) == ("Prod Server", "John Smith")
+    assert not list(path.parent.glob("config.invalid-*.json"))
 
 
 def test_openssh_profile_with_jump_round_trips(fake_appdata):

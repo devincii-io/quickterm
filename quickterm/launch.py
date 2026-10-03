@@ -386,6 +386,11 @@ def resolve(
         cmd = cmd or resolved_cmd
         args = args if args is not None else resolved_args
         env = env if env is not None else dict(prof.env)
+        if getattr(prof, "terminal_type", None) == "codex" and isinstance(cmd, str):
+            # The native exe replaces npm's shim; keep what the shim sets.
+            from .agents import codex_launch_env
+
+            env = {**codex_launch_env(cmd), **(env or {})}
     else:
         cwd = folder
     if not isinstance(cmd, str) or not cmd.strip():

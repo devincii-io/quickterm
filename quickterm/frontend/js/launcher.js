@@ -751,13 +751,17 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const patchActiveLine = (group) => {
     const path = group?.path || "";
     const folder = folderName(path);
-    setText(folderLine, folder || (group?.kind === "workspace" ? "no folder" : ""));
+    // Scratch says where its terminals start, so the line is never blank.
+    const fallback = group?.kind === "workspace" ? "no folder" : group?.kind === "scratch" ? "scratch folder" : "";
+    setText(folderLine, folder || fallback);
     // "acme / acme" says nothing twice.
     folderLine.hidden = !folderLine.textContent
       || folder.toLowerCase() === String(group?.label || "").toLowerCase();
     setClass(folderLine, "warning", group?.pathExists === false);
     folderLine.title = !path
-      ? "This workspace has no folder. Terminals open in your home folder."
+      ? (group?.kind === "scratch"
+        ? "Scratch terminals start in QuickTerm's disposable scratch folder."
+        : "This workspace has no folder. Terminals open in your home folder.")
       : group.pathExists === false ? `${path} (missing)` : path;
   };
 
@@ -784,10 +788,13 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const handle = confirmNear(trigger, {
       owner: "sidebar-confirm",
       ...options,
-      onClose: () => {
+      onClose: (reason) => {
         if (confirms.get(key)?.handle === handle) confirms.delete(key);
         holder.classList.remove("armed");
-        handBack();
+        // Blur: the keyboard already went where the person clicked.
+        // Replaced: a newer bar holds it, and a deferred hand-back would
+        // pull it out of that bar.
+        if (reason !== "blur" && reason !== "replaced") handBack();
       },
     });
     confirms.set(key, { handle, trigger });
@@ -1043,7 +1050,10 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     head.addEventListener("click", (event) => {
       const group = itemFor(node);
       if (!group) return;
-      if (!group.name || event.target.closest?.(".session-group-chevron")) {
+      // A closed scratch view is never reopened (its id would come back as
+      // a workspace of that name); its terminals are rows to attach instead.
+      const closedScratch = group.kind === "scratch" && !group.open;
+      if (!group.name || closedScratch || event.target.closest?.(".session-group-chevron")) {
         toggleFold(node);
         return;
       }

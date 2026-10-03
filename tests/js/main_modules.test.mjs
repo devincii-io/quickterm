@@ -425,3 +425,67 @@ test("a scratch view boots with its own identity, and only the first one is mark
     globalThis.location = previous;
   }
 });
+
+test("deleting a workspace open in a view spares the terminals on screen, whatever the timing", async () => {
+  // Closing the view retains its terminals, but its iframe and every pane
+  // socket go only after the slide; the server reaps each owned terminal no
+  // one is attached to when the DELETE arrives. The file must not list them.
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const order = [];
+  let file = {
+    layout: { type: "split", dir: "h", ratio: 0.5, children: [{ type: "pane", session_id: "a" }, { type: "pane", session_id: "b" }] },
+    session_ids: ["a", "b", "background"],
+    logo: null,
+  };
+  const actions = createWorkspaceActions({
+    api: {
+      deleteWorkspace: async (name) => { order.push(["delete", name, [...file.session_ids]]); },
+    },
+    workspace: {
+      details: async () => structuredClone(file),
+      save: async (name, layout, logo, ids) => { file = { layout, logo, session_ids: ids }; },
+    },
+    state,
+    layout: null,
+    listWindowsSafe: async () => [],
+    closeWorkspaceView: async (name) => { order.push(["close", name]); return true; },
+    viewSessionIds: () => ["a", "b"],
+    showError: (text) => { throw new Error(text); },
+    buildLauncher() {},
+    refreshStatusSoon() {},
+    scheduleWorkspaceSave() {},
+  });
+  assert.equal(await actions.deleteWorkspace("alpha"), true);
+  assert.deepEqual(order, [["close", "alpha"], ["delete", "alpha", ["background"]]]);
+  assert.deepEqual([...state.workspaceNames], []);
+});
+
+test("a workspace saved with a folder and no layout opens as itself, in its folder", async () => {
+  const { createWorkspaceSwitch } = await load("workspace_switch.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  state.currentWorkspace = "alpha";
+  const spawned = [];
+  const restoredWith = [];
+  const pane = { id: "p1" };
+  const workspaceSwitch = createWorkspaceSwitch({
+    api: { getSessions: async () => [] },
+    workspace: { details: async (name) => (name === "alpha" ? { layout: null, path: "C:/work/alpha", path_exists: true } : null) },
+    state,
+    layout: { restore: (layout) => { restoredWith.push(layout); return [pane]; }, focusPane() {} },
+    spawnDefaultInto: async (into) => { spawned.push([into.id, state.workspacePath]); return true; },
+    profileTerminalType: () => null,
+    showError: (text) => { throw new Error(text); },
+  });
+  assert.equal(await workspaceSwitch.restoreWorkspace("alpha"), true);
+  assert.deepEqual(restoredWith, [null]);
+  assert.deepEqual(spawned, [["p1", "C:/work/alpha"]]);
+  assert.equal(state.currentWorkspace, "alpha");
+  assert.equal(await workspaceSwitch.restoreWorkspace("missing"), false);
+});

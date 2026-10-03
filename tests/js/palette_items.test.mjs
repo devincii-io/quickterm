@@ -137,7 +137,7 @@ test("terminal rows reach every listed terminal and say where it is and how it i
 test("settings rows are found by their keywords and open the setting", () => {
   const { calls, app } = recorder();
   app.settingEntries = () => [
-    { id: "font_size", label: "Font size", tab: "general", hint: "Terminal text size", keywords: ["zoom"] },
+    { id: "font_size", label: "Font size", tab: "general", hint: "Terminal text size", keywords: "zoom px" },
     { id: "broken" },
   ];
   const rows = settingRows(app);

@@ -205,6 +205,8 @@
   display: grid;
   place-items: center;
   border-radius: 6px;
+  /* A bare <button> keeps the browser's light grey tile on the dark sheet. */
+  background: transparent;
   color: var(--muted);
 }
 .icon-button:hover { background: var(--surface-raised); color: var(--text); }

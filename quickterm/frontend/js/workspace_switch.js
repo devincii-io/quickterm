@@ -15,8 +15,12 @@ export function createWorkspaceSwitch({
 }) {
   async function restoreWorkspace(name) {
     const saved = await workspace.details(name).catch(() => null);
-    if (!saved || !saved.layout) return false;
-    const savedLayout = saved.layout;
+    if (!saved) return false;
+    // A workspace created with a folder and no layout yet (PUT with
+    // layout:null) is an empty workspace, not a missing one: it opens as
+    // itself, with one fresh pane in its own folder. Falling back to scratch
+    // ran it under a scratch owner in the scratch folder.
+    const savedLayout = saved.layout || null;
     state.workspaceLogo = saved.logo || null;
     state.workspacePath = saved.path || null;
     state.workspaceRoots.set(name, state.workspacePath);

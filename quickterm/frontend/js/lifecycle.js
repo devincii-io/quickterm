@@ -33,8 +33,12 @@ export function createLifecycle({
       // awaits the save while its document is still alive.
       workspace.save(state.currentWorkspace, layout.serialize(), isScratchWorkspace(state.currentWorkspace) ? state.workspaceLogo : undefined,
         [...ownedSessionIds()], undefined, { keepalive: true })
-        .catch(() => {}).finally(release);
-    } else release();
+        .catch(() => {});
+    }
+    // Now, not after the save: once the document is torn down a pending
+    // promise never settles, and a release chained to it never left. The
+    // claim then outlived a reload for the whole registry TTL.
+    release();
     // The idle reaper has fresh activity data; pagehide must never kill scratch.
   }
 

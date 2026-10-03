@@ -48,26 +48,12 @@ _MODIFIERS = {
 }
 
 _NAMED_KEYS = {
-    "grave": 0xC0,       # VK_OEM_3
-    "backtick": 0xC0,
     "space": 0x20,
     "tab": 0x09,
     "esc": 0x1B,
     "escape": 0x1B,
     "enter": 0x0D,
     "return": 0x0D,
-    # Named OEM keys: the same physical key on every layout, unlike the
-    # single-character VkKeyScanW path that older configs still use.
-    "minus": 0xBD,
-    "equal": 0xBB,
-    "comma": 0xBC,
-    "period": 0xBE,
-    "slash": 0xBF,
-    "semicolon": 0xBA,
-    "quote": 0xDE,
-    "bracketleft": 0xDB,
-    "bracketright": 0xDD,
-    "backslash": 0xDC,
     "left": 0x25,
     "up": 0x26,
     "right": 0x27,
@@ -81,12 +67,46 @@ _NAMED_KEYS = {
     **{f"numpad{n}": 0x60 + n for n in range(10)},
 }
 
+# Named OEM keys are physical positions (Settings records them from the
+# browser's `e.code`), so they resolve through the set-1 scan code under the
+# current layout: VK_OEM_MINUS is the "-" key on QWERTZ, not the ß key that
+# sits where US "-" is. The second value is the US virtual key, used off
+# Windows and when the layout does not map the scan code.
+_PHYSICAL_KEYS = {
+    "grave": (0x29, 0xC0),
+    "backtick": (0x29, 0xC0),
+    "minus": (0x0C, 0xBD),
+    "equal": (0x0D, 0xBB),
+    "comma": (0x33, 0xBC),
+    "period": (0x34, 0xBE),
+    "slash": (0x35, 0xBF),
+    "semicolon": (0x27, 0xBA),
+    "quote": (0x28, 0xDE),
+    "bracketleft": (0x1A, 0xDB),
+    "bracketright": (0x1B, 0xDD),
+    "backslash": (0x2B, 0xDC),
+}
+
+_MAPVK_VSC_TO_VK_EX = 3
+
 _F_KEY = re.compile(r"^f([1-9]|1[0-9]|2[0-4])$")
+
+
+def _vk_for_scan(scan: int, fallback: int) -> int:
+    if os.name != "nt":
+        return fallback
+    try:
+        vk = int(ctypes.windll.user32.MapVirtualKeyW(scan, _MAPVK_VSC_TO_VK_EX))
+    except (AttributeError, OSError):
+        return fallback
+    return vk or fallback
 
 
 def _vk_for_key(key: str) -> int:
     if key in _NAMED_KEYS:
         return _NAMED_KEYS[key]
+    if key in _PHYSICAL_KEYS:
+        return _vk_for_scan(*_PHYSICAL_KEYS[key])
     m = _F_KEY.match(key)
     if m:
         return 0x70 + int(m.group(1)) - 1  # VK_F1 .. VK_F24

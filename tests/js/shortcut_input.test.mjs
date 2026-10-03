@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  bindingFromEvent, bindingLabel, captureActive, normalizeBinding, shortcutInput, shortcutWarnings,
+  bindingFromEvent, bindingLabel, captureActive, normalizeBinding, setKeyboardLayout, shortcutInput, shortcutWarnings,
 } from "../../quickterm/frontend/js/shortcut_input.js";
 import { focusOwners, resetFocusOwners } from "../../quickterm/frontend/js/focus.js";
 
@@ -135,9 +135,30 @@ test("every key family maps from its physical code", () => {
   assert.equal(press("IntlBackslash", ctrlAlt), null);
 });
 
-test("the layout does not matter, only the physical key", () => {
-  // QWERTZ: the key labelled Z sits where KeyY is, and types "z".
+test("a letter is the one the layout prints on the key, punctuation is the position", () => {
+  // Without a layout map (outside a browser) the US reading applies.
   assert.equal(bindingFromEvent({ code: "KeyY", key: "z", ctrlKey: true, altKey: true }).binding, "ctrl+alt+y");
+  // QWERTZ: the key labelled Z sits where KeyY is. Windows registers VK_Z by
+  // layout too, so the binding must say z. Ctrl+Alt is AltGr, so e.key ("@"
+  // for Ctrl+Alt+Q) cannot be trusted; the layout map can.
+  setKeyboardLayout(new Map([["KeyY", "z"], ["KeyZ", "y"], ["KeyQ", "q"], ["Minus", "ß"], ["Backquote", "^"], ["Digit1", "1"]]));
+  try {
+    assert.equal(bindingFromEvent({ code: "KeyY", key: "z", ctrlKey: true, altKey: true }).binding, "ctrl+alt+z");
+    assert.equal(bindingFromEvent({ code: "KeyQ", key: "@", ctrlKey: true, altKey: true }).binding, "ctrl+alt+q");
+    assert.equal(press("Minus", ctrlAlt), "ctrl+alt+minus", "punctuation stays physical; hotkeys.py maps the scan code");
+    assert.equal(bindingLabel("ctrl+alt+minus"), "Ctrl+Alt+ß");
+    assert.equal(bindingLabel("ctrl+alt+grave"), "Ctrl+Alt+^");
+    assert.equal(bindingLabel("ctrl+alt+space"), "Ctrl+Alt+Space");
+  } finally {
+    setKeyboardLayout(null);
+  }
+});
+
+test("the field's accessible name carries the binding and the capture prompt", () => {
+  const field = shortcutInput({ value: "ctrl+alt+1", label: "Global shortcut", suspend: () => {} });
+  assert.equal(field.el.attributes["aria-label"], "Global shortcut: Ctrl+Alt+1");
+  field.set(null);
+  assert.equal(field.el.attributes["aria-label"], "Global shortcut: Not set");
 });
 
 test("modifiers come first in the order ctrl, alt, shift, win", () => {

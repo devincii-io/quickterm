@@ -78,7 +78,9 @@ test("a profile reports the problem that would stop it from starting", () => {
 test("ssh fields refuse what the server refuses", () => {
   assert.deepEqual(sshProblems({ ssh_host: "box", ssh_user: "me" }), []);
   assert.match(sshProblems({ ssh_host: "-oProxyCommand=x" })[0], /Host must not start with -/);
-  assert.match(sshProblems({ ssh_host: "box", ssh_user: "a b" })[0], /User must not contain spaces/);
+  assert.match(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_user: "a b" })[0], /User must not contain spaces/);
+  // PuTTY takes a saved-session name as host; 3.x profiles keep loading.
+  assert.deepEqual(sshProblems({ ssh_host: "Prod Server", ssh_user: "John Smith" }), []);
   assert.equal(sshProblems({ ssh_host: "box", ssh_proxy_jump: "bastion" })[0], "ProxyJump needs the OpenSSH client");
   assert.deepEqual(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_proxy_jump: "me@bastion:22,other" }), []);
   assert.match(sshProblems({ ssh_host: "box", ssh_client: "openssh", ssh_proxy_jump: "-J x" })[0], /ProxyJump must be/);

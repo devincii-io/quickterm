@@ -70,7 +70,7 @@ test("a prefix narrows the list to one kind and a bare prefix lists it", () => {
     profiles: [{ name: "Codex", terminal_type: "codex" }],
     snippets: [{ name: "deploy", text: "make deploy\r" }],
     liveTerminals: () => [{ session: { id: "s1", name: "build", alive: true }, workspace: "api", label: "api" }],
-    settingEntries: () => [{ id: "font_size", label: "Font size", tab: "general", keywords: ["zoom"] }],
+    settingEntries: () => [{ id: "font_size", label: "Font size", tab: "general", keywords: "font size zoom px" }],
   });
   palette.late.names = ["api"];
   palette._compose();

@@ -258,7 +258,11 @@ def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     assert exiting.count("keepalive: true") >= 2
     assert "workspace.save(state.currentWorkspace" in exiting
     assert '"DELETE"' in exiting
-    assert ".finally(release)" in exiting
+    # The release leaves at once, not chained to the save: a promise pending
+    # when the document is torn down never settles, so a chained release
+    # never left and the claim outlived a reload for the whole TTL.
+    assert ".finally(release)" not in exiting
+    assert "\n    release();" in exiting
     assert "/api/sessions/cleanup" not in exiting
 
 
@@ -421,7 +425,9 @@ def test_views_have_no_primary_and_every_view_closes():
     make = _function(views, "  _makeView({", "\n  _button(")
     assert 'view.closeButton = this._button("x",' in make
     assert "if (!primary)" not in make
-    close = _function(views, "  async close(view) {", "\n  // One view over the whole window")
+    # Opens, closes and rebuilds run one after another instead of refusing.
+    assert "    return this._serial(() => this._close(view));" in views
+    close = _function(views, "  async _close(view) {", "\n  // One view over the whole window")
     assert "if (!view || this.busy || !this.views().includes(view)) return false;" in close
     # Closing saves, retains and releases through the view's own document,
     # then removes the leaf; nothing is killed.
