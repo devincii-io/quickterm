@@ -35,8 +35,10 @@ from uuid import uuid4
 # case.
 DEFAULT_TTL_S = 150.0
 # Windows are cheap but not free (one WebView2 each). A ceiling keeps a runaway
-# caller from opening them until the machine gives up.
-DEFAULT_MAX_WINDOWS = 12
+# caller from opening them until the machine gives up. Every native window's
+# shell document and each workspace view inside it register on their own, so
+# one window with a handful of views already takes several entries.
+DEFAULT_MAX_WINDOWS = 32
 MAX_ID_CHARS = 64
 MAX_TITLE_CHARS = 120
 MAX_WORKSPACE_CHARS = 200

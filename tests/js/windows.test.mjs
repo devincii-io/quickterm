@@ -43,6 +43,9 @@ test("a refusal names the consequence, not the mechanism", () => {
   assert.equal(describeHolder({ id: "w3", label: "Beta window" }), "another window (Beta window)");
   assert.equal(describeHolder({ id: "w1", label: "" }), "another window");
   assert.equal(describeHolder(null), "another window");
+  // Every workspace is a view now; a 3.x window still calls them side views.
+  assert.equal(describeHolder({ id: "v1", label: "View: api" }), "a workspace view (api)");
+  assert.equal(describeHolder({ id: "v2", label: "Side view: docs" }), "a workspace view (docs)");
 });
 
 test("the new-window picker shows taken workspaces instead of hiding them", () => {

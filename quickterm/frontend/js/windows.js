@@ -54,7 +54,11 @@ export function workspaceHolder(list, selfId, name) {
 export function describeHolder(entry) {
   if (entry && entry.primary) return "the main window";
   const label = entry && entry.label ? String(entry.label).trim() : "";
-  if (label.startsWith("Side view: ")) return `a second workspace view (${label.slice(11)})`;
+  // Every workspace view registers as "View: <name>"; 3.x called them side
+  // views, and a registry entry from a window still running 3.x says so.
+  for (const prefix of ["View: ", "Side view: "]) {
+    if (label.startsWith(prefix)) return `a workspace view (${label.slice(prefix.length)})`;
+  }
   return label ? `another window (${label})` : "another window";
 }
 
