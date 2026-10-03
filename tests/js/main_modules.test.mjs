@@ -379,7 +379,7 @@ test("autosave waits out a switch and never saves an unnamed scratch", async () 
   state.currentWorkspace = "Alpha";
   state.workspacePath = "C:\\alpha";
   assert.equal(await autosave.persistCurrentWorkspace(), true);
-  assert.deepEqual(saves, [["Alpha", { type: "pane" }, null, ["a"], "C:\\alpha"]]);
+  assert.deepEqual(saves, [["Alpha", { type: "pane" }, undefined, ["a"], undefined]], "layout autosaves preserve separately edited metadata");
   autosave.cancelWorkspaceSave();
   autosave.cancelWorkspaceRetry();
 });

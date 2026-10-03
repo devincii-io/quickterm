@@ -1012,6 +1012,10 @@ def _discard_scratch_workspace() -> None:
         import quickterm.workspace as workspace
 
         workspace.delete_workspace("scratch")
+        for name in workspace.list_workspaces():
+            saved = workspace.load_workspace(name)
+            if saved is not None and getattr(saved, "temporary", False):
+                workspace.delete_workspace(name)
     except Exception:
         log.debug("could not discard scratch workspace", exc_info=True)
 

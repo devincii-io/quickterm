@@ -17,6 +17,8 @@ const PATHS = {
   "arrow-up-right": '<line x1="6.5" y1="17.5" x2="17" y2="7"/><polyline points="8.5 7 17 7 17 15.5"/>',
   check: '<polyline points="4.5 12.5 9.5 17.5 19.5 6.5"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  maximize: '<path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/>',
+  minimize: '<path d="M3 8h5V3m8 0v5h5M8 21v-5H3m18 0h-5v5"/>',
   x: '<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>',
   trash:
     '<polyline points="3.5 6.5 20.5 6.5"/><path d="M8.5 6.5v-2a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v2"/>' +

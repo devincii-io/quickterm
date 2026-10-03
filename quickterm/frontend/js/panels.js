@@ -11,23 +11,14 @@ import { renderTerminalSettings } from "./panel_settings_terminals.js";
 import { renderSnippetSettings } from "./panel_settings_snippets.js";
 import { renderAboutSettings, renderVoiceSettings, renderAdvancedSettings } from "./panel_settings_about.js";
 import { renderHelp } from "./panel_help.js";
-
-// TERMINAL_TYPES is the Settings fallback inventory, which lists only what a
-// Windows machine may offer before it has been asked. Every other kind the
-// launcher knows is named here, or the dashboard called a Git Bash or a zsh
-// profile "Custom command".
-const OTHER_TYPE_LABELS = {
-  "git-bash": "Git Bash",
-  nushell: "Nushell",
-  bash: "Bash",
-  zsh: "Zsh",
-  fish: "Fish",
-};
+import { renderConnections, connectionProblems, connectionLabel } from "./panel_connections.js";
+import { renderSetup } from "./setup.js";
+import { settingsPatch } from "./global_settings.js";
 
 export function terminalTypeLabel(type) {
   const known = TERMINAL_TYPES.find((item) => item.id === type);
   if (known) return known.label;
-  return OTHER_TYPE_LABELS[type] || TERMINAL_TYPES.find((item) => item.id === "custom").label;
+  return connectionLabel({ terminal_type: type });
 }
 
 // Who gets Escape or Tab while the sheet is open. A menu opened from the
@@ -40,28 +31,6 @@ export function sheetKeyRoute(key, { menuOpen, inMenu }) {
   if (key !== "Escape" && key !== "Tab") return "none";
   if (!menuOpen) return "sheet";
   return inMenu ? "menu" : "close-menu";
-}
-
-// The Advanced tab hands back arbitrary JSON. "null", "42" and "[]" all parse
-// happily and then throw on the first property access, past the parse guard,
-// so the shape is checked here, not later.
-function parseSettingsJson(text) {
-  let value;
-  try {
-    value = JSON.parse(text);
-  } catch (_) {
-    return { error: "Fix the JSON before saving." };
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { error: "The configuration must be a JSON object." };
-  }
-  if (value.profiles !== undefined && !Array.isArray(value.profiles)) {
-    return { error: "“profiles” must be a list." };
-  }
-  if (value.snippets !== undefined && !Array.isArray(value.snippets)) {
-    return { error: "“snippets” must be a list." };
-  }
-  return { value };
 }
 
 export class Panels {
@@ -133,6 +102,7 @@ export class Panels {
   }
 
   close() {
+    this.connectionEditor = null;
     // If the user previewed a theme in Settings without saving, put the
     // committed theme back so closing = cancel.
     const revert = this._themePreviewDirty ? this.app.appliedTheme() : null;
@@ -171,6 +141,7 @@ export class Panels {
       dashboard: ["Your workspaces", "Pick up where you left off, or start something new."],
       settings: ["Settings", "Make QuickTerm feel right for the way you work."],
       help: ["Quick guide", "Everything you need, without a manual."],
+      setup: ["Set up QuickTerm", "Windows, workspaces and terminals"],
     };
     [this.titleEl.textContent, this.subtitleEl.textContent] = titles[name] || titles.help;
     if (name === "dashboard") {
@@ -179,6 +150,9 @@ export class Panels {
     } else if (name === "settings") {
       this.bodyEl.textContent = "";
       this._settings();
+    } else if (name === "setup") {
+      this.bodyEl.textContent = "";
+      renderSetup.call(this, this.bodyEl);
     } else {
       this.bodyEl.textContent = "";
       this._help();
@@ -436,6 +410,7 @@ export class Panels {
       return;
     }
     this.settingsDraft = JSON.parse(JSON.stringify(cfg));
+    this.settingsBaseline = structuredClone(cfg);
     this.terminalInventory = inventory;
     // No type is stamped here. A hand-edited profile without one launches as
     // a plain command, and stamping the inferred type at load saved it with
@@ -448,29 +423,19 @@ export class Panels {
     const content = make("div", "settings-content");
     const tabs = [
       ["general", "General", "Appearance and behavior"],
-      ["terminals", "Terminals", "Profiles, WSL and commands"],
+      ["connections", "Terminals and connections", "Saved launch configurations"],
       ["snippets", "Snippets", "Palette commands"],
       // Voice is parked until it has a real capture overlay; the backend
       // hotkey wiring is disabled in app.py for the same reason.
-      ["advanced", "Advanced", "Raw configuration"],
+      ["advanced", "Advanced", "Server and voice settings"],
       ["about", "About", "Version, updates and links"],
     ];
-    // Reconcile the Advanced tab's textarea into the draft before the DOM that
-    // holds it is thrown away. Without this, switching tabs silently discarded
-    // raw JSON edits and a later Save reported "Saved." for the old config.
-    const absorbJson = () => {
-      const textarea = content.querySelector(".settings-json");
-      if (!textarea) return null;
-      const parsed = parseSettingsJson(textarea.value);
-      if (parsed.error) return parsed.error;
-      this.settingsDraft = parsed.value;
-      return null;
-    };
     const render = () => {
       for (const button of nav.querySelectorAll("button")) button.classList.toggle("active", button.dataset.tab === this.settingsTab);
       content.textContent = "";
       if (this.settingsTab === "general") this._settingsGeneral(content);
       else if (this.settingsTab === "terminals") this._settingsTerminals(content, render);
+      else if (this.settingsTab === "connections") renderConnections.call(this, content, render);
       else if (this.settingsTab === "snippets") this._settingsSnippets(content, render);
       else if (this.settingsTab === "about") this._settingsAbout(content);
       else this._settingsAdvanced(content);
@@ -481,12 +446,6 @@ export class Panels {
       button.dataset.tab = id;
       button.append(make("strong", "", title), make("small", "", note));
       button.addEventListener("click", () => {
-        const problem = absorbJson();
-        if (problem) {
-          message.textContent = problem;
-          message.classList.add("error");
-          return;
-        }
         this.settingsTab = id;
         render();
       });
@@ -501,14 +460,14 @@ export class Panels {
     cancel.addEventListener("click", () => this.close());
     const save = this._button("Save changes", "primary-button");
     save.addEventListener("click", async () => {
-      const jsonProblem = absorbJson();
-      if (jsonProblem) {
-        message.textContent = jsonProblem;
+      const profiles = this.settingsDraft.profiles || [];
+      if (this.connectionEditor?.draft) {
+        message.textContent = "Save or cancel the connection being edited first.";
         message.classList.add("error");
-        content.querySelector(".settings-json")?.focus();
         return;
       }
-      const profiles = this.settingsDraft.profiles || [];
+      const connectionError = profiles.flatMap((profile) => connectionProblems(profile, profiles))[0];
+      if (connectionError) { message.textContent = connectionError; message.classList.add("error"); return; }
       if (profiles.some((profile) => !(profile.name || "").trim())) {
         message.textContent = "Every terminal profile needs a name.";
         message.classList.add("error");
@@ -544,12 +503,17 @@ export class Panels {
       message.classList.remove("error");
       message.textContent = "Saving…";
       try {
-        await api.putConfig(this.settingsDraft);
+        const fresh = await api.getFullConfig();
+        const patch = settingsPatch(this.settingsDraft, this.settingsBaseline, fresh);
+        await api.putConfig(patch);
+        Object.assign(this.settingsDraft, fresh, patch);
+        this.settingsBaseline = structuredClone(this.settingsDraft);
         await this.app.onConfigSaved();
         this._themePreviewDirty = false; // committed, so nothing to revert on close
         message.textContent = "Saved. New terminals will use these settings.";
+        render();
       } catch (error) {
-        message.textContent = error.detail || `Could not save (${error.status || "connection error"}).`;
+        message.textContent = error.detail || error.message || `Could not save (${error.status || "connection error"}).`;
         message.title = message.textContent;
         message.classList.add("error");
       } finally {

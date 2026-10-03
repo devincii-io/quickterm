@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -45,6 +46,18 @@ def _wire_notifier(ctx: ApiContext) -> None:
 def register(app: FastAPI, ctx: ApiContext) -> None:
     manager = ctx.manager
     _wire_notifier(ctx)
+
+    @app.post("/api/connections/{name}/open")
+    async def open_desktop_connection(name: str) -> dict:
+        connections = importlib.import_module("quickterm.connections")
+
+        try:
+            profile = launch.find_profile(ctx.cfg, name)
+            return await asyncio.to_thread(connections.open_desktop, profile)
+        except launch.LaunchError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/sessions")
     def list_sessions(metrics: bool = True) -> list[dict]:

@@ -15,6 +15,7 @@ export function validateWorkspaceName(name) {
   // "scratch" is reserved: the backend deletes that file at app start and
   // exit, so a user workspace under that name would silently vanish.
   if (cleanName.toLowerCase() === "scratch") return '"scratch" is reserved for the disposable workspace.';
+  if (cleanName.toLowerCase().startsWith("scratch-view-")) return 'Names starting with "scratch-view-" are reserved for temporary workspace views.';
   // The backend stores names through a safe-name filter; a name that does
   // not survive it unchanged would collide or fail to restore on reboot.
   if (cleanName.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\.+$/, "") !== cleanName) {
@@ -290,6 +291,14 @@ export function createWorkspaceActions({
 
   async function onWorkspacesChanged() {
     state.workspaceNames = await api.listWorkspaces().catch(() => state.workspaceNames);
+    if (state.currentWorkspace) {
+      const saved = await workspace.details(state.currentWorkspace).catch(() => null);
+      if (saved) {
+        state.workspacePath = saved.path || null;
+        state.workspacePathExists = saved.path_exists !== false;
+        state.workspaceLogo = saved.logo || null;
+      }
+    }
     buildLauncher();
     refreshWorkspaceRoots();
   }
@@ -306,10 +315,7 @@ export function createWorkspaceActions({
       return false;
     }
     try {
-      await workspace.save(
-        name, saved.layout, saved.logo || null, [...(saved.session_ids || [])],
-        (folder || "").trim() || null,
-      );
+      await api.patchWorkspace(name, { path: (folder || "").trim() || null });
     } catch (error) {
       showError(error?.detail || `That folder could not be saved for "${name}".`);
       return false;
@@ -329,9 +335,7 @@ export function createWorkspaceActions({
     state.workspacePath = next;
     state.workspacePathExists = true;
     try {
-      await workspace.save(
-        state.currentWorkspace, layout.serialize(), state.workspaceLogo, [...ownedSessionIds()], next,
-      );
+      await api.patchWorkspace(state.currentWorkspace, { path: next });
     } catch (error) {
       state.workspacePath = previous;
       showError(error?.detail || "That folder could not be saved for this workspace.");
@@ -346,12 +350,20 @@ export function createWorkspaceActions({
 
   async function setWorkspaceLogo(assetId) {
     if (!state.currentWorkspace) return false;
+    await api.patchWorkspace(state.currentWorkspace, { logo: assetId || null });
     state.workspaceLogo = assetId || null;
-    await workspace.save(
-      state.currentWorkspace, layout.serialize(), state.workspaceLogo, [...ownedSessionIds()], state.workspacePath,
-    );
     buildLauncher();
     return true;
+  }
+
+  async function setWorkspaceAppearance(name, folder, logo) {
+    try {
+      await api.patchWorkspace(name, { path: (folder || "").trim() || null, logo: logo || null });
+      return true;
+    } catch (error) {
+      showError(error?.detail || "Workspace settings could not be saved.");
+      return false;
+    }
   }
 
   return {
@@ -366,5 +378,6 @@ export function createWorkspaceActions({
     setWorkspaceFolder,
     setWorkspacePath,
     setWorkspaceLogo,
+    setWorkspaceAppearance,
   };
 }

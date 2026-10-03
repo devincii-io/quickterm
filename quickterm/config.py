@@ -52,6 +52,7 @@ class Profile:
     ssh_port: int | None = None
     ssh_user: str | None = None
     ssh_key: str | None = None
+    connection: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,8 +75,7 @@ class VoiceConfig:
 
 
 def _default_profiles() -> list[Profile]:
-    # Personal profiles are user-created only; system shells (PowerShell, cmd,
-    # WSL, bash, ...) are detected live and offered by the launcher instead.
+    # Discovery feeds setup; the launcher exposes saved configurations only.
     return []
 
 
@@ -118,8 +118,7 @@ class AppConfig:
     # Root folder for the disposable scratch workspace. Empty = a QuickTerm
     # folder under the system temp directory, created on demand.
     scratch_dir: str = ""
-    # A profile name, or a detected system shell id such as "git-bash".
-    # Empty = first profile, else first system shell.
+    # Saved profile name. Legacy shell IDs remain readable for older clients.
     default_profile: str = ""
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
@@ -360,6 +359,8 @@ def validate_config(cfg: AppConfig) -> None:
         hotkey_owners[parse_binding(cfg.summon_hotkey)] = "QuickTerm summon shortcut"
     profile_names: set[str] = set()
     for profile in cfg.profiles:
+        from .connections import validate as validate_connection
+
         name = profile.name.strip() if isinstance(profile.name, str) else ""
         if not name:
             raise ValueError("Every terminal profile needs a name")
@@ -383,6 +384,10 @@ def validate_config(cfg: AppConfig) -> None:
                 )
         if not isinstance(profile.autostart, bool):
             raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
+        try:
+            validate_connection(profile)
+        except ValueError as exc:
+            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
         if profile.terminal_type == "custom" and not profile.cmd.strip():
             raise ValueError(f'Terminal profile "{name}": executable is required')
         if profile.terminal_type == "claude-code" and profile.claude_mode not in {

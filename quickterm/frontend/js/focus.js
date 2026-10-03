@@ -30,7 +30,12 @@ export function releaseFocus(owner) {
 
 // True when nothing on top of the workspace wants the keyboard.
 export function terminalMayFocus() {
-  return owners.size === 0;
+  if (owners.size) return false;
+  // Window overlays also own focus in embedded workspace documents.
+  if (typeof window !== "undefined" && window.parent !== window) {
+    return !window.parent.quicktermChrome?.ownsKeyboard();
+  }
+  return true;
 }
 
 export function focusOwners() {

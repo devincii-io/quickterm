@@ -67,6 +67,10 @@ export function createSpawner({
   // no-op and handed every new pane the first personal profile instead.
   function defaultProfile() {
     const name = state.cfg.default_profile;
+    if (state.requireConfiguredTerminals) {
+      return state.profiles.find((item) => item.name === name && !["rdp", "vnc"].includes(item.terminal_type))
+        || state.profiles.find((item) => !["ssh", "sftp", "telnet", "serial", "docker", "podman", "kubernetes", "rdp", "vnc"].includes(item.terminal_type)) || null;
+    }
     if (name === "") return null;
     const profile = state.profiles.find((item) => item.name === name);
     if (profile) return profile;
@@ -76,9 +80,7 @@ export function createSpawner({
   }
 
   // Where a new terminal should start when the caller has no directory of its
-  // own. Inside a named workspace the answer is "let the backend resolve the
-  // workspace folder"; in scratch it is the disposable scratch folder; a
-  // profile pinned to a fixed folder always keeps it.
+  // own. Named workspaces use their stored root; scratch uses its disposable root.
   // Profiles carry no folder, so there is nothing here to defer to: an
   // explicit directory wins, scratch supplies its own throwaway root, and a
   // named workspace is resolved by the backend from its stored path.
@@ -124,7 +126,7 @@ export function createSpawner({
       pane.launchOptions = launchOptions(launch);
       // The backend resolves the workspace folder, so its answer, not the
       // hint we sent, is what this pane actually opened in.
-      pane.setLaunchCwd(info.cwd || cwd || profileByName(profileName)?.cwd || null);
+      pane.setLaunchCwd(info.cwd || cwd || null);
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -177,9 +179,9 @@ export function createSpawner({
     }
     const profile = defaultProfile();
     if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride), {});
-    const system = defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
+    const system = !state.requireConfiguredTerminals && defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
     if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
-    pane.showNotice("[no shell found, add one in settings]");
+    pane.showNotice(state.requireConfiguredTerminals ? "[Set up a terminal in Terminals and connections]" : "[no shell found, add one in settings]");
     return Promise.resolve(null);
   }
 
@@ -215,13 +217,20 @@ export function createSpawner({
         claudeMode: normalClaudeSplitMode(profile),
       });
     }
-    const system = defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
+    const system = !state.requireConfiguredTerminals && defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
     if (!system) return spawnDefaultInto(pane);
     const choice = { kind: "system", id: system.terminalType, ...system };
     return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice)) });
   }
 
   async function runProfile(profile) {
+    if (["rdp", "vnc"].includes(profile.terminal_type)) {
+      try {
+        await api.openDesktopConnection(profile.name);
+        layout.focused?.flashNotice(`[${profile.name} opened in a separate desktop window]`);
+      } catch (error) { showError(error.detail || "Could not open the desktop client"); }
+      return;
+    }
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;

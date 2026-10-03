@@ -16,7 +16,7 @@ export function createAppState({
     workspaceNames,
     terminalInventory,
 
-    // This window's identity in the registry, and the workspace it is allowed
+    // This view's identity in the registry, and the workspace it is allowed
     // to own (window_registry.js is the only writer).
     windowId: null,
     claimedWorkspace: null,
@@ -26,12 +26,11 @@ export function createAppState({
     // trusted from the launch URL for the rest of the run.
     windowIsPrimary,
 
-    // null is a never-adopted scratch layout; "scratch" is the adopted one.
+    // null is a scratch layout before adoption; each scratch view gets its own id.
     currentWorkspace: null,
     workspaceLogo: null,
     // A workspace is a folder: this is the root every session it owns starts in.
-    // null means "no folder chosen": the backend falls back to the profile's own
-    // directory and finally the home folder.
+    // null means "no folder chosen": the backend falls back to the home folder.
     workspacePath: null,
     workspacePathExists: true,
     // Scratch is disposable, so its terminals start in a disposable folder
@@ -54,8 +53,7 @@ export function createAppState({
     // The document is leaving; nothing autosaves after this.
     exiting: false,
 
-    // Whatever the launcher's "New terminal" dropdown currently shows is what
-    // splits and fresh panes open.
+    // Shared by this native window's views; splits use its configured launch choice.
     selectedTerminal: null,
     // launcher.js's handle on the sidebar, replaced on every rebuild.
     launcherView: null,

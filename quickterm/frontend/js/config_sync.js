@@ -41,12 +41,13 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
       api.getTerminalOptions().catch(() => state.terminalInventory),
     ]);
     if (!fresh) return;
+    const previous = state.cfg;
     // A new default terminal in Settings is what "+" starts from now on, not
     // only after a restart.
     if (fresh.default_profile !== state.cfg.default_profile) state.selectedTerminal = null;
     state.cfg = fresh;
     reportLaunchError(fresh.launch_error);
-    state.scratchRoot = fresh.scratch_dir || state.scratchRoot;
+    state.scratchRoot = fresh.scratch_dir || null;
     state.profiles = fresh.profiles || [];
     state.snippets = fresh.snippets || [];
     state.terminalInventory = saveInventoryCache(freshInventory);
@@ -55,8 +56,8 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
     app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
     applyChromeTheme(fresh.theme, fresh.custom_theme);
     layout.setTheme(getTheme(fresh.theme, fresh.custom_theme).xterm);
-    layout.setFontFamily(fresh.font_family || "JetBrains Mono");
-    setFontSize(fresh.font_size, false);
+    if (fresh.font_family !== previous.font_family) layout.setFontFamily(fresh.font_family || "JetBrains Mono");
+    if (fresh.font_size !== previous.font_size) setFontSize(fresh.font_size, false);
     buildLauncher();
   }
 

@@ -18,14 +18,9 @@ export function renderGeneralSettings(host) {
       String(cfg.font_size || 14),
     );
     fontSize.addEventListener("change", () => { cfg.font_size = Number(fontSize.value); });
-    // A detected shell is a default of its own (stored as its id, "git-bash"),
-    // so opening Git Bash by default needs no profile.
-    const shells = (this.terminalInventory?.types || []).filter((type) => type.executable
-      && type.available !== false && !["custom", "claude-code", "ssh", "sftp"].includes(type.id));
     const profileOptions = [
-      { value: "", label: "System default shell" },
-      ...shells.map((type) => ({ value: type.id, label: type.label })),
-      ...(cfg.profiles || []).map((profile) => ({ value: profile.name, label: profile.name })),
+      { value: "", label: "First saved local terminal" },
+      ...(cfg.profiles || []).filter((profile) => !["rdp", "vnc"].includes(profile.terminal_type)).map((profile) => ({ value: profile.name, label: profile.name })),
     ];
     const defaultProfile = this._select(profileOptions, cfg.default_profile || "");
     defaultProfile.addEventListener("change", () => { cfg.default_profile = defaultProfile.value; });
@@ -49,17 +44,6 @@ export function renderGeneralSettings(host) {
       hint: "Shown whenever a workspace does not have its own logo.",
       onChange: async (assetId) => { cfg.logo = assetId; },
     }));
-    const workspaceName = this.app.currentWorkspace && this.app.currentWorkspace();
-    if (workspaceName) {
-      branding.append(this._logoPicker({
-        title: `${workspaceName} logo`,
-        value: this.app.workspaceLogo ? this.app.workspaceLogo() : null,
-        hint: "Overrides the app logo only while this workspace is open.",
-        onChange: async (assetId) => { await this.app.setWorkspaceLogo(assetId); },
-      }));
-    } else {
-      branding.append(make("p", "branding-scratch-note", "Open or save a named workspace to give it a separate logo."));
-    }
 
     const behavior = make("div", "settings-group");
     behavior.append(
@@ -101,9 +85,7 @@ export function renderGeneralSettings(host) {
     maxSessions.addEventListener("input", () => {
       cfg.max_sessions = Math.max(0, Math.min(100, Number(maxSessions.value) || 0));
     });
-    // Settings PUTs the whole draft, so writing the field into it is all a
-    // save needs; the server applies the folder live and main.js re-reads the
-    // resolved root in onConfigSaved. Empty means the built-in default.
+    // The partial settings save applies this root live. Empty means the default.
     const scratch = this._textInput(cfg.scratch_dir || "", "Default: a QuickTerm folder in the system temp folder");
     scratch.addEventListener("input", () => { cfg.scratch_dir = scratch.value.trim(); });
     const scratchField = folderPickerControl(scratch, { label: "Choose the scratch folder" });

@@ -43,6 +43,7 @@ class Profile:
     autostart: bool = False
     terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/
                                       # git-bash/nushell/claude-code/ssh/sftp/custom
+                                      # telnet/serial/docker/podman/kubernetes/rdp/vnc
                                       # (POSIX adds bash/zsh/fish)
     wsl_distro: str | None = None
     start_command: str | None = None  # run inside supported shells, then remain interactive;
@@ -52,6 +53,7 @@ class Profile:
     ssh_port: int | None = None       # None = 22; validated 1..65535
     ssh_user: str | None = None
     ssh_key: str | None = None        # path to a PuTTY .ppk; existence not validated
+    connection: dict[str, str] = field(default_factory=dict)
 
 @dataclass
 class Snippet:
@@ -112,6 +114,16 @@ Profiles hold no folder, so there is none to validate here; the workspace root
 is checked when a session actually spawns. `ssh`/`sftp` profiles require a
 non-empty `ssh_host`. Passphrases and passwords are never stored; plink and
 psftp prompt interactively inside the terminal.
+
+`connection` holds typed connection fields, exposed individually in Settings:
+host/port for Telnet and desktop clients; device/baud/data_bits/parity/stop_bits/flow
+for serial; target/shell/user/context/namespace/container for containers; and
+fullscreen/width/height for RDP. Values are strings, unknown fields are rejected,
+and required targets, numeric bounds and serial enums are validated on save.
+`connections.resolve` builds argv without shell interpolation. Telnet/serial use
+bundled plink; Docker/Podman/Kubernetes use their configured CLI executable.
+RDP/VNC are external desktop windows, never PTYs. They require an explicit open
+and reject autostart/global shortcuts; credentials remain in the client.
 
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
 pairs, empty names, `=`, control characters, NUL values, and names that collide
@@ -439,6 +451,7 @@ class Workspace:
     logo: str | None = None
     path: str | None = None   # root folder every session in this workspace starts in
     session_ids: list[str] = field(default_factory=list)  # includes detached
+    temporary: bool = False   # disposable scratch-view layout, deleted between runs
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
@@ -538,7 +551,8 @@ Rules:
   workspace, so it owns one.
 - `workspace=None` means "claims nothing" and never collides. A window with no
   claim MUST NOT autosave a layout. A window that wants exclusive Scratch
-  claims the name `scratch` like any other workspace.
+  claims its scratch workspace name like any other workspace (`scratch` in the
+  primary window, `scratch-view-<id>` for other windows and tiled scratch views).
 - Names are compared **exactly**, never case-folded, because `workspace.py`
   stores `dev` and `Dev` as separate files and they are separate workspaces.
 - **Liveness is a heartbeat, not a process handle**, because a viewer can be a
@@ -634,6 +648,8 @@ REST (JSON, under `/api`):
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
 | GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. With `?challenge=<nonce>` (`[A-Za-z0-9_-]{16,64}`, else 400) it adds `proof`, the hex HMAC-SHA256 of the nonce keyed with the token: a local client proves it found this user's QuickTerm before it sends the token, and the proof of a caller-chosen nonce reveals nothing about the token. |
 | POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; `claude_mode` is limited to `new`, `continue`, `resume`, or `agents` and only applies to a `claude-code` profile; explicit cmd overrides). Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to plink/psftp argv (`[-ssh] [-P port] [-i key] [user@]host [remote-command]`); 400 if the tools are missing. |
+| POST | /api/connections/{name}/open | Opens a saved RDP/VNC profile in its external client, off the event loop. Returns `{pid, profile, type, external: true}`; 404 for an unknown profile, 400 for a terminal profile or unavailable/invalid client. No session is registered and no credentials are stored. Token-gated. |
+| PATCH | /api/workspaces/{name} | `{path?, logo?}` metadata-only edit under the workspace write lock. Preserves the latest layout, session ownership and temporary flag; 404 if missing; 400 for an empty body, unknown fields, or invalid metadata. Layout autosaves omit durable-workspace metadata so stale viewers cannot undo a folder/logo edit. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
 | POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
@@ -1003,7 +1019,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `prefers-reduced-motion` turns it off.
 - `workspace_views.js` tiles any number of workspaces into one window. The
   primary view is this document; every other view is a same-origin iframe
-  running the same app on another workspace. Views are leaves of a
+  running the same app on another workspace. Only the primary document draws
+  the window's sidebar, palette and panels. The sidebar remains outside the
+  tiled stage and routes actions to the active view's app. Embedded documents
+  suppress their chrome; their focus gate also respects the parent overlay.
+  Views are leaves of a
   `split_tree.js` tree and share the pane rules: a new view takes half of the
   view that asked, cut along its longer side; a header drag docks it beside
   another view or swaps the two; each divider drags, answers arrow keys and
@@ -1102,16 +1122,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   palette row reads "show all panes", and the terminal keeps the keyboard.
   Focusing a pane the zoom hides unzooms first. Alt+Z on a lone pane only
   flashes "[only one pane]".
-- Sidebar (`launcher.js`), top to bottom: `+ <choice>` opens a terminal, the
-  chevron beside it opens a `menu.js` menu over Personal profiles, System
-  shells and the built-in Claude choices (`claude:continue|new|resume`, the
-  CLI plus one flag, no profile needed), and an **Install** group from the
-  inventory's `installs` (`install:powershell-core`). An install row is never
-  selected, cycled or remembered (`canLaunch`): it opens a terminal running
-  the installer (`spawner.runInstaller`, or the download page), and when that
-  session exits (`Pane.onceExited`) the inventory is fetched with
-  `fresh=true`, so the new shell appears; the palette offers the same
-  installs; the workspace row is a menu button
+- Sidebar (`launcher.js`), top to bottom: a native-window identity/menu,
+  coloured workspace-view navigation when tiled, and `+ <choice>` to open a
+  saved terminal. The chooser lists configured profiles only; detecting a shell
+  never makes it a default or adds it to the launch menu. Desktop clients stay
+  in Connections. With no saved terminals, the launch action opens setup.
+  A separate gear opens the terminal/connection manager. The workspace row is a menu button
   (scratch, every saved workspace with its folder, the ones shown in another
   view marked in that view's colour, a **show beside** row action, the
   **workspace here** offer when applicable, **new scratch**), with the folder
@@ -1131,39 +1147,63 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   statistics, detached-session management, and quick profile launch.
 - Sidebar workspace rows: named workspaces autosave layout and session IDs and
   restore the exact live sessions; the last active one is remembered locally.
-  Scratch lifecycle: an unsaved scratch layout adopts the reserved
-  workspace name `scratch` on the FIRST user keystroke (replacing the previous
-  scratch file and its background-only sessions), autosaves from then on, and
-  survives window close within a run; the backend deletes `workspaces/scratch.json`
-  at process start and shutdown so it never survives a run. The name `scratch`
-  (any case) and dot-prefixed names are rejected in user save paths; workspace
-  names must survive `_safe_name` unchanged.
+  Scratch is adopted when its view boots, autosaves and survives close within a
+  run. Each additional scratch window/view uses `scratch-view-<registry id>`
+  with `temporary: true`, displayed as `scratch N` in its native window.
+  New scratch opens a separate view rather than replacing the active layout.
+  Startup/shutdown delete the legacy scratch file and flagged temporary
+  workspace files, never the scratch folder contents or unrelated workspaces.
+  Names `scratch`, `scratch-view-*`, and dot-prefixed names are reserved in the
+  user save flow. Promoting scratch saves a normal durable workspace.
 - The terminal list shows every live terminal on the backend, grouped by the
   owning workspace (yours first and unheaded when it is the only group). A row
   is a state dot and a name; chips appear only for new output, busy and open
   elsewhere. The list's tooltip carries `<n> in <workspace> · <total> live`.
   Dashboard has separate **this workspace** / **all live** statistics plus
   explicit Unassigned ownership.
-- Settings: tabbed General/Terminals/Snippets/Advanced/About editor. Nothing configurable is a bare
-  name plus a value: profiles and snippets each carry a `description`, and every row shows name,
-  description and a compact line of what it actually runs. Terminal profiles are grouped by
-  `terminal_type`; both lists gain a filter box over name/description/command at six items or more.
-  Each editor opens with a sentence about what that kind of thing is. Per-item problems (no name,
-  duplicate name, no command, no executable, no SSH host, bad environment) are marked at the item;
-  the footer validation in `panels.js` `_settings()` remains the backstop that refuses the save.
-  Empty states name a thing worth making rather than reporting that the list is empty.
-  Terminal profiles expose shell type,
-  detected WSL distributions, start command, shortcut, and autostart without requiring JSON.
+- Settings: General/Terminals and connections/Snippets/Advanced/About forms,
+  with no raw JSON editor. Connections has a searchable saved list and a
+  grouped Add catalog, then a type-specific setup form. Arguments are one argv
+  item per line; environment variables have separate key/value controls.
+  Save connection validates and persists before exposing the launcher entry,
+  then synchronizes all views. Cancel discards the editor draft. Removal leaves
+  live sessions running and is committed by Save changes.
+  Local terminal forms expose executable, detected WSL distributions, startup
+  command, shortcut, and autostart.
   `ssh`/`sftp` profiles add Host/Port/Username/Private key (`.ppk`);
   `ssh` relabels start command as a remote command; `sftp` hides it.
   `claude-code` exposes native launch modes: new,
   continue latest (`--continue`), choose a session (`--resume`), or open the
   background-agent manager (`claude agents`). Its executable is detected in the
   terminal inventory but is profile-only rather than a generic system shell.
+  Serial, Telnet, Docker, Podman, Kubernetes, RDP and VNC expose their typed
+  fields. Desktop profiles say Open window, terminal profiles Open terminal.
+  Advanced exposes loopback host and stored voice preferences as controls;
+  voice capture remains unavailable. A first-run three-step setup tour opens
+  only with no configured profiles and no completed-tour flag, and is available
+  again from Help or the native-window menu.
 - Themes: four featured choices stay visible; the catalog groups all remaining
   palettes under Dark, Neon, Soft, Warm, Light, and Custom. Clicking a theme previews
   both application chrome and every open xterm immediately; Cancel restores the
   persisted theme.
+- State scope: saved theme/custom palette, font defaults, profiles, snippets,
+  default terminal, retention/limits, scratch folder and other config are
+  backend-wide. `global_settings.js` publishes a revision-only storage event
+  after saves and refreshes on native-window focus; each receiving parent
+  reloads config and the workspace catalog into all its views without
+  rebroadcasting or rebuilding an open editor. Settings sends only changed
+  top-level fields and rejects stale conflicting edits. Unrelated config saves
+  never reset pane-local font zoom. Theme preview/cancel covers all views in
+  the editing window; a committed theme reaches other native windows.
+  Sidebar mode/width, folded groups, launch choice, focused view and view zoom
+  belong to the native window. Workspace roots/logos/layout/session ownership
+  belong to a workspace. Text zoom, cursor, input, terminal output and terminal
+  lifecycle belong to a pane/session. Workspace-catalog changes refresh other
+  views without replacing their layouts or moving their terminals.
+  Workspace folder/logo controls live in Dashboard's workspace Settings editor,
+  separate from global Settings, and commit together on Save. Replaced uploaded
+  images are not deleted while a saved config or history entry may reference
+  them; cancelling a draft cannot erase the previous logo.
 - Font size: Ctrl+±/0 change the focused pane only and are temporary; the
   saved default for every pane lives in Settings. Pane sizing lives on the
   splitter (drag, keyboard, double-click to balance) and Alt+Z zooms.
@@ -1182,10 +1222,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   palette) it focuses **Kill**, and Alt+W or Enter again completes it; opened
   from the header button it focuses **Cancel**. Escape cancels from anywhere
   in the pane. Alt+W on a pane without a live terminal flashes a notice.
-- Starting folders are shell-native: blank Windows profiles use the Windows
-  user home and blank WSL profiles use `wsl.exe --cd ~`. WSL profile folders
-  are passed through `--cd` and may be Linux paths such as `~/dev`; the profile
-  startup command runs after that location is selected. Every folder field is
+- Starting folders belong to workspaces, not profiles. An explicit launch
+  directory overrides the workspace root; missing or deleted roots fall back
+  to the home folder. WSL launches translate Windows roots for `--cd`, and
+  use `wsl.exe --cd ~` with no root. The profile startup command runs after
+  that location is selected. Every folder field is
   built by the one shared `folderPickerControl(input, options)` in
   `panel_shared.js`, which keeps manual entry and dispatches a bubbling `input`
   event on the field when a folder is picked, so callers need no second
@@ -1229,8 +1270,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   whatever the host (a POSIX shell names its own machine there); on Windows a
   drive-letter path is local, and only a host other than `localhost` makes a
   UNC path.
-  Sidebar Open and Alt+N keep the selected profile's configured folder. A
-  Claude split always uses its project folder and substitutes a normal
+  Sidebar Open and Alt+N use the workspace root. Remote and container splits
+  also use that root instead of borrowing a shell's signalled directory. A
+  Claude split always uses its workspace's project folder and substitutes a normal
   conversation when that profile's default mode is `agents`; the palette's
   explicit **Split Claude agent view** runs `claude agents --cwd <project>`.
 - Keybindings (in addition to palette): Alt+N opens a new default terminal,

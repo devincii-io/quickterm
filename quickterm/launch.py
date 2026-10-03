@@ -155,6 +155,12 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
     start = (getattr(prof, "start_command", None) or "").strip()
     configured = (getattr(prof, "cmd", None) or "").strip()
     existing_args = list(getattr(prof, "args", []) or [])
+    from .connections import CONNECTION_TYPES, DESKTOP_TYPES, resolve as resolve_connection
+
+    if terminal_type in DESKTOP_TYPES:
+        raise ValueError("Desktop connections open in a separate client window from Connections")
+    if terminal_type in CONNECTION_TYPES:
+        return resolve_connection(prof, cwd)
 
     if terminal_type == "claude-code":
         executable = configured
@@ -194,9 +200,10 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
         # opens under /mnt/c.  A blank profile belongs in the distro's own
         # home; explicit Linux and Windows paths are both accepted by --cd.
         args += ["--cd", cwd or "~"]
+        args += existing_args
         if start:
             args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
-        return "wsl.exe", args, None
+        return configured or "wsl.exe", args, None
     if terminal_type in ("bash", "zsh", "fish"):
         shell = configured or terminal_type
         # Same rule as Git Bash below: the profile's own arguments go first,
@@ -234,6 +241,7 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
             args += ["-P", str(port)]
         if key:
             args += ["-i", key]
+        args += existing_args
         args.append(f"{user}@{host}" if user else host)
         # plink runs a trailing command on the remote host instead of a shell.
         if terminal_type == "ssh" and start:

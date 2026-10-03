@@ -136,17 +136,10 @@ export function renderLogoPicker({ title, value, hint, onChange }) {
     choose.addEventListener("click", () => file.click());
     const remove = this._button("Reset", "text-button");
     remove.disabled = !value;
-    // Superseded uploads were never reclaimed: every replaced logo stayed in
-    // %APPDATA%/quickterm/assets forever (up to 1 MB each) and api.deleteAsset
-    // had no callers at all. Best effort; the config change is what matters.
-    const discard = (assetId) => {
-      if (assetId) api.deleteAsset(assetId).catch(() => {});
-    };
+    // Uploaded assets may still be referenced by committed settings or history.
     remove.addEventListener("click", async () => {
-      const previous = value;
       await onChange(null);
       value = null;
-      discard(previous);
       remove.disabled = true;
       render(null);
       status.textContent = "Using the built-in QuickTerm mark.";
@@ -164,13 +157,11 @@ export function renderLogoPicker({ title, value, hint, onChange }) {
       status.textContent = "Uploading…";
       try {
         const uploaded = await api.uploadAsset(selected);
-        const previous = value;
         await onChange(uploaded.id);
         value = uploaded.id;
-        if (previous !== uploaded.id) discard(previous);
         remove.disabled = false;
         render(value);
-        status.textContent = "Ready. Save settings to apply the global logo.";
+        status.textContent = "Ready to save.";
       } catch (error) {
         status.textContent = `Upload failed (${error.status || "connection error"}).`;
         status.classList.add("error");

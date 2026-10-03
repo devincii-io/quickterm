@@ -189,14 +189,28 @@ export function renderVoiceSettings(host) {
 
 
 export function renderAdvancedSettings(host) {
-    host.append(this._sectionHeading(
-      "Advanced configuration",
-      "The same configuration the other tabs edit, as the JSON file on disk. Invalid JSON cannot be saved.",
-    ));
-    const notice = make("div", "advanced-notice", "Use this for precise argument arrays, bulk edits and any setting that has no field of its own. Every profile and snippet here also carries a description; the other tabs are the readable way to write one.");
-    const textarea = make("textarea", "settings-json");
-    textarea.spellcheck = false;
-    textarea.value = JSON.stringify(this.settingsDraft, null, 2);
-    textarea.addEventListener("keydown", (event) => event.stopPropagation());
-    host.append(notice, textarea);
+    const cfg = this.settingsDraft;
+    host.append(this._sectionHeading("Server", "Changes apply after restart."));
+    const server = make("div", "settings-grid two-column");
+    const bind = this._select(["127.0.0.1", "localhost", "::1"].map((value) => ({ value, label: value })), cfg.host || "127.0.0.1");
+    bind.addEventListener("change", () => { cfg.host = bind.value; });
+    server.append(this._field("Loopback address", bind));
+    host.append(server);
+    cfg.voice ||= { enabled: true, model_size: "small", hotkey: "ctrl+alt+v", language: null };
+    host.append(this._sectionHeading("Voice preferences", "Voice capture is currently unavailable."));
+    const voice = make("div", "settings-grid two-column");
+    const enabled = make("label", "toggle-row");
+    const checkbox = make("input", "sr-only");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(cfg.voice.enabled);
+    checkbox.addEventListener("change", () => { cfg.voice.enabled = checkbox.checked; });
+    enabled.append(checkbox, make("span", "toggle-control"), make("span", "toggle-copy", "Voice enabled"));
+    const model = this._select(["tiny", "base", "small", "medium", "large-v3"].map((value) => ({ value, label: value })), cfg.voice.model_size);
+    model.addEventListener("change", () => { cfg.voice.model_size = model.value; });
+    const language = this._textInput(cfg.voice.language || "", "Auto-detect");
+    language.addEventListener("input", () => { cfg.voice.language = language.value || null; });
+    const hotkey = this._textInput(cfg.voice.hotkey || "", "ctrl+alt+v");
+    hotkey.addEventListener("input", () => { cfg.voice.hotkey = hotkey.value; });
+    voice.append(enabled, this._field("Model", model), this._field("Language code", language), this._field("Voice shortcut", hotkey));
+    host.append(voice);
   }

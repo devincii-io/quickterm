@@ -39,6 +39,7 @@ export const getProfiles = () => req("GET", "/api/profiles");
 export const getSessions = (options = {}) =>
   req("GET", options.metrics === false ? "/api/sessions?metrics=false" : "/api/sessions");
 export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
+export const openDesktopConnection = (name) => req("POST", `/api/connections/${encodeURIComponent(name)}/open`, {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
 export const retainSession = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/retain`, {});
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
@@ -54,14 +55,16 @@ export const claimLaunch = () => req("GET", "/api/launches/next");
 export const listWorkspaces = () =>
   req("GET", "/api/workspaces").then((names) => (names || []).filter((name) => !name.startsWith(".")));
 export const getWorkspace = (name) => req("GET", `/api/workspaces/${encodeURIComponent(name)}`);
+export const patchWorkspace = (name, metadata) => req("PATCH", `/api/workspaces/${encodeURIComponent(name)}`, metadata);
 // `path` is deliberately three-valued: undefined omits the key so the server
 // keeps the stored folder (every layout autosave takes this branch), null
 // clears it, a string sets it.
 export const putWorkspace = (name, layout, logo, sessionIds = [], path, options) =>
   req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
     layout,
-    logo: logo ?? null,
+    ...(logo === undefined ? {} : { logo }),
     session_ids: [...new Set(sessionIds || [])],
+    ...(/^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(name) ? { temporary: true } : {}),
     ...(path === undefined ? {} : { path }),
   }, options);
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
