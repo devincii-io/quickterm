@@ -2,20 +2,22 @@ import { icon } from "./icons.js";
 import { toggleMenu } from "./menu.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
 import { connectionLabel, connectionTarget } from "./panel_connections.js";
-import { workspaceLabel } from "./boot_context.js";
+import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
+import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
+import { claimFocus, releaseFocus } from "./focus.js";
+import { confirmNear } from "./confirm_popover.js";
 
 // The sidebar is the whole chrome. Three modes, one hotkey (Alt+Shift+S)
 // cycles them, and the choice is remembered per machine:
-//   full    a list: new terminal, workspace, every live terminal, four icons
+//   full    one list: new terminal, every workspace with its terminals, icons
 //   rail    30px of dots, so the state of every terminal is still in view
-//   hidden  nothing at all; a small floating "+" sits over the terminal's left
-//           edge and can be dragged up and down
+//   hidden  nothing at all; a small floating "+" sits at the terminal's top
+//           left corner
 export const SIDEBAR_MODES = ["full", "rail", "hidden"];
 const SIDEBAR_MODE_KEY = "quickterm.sidebarMode";
 const LEGACY_COLLAPSED_KEY = "quickterm.sidebarCollapsed";
 const SIDEBAR_WIDTH_KEY = "quickterm.sidebarWidth";
 const SIDEBAR_GROUPS_KEY = "quickterm.sidebarClosedGroups";
-const FLOAT_TOP_KEY = "quickterm.floatTop";
 
 export function nextSidebarMode(mode) {
   const index = SIDEBAR_MODES.indexOf(mode);
@@ -58,11 +60,6 @@ export function isWideSidebar(width) {
 // Terminals nobody claims land here. panel_dashboard.js names the same set with
 // the same word, so the two views cannot describe one thing two ways.
 export const UNASSIGNED_GROUP = "Unassigned";
-const SCRATCH_GROUP = "scratch";
-
-function asSet(value) {
-  return value instanceof Set ? value : new Set(value || []);
-}
 
 // What one terminal is doing, in one word.
 //
@@ -74,7 +71,7 @@ function asSet(value) {
 //
 // `attention` outranks everything, being open here included: a pane you are
 // not looking at can ring, and the focused one never keeps it long, because
-// sidebar.js tells the server it was seen.
+// the shell tells the server it was seen.
 //
 // `attachments` counts subscribers on the backend, not panes in this window,
 // so a terminal open in another QuickTerm window says so rather than looking
@@ -170,73 +167,103 @@ export function sessionTooltip(session, groupName) {
 }
 
 const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread"];
+const KIND_ORDER = { workspace: 0, scratch: 1, unassigned: 2 };
 
-// Group every live terminal on the backend by the workspace that owns it,
-// plus the exited ones the backend still holds for the user (isListedSession).
+function lookup(map, id) {
+  if (!map) return undefined;
+  if (map instanceof Map) return map.get(id);
+  return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : undefined;
+}
+
+function byText(a, b) {
+  return String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true })
+    || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+// One flat list of groups: every saved workspace (empty ones too, so any of
+// them is one click from open), the scratch views this window shows or that
+// still own a terminal, then the terminals nobody owns. The order is the name
+// and nothing else. A terminal that needs you gets a chip and a halo; it never
+// moves a row or a group, because a list that reorders itself under the
+// pointer turns a click on one terminal into a click on another.
 //
-// The ownership rule has to be the dashboard's rule or the two views disagree
-// about the same machine. panel_dashboard.js derives it from each saved
-// workspace's `session_ids` plus the ids in its layout; the backend mirrors
-// exactly that set onto every session as `workspace` on each workspace PUT
-// (`SessionManager.sync_workspace`), so reading the field here is the same
-// answer from the end the sidebar can afford. What the backend cannot know is
-// what this window has claimed since its last autosave, which is what
-// ownedIds/attachedIds add on top.
-export function groupSessionsByWorkspace(sessions = [], context = {}) {
-  const owned = asSet(context.ownedIds);
-  const attached = asSet(context.attachedIds);
-  const visible = asSet(context.visibleIds);
-  const currentName = context.currentWorkspace || SCRATCH_GROUP;
+// The owner rule is the dashboard's rule plus what this window knows first: a
+// view that has a pane on the session, then an in-memory claim not yet
+// autosaved, then the backend's `workspace` field (mirrored from every saved
+// workspace's session_ids on each workspace PUT).
+export function sidebarGroups(sessions = [], { workspaces = [], views = [], attached = {}, owned = {} } = {}) {
+  const viewOf = new Map();
+  for (const view of views || []) if (view?.workspace) viewOf.set(view.workspace, view);
+  const saved = new Map();
+  for (const entry of workspaces || []) {
+    const info = typeof entry === "string" ? { name: entry } : entry;
+    if (info?.name) saved.set(info.name, info);
+  }
   const groups = new Map();
-  const groupFor = (name, kind) => {
-    let group = groups.get(name);
-    if (!group) {
-      group = { name, kind, sessions: [], open: 0, busy: 0, unread: 0, attention: 0, finished: 0 };
-      groups.set(name, group);
-    }
+
+  const ensure = (name) => {
+    const key = name ? `ws:${name}` : "unassigned";
+    let group = groups.get(key);
+    if (group) return group;
+    const view = name ? viewOf.get(name) : undefined;
+    const kind = !name ? "unassigned" : isScratchWorkspace(name) ? "scratch" : "workspace";
+    const info = name ? saved.get(name) : undefined;
+    group = {
+      key,
+      name: name || null,
+      label: kind === "unassigned" ? UNASSIGNED_GROUP
+        : kind === "scratch" ? (view?.label || workspaceLabel(name)) : name,
+      kind,
+      open: Boolean(view),
+      active: Boolean(view?.active),
+      color: view?.color || null,
+      path: info?.path ?? null,
+      pathExists: info?.pathExists ?? null,
+      sessions: [],
+      counts: { attention: 0, open: 0, busy: 0, unread: 0, finished: 0 },
+    };
+    groups.set(key, group);
     return group;
   };
 
+  for (const name of saved.keys()) if (!isScratchWorkspace(name)) ensure(name);
+  for (const name of viewOf.keys()) ensure(name);
   for (const session of sessions || []) {
     if (!isListedSession(session)) continue;
-    const isAttached = attached.has(session.id);
-    const claimed = session.workspace || null;
-    const isHere = isAttached || owned.has(session.id) || (claimed !== null && claimed === currentName);
-    const group = isHere
-      ? groupFor(currentName, "current")
-      : groupFor(claimed || UNASSIGNED_GROUP, claimed ? "workspace" : "unassigned");
-    const state = sessionState(session, isAttached || visible.has(session.id));
-    group.sessions.push({ session, isAttached, isHere, state, finished: !session.alive });
-    if (COUNTED_STATES.includes(state.key)) group[state.key] += 1;
+    const attachedIn = lookup(attached, session.id) || null;
+    const owner = attachedIn || lookup(owned, session.id) || session.workspace || null;
+    const group = ensure(owner);
+    const state = sessionState(session, Boolean(attachedIn));
+    group.sessions.push({ session, state, attachedIn, finished: session.alive === false });
+    if (COUNTED_STATES.includes(state.key)) group.counts[state.key] += 1;
   }
-  if (groups.size && !groups.has(currentName)) groupFor(currentName, "current");
 
-  // Attention first inside a group, name second. A terminal asking for you
-  // leads, then the one you are looking at, then the rest; a finished one
-  // that asked for nothing sinks to the bottom.
-  const rank = { attention: 0, open: 1, unread: 2, busy: 3, elsewhere: 4, idle: 5, finished: 6 };
+  const rowName = (entry) => entry.session.name || entry.session.id || "";
   for (const group of groups.values()) {
-    group.sessions.sort((a, b) => (rank[a.state.key] ?? 9) - (rank[b.state.key] ?? 9)
-      || (a.session.name || a.session.id).localeCompare(b.session.name || b.session.id));
+    group.sessions.sort((a, b) => rowName(a).localeCompare(rowName(b), undefined, { numeric: true })
+      || String(a.session.id).localeCompare(String(b.session.id), undefined, { numeric: true }));
   }
-  // Your workspace first, unassigned last, everything else alphabetical.
-  const order = (group) => (group.kind === "current" ? 0 : group.kind === "unassigned" ? 2 : 1);
-  return [...groups.values()].sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+  return [...groups.values()].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+    || byText(a.label, b.label)
+    || byText(a.key, b.key));
 }
 
 // The group's one-line summary. A collapsed group has to keep saying what is
 // inside it, or folding one away hides exactly what this section exists to
 // show. The count itself lives in the pill beside the name.
 export function groupSummary(group) {
-  if (!group.sessions.length) return "nothing running";
+  const sessions = group.sessions || [];
+  if (!sessions.length) return "nothing running";
+  const counts = group.counts || group;
+  const count = (key) => counts[key] || 0;
   const parts = [];
-  const attention = group.attention || 0;
-  const finished = group.finished || 0;
+  const attention = count("attention");
+  const finished = count("finished");
   if (attention) parts.push(`${attention} need${attention === 1 ? "s" : ""} you`);
-  if (group.open) parts.push(`${group.open} open`);
-  if (group.unread) parts.push(`${group.unread} new output`);
-  if (group.busy) parts.push(`${group.busy} busy`);
-  const quiet = group.sessions.length - attention - finished - group.open - group.unread - group.busy;
+  if (count("open")) parts.push(`${count("open")} open`);
+  if (count("unread")) parts.push(`${count("unread")} new output`);
+  if (count("busy")) parts.push(`${count("busy")} busy`);
+  const quiet = sessions.length - attention - finished - count("open") - count("unread") - count("busy");
   if (quiet > 0) parts.push(`${quiet} background`);
   if (finished) parts.push(`${finished} finished`);
   return parts.join(" · ");
@@ -257,18 +284,34 @@ function make(tag, className, text) {
   return node;
 }
 
+// The agent mode of a profile. `claude_mode` is the pre-4.0 field name and is
+// still written for Claude Code profiles, so it is read as the fallback.
+const AGENT_MODE_LABELS = {
+  new: "new conversation",
+  continue: "continue latest",
+  resume: "choose session",
+  fork: "fork a session",
+  agents: "agent manager",
+};
+
+function agentMode(profile) {
+  return profile.agent_mode ?? profile.claude_mode ?? (profile.terminal_type === "codex" ? "new" : "continue");
+}
+
 function shellLabel(profile) {
   const target = profile.ssh_host
     ? (profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host)
     : "";
+  const mode = AGENT_MODE_LABELS[agentMode(profile)] || agentMode(profile);
   const labels = {
-    "claude-code": `Claude Code · ${profile.claude_mode === "resume" ? "choose session" : profile.claude_mode === "agents" ? "agent manager" : profile.claude_mode === "new" ? "new" : "continue"}`,
+    "claude-code": `Claude Code · ${mode}`,
+    codex: `Codex · ${mode}`,
     "powershell-core": "PowerShell 7",
     "windows-powershell": "Windows PowerShell",
     "command-prompt": "Command Prompt",
     wsl: profile.wsl_distro ? `WSL · ${profile.wsl_distro}` : "WSL",
-    ssh: target ? `SSH · ${target}` : "SSH (PuTTY plink)",
-    sftp: target ? `SFTP · ${target}` : "SFTP (PuTTY psftp)",
+    ssh: target ? `SSH · ${target}` : "SSH",
+    sftp: target ? `SFTP · ${target}` : "SFTP",
     custom: "Custom command",
   };
   return labels[profile.terminal_type] || profile.cmd || "Terminal";
@@ -286,18 +329,33 @@ const SYSTEM_META = {
   nushell: { args: [] },
 };
 
-// Claude needs no profile. When the inventory finds the CLI, three choices
-// exist out of the box, each just the CLI plus one flag; the workspace folder
-// is where they open, exactly like a shell.
-const CLAUDE_MODES = [
-  ["continue", ["--continue"], "Claude · continue", "Continue the latest conversation in this folder"],
-  ["new", [], "Claude · new", "Start a new conversation in this folder"],
-  ["resume", ["--resume"], "Claude · resume", "Choose one of Claude's sessions in this folder"],
-];
+// Agents need no profile. When the inventory finds a CLI, its common modes
+// exist out of the box, each just the CLI plus its mode arguments; the
+// workspace folder is where they open, exactly like a shell.
+const AGENT_CHOICES = {
+  "claude-code": {
+    group: "Claude",
+    prefix: "claude",
+    modes: [
+      ["continue", ["--continue"], "Claude · continue", "Continue the latest conversation in this folder"],
+      ["new", [], "Claude · new", "Start a new conversation in this folder"],
+      ["resume", ["--resume"], "Claude · resume", "Choose one of Claude's sessions in this folder"],
+    ],
+  },
+  codex: {
+    group: "Codex",
+    prefix: "codex",
+    modes: [
+      ["new", [], "Codex · new conversation", "Start a new Codex conversation in this folder"],
+      ["continue", ["resume", "--last"], "Codex · continue latest", "Continue the latest Codex conversation in this folder"],
+      ["resume", ["resume"], "Codex · choose session", "Choose one of Codex's sessions"],
+    ],
+  },
+};
 
 // Every choice carries its own `key`, and the selection is compared by that
-// key alone, so a choice object from a previous build of the sidebar still
-// selects the right row after the list is rebuilt.
+// key alone, so a choice object from an earlier model still selects the right
+// row after the list is recomputed.
 export function terminalChoices(options) {
   const choices = [];
   for (const profile of options.profiles || []) {
@@ -317,7 +375,7 @@ export function terminalChoices(options) {
   if (options.configuredOnly) return choices.filter((choice) => !["rdp", "vnc"].includes(choice.profile.terminal_type));
   const types = options.inventory?.types || [];
   for (const type of types) {
-    if (!type.executable || type.available === false || ["custom", "ssh", "sftp", "claude-code"].includes(type.id)) continue;
+    if (!type.executable || type.available === false || ["custom", "ssh", "sftp", ...Object.keys(AGENT_CHOICES)].includes(type.id)) continue;
     const meta = SYSTEM_META[type.id] || { args: [] };
     if (type.id === "wsl" && (options.inventory?.wsl_distributions || []).length) {
       for (const distro of options.inventory.wsl_distributions) {
@@ -346,15 +404,17 @@ export function terminalChoices(options) {
       detail: type.executable,
     });
   }
-  const claude = types.find((type) => type.id === "claude-code" && type.executable && type.available !== false);
-  if (claude) {
-    for (const [mode, args, label, detail] of CLAUDE_MODES) {
+  for (const [id, agent] of Object.entries(AGENT_CHOICES)) {
+    const found = types.find((type) => type.id === id && type.executable && type.available !== false);
+    if (!found) continue;
+    for (const [mode, args, label, detail] of agent.modes) {
+      const prefix = agent.prefix;
       choices.push({
-        key: `claude:${mode}`,
-        group: "Claude",
+        key: prefix === "claude" ? `claude:${mode}` : `${prefix}:${mode}`,
+        group: agent.group,
         kind: "system",
-        id: "claude-code",
-        cmd: claude.executable,
+        id,
+        cmd: found.executable,
         args,
         mode,
         label,
@@ -399,11 +459,8 @@ function iconButton(className, iconName, title, onClick) {
   return button;
 }
 
-// Hand the keyboard back to the terminal once a choice is made, or the next
-// keystroke lands on the control that was just used instead of the shell. The
-// menus claim the keyboard in focus.js while open and call this on close.
-function handBack(options) {
-  requestAnimationFrame(() => options.onLaunchComplete?.());
+function setLabel(button, title) {
+  setAttrs(button, { title, "aria-label": title });
 }
 
 function loadMode() {
@@ -433,9 +490,8 @@ function saveWidth(width) {
   try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch (_) { /* optional */ }
 }
 
-// Folded groups are stored by name, not by index: workspaces come and go, and
-// the fold has to survive `buildLauncher()` throwing the whole sidebar away on
-// every config change.
+// Folded groups are stored by workspace name (Unassigned by its label), not by
+// position: workspaces come and go and the fold has to stay with its group.
 function loadClosedGroups() {
   try {
     const raw = JSON.parse(sessionStorage.getItem(SIDEBAR_GROUPS_KEY) || "[]");
@@ -447,116 +503,60 @@ function saveClosedGroups(names) {
   try { sessionStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify([...names])); } catch (_) { /* optional */ }
 }
 
-function loadFloatTop() {
-  try {
-    const raw = Number.parseInt(sessionStorage.getItem(FLOAT_TOP_KEY) || localStorage.getItem(FLOAT_TOP_KEY), 10);
-    return Number.isFinite(raw) ? raw : 12;
-  } catch (_) { return 12; }
-}
-
-function saveFloatTop(top) {
-  try { sessionStorage.setItem(FLOAT_TOP_KEY, String(top)); } catch (_) { /* optional */ }
-  try { localStorage.setItem(FLOAT_TOP_KEY, String(top)); } catch (_) { /* optional */ }
+function foldId(group) {
+  return group.name || UNASSIGNED_GROUP;
 }
 
 // The floating "+" that stands in for the sidebar while it is hidden. It is
-// static in index.html, so it survives every rebuild; only its listeners hang
-// off the launcher's AbortController. Dragging the handle moves it up and down
-// and the position is remembered.
-function wireFloat(options, abort, showSidebar) {
+// static in index.html and pinned by CSS at the top left; it does not move.
+function wireFloat(actions, signal, showSidebar) {
   const float = document.getElementById("float-launch");
   if (!float) return { show() {}, hide() {} };
-  const handle = float.querySelector(".float-handle");
   const open = float.querySelector(".float-new");
   const reveal = float.querySelector(".float-show");
-  const signal = abort.signal;
-
-  const clampTop = (top) => Math.max(4, Math.min(window.innerHeight - float.offsetHeight - 4, Math.round(top)));
-  const place = (top) => { float.style.top = `${clampTop(top)}px`; };
-
-  open?.addEventListener("click", () => options.onNewTerminal?.(), { signal });
+  open?.addEventListener("click", () => actions.newTerminal?.(), { signal });
   open?.addEventListener("contextmenu", (event) => { event.preventDefault(); showSidebar(); }, { signal });
   reveal?.addEventListener("click", showSidebar, { signal });
-
-  let dragging = false;
-  let grabOffset = 0;
-  handle?.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    dragging = true;
-    grabOffset = event.clientY - float.getBoundingClientRect().top;
-    handle.setPointerCapture(event.pointerId);
-    float.classList.add("dragging");
-    event.preventDefault();
-  }, { signal });
-  handle?.addEventListener("pointermove", (event) => {
-    if (dragging) place(event.clientY - grabOffset);
-  }, { signal });
-  const endDrag = (event) => {
-    if (!dragging) return;
-    dragging = false;
-    try { handle.releasePointerCapture(event.pointerId); } catch (_) { /* already gone */ }
-    float.classList.remove("dragging");
-    saveFloatTop(Number.parseInt(float.style.top, 10) || 12);
-  };
-  handle?.addEventListener("pointerup", endDrag, { signal });
-  handle?.addEventListener("pointercancel", endDrag, { signal });
-  window.addEventListener("resize", () => { if (!float.hidden) place(Number.parseInt(float.style.top, 10) || 12); }, { signal });
-
   return {
-    show() { float.hidden = false; place(loadFloatTop()); },
+    show() { float.hidden = false; },
     hide() { float.hidden = true; },
   };
 }
 
-export function initLauncher(el, options) {
+// A click synthesised by Enter or Space has no pointer behind it.
+function fromKeyboard(event) {
+  return event?.detail === 0;
+}
+
+export function initLauncher(el, { actions = {}, chrome = [], elevated = false } = {}) {
   if (el._launcherAbort) el._launcherAbort.abort();
   const abort = new AbortController();
+  const signal = abort.signal;
   el._launcherAbort = abort;
   el.textContent = "";
   el.classList.add("sidebar");
-  const workspaceName = options.workspaceLabel || options.currentWorkspace || "scratch";
-  const windowRow = make("div", "sidebar-window");
-  windowRow.append(icon("new-window", 13), make("span", "sidebar-window-label", options.windowLabel || "QuickTerm window"));
-  const windowMenu = iconButton("sidebar-window-menu", "chevron-down", "Window and workspace views");
-  windowMenu.addEventListener("click", () => toggleMenu({
-    anchor: windowRow, trigger: windowMenu, label: "Window",
-    items: [
-      { label: "Add scratch view", icon: "workspaces", run: () => options.onOpenBeside?.(null) },
-      { label: "Add workspace view", icon: "workspaces", run: () => options.onPickView?.() },
-      { label: "New QuickTerm window", icon: "new-window", run: () => options.onNewWindow?.() },
-      { separator: true },
-      { label: "Setup tour", icon: "help", run: () => options.onTour?.() },
-    ], onClose: () => handBack(options),
-  }));
-  windowRow.append(windowMenu);
-  el.append(windowRow);
-  const shownViews = options.shownViews?.() || [];
-  if (shownViews.length > 1) {
-    const viewList = make("nav", "sidebar-view-list");
-    viewList.setAttribute("aria-label", "Workspace views in this window");
-    for (const view of shownViews) {
-      const button = make("button", `sidebar-view${view.active ? " active" : ""}`);
-      button.type = "button";
-      button.title = `Focus workspace view: ${view.name}`;
-      const dot = make("span", "sidebar-view-dot");
-      dot.style.backgroundColor = view.color;
-      button.append(dot, make("span", "sidebar-view-name", view.name));
-      button.addEventListener("click", () => options.onFocusView?.(view.name));
-      viewList.append(button);
-    }
-    el.append(viewList);
-  }
+
+  let model = {
+    profiles: [], inventory: null, defaultProfile: null, selectedTerminal: null, logoUrl: null,
+    workspaces: [], views: [], sessions: [], attached: {}, owned: {}, here: null,
+  };
+
+  // Hand the keyboard back to the terminal once a choice is made, or the next
+  // keystroke lands on the control that was just used instead of the shell.
+  // Menus and confirmations claim the keyboard in focus.js while open and
+  // release it before this runs.
+  const handBack = () => requestAnimationFrame(() => actions.handBack?.());
 
   // Mode -------------------------------------------------------------------
   let mode = loadMode();
-  const float = wireFloat(options, abort, () => setMode("full"));
+  const float = wireFloat(actions, signal, () => setMode("full"));
   const applyMode = () => {
     document.body.classList.toggle("sidebar-collapsed", mode === "rail");
     document.body.classList.toggle("sidebar-hidden", mode === "hidden");
     el.setAttribute("aria-hidden", String(mode === "hidden"));
     if (mode === "hidden") float.show(); else float.hide();
     saveMode(mode);
-    options.onSidebarResize?.();
+    actions.sidebarResized?.();
   };
   let describeCollapse = () => {};
   const setMode = (next) => {
@@ -564,50 +564,50 @@ export function initLauncher(el, options) {
     mode = next;
     applyMode();
     describeCollapse();
-    handBack(options);
+    handBack();
   };
 
   // New terminal -----------------------------------------------------------
   // One button that opens whatever is selected, and a chevron beside it that
-  // opens the list of choices as a menu (menu.js): personal profiles, system
-  // shells and the built-in Claude choices, grouped, the current one marked.
+  // opens the list of choices as a menu (menu.js). Built once; the choices are
+  // recomputed when profiles, inventory or the selection change.
   const launch = make("div", "sidebar-launch");
-  const menuChoices = terminalChoices(options);
-  const choices = menuChoices.filter(canLaunch);
-  let selected = choices.find((choice) => choice.key === choiceKey(options.selectedTerminal));
-  if (!selected && options.defaultProfile) {
-    // A profile name, or a system shell id ("git-bash"; "wsl" is its first
-    // distribution). A profile of the same name wins.
-    selected = choices.find((choice) => choice.key === `profile:${options.defaultProfile}`)
-      || choices.find((choice) => choice.kind === "system" && choice.id === options.defaultProfile);
-  }
-  selected ||= choices[0] || null;
+  let menuChoices = [];
+  let choices = [];
+  let selected = null;
 
   const open = make("button", "sidebar-new");
   open.type = "button";
   const openLabel = make("span", "sidebar-label");
   open.append(icon("plus", 15), openLabel);
   const describeOpen = () => {
-    openLabel.textContent = selected ? selected.label : "Set up terminal";
+    setText(openLabel, selected ? selected.label : "Set up terminal");
     open.title = selected
       ? `New ${selected.label} (Alt+N) · ${selected.detail}`
       : "No shell was found on this computer";
-    open.disabled = !selected && !options.onSetup;
+    open.disabled = !selected && !actions.setup;
   };
   open.addEventListener("click", () => {
-    if (!selected) { options.onSetup?.(); return; }
+    if (!selected) { actions.setup?.(); return; }
     const launched = selected.kind === "profile"
-      ? options.onRunProfile(selected.profile)
-      : options.onRunSystem(selected);
-    Promise.resolve(launched).finally(() => options.onLaunchComplete?.());
-  });
+      ? actions.runProfile?.(selected.profile)
+      : actions.runSystem?.(selected);
+    Promise.resolve(launched).finally(handBack);
+  }, { signal });
 
   const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Choose what a new terminal runs");
   pick.setAttribute("aria-haspopup", "menu");
   pick.setAttribute("aria-expanded", "false");
-  pick.disabled = !menuChoices.length;
+  const select = (choice) => {
+    selected = choice;
+    // Kept here as well, so a later profiles update cannot restore the old pick
+    // before the shell has echoed the new one.
+    model = { ...model, selectedTerminal: choice };
+    if (choice) actions.selectTerminal?.(choice);
+    describeOpen();
+  };
   const openTerminalMenu = () => {
-    if (!menuChoices.length) { options.onSetup?.(); return; }
+    if (!menuChoices.length) { actions.setup?.(); return; }
     const items = [];
     let group = null;
     for (const choice of menuChoices) {
@@ -619,212 +619,537 @@ export function initLauncher(el, options) {
         label: choice.label,
         detail: choice.detail,
         icon: canLaunch(choice) ? undefined : "plus",
-        selected: choice === selected,
-        run: () => {
-          if (!canLaunch(choice)) {
-            options.onInstall?.(choice);
-            return;
-          }
-          selected = choice;
-          options.onSelectTerminal?.(selected);
-          describeOpen();
-        },
+        selected: choice.key === choiceKey(selected),
+        run: () => (canLaunch(choice) ? select(choice) : actions.install?.(choice)),
       });
     }
-    items.push({ separator: true }, { label: "Manage terminals and connections", icon: "settings", run: () => options.onSetup?.() });
-    toggleMenu({
-      anchor: launch,
-      trigger: pick,
-      items,
-      label: "Terminal for new panes",
-      onClose: () => handBack(options),
-    });
+    items.push({ separator: true }, { label: "Manage terminals and connections", icon: "settings", run: () => actions.setup?.() });
+    toggleMenu({ anchor: launch, trigger: pick, items, label: "Terminal for new panes", onClose: handBack });
   };
-  pick.addEventListener("click", openTerminalMenu);
-  if (selected) options.onSelectTerminal?.(selected);
+  pick.addEventListener("click", openTerminalMenu, { signal });
   // Right-clicking "+" is the fast way to the same list.
   open.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     openTerminalMenu();
-  });
-  describeOpen();
+  }, { signal });
   launch.append(open, pick);
-  const setup = iconButton("sidebar-setup", "settings", "Manage terminals and connections", () => options.onSetup?.());
-  launch.append(setup);
-  if (!options.elevated) {
+  launch.append(iconButton("sidebar-setup", "settings", "Manage terminals and connections", () => actions.setup?.()));
+  if (!elevated) {
     // Elevation spawns a separate process, so success is invisible here and a
     // declined UAC prompt is indistinguishable from a dead button. Hold the
-    // button while the request is in flight and let main.js report the outcome.
+    // button while the request is in flight and let the shell report the outcome.
     const admin = iconButton("sidebar-admin", "shield", "New administrator terminal", () => {
       if (!selected || admin.disabled) return;
       admin.disabled = true;
       const request = selected.kind === "profile"
-        ? options.onElevateProfile(selected.profile)
-        : options.onElevateSystem(selected);
+        ? actions.elevateProfile?.(selected.profile)
+        : actions.elevateSystem?.(selected);
       Promise.resolve(request).finally(() => { admin.disabled = false; });
     });
     launch.append(admin);
   }
   el.append(launch);
 
-  // Workspace --------------------------------------------------------------
-  // One row: the workspace name as a menu button, the folder under it, the
-  // "workspace here" offer when the focused terminal is somewhere else, and
-  // the save dot main.js drives through #sb-save. The menu lists scratch and
-  // every saved workspace with its folder, marks the ones this window already
-  // shows in another view in that view's colour (choosing one focuses that
-  // view), offers to tile any other beside this one, and ends with "new
-  // scratch", which main.js confirms before anything running is replaced.
-  const where = make("div", "sidebar-where");
-  const workspaceButton = make("button", "sidebar-workspace-button");
-  workspaceButton.type = "button";
-  workspaceButton.setAttribute("aria-haspopup", "menu");
-  workspaceButton.setAttribute("aria-expanded", "false");
-  workspaceButton.setAttribute("aria-label", `Workspace: ${workspaceName}`);
-  workspaceButton.append(make("span", "sidebar-label", workspaceName), icon("chevron-down", 11));
-  let here = options.here || null;
-  const hereLabel = () => (here.action === "open" ? `open ${here.name}` : `workspace here: ${here.name}`);
-  const hereTitle = () => (here.action === "open"
-    ? `${here.folder} is the folder of workspace ${here.name}. Switch to it and take this terminal along.`
-    : `Make ${here.folder} a workspace named ${here.name} and move this terminal into it`);
-  const workspaceItems = () => {
-    const shown = typeof options.shownViews === "function" ? options.shownViews() : [];
-    const roots = typeof options.workspaceRoots === "function" ? options.workspaceRoots() : new Map();
-    const canBeside = typeof options.onOpenBeside === "function" && options.canOpenBeside?.() !== false;
-    const entry = (name, value) => {
-      const current = name === workspaceName || name === options.currentWorkspace;
-      const view = current ? null : shown.find((each) => each.name === name);
-      const root = roots.get(name) || null;
-      const item = {
-        label: name,
-        detail: current || !root ? undefined : folderName(root),
-        title: root || undefined,
-        selected: current,
-        color: view ? view.color : undefined,
-        hint: view ? "shown here" : undefined,
-        run: () => {
-          if (current) return;
-          if (view) options.onFocusView?.(name);
-          else options.onWorkspace?.(value);
-        },
-      };
-      if (!current && !view && canBeside && value) {
-        item.actions = [{
-          icon: "workspaces",
-          title: `Show ${name} beside ${workspaceName}`,
-          run: () => options.onOpenBeside(name),
-        }];
-      }
-      return item;
-    };
-    const named = (options.workspaces || []).filter((name) => name !== "scratch" && !name.startsWith("scratch-view-"));
-    const items = [entry("scratch", null)];
-    if (named.length) items.push({ separator: true });
-    for (const name of named) items.push(entry(name, name));
-    items.push({ separator: true });
-    if (here) {
-      items.push({ label: hereLabel(), icon: "plus", detail: folderName(here.folder), title: hereTitle(),
-        run: () => options.onWorkspaceHere?.() });
+  const patchLaunch = () => {
+    // The configured launcher lists saved terminals only (setup adds them); a
+    // model can opt back into the raw inventory with configuredOnly: false.
+    menuChoices = terminalChoices({ ...model, configuredOnly: model.configuredOnly ?? true });
+    choices = menuChoices.filter(canLaunch);
+    const wanted = choiceKey(model.selectedTerminal) || choiceKey(selected);
+    let next = choices.find((choice) => choice.key === wanted);
+    if (!next && model.defaultProfile) {
+      // A profile name, or a system shell id ("git-bash"; "wsl" is its first
+      // distribution). A profile of the same name wins.
+      next = choices.find((choice) => choice.key === `profile:${model.defaultProfile}`)
+        || choices.find((choice) => choice.kind === "system" && choice.id === model.defaultProfile);
     }
-    items.push({ label: "new scratch", icon: "plus", detail: "a fresh disposable layout",
-      run: () => options.onNewScratch?.() });
-    return items;
+    next ||= choices[0] || null;
+    pick.disabled = !menuChoices.length;
+    if (next && choiceKey(next) !== choiceKey(model.selectedTerminal)) select(next);
+    else { selected = next; describeOpen(); }
   };
-  workspaceButton.addEventListener("click", () => {
+
+  // Workspaces -------------------------------------------------------------
+  const section = make("div", "sidebar-section");
+  const add = iconButton("sidebar-section-add", "plus", "New scratch view, workspace here, or a new window");
+  add.setAttribute("aria-haspopup", "menu");
+  add.setAttribute("aria-expanded", "false");
+  add.addEventListener("click", () => {
+    const here = model.here;
     toggleMenu({
-      anchor: where,
-      trigger: workspaceButton,
-      items: workspaceItems(),
-      label: "Workspace",
-      onClose: () => handBack(options),
+      anchor: section,
+      trigger: add,
+      label: "Workspaces",
+      items: [
+        { label: "New scratch view", icon: "plus", detail: "a fresh disposable layout", run: () => actions.newScratch?.() },
+        here ? {
+          label: `Workspace here: ${here.name}`, icon: "folder", detail: folderName(here.folder), title: hereTitle(here),
+          run: () => actions.workspaceHere?.(),
+        } : null,
+        { label: "Open in new window…", icon: "new-window", run: () => actions.newWindow?.() },
+      ],
+      onClose: (reason) => { if (reason !== "run") handBack(); },
     });
-  });
-  // "scratch / scratch" says nothing twice: the folder line is dropped when it
-  // only repeats the workspace name.
-  const folder = folderName(options.workspacePath);
-  const folderLine = make("small", "sidebar-folder", folder || "no folder");
-  if (folder && folder.toLowerCase() === workspaceName.toLowerCase()) folderLine.hidden = true;
-  if (options.workspacePath) {
-    folderLine.title = options.workspacePathExists === false
-      ? `${options.workspacePath} (missing)`
-      : options.workspacePath;
-    if (options.workspacePathExists === false) folderLine.classList.add("warning");
-  } else {
-    folderLine.title = "This workspace has no folder. Terminals open in your home folder.";
-  }
-  workspaceButton.title = folderLine.title;
-  // The offer to make the focused terminal's folder a workspace. main.js
-  // patches it through updateHere() on every focus and folder change; the
-  // row itself is only rebuilt on config changes.
+  }, { signal });
+  section.append(make("span", "sidebar-section-label", "Workspaces"), add);
+  el.append(section);
+
+  // The active workspace's second line: its folder, the "workspace here"
+  // offer, Explorer and VS Code, and the save dot. One node, moved under
+  // whichever group head is active, so #sb-save is always the same element.
+  const activeLine = make("div", "sidebar-active-line");
+  const folderLine = make("small", "sidebar-folder");
   const hereButton = make("button", "sidebar-here");
   hereButton.type = "button";
   hereButton.hidden = true;
   const hereText = make("span", "sidebar-label");
   hereButton.append(icon("plus", 11), hereText);
   hereButton.addEventListener("click", () => {
-    options.onWorkspaceHere?.();
-    handBack(options);
-  });
-  const updateHere = (state) => {
-    here = state || null;
-    hereButton.hidden = !here;
-    if (!here) return;
-    hereText.textContent = hereLabel();
-    hereButton.title = hereTitle();
-    hereButton.setAttribute("aria-label", hereTitle());
+    actions.workspaceHere?.();
+    handBack();
+  }, { signal });
+  const tools = make("div", "sidebar-folder-tools");
+  const openIn = (app, iconName, label) => {
+    const button = iconButton("sidebar-folder-open", iconName, label, () => {
+      actions.openFolder?.(app);
+      handBack();
+    });
+    button.dataset.app = app;
+    return button;
   };
-  updateHere(here);
+  // The folder is resolved by the shell at click time, so it is where the
+  // focused terminal is right now (a `cd` counts), else the workspace folder.
+  tools.append(
+    openIn("explorer", "folder", "Open the focused terminal's folder in Explorer (Alt+Shift+E)"),
+    openIn("vscode", "code", "Open the focused terminal's folder in VS Code (Alt+Shift+C)"),
+  );
   const save = make("span", "sidebar-save");
   save.id = "sb-save";
   save.setAttribute("role", "status");
   save.setAttribute("aria-live", "polite");
-  const whereCopy = make("div", "sidebar-where-copy");
-  whereCopy.append(workspaceButton, folderLine, hereButton);
-  where.append(whereCopy);
-  // Two buttons for the folder this row is about: Explorer and VS Code. The
-  // folder is resolved by main.js at click time, so it is where the focused
-  // terminal is right now (a `cd` counts), else the workspace folder. The
-  // titles stay generic because this row is rebuilt only on config changes.
-  if (typeof options.onOpenFolder === "function") {
-    const tools = make("div", "sidebar-folder-tools");
-    const openIn = (app, iconName, label) => {
-      const button = iconButton("sidebar-folder-open", iconName, label, () => {
-        options.onOpenFolder(app);
-        handBack(options);
-      });
-      button.dataset.app = app;
-      return button;
-    };
-    tools.append(
-      openIn("explorer", "folder", "Open the focused terminal's folder in Explorer (Alt+Shift+E)"),
-      openIn("vscode", "code", "Open the focused terminal's folder in VS Code (Alt+Shift+C)"),
-    );
-    where.append(tools);
+  activeLine.append(folderLine, hereButton, tools, save);
+  // Where the line waits while no view is open, so #sb-save stays in the DOM.
+  const parking = make("div", "sidebar-parking");
+  parking.hidden = true;
+  parking.append(activeLine);
+
+  const hereLabel = (here) => (here.action === "open" ? `open ${here.name}` : `workspace here: ${here.name}`);
+  function hereTitle(here) {
+    return here.action === "open"
+      ? `${here.folder} is the folder of workspace ${here.name}. Open it and take this terminal along.`
+      : `Make ${here.folder} a workspace named ${here.name} and move this terminal into it`;
   }
-  where.append(save);
-  el.append(where);
+  // The offer to make the focused terminal's folder a workspace. The shell
+  // patches it on every focus and folder change.
+  const patchHere = () => {
+    const here = model.here || null;
+    hereButton.hidden = !here;
+    if (!here) return;
+    setText(hereText, hereLabel(here));
+    setLabel(hereButton, hereTitle(here));
+  };
+  const patchActiveLine = (group) => {
+    const path = group?.path || "";
+    const folder = folderName(path);
+    setText(folderLine, folder || (group?.kind === "workspace" ? "no folder" : ""));
+    // "acme / acme" says nothing twice.
+    folderLine.hidden = !folderLine.textContent
+      || folder.toLowerCase() === String(group?.label || "").toLowerCase();
+    setClass(folderLine, "warning", group?.pathExists === false);
+    folderLine.title = !path
+      ? "This workspace has no folder. Terminals open in your home folder."
+      : group.pathExists === false ? `${path} (missing)` : path;
+  };
 
   // Terminals --------------------------------------------------------------
   const sessionList = make("div", "sidebar-sessions");
-  el.append(sessionList);
+  const groupList = make("div", "sidebar-groups");
+  const emptyNote = make("div", "sidebar-empty", "no workspaces and no terminals");
+  emptyNote.hidden = true;
+  sessionList.append(groupList, emptyNote);
+  el.append(sessionList, parking);
+
+  const closedGroups = loadClosedGroups();
+  const parts = new WeakMap();
+  // Open confirmations by what they are about (`session:<id>`, `group:<key>`),
+  // so one whose row has gone, or moved to another group, can be closed on the
+  // next update.
+  const confirms = new Map();
+
+  const groupOf = (node) => itemFor(node.closest(".session-group"));
+
+  const openConfirm = (key, holder, trigger, options) => {
+    confirms.get(key)?.handle.close("replaced");
+    holder.classList.add("armed");
+    const handle = confirmNear(trigger, {
+      owner: "sidebar-confirm",
+      ...options,
+      onClose: () => {
+        if (confirms.get(key)?.handle === handle) confirms.delete(key);
+        holder.classList.remove("armed");
+        handBack();
+      },
+    });
+    confirms.set(key, { handle, trigger });
+    return handle;
+  };
+
+  const killConfirm = (entry, keyboard) => {
+    const item = itemFor(entry);
+    if (!item?.session || item.session.alive === false) return;
+    const { kill } = parts.get(entry);
+    const name = item.session.name || item.session.id;
+    openConfirm(`session:${item.session.id}`, entry, kill, {
+      message: `Kill ${name}? This stops its whole process tree.`,
+      confirmLabel: "Kill",
+      keyboard,
+      // Read at confirm time: the row may have been patched since it opened.
+      action: () => actions.killTerminal?.(itemFor(entry)?.session || item.session),
+    });
+  };
+
+  const detach = (entry) => {
+    const session = itemFor(entry)?.session;
+    if (!session) return;
+    Promise.resolve(actions.detachTerminal?.(session)).finally(handBack);
+  };
+
+  // Double-click or F2 renames in place. The input claims the keyboard, and the
+  // row is marked as being edited, so the 10 s poll leaves it alone.
+  const startRename = (entry) => {
+    const { row, name } = parts.get(entry);
+    const session = itemFor(entry)?.session;
+    if (!session || row.querySelector("input")) return;
+    const input = make("input", "session-rename");
+    input.value = session.name || "";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "Terminal name");
+    markEditing(entry, true);
+    claimFocus("sidebar-rename");
+    name.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (keep) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      input.replaceWith(name);
+      markEditing(entry, false);
+      releaseFocus("sidebar-rename");
+      const current = itemFor(entry)?.session || session;
+      if (keep && value && value !== current.name) {
+        setText(name, value);
+        actions.renameTerminal?.(current, value);
+      }
+      handBack();
+    };
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") commit(true);
+      else if (event.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("dblclick", (event) => event.stopPropagation());
+  };
+
+  const activeView = () => (model.views || []).find((view) => view.active) || null;
+
+  const rowMenu = (entry, keyboard) => {
+    const item = itemFor(entry);
+    if (!item?.session) return;
+    const { session, attachedIn } = item;
+    const group = groupOf(entry);
+    const target = activeView();
+    const owner = group?.name || null;
+    const items = [
+      { label: "Open", icon: "arrow-up-right", run: () => actions.activateTerminal?.(itemFor(entry)?.session || session) },
+    ];
+    if (target && session.alive !== false && owner !== target.workspace) {
+      items.push({
+        label: `Move to ${target.label || workspaceLabel(target.workspace)}`, icon: "workspaces",
+        run: () => Promise.resolve(actions.moveTerminalHere?.(itemFor(entry)?.session || session)).finally(handBack),
+      });
+    }
+    if (attachedIn) items.push({ label: "Detach", icon: "unplug", hint: "keeps running", run: () => detach(entry) });
+    items.push({ label: "Rename", hint: "F2", run: () => startRename(entry) });
+    if (session.alive !== false) {
+      items.push({ separator: true }, { label: "Kill…", icon: "stop", danger: true, hint: "Del", run: () => killConfirm(entry, keyboard) });
+    }
+    const { row } = parts.get(entry);
+    toggleMenu({
+      anchor: row,
+      trigger: row,
+      items,
+      label: `Terminal ${session.name || session.id}`,
+      onClose: (reason) => { if (reason !== "run") handBack(); },
+    });
+  };
+
+  const createRow = () => {
+    const entry = make("div", "session-entry");
+    const row = make("button", "session-row");
+    row.type = "button";
+    const dot = make("span", "session-state");
+    const name = make("span", "session-name");
+    const chip = make("span", "session-chip");
+    const where = make("small", "session-where");
+    row.append(dot, name, chip, where);
+    const tray = make("div", "session-actions");
+    const detachButton = iconButton("session-action session-detach", "unplug", "Detach", () => detach(entry));
+    const kill = iconButton("session-action session-kill danger", "stop", "Kill", (event) => killConfirm(entry, fromKeyboard(event)));
+    tray.append(detachButton, kill);
+    entry.append(row, tray);
+    parts.set(entry, { row, name, chip, where, detach: detachButton, kill });
+
+    row.addEventListener("click", () => {
+      const session = itemFor(entry)?.session;
+      if (session) actions.activateTerminal?.(session);
+    });
+    row.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      startRename(entry);
+    });
+    let keyboardMenuAt = 0;
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
+      if (event.key === "F2") {
+        event.preventDefault();
+        startRename(entry);
+      } else if (event.key === "Delete") {
+        event.preventDefault();
+        killConfirm(entry, true);
+      } else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+        event.preventDefault();
+        keyboardMenuAt = Date.now();
+        rowMenu(entry, true);
+      }
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      // The ContextMenu key raises this event too, after its keydown did the work.
+      if (Date.now() - keyboardMenuAt < 400) return;
+      rowMenu(entry, false);
+    });
+    return entry;
+  };
+
+  // `group` is passed in rather than read from the DOM: a new row is updated
+  // before patchList inserts it.
+  const updateRow = (entry, item, group) => {
+    const { session, state, attachedIn, finished } = item;
+    const { row, name, chip, where, detach: detachButton, kill } = parts.get(entry);
+    const label = session.name || String(session.id).slice(0, 8);
+    setClass(entry, "needs-you", state.key === "attention");
+    row.className = [
+      "session-row",
+      `state-${state.key}`,
+      attachedIn ? "attached" : "detached",
+      state.key === "unread" ? "unread" : "",
+      finished ? "finished" : "",
+    ].filter(Boolean).join(" ");
+    setText(name, label);
+    let title = sessionTooltip(session, group?.label || "");
+    const profile = (model.profiles || []).find((each) => each.name === session.profile);
+    if (profile) {
+      title += `\n${connectionLabel(profile)}: ${connectionTarget(profile)}`;
+      row.dataset.connectionType = profile.terminal_type || "custom";
+    } else {
+      delete row.dataset.connectionType;
+    }
+    setAttrs(row, { title });
+    // The folder is the fact that tells one project's shell from another's, so
+    // it gets its own line as soon as the sidebar is wide enough to hold it.
+    const folder = folderName(sessionFolder(session));
+    setText(where, folder);
+    where.hidden = !folder;
+    // Chips only for the states worth interrupting for: a plain background
+    // shell is a hollow dot, or the list turns into a wall of badges.
+    const chipped = ["attention", "unread", "busy", "elsewhere"].includes(state.key);
+    chip.hidden = !chipped;
+    chip.className = chipped ? `session-chip chip-${state.key}` : "session-chip";
+    setText(chip, chipped ? (state.key === "unread" ? "new" : state.label) : "");
+    detachButton.hidden = !attachedIn;
+    setLabel(detachButton, `Detach ${label}: keeps running`);
+    kill.hidden = finished;
+    setLabel(kill, `Kill ${label}…`);
+  };
+
+  const toggleFold = (node, wantClosed) => {
+    const group = itemFor(node);
+    if (!group?.sessions.length) return;
+    const id = foldId(group);
+    const closed = wantClosed ?? !closedGroups.has(id);
+    if (closed === closedGroups.has(id)) return;
+    if (closed) closedGroups.add(id); else closedGroups.delete(id);
+    saveClosedGroups(closedGroups);
+    // A DOM toggle, not a re-render: rebuilding the group would drop the
+    // keyboard out of the very control that was just pressed.
+    updateGroup(node, group);
+  };
+
+  const groupMenu = (node, keyboard) => {
+    const group = itemFor(node);
+    if (!group?.name) return;
+    const { kebab, headline } = parts.get(node);
+    const items = [];
+    if (group.kind === "workspace") {
+      items.push({ label: "Open in new window", icon: "new-window", run: () => actions.openWorkspaceInWindow?.(group.name) });
+    }
+    items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
+    if (group.kind === "workspace") {
+      items.push({ separator: true }, {
+        label: "Delete workspace…", icon: "trash", danger: true,
+        run: () => openConfirm(`group:${group.key}`, node, kebab, {
+          message: `Delete workspace ${group.name}? Detached terminals it owns are killed; attached ones keep running.`,
+          confirmLabel: "Delete",
+          keyboard,
+          action: () => actions.deleteWorkspace?.(group.name),
+        }),
+      });
+    }
+    toggleMenu({
+      anchor: headline,
+      trigger: kebab,
+      items,
+      label: `Workspace ${group.label}`,
+      onClose: (reason) => { if (reason !== "run") handBack(); },
+    });
+  };
+
+  const createGroup = () => {
+    const node = make("div", "session-group");
+    const headline = make("div", "session-group-headline");
+    const head = make("button", "session-group-head");
+    head.type = "button";
+    const chevron = make("span", "session-group-chevron");
+    const dot = make("span", "session-group-dot");
+    const name = make("span", "session-group-name");
+    const count = make("span", "sidebar-count");
+    head.append(chevron, dot, name, count);
+    const tray = make("div", "group-actions");
+    const closeView = iconButton("group-action group-close", "x", "Close view");
+    const kebab = iconButton("group-action group-more", "more", "Workspace actions");
+    kebab.setAttribute("aria-haspopup", "menu");
+    kebab.setAttribute("aria-expanded", "false");
+    tray.append(closeView, kebab);
+    headline.append(head, tray);
+    const slot = make("div", "session-group-detail");
+    const rows = make("div", "session-group-rows");
+    node.append(headline, slot, rows);
+    parts.set(node, { headline, head, chevron, dot, name, count, closeView, kebab, slot, rows });
+
+    head.addEventListener("click", (event) => {
+      const group = itemFor(node);
+      if (!group) return;
+      if (!group.name || event.target.closest?.(".session-group-chevron")) {
+        toggleFold(node);
+        return;
+      }
+      actions.openWorkspace?.(group.name);
+    });
+    head.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        toggleFold(node, event.key === "ArrowLeft");
+      }
+    });
+    closeView.addEventListener("click", () => {
+      const group = itemFor(node);
+      if (group?.name) Promise.resolve(actions.closeWorkspace?.(group.name)).finally(handBack);
+    });
+    kebab.addEventListener("click", (event) => groupMenu(node, fromKeyboard(event)));
+    return node;
+  };
+
+  const updateGroup = (node, group) => {
+    const { head, chevron, dot, name, count, closeView, kebab, slot, rows } = parts.get(node);
+    const hasRows = group.sessions.length > 0;
+    const closed = hasRows && closedGroups.has(foldId(group));
+    for (const kind of ["workspace", "scratch", "unassigned"]) setClass(node, kind, group.kind === kind);
+    setClass(node, "open", group.open);
+    setClass(node, "active", group.active);
+    setClass(node, "has-attention", group.counts.attention > 0);
+    setClass(node, "folded", closed);
+    setClass(head, "warning", group.pathExists === false);
+    // Kept in the layout so every name lines up; `hidden` would collapse it.
+    setClass(chevron, "empty", !hasRows);
+    const glyph = closed ? "chevron-right" : "chevron-down";
+    if (chevron.dataset.glyph !== glyph) {
+      chevron.dataset.glyph = glyph;
+      chevron.textContent = "";
+      chevron.append(icon(glyph, 10));
+    }
+    setClass(dot, "hollow", !group.open);
+    if (group.open && group.color) dot.style.setProperty("--group-color", group.color);
+    else dot.style.removeProperty("--group-color");
+    setText(name, group.label);
+    setText(count, String(group.sessions.length));
+    const where = group.kind === "unassigned" ? "Live terminals no workspace owns"
+      : group.path ? `${group.path}${group.pathExists === false ? " (missing)" : ""}`
+        : group.label;
+    setAttrs(head, {
+      title: `${where} · ${groupSummary(group)}`,
+      "aria-expanded": hasRows ? String(!closed) : false,
+      "aria-current": group.active ? "true" : false,
+    });
+    closeView.hidden = !group.open;
+    setLabel(closeView, `Close view ${group.label}: saves it, terminals keep running`);
+    kebab.hidden = !group.name;
+    setLabel(kebab, `${group.label}: workspace actions`);
+    if (group.active) {
+      if (activeLine.parentNode !== slot) slot.append(activeLine);
+      patchActiveLine(group);
+    }
+    // Folding is the `.folded` class, not `hidden`: the rail still shows the
+    // dots of a folded group.
+    patchList(rows, group.sessions, {
+      key: (entry) => `session:${entry.session.id}`,
+      create: createRow,
+      update: (entry, item) => updateRow(entry, item, group),
+    });
+  };
+
+  const patchGroups = () => {
+    const focused = sessionList.contains(document.activeElement) ? document.activeElement : null;
+    const groups = sidebarGroups(model.sessions, model);
+    const nodes = patchList(groupList, groups, {
+      key: (group) => `group:${group.key}`,
+      create: createGroup,
+      update: updateGroup,
+    });
+    if (!nodes.some((node) => itemFor(node)?.active) && activeLine.parentNode !== parking) parking.append(activeLine);
+    emptyNote.hidden = groups.length > 0;
+    // Close a confirmation whose terminal or workspace is no longer listed.
+    const listed = new Set();
+    for (const group of groups) {
+      listed.add(`group:${group.key}`);
+      for (const entry of group.sessions) listed.add(`session:${entry.session.id}`);
+    }
+    for (const [key, { handle, trigger }] of [...confirms]) {
+      if (!listed.has(key) || !trigger.isConnected) handle.close("gone");
+    }
+    if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  };
 
   // Footer -----------------------------------------------------------------
-  // Keyed by the label main.js passes in `chrome`, so a new footer entry is
+  // Keyed by the label the shell passes in `chrome`, so a new footer entry is
   // one map line away from its own glyph instead of silently falling back
   // to the terminal one.
   const footer = make("nav", "sidebar-footer");
   footer.setAttribute("aria-label", "Application");
   const navIcons = {
     dashboard: "dashboard", settings: "settings", help: "help",
-    commands: "terminal", "new window": "new-window", "workspace beside": "workspaces",
+    commands: "terminal", "new window": "new-window",
   };
-  for (const [label, onClick, shortcut] of options.chrome || []) {
+  for (const [label, onClick, shortcut] of chrome || []) {
     const button = iconButton("sidebar-nav-button", navIcons[label] || "terminal",
       shortcut ? `${label} (${shortcut})` : label, onClick);
     button.dataset.nav = label;
     footer.append(button);
   }
-  if (options.elevated) {
+  if (elevated) {
     const badge = make("span", "sidebar-admin-badge");
     badge.title = "Administrator mode";
     badge.append(icon("shield", 13));
@@ -844,11 +1169,7 @@ export function initLauncher(el, options) {
 
   // Resize grip -------------------------------------------------------------
   // The sidebar is a grid column of #app, so the width lives in --sidebar-w on
-  // the root rather than on this element: the column has to know it, and the
-  // element is thrown away and rebuilt on every config change. The grip is
-  // rebuilt with it, so its listeners hang off the same AbortController the
-  // rest of the launcher already uses; the window listener below would
-  // otherwise pile up one copy per rebuild.
+  // the root rather than on this element: the column has to know it.
   const grip = make("div", "sidebar-grip");
   grip.tabIndex = 0;
   grip.setAttribute("role", "separator");
@@ -875,14 +1196,14 @@ export function initLauncher(el, options) {
   let frame = 0;
   let pending = width;
   let fitTimer = 0;
-  // main.js answers onSidebarResize by re-fitting every xterm to its new pixel
-  // size, which is far too heavy to run per pointermove. So the width write is
-  // coalesced into one animation frame and the fit trails the last change;
-  // the end of a drag asks for it straight away.
+  // The shell answers sidebarResized by re-fitting every xterm to its new
+  // pixel size, which is far too heavy to run per pointermove. So the width
+  // write is coalesced into one animation frame and the fit trails the last
+  // change; the end of a drag asks for it straight away.
   const notifyResize = (now = false) => {
     clearTimeout(fitTimer);
-    if (now) { options.onSidebarResize?.(); return; }
-    fitTimer = setTimeout(() => options.onSidebarResize?.(), 90);
+    if (now) { actions.sidebarResized?.(); return; }
+    fitTimer = setTimeout(() => actions.sidebarResized?.(), 90);
   };
   const commit = () => {
     frame = 0;
@@ -908,11 +1229,11 @@ export function initLauncher(el, options) {
     // Leave the keyboard where it was. Dragging a grip is not a request to
     // take focus off the terminal, and focus.js would hand it straight back.
     event.preventDefault();
-  }, { signal: abort.signal });
+  }, { signal });
 
   grip.addEventListener("pointermove", (event) => {
     if (dragging) queueWidth(event.clientX - originLeft);
-  }, { signal: abort.signal });
+  }, { signal });
 
   const endDrag = (event) => {
     if (!dragging) return;
@@ -926,14 +1247,14 @@ export function initLauncher(el, options) {
   };
   // Pointer capture is what makes this correct: a drag that ends outside the
   // window still delivers its pointerup here, so the body class cannot stick.
-  grip.addEventListener("pointerup", endDrag, { signal: abort.signal });
-  grip.addEventListener("pointercancel", endDrag, { signal: abort.signal });
+  grip.addEventListener("pointerup", endDrag, { signal });
+  grip.addEventListener("pointercancel", endDrag, { signal });
 
   const resetWidth = () => {
     applyWidth(SIDEBAR_WIDTH_DEFAULT, true);
     notifyResize(true);
   };
-  grip.addEventListener("dblclick", resetWidth, { signal: abort.signal });
+  grip.addEventListener("dblclick", resetWidth, { signal });
 
   // A pointer-only resize is unreachable without a pointer, so the grip is in
   // the tab order and answers the arrows. Shift takes a coarse step, Home/End
@@ -950,7 +1271,7 @@ export function initLauncher(el, options) {
     event.preventDefault();
     applyWidth(next, true);
     notifyResize();
-  }, { signal: abort.signal });
+  }, { signal });
 
   // The cap is relative to the window, so a shrinking window has to pull the
   // sidebar in. The stored width is left alone: it comes back when there is
@@ -959,11 +1280,12 @@ export function initLauncher(el, options) {
     const before = width;
     applyWidth(desired);
     if (width !== before) notifyResize();
-  }, { signal: abort.signal });
+  }, { signal });
 
-  abort.signal.addEventListener("abort", () => {
+  signal.addEventListener("abort", () => {
     if (frame) cancelAnimationFrame(frame);
     clearTimeout(fitTimer);
+    for (const { handle } of [...confirms.values()]) handle.close("gone");
   });
 
   // The stored width must land before the grid animates, or every start slides
@@ -974,269 +1296,27 @@ export function initLauncher(el, options) {
   describeCollapse();
   requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
 
-  // Terminals ---------------------------------------------------------------
-  // The list shows every live terminal on this backend, grouped by the
-  // workspace that owns it. It used to show only what this window held, so a
-  // machine running seven terminals across three projects looked like two.
-  const closedGroups = loadClosedGroups();
-  // The foreign terminal whose choices are open. One at a time, and it survives
-  // the 10 s poll below, which rebuilds this list from scratch.
-  let armedSessionId = null;
-
-  const setArmed = (id) => {
-    armedSessionId = id;
-    for (const entry of sessionList.querySelectorAll(".session-entry")) {
-      const on = entry.dataset.sessionId === id;
-      entry.classList.toggle("armed", on);
-      const strip = entry.querySelector(".session-choices");
-      if (strip) strip.hidden = !on;
-      const row = entry.querySelector(".session-row[aria-expanded]");
-      if (row) row.setAttribute("aria-expanded", String(on));
-    }
+  const LAUNCH_KEYS = ["profiles", "inventory", "defaultProfile", "selectedTerminal", "configuredOnly"];
+  const update = (partial = {}) => {
+    model = { ...model, ...partial };
+    if (LAUNCH_KEYS.some((key) => key in partial)) patchLaunch();
+    if ("here" in partial) patchHere();
+    patchGroups();
   };
 
-  // Double-click renames in place, the same gesture the pane header had. The
-  // header is gone on a lone pane, so this is where the name is edited now.
-  const startRename = (row, nameEl, session) => {
-    if (row.querySelector("input")) return;
-    const input = make("input", "session-rename");
-    input.value = session.name || "";
-    input.spellcheck = false;
-    input.setAttribute("aria-label", "Terminal name");
-    nameEl.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const commit = (save) => {
-      if (done) return;
-      done = true;
-      const value = input.value.trim();
-      input.replaceWith(nameEl);
-      if (save && value && value !== session.name) options.onRenameSession?.(session, value);
-      handBack(options);
-    };
-    input.addEventListener("keydown", (event) => {
-      event.stopPropagation();
-      if (event.key === "Enter") commit(true);
-      else if (event.key === "Escape") commit(false);
-    });
-    input.addEventListener("blur", () => commit(true));
-    input.addEventListener("click", (event) => event.stopPropagation());
-  };
+  const updateHere = (here) => update({ here: here || null });
 
-  const sessionEntry = (entry, group) => {
-    const { session, isAttached, isHere, state, finished } = entry;
-    // Foreign means "another workspace owns it". Unassigned is not foreign:
-    // there is nobody to take it from, so attaching is the honest reading of a
-    // click, and main.js already allows exactly that.
-    const shown = (options.shownViews?.() || []).some((view) => view.name === group.name || view.workspace === group.name);
-    const foreign = !isHere && group.kind === "workspace" && !shown;
-    const wrap = make("div", [
-      "session-entry",
-      foreign ? "foreign" : "",
-      state.key === "attention" ? "needs-you" : "",
-    ].filter(Boolean).join(" "));
-    wrap.dataset.sessionId = session.id;
-    const row = make("button", [
-      "session-row",
-      `state-${state.key}`,
-      isAttached ? "attached" : "detached",
-      state.key === "unread" ? "unread" : "",
-      finished ? "finished" : "",
-    ].filter(Boolean).join(" "));
-    row.type = "button";
-    row.dataset.rowKey = session.id;
-    row.title = sessionTooltip(session, group.name);
-    const name = make("span", "session-name", session.name || session.id.slice(0, 8));
-    row.append(make("span", "session-state"), name);
-    const profile = (options.profiles || []).find((item) => item.name === session.profile);
-    if (profile) {
-      row.title += `\n${connectionLabel(profile)}: ${connectionTarget(profile)}`;
-      row.dataset.connectionType = profile.terminal_type || "custom";
-    }
-    // The folder is the fact that tells one project's shell from another's, so
-    // it gets its own line as soon as the sidebar is wide enough to hold it.
-    // It is where the shell is now when the shell says so, else where it began.
-    const folder = sessionFolder(session);
-    if (folder) row.append(make("small", "session-where", folderName(folder)));
-    // Chips only for the states worth interrupting for: a plain background
-    // shell is a hollow dot, or the list turns into a wall of badges.
-    if (["attention", "unread", "busy", "elsewhere"].includes(state.key)) {
-      row.append(make("span", `session-chip chip-${state.key}`, state.key === "unread" ? "new" : state.label));
-    }
-    wrap.append(row);
-
-    if (!foreign) {
-      row.addEventListener("click", () => {
-        if (options.onFocusShownSession?.(session.id)) return;
-        if (isAttached) options.onFocusSession?.(session.id);
-        // Finished: read what it left, through the replay-only reattach.
-        else if (finished) options.onOpenFinished?.(session);
-        else options.onAttachSession?.(session);
-      });
-      row.addEventListener("dblclick", (event) => {
-        event.preventDefault();
-        startRename(row, name, session);
-      });
-      return wrap;
-    }
-
-    // Clicking a terminal another workspace owns must never silently take it.
-    // The row offers the two honest choices instead, each labelled with what it
-    // does to which workspace.
-    row.setAttribute("aria-expanded", String(armedSessionId === session.id));
-    const choices = make("div", "session-choices");
-    choices.hidden = armedSessionId !== session.id;
-    const target = group.name === SCRATCH_GROUP ? null : group.name;
-    const choiceButton = (iconName, label, title, onClick) => {
-      const button = make("button", "session-choice");
-      button.type = "button";
-      button.title = title;
-      button.append(icon(iconName, 12), make("span", "sidebar-label", label));
-      button.addEventListener("click", onClick);
-      return button;
-    };
-    const openThere = choiceButton("diamond", `open ${group.name}`,
-      `Switch this window to ${group.name}, where this terminal already runs`,
-      () => options.onWorkspace?.(target));
-    openThere.dataset.rowKey = `${session.id}:open`;
-    choices.append(openThere);
-    // The third way: keep this window where it is and tile that workspace
-    // beside it. If the window already shows it, the choice focuses that view.
-    if (target && typeof options.onOpenBeside === "function" && options.canOpenBeside?.() !== false) {
-      const shown = (typeof options.shownViews === "function" ? options.shownViews() : [])
-        .find((each) => each.name === group.name);
-      const beside = shown
-        ? choiceButton("workspaces", `focus ${group.name}`,
-          `${group.name} is already shown in this window. Focus that view.`,
-          () => { setArmed(null); options.onFocusView?.(group.name); })
-        : choiceButton("workspaces", `show ${group.name} beside`,
-          `Tile ${group.name} beside ${workspaceName} in this window; this terminal stays where it is`,
-          () => { setArmed(null); options.onOpenBeside(target); });
-      beside.dataset.rowKey = `${session.id}:beside`;
-      choices.append(beside);
-    }
-    if (finished) {
-      // A finished terminal is read where it ran; there is nothing to move.
-      choices.append(make("p", "session-choice-note",
-        `It has finished. Open ${group.name} to read its output.`));
-    } else if (typeof options.onMoveSession === "function") {
-      const move = choiceButton("arrow-up-right", "move here",
-        `Take this terminal out of ${group.name} and attach it in ${workspaceName}`,
-        () => {
-          setArmed(null);
-          options.onMoveSession(session, target);
-        });
-      move.dataset.rowKey = `${session.id}:move`;
-      choices.append(move);
-    } else {
-      choices.append(make("p", "session-choice-note",
-        `Moving it into ${workspaceName} is a Dashboard action.`));
-    }
-    // Escape backs out of a decision without making it. It stops here so the
-    // global key layer does not also read it as "close whatever is open".
-    choices.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setArmed(null);
-      row.focus();
-    });
-    // The rail shows a foreign terminal only when it needs you, and has no
-    // room for its choices: widen first (listeners run in order), so the
-    // click is never dead.
-    row.addEventListener("click", () => { if (mode === "rail") setMode("full"); });
-    row.addEventListener("click", () => setArmed(armedSessionId === session.id ? null : session.id));
-    wrap.append(choices);
-    return wrap;
-  };
-
-  // `bare` drops the heading when everything alive belongs to this workspace.
-  // A single group headed by its own name is a label for a list of one thing.
-  const sessionGroup = (group, bare = false) => {
-    const box = make("div", `session-group ${group.kind}${group.attention ? " has-attention" : ""}`);
-    const closed = !bare && closedGroups.has(group.name);
-    const head = make("button", "session-group-head");
-    head.type = "button";
-    head.dataset.rowKey = `group:${group.name}`;
-    head.setAttribute("aria-expanded", String(!closed));
-    head.title = (group.kind === "current"
-      ? `Terminals in ${group.name}, the workspace this window is in`
-      : group.kind === "unassigned"
-        ? "Live terminals no workspace owns"
-        : `Terminals owned by workspace ${group.name}`) + ` · ${groupSummary(group)}`;
-    const chevron = make("span", "session-group-chevron");
-    chevron.append(icon(closed ? "chevron-right" : "chevron-down", 10));
-    const label = options.shownViews?.().find((view) => view.workspace === group.name)?.name || workspaceLabel(group.name);
-    head.append(chevron, make("span", "session-group-name", label),
-      make("span", "sidebar-count", String(group.sessions.length)));
-
-    const rows = make("div", "session-group-rows");
-    rows.hidden = closed;
-    for (const entry of group.sessions) rows.append(sessionEntry(entry, group));
-    if (!group.sessions.length) {
-      rows.append(make("div", "sidebar-empty", "nothing running"));
-    }
-    // Folding is a DOM toggle, not a re-render: rebuilding the list would drop
-    // the keyboard out of the very control that was just pressed.
-    head.addEventListener("click", () => {
-      const nowClosed = !rows.hidden;
-      rows.hidden = nowClosed;
-      head.setAttribute("aria-expanded", String(!nowClosed));
-      chevron.textContent = "";
-      chevron.append(icon(nowClosed ? "chevron-right" : "chevron-down", 10));
-      if (nowClosed) closedGroups.add(group.name);
-      else closedGroups.delete(group.name);
-      saveClosedGroups(closedGroups);
-    });
-    if (!bare) box.append(head);
-    box.append(rows);
-    return box;
-  };
-
-  const updateSessions = (sessions = [], attachedIds = [], ownedIds = []) => {
-    const groups = groupSessionsByWorkspace(sessions, {
-      currentWorkspace: options.currentWorkspace,
-      attachedIds,
-      ownedIds,
-      visibleIds: options.visibleSessionIds?.() || [],
-    });
-    const totalLive = (sessions || []).filter((session) => session.alive).length;
-    const here = groups.find((group) => group.kind === "current")?.sessions.length || 0;
-    sessionList.title = `${here} in ${workspaceName} · ${totalLive} live on this backend`;
-
-    // main.js repolls every 10 s and this list is rebuilt from the answer, so
-    // whatever the keyboard was inside has to be put back. Without it, opening
-    // the choices under a foreign terminal and reading them for ten seconds
-    // dropped focus to <body> mid-decision. A rename in progress is left alone
-    // for the same reason.
-    if (sessionList.querySelector("input")) return;
-    const activeKey = sessionList.contains(document.activeElement)
-      ? document.activeElement.dataset.rowKey || null
-      : null;
-    sessionList.textContent = "";
-    if (!groups.length) {
-      sessionList.append(make("div", "sidebar-empty", "no terminals"));
-      return;
-    }
-    const solo = groups.length === 1 && groups[0].kind === "current";
-    for (const group of groups) sessionList.append(sessionGroup(group, solo));
-    if (!activeKey) return;
-    for (const node of sessionList.querySelectorAll("[data-row-key]")) {
-      if (node.dataset.rowKey === activeKey) { node.focus(); break; }
-    }
-  };
-
-  updateSessions(options.sessions, options.attachedSessionIds, options.ownedSessionIds);
+  patchLaunch();
+  patchHere();
+  patchGroups();
   return {
-    updateSessions,
+    update,
     updateHere,
     cycleTerminal(delta = 1) {
       if (!choices.length) return null;
-      const current = Math.max(0, choices.indexOf(selected));
-      selected = choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length];
-      options.onSelectTerminal?.(selected);
-      describeOpen();
-      handBack(options);
+      const current = Math.max(0, choices.findIndex((choice) => choice.key === choiceKey(selected)));
+      select(choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length]);
+      handBack();
       return selected;
     },
     mode: () => mode,
