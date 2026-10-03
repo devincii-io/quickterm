@@ -26,16 +26,17 @@ export function validateWorkspaceName(name) {
 
 export function createWorkspaceActions({
   api, workspace, state, layout,
-  claimWorkspaceFor, listWindowsSafe, switchWorkspace, ensureScratchWorkspace, attachSession, hereState,
-  persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
+  claimWorkspaceFor, listWindowsSafe, ensureScratchWorkspace, attachSession, hereState,
+  openWorkspaceView, closeWorkspaceView, persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
   ownedSessionIds, attachedSessionIds, forgetSession,
   refreshWorkspaceRoots, buildLauncher, refreshStatusSoon, showError, clearError,
 }) {
   // Make the focused terminal's folder a workspace (or open the one it already
   // belongs to) and take the terminal along. The terminal is what the user
   // was looking at when they asked, so it leads: it is written into the
-  // target's layout first, then detached here, then the window switches and
-  // the restore attaches it again. Nothing is killed at any step.
+  // target's layout first, then detached here, then the target's own view
+  // opens (or is focused) and its restore attaches it again. This view stays
+  // on its workspace. Nothing is killed at any step.
   async function createWorkspaceHere() {
     const here = hereState();
     if (!here || state.transitioning) return false;
@@ -103,7 +104,7 @@ export function createWorkspaceActions({
       state.workspaceNames.sort((a, b) => a.localeCompare(b));
     }
     state.workspaceRoots.set(name, saved ? saved.path || null : folder);
-    return switchWorkspace(name);
+    return Boolean(await openWorkspaceView(name));
   }
 
   async function removeWorkspaceOwnership(name, sessionId) {
@@ -157,7 +158,10 @@ export function createWorkspaceActions({
     }
     state.workspaceSessionIds.add(info.id);
     await persistCurrentWorkspace();
-    return attachSession(fresh);
+    // `fresh` was read before the old workspace let go, so it still carries
+    // that workspace's tag, which attachSession would refuse. The ownership
+    // moved above; the tag follows it with the next save.
+    return attachSession({ ...fresh, workspace: state.currentWorkspace || null });
   }
 
   async function killWorkspaceSession(info, workspaceName) {
@@ -255,6 +259,9 @@ export function createWorkspaceActions({
   // kills sessions nobody is attached to, and deleting the workspace you're
   // in simply turns the live layout into a scratch layout in place.
   async function deleteWorkspace(name) {
+    // A view of this window showing it is closed first (saved, its terminals
+    // retained, its claim released), or it would autosave the file back.
+    if (name !== state.currentWorkspace && closeWorkspaceView && !(await closeWorkspaceView(name))) return false;
     // Deleting a workspace another window has open pulls the file out from
     // under a live layout that is still autosaving into it.
     const holder = workspaceHolder(await listWindowsSafe(), state.windowId, name);

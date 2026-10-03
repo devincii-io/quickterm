@@ -3,27 +3,33 @@ import assert from "node:assert/strict";
 
 // main.js is the composition root and cannot be imported here (it boots on
 // import and pulls in xterm through layout.js). Every module it composes can,
-// and importing them all is what catches a module that fails at load time.
+// the shell (shell.js) included, and importing them all is what catches a
+// module that fails at load time.
 const JS = "../../quickterm/frontend/js/";
 const MODULES = {
   "app_state.js": ["createAppState"],
   "autosave.js": ["createAutosave"],
   "boot_context.js": [
     "SCRATCH_WS", "embedded", "storedWorkspace", "storedScratchActive", "rememberWorkspace",
-    "captureToken", "captureOpenDir", "captureWindowIdentity", "rememberedWindowId",
+    "captureToken", "captureOpenDir", "captureWindowIdentity", "captureFirstView", "rememberedWindowId",
     "rememberWindowId", "loadInventoryCache", "saveInventoryCache",
   ],
   "config_sync.js": ["createConfigSync"],
   "feedback.js": ["setWorkspaceSaveState", "showError", "clearError"],
   "fonts.js": ["DEFAULT_FONT", "clampFont", "createFontSize"],
   "here.js": ["pathKey", "samePath", "insidePath", "baseName", "createHere"],
-  "launch_loop.js": ["createLaunchLoop"],
+  "launch_loop.js": ["createLaunchLoop", "createLaunchTarget"],
   "layout_sessions.js": ["sessionIdsInLayout", "removeSessionFromLayout", "layoutWith"],
   "lifecycle.js": ["createLifecycle"],
   "pane_commands.js": ["createPaneCommands"],
   "scratch.js": ["discardScratchWarning", "createScratch"],
   "session_ownership.js": ["createSessionOwnership"],
-  "sidebar.js": ["createSidebar"],
+  "shell.js": ["bootShell", "shellApp", "SHELL_MEMBERS"],
+  "shell_routing.js": ["rowAction", "killRoute", "sessionOwner", "finishedAttachRecord", "createTerminalRouting"],
+  "sidebar.js": [
+    "createSidebar", "sidebarModel", "collectViewContext", "sessionToMarkSeen", "documentHasKeyboard",
+    "finishedAttachRecord",
+  ],
   "terminal_actions.js": ["createTerminalActions", "resultLabel"],
   "spawner.js": [
     "defaultSystemSpec", "serializableSpec", "commandTerminalType", "claudeProfileForPane", "createSpawner",
@@ -69,6 +75,7 @@ test("a factory builds without touching its dependencies", async () => {
     ["spawner.js", "createSpawner"], ["window_registry.js", "createWindowRegistry"],
     ["workspace_actions.js", "createWorkspaceActions"], ["workspace_switch.js", "createWorkspaceSwitch"],
     ["fonts.js", "createFontSize"], ["terminal_actions.js", "createTerminalActions"],
+    ["launch_loop.js", "createLaunchTarget"], ["shell_routing.js", "createTerminalRouting"],
   ];
   for (const [file, name] of factories) {
     const factory = (await load(file))[name];
@@ -382,4 +389,39 @@ test("autosave waits out a switch and never saves an unnamed scratch", async () 
   assert.deepEqual(saves, [["Alpha", { type: "pane" }, undefined, ["a"], undefined]], "layout autosaves preserve separately edited metadata");
   autosave.cancelWorkspaceSave();
   autosave.cancelWorkspaceRetry();
+});
+
+test("the shell answers window-wide members itself and everything else from the active view", async () => {
+  const { shellApp, SHELL_MEMBERS } = await load("shell.js");
+  for (const name of [
+    "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
+    "liveTerminals", "activateTerminal", "killTerminal", "detachTerminal",
+    "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals",
+  ]) assert.ok(SHELL_MEMBERS.includes(name), name);
+  const shell = { openWorkspace: () => "shell", killTerminal: () => "shell" };
+  const facade = { splitH: () => "facade", profiles: ["fallback"] };
+  let active = null;
+  const app = shellApp({ shell, facade, activeApp: () => active });
+  assert.equal(app.openWorkspace(), "shell");
+  assert.equal(app.splitH(), "facade", "with no view the facade answers");
+  assert.deepEqual(app.profiles, ["fallback"]);
+  active = { splitH: () => "view", openWorkspace: () => "view", killTerminal: () => "view", profiles: ["view"] };
+  assert.equal(app.splitH(), "view");
+  assert.deepEqual(app.profiles, ["view"]);
+  assert.equal(app.openWorkspace(), "shell", "a view never answers a window-wide member");
+  assert.equal(app.killTerminal(), "shell");
+  assert.equal(app.runAgentMode, undefined, "a member nobody has is undefined, not an error");
+});
+
+test("a scratch view boots with its own identity, and only the first one is marked", async () => {
+  const { captureFirstView } = await load("boot_context.js");
+  const previous = globalThis.location;
+  try {
+    globalThis.location = { search: "?workspace=&window=view-12345678&embedded=1&first=1" };
+    assert.equal(captureFirstView(), true);
+    globalThis.location = { search: "?workspace=&window=view-12345678&embedded=1" };
+    assert.equal(captureFirstView(), false);
+  } finally {
+    globalThis.location = previous;
+  }
 });

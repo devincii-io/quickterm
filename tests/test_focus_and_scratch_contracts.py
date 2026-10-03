@@ -92,3 +92,28 @@ def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
         new_scratch_start:scratch.index("\n  async function openFolderInScratch", new_scratch_start)
     ]
     assert "switchWorkspace(null, null, { replaceScratch: true })" in new_scratch
+
+
+def test_new_scratch_opens_its_own_view_and_replaces_nothing():
+    # Every scratch is a view of its own now. "New scratch" opens another
+    # one beside what is open, so the confirmed replace path above is never
+    # reached from the UI and no terminal is put at risk by asking for one.
+    shell = (FRONTEND_JS / "shell.js").read_text(encoding="utf-8")
+    main = (FRONTEND_JS / "main.js").read_text(encoding="utf-8")
+    start = shell.index("  async function newScratchView()")
+    new_scratch = shell[start:shell.index("\n  }\n", start)]
+    assert "return Boolean(await views.open(null));" in new_scratch
+    assert "newScratchWorkspace" not in shell and "newScratchWorkspace" not in main
+    assert "discardScratch" not in shell
+    assert "newScratch: newScratchView," in shell
+
+
+def test_closing_a_scratch_view_kills_nothing():
+    # Closing a view is leaving its workspace, scratch included, and leaving
+    # was never confirmed by anyone: every owned terminal is retained.
+    lifecycle = (FRONTEND_JS / "lifecycle.js").read_text(encoding="utf-8")
+    start = lifecycle.index("  async function closeView()")
+    close = lifecycle[start:lifecycle.index("\n  return {", start)]
+    assert "await api.retainSession(id)" in close
+    assert "killSession" not in close and "cleanupSessions" not in close
+    assert "discardScratch" not in close

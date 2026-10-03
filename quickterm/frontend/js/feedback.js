@@ -3,19 +3,19 @@
 
 const $ = (id) => document.getElementById(id);
 
-// #sb-save owns the saving/saved lifecycle only. It is a 9 px span that
-// collapses when empty and disappears under the panel overlay, so it is the
-// wrong place for anything the user has to act on.
-// #sb-save is the save dot on the sidebar's workspace row: data-state drives
-// the colour, the title carries the words. It is the saving/saved lifecycle
-// and nothing else.
+// #sb-save is the save dot on the shell sidebar's active workspace group:
+// data-state drives the colour, the title carries the words. It is the
+// saving/saved lifecycle and nothing else, so it is the wrong place for
+// anything the user has to act on. Only the active view's saves reach it;
+// the shell itself saves nothing and writes it only on a view's behalf
+// (`shared`).
 export function setWorkspaceSaveState(text, state = "", shared = false) {
   if (typeof window !== "undefined" && window.parent !== window) {
     const host = window.parent.quicktermViews;
     if (host?.active === host?.viewFor(window)) return window.parent.quicktermChrome?.saveState(text, state);
     return;
   }
-  if (!shared && window.quicktermViews?.active && !window.quicktermViews.active.primary) return;
+  if (!shared) return;
   const status = $("sb-save");
   if (!status) return;
   const key = state || text;
