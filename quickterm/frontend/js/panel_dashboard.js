@@ -29,6 +29,29 @@ import {
 import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
 import { attentionText, sessionFolder } from "./launcher.js";
 
+// A miniature of a workspace's split layout for its card.
+export function layoutPreview(layout) {
+  const build = (node) => {
+    if (!node || node.type !== "split") {
+      const pane = make("span", "workspace-preview-pane");
+      pane.append(make("i", "", node && node.profile ? node.profile : "terminal"));
+      return pane;
+    }
+    const split = make("span", `workspace-preview-split ${node.dir === "v" ? "vertical" : "horizontal"}`);
+    const ratio = Math.max(20, Math.min(80, Math.round((node.ratio || 0.5) * 100)));
+    const children = node.children || [];
+    const first = build(children[0]);
+    const second = build(children[1]);
+    first.style.flex = `${ratio} 1 0`;
+    second.style.flex = `${100 - ratio} 1 0`;
+    split.append(first, second);
+    return split;
+  };
+  const preview = make("div", "workspace-preview");
+  preview.append(build(layout));
+  return preview;
+}
+
 // Sessions nobody claims are grouped under this label, which is also the signal
 // to the move/kill calls that there is no owning workspace to name.
 const UNASSIGNED = "Unassigned";
@@ -495,11 +518,11 @@ function createWorkspaceCard(panel, index) {
   top.append(logo, title, badge);
 
   const folderLine = make("p", "workspace-card-folder");
-  const preview = panel._layoutPreview(null);
+  const preview = layoutPreview(null);
 
   const actions = make("div", "workspace-card-actions");
-  const load = panel._button("Open workspace", "card-open-button");
-  load.addEventListener("click", () => {
+  const open = panel._button("Open workspace", "card-open-button");
+  open.addEventListener("click", () => {
     panel.close();
     panel.app.loadWorkspace(itemFor(card).name);
   });
@@ -523,10 +546,10 @@ function createWorkspaceCard(panel, index) {
       if (panel.open === "dashboard") panel._dashboard();
     });
   });
-  actions.append(load, editFolder, remove);
+  actions.append(open, editFolder, remove);
 
   card.append(top, folderLine, preview, actions);
-  card.addEventListener("dblclick", () => load.click());
+  card.addEventListener("dblclick", () => open.click());
   cardParts.set(card, { logo, title, badge, folderLine, preview, actions, layout: undefined });
   return card;
 }
@@ -566,7 +589,7 @@ function updateWorkspaceCard(panel, card, workspace, index) {
   const signature = JSON.stringify(layout ?? null);
   if (parts.layout !== signature) {
     parts.layout = signature;
-    const next = panel._layoutPreview(layout);
+    const next = layoutPreview(layout);
     card.replaceChild(next, parts.preview);
     parts.preview = next;
   }
