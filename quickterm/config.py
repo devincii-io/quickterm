@@ -47,11 +47,17 @@ class Profile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
-    claude_mode: str | None = None
+    # Launch mode of an agent profile (claude-code, codex). Configs before 4.0
+    # call it `claude_mode`; config_from_dict carries that over.
+    agent_mode: str | None = None
+    agent: dict[str, str] = field(default_factory=dict)
     ssh_host: str | None = None
     ssh_port: int | None = None
     ssh_user: str | None = None
     ssh_key: str | None = None
+    # None means PuTTY, so every profile saved before 4.0 keeps its client.
+    ssh_client: str | None = None
+    ssh_proxy_jump: str | None = None
     connection: dict[str, str] = field(default_factory=dict)
 
 
@@ -72,6 +78,25 @@ class VoiceConfig:
     model_size: str = "small"
     hotkey: str = "ctrl+alt+v"
     language: str | None = None
+
+
+@dataclass
+class WindowConfig:
+    width: int = 1280
+    height: int = 800
+    remember_bounds: bool = True
+
+
+@dataclass
+class OverlayConfig:
+    enabled: bool = False
+    edge: str = "top"
+    width_pct: int = 100
+    height_pct: int = 50
+    always_on_top: bool = True
+    hide_on_blur: bool = True
+    monitor: str = "cursor"
+    animate: bool = True
 
 
 def _default_profiles() -> list[Profile]:
@@ -123,6 +148,8 @@ class AppConfig:
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    window: WindowConfig = field(default_factory=WindowConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
 
 
 def default_cwd() -> str:
@@ -240,6 +267,11 @@ def _decode_environment(raw: object) -> dict[str, str]:
 
 def _storage_dict(cfg: AppConfig) -> dict:
     stored = dataclasses.asdict(cfg)
+    for profile in stored["profiles"]:
+        # A build before 4.0 reads only `claude_mode`; without it a downgrade
+        # silently turns every Claude profile into "continue".
+        if profile.get("terminal_type") == "claude-code":
+            profile["claude_mode"] = profile.get("agent_mode")
     if not secret_store.protection_available():
         return stored
     for profile in stored["profiles"]:
@@ -292,6 +324,8 @@ def config_from_dict(raw: dict) -> AppConfig:
             if not isinstance(profile, dict):
                 raise TypeError("Profile must be a JSON object")
             parsed = dict(profile)
+            if parsed.get("agent_mode") is None and parsed.get("claude_mode") is not None:
+                parsed["agent_mode"] = parsed["claude_mode"]
             if "env" in parsed:
                 parsed["env"] = _decode_environment(parsed["env"])
             profiles.append(_parse(Profile, parsed))
@@ -302,7 +336,73 @@ def config_from_dict(raw: dict) -> AppConfig:
         kwargs["snippets"] = [_parse(Snippet, s) for s in kwargs["snippets"]]
     if "voice" in kwargs:
         kwargs["voice"] = _parse(VoiceConfig, kwargs["voice"])
+    if "window" in kwargs:
+        kwargs["window"] = _parse(WindowConfig, kwargs["window"])
+    if "overlay" in kwargs:
+        kwargs["overlay"] = _parse(OverlayConfig, kwargs["overlay"])
     return AppConfig(**kwargs)
+
+
+_SSH_UNSAFE = re.compile(r"[\s\x00-\x1f\x7f]")
+_PROXY_JUMP = re.compile(r"^[A-Za-z0-9._@:,\[\]%-]+$")
+
+
+def _validate_ssh(profile: Profile) -> None:
+    """Host, user and jump reach ssh as arguments, so none may pass as an option."""
+    if not isinstance(profile.ssh_host, str) or not profile.ssh_host.strip():
+        raise ValueError("host is required")
+    if profile.ssh_port is not None and (
+        isinstance(profile.ssh_port, bool)
+        or not isinstance(profile.ssh_port, int)
+        or not 1 <= profile.ssh_port <= 65535
+    ):
+        raise ValueError("port must be between 1 and 65535")
+    for field_label, value in (("username", profile.ssh_user), ("private key", profile.ssh_key)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field_label} must be a string")
+    for field_label, value in (("host", profile.ssh_host), ("username", profile.ssh_user)):
+        text = (value or "").strip()
+        if text.startswith("-") or _SSH_UNSAFE.search(text):
+            raise ValueError(f"{field_label} must not start with - or contain spaces or control characters")
+    if profile.ssh_client not in (None, "openssh", "putty"):
+        raise ValueError("SSH client must be openssh or putty")
+    openssh = profile.ssh_client == "openssh"
+    jump = (profile.ssh_proxy_jump or "").strip()
+    if jump:
+        if jump.startswith("-") or not _PROXY_JUMP.fullmatch(jump):
+            raise ValueError("ProxyJump must be [user@]host[:port], comma separated")
+        if not openssh:
+            raise ValueError("ProxyJump needs the OpenSSH client")
+    if openssh and (profile.ssh_key or "").strip().lower().endswith(".ppk"):
+        raise ValueError("OpenSSH cannot read PuTTY .ppk keys; choose the PuTTY client or an OpenSSH key")
+
+
+def _validate_window(cfg: AppConfig) -> None:
+    window = getattr(cfg, "window", None) or WindowConfig()
+    overlay = getattr(cfg, "overlay", None) or OverlayConfig()
+    for label, value, low, high in (
+        ("Window width", window.width, 760, 16384),
+        ("Window height", window.height, 480, 16384),
+        ("Overlay width", overlay.width_pct, 30, 100),
+        ("Overlay height", overlay.height_pct, 20, 100),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{label} must be an integer")
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}")
+    for label, value in (
+        ("Remember window size", window.remember_bounds),
+        ("Overlay mode", overlay.enabled),
+        ("Overlay always on top", overlay.always_on_top),
+        ("Overlay hide on blur", overlay.hide_on_blur),
+        ("Overlay animation", overlay.animate),
+    ):
+        if not isinstance(value, bool):
+            raise ValueError(f"{label} must be true or false")
+    if overlay.edge not in ("top", "bottom"):
+        raise ValueError("Overlay edge must be top or bottom")
+    if overlay.monitor not in ("cursor", "primary"):
+        raise ValueError("Overlay monitor must be cursor or primary")
 
 
 def validate_config(cfg: AppConfig) -> None:
@@ -357,8 +457,11 @@ def validate_config(cfg: AppConfig) -> None:
     hotkey_owners: dict[tuple[int, int], str] = {}
     if cfg.summon_hotkey.strip():
         hotkey_owners[parse_binding(cfg.summon_hotkey)] = "QuickTerm summon shortcut"
+    _validate_window(cfg)
     profile_names: set[str] = set()
     for profile in cfg.profiles:
+        from .agents import AGENT_TYPES as validate_agent_types
+        from .agents import validate as validate_agent
         from .connections import validate as validate_connection
 
         name = profile.name.strip() if isinstance(profile.name, str) else ""
@@ -376,42 +479,32 @@ def validate_config(cfg: AppConfig) -> None:
             ("terminal type", profile.terminal_type),
             ("WSL distribution", profile.wsl_distro),
             ("startup command", profile.start_command),
-            ("Claude launch mode", profile.claude_mode),
+            ("launch mode", profile.agent_mode),
+            ("SSH client", profile.ssh_client),
+            ("ProxyJump", profile.ssh_proxy_jump),
         ):
             if value is not None and not isinstance(value, str):
                 raise ValueError(
                     f'Terminal profile "{name}": {field_label} must be a string'
                 )
+        if not isinstance(profile.agent, dict):
+            raise ValueError(f'Terminal profile "{name}": agent options must be an object')
         if not isinstance(profile.autostart, bool):
             raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
         try:
             validate_connection(profile)
+            if profile.terminal_type in validate_agent_types:
+                # Agents need a project folder, and the workspace root is the
+                # only source of one: the spawn refuses when none resolves.
+                validate_agent(profile)
+            if profile.terminal_type in ("ssh", "sftp"):
+                _validate_ssh(profile)
         except ValueError as exc:
             raise ValueError(f'Terminal profile "{name}": {exc}') from exc
         if profile.terminal_type == "custom" and not profile.cmd.strip():
             raise ValueError(f'Terminal profile "{name}": executable is required')
-        if profile.terminal_type == "claude-code" and profile.claude_mode not in {
-            None, "new", "continue", "resume", "agents"
-        }:
-            raise ValueError(
-                f'Terminal profile "{name}": Claude launch mode must be new, continue, resume, or agents'
-            )
-        # Claude Code needs a project folder and the workspace root is the only
-        # source of one. _resolve_profile refuses the spawn if none resolves.
         if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
             raise ValueError(f'Terminal profile "{name}": arguments must be strings')
-        if profile.terminal_type in ("ssh", "sftp"):
-            if not isinstance(profile.ssh_host, str) or not profile.ssh_host.strip():
-                raise ValueError(f'Terminal profile "{name}": host is required')
-            if profile.ssh_port is not None and (
-                isinstance(profile.ssh_port, bool)
-                or not isinstance(profile.ssh_port, int)
-                or not 1 <= profile.ssh_port <= 65535
-            ):
-                raise ValueError(f'Terminal profile "{name}": port must be between 1 and 65535')
-            for field_label, value in (("username", profile.ssh_user), ("private key", profile.ssh_key)):
-                if value is not None and not isinstance(value, str):
-                    raise ValueError(f'Terminal profile "{name}": {field_label} must be a string')
         try:
             validate_environment(profile.env)
         except ValueError as exc:
