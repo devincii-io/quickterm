@@ -36,11 +36,16 @@ class FakeProfile:
     terminal_type: str | None = None
     wsl_distro: str | None = None
     start_command: str | None = None
+    # Legacy alias, kept so the request tests still exercise claude_mode.
     claude_mode: str | None = None
+    agent_mode: str | None = None
+    agent: dict = field(default_factory=dict)
     ssh_host: str | None = None
     ssh_port: int | None = None
     ssh_user: str | None = None
     ssh_key: str | None = None
+    ssh_client: str | None = None
+    ssh_proxy_jump: str | None = None
     connection: dict = field(default_factory=dict)
 
 
@@ -56,6 +61,25 @@ class FakeVoiceConfig:
     model_size: str = "small"
     hotkey: str = "ctrl+alt+v"
     language: str | None = None
+
+
+@dataclass
+class FakeWindowConfig:
+    width: int = 1280
+    height: int = 800
+    remember_bounds: bool = True
+
+
+@dataclass
+class FakeOverlayConfig:
+    enabled: bool = False
+    edge: str = "top"
+    width_pct: int = 100
+    height_pct: int = 50
+    always_on_top: bool = True
+    hide_on_blur: bool = True
+    monitor: str = "cursor"
+    animate: bool = True
 
 
 @dataclass
@@ -77,6 +101,8 @@ class FakeConfig:
     profiles: list = field(default_factory=list)
     snippets: list = field(default_factory=list)
     voice: FakeVoiceConfig = field(default_factory=FakeVoiceConfig)
+    window: FakeWindowConfig = field(default_factory=FakeWindowConfig)
+    overlay: FakeOverlayConfig = field(default_factory=FakeOverlayConfig)
 
 
 @dataclass
@@ -965,6 +991,12 @@ def fake_config_mod(monkeypatch, cfg):
             if k in {"font_family", "default_profile", "max_sessions", "port",
                      "host", "summon_hotkey", "scratch_dir", "font_size"}:
                 setattr(parsed, k, v)
+            elif k == "window":
+                parsed.window = FakeWindowConfig(**v)
+            elif k == "overlay":
+                parsed.overlay = FakeOverlayConfig(**v)
+            elif k == "profiles":
+                parsed.profiles = [FakeProfile(**p) for p in v]
         return parsed
 
     mod.config_from_dict = config_from_dict
@@ -2048,13 +2080,110 @@ def test_put_config_accepts_a_revert_to_the_running_port(client, cfg, fake_confi
 
 
 def test_put_config_never_guards_host_or_the_summon_hotkey(client, cfg, fake_config_mod):
+    """Neither is a runtime override, so both are saved as sent. The summon
+    key also applies at once; the host waits for a restart."""
     sys.modules["quickterm.config"].disk_config.summon_hotkey = "ctrl+alt+x"
     cfg.runtime_overrides = {"port"}
 
-    response = client.put("/api/config", json={"summon_hotkey": cfg.summon_hotkey})
+    response = client.put(
+        "/api/config", json={"summon_hotkey": "ctrl+shift+f12", "host": "::1"}
+    )
 
     assert response.status_code == 204
-    assert fake_config_mod[-1].summon_hotkey == cfg.summon_hotkey
+    assert fake_config_mod[-1].summon_hotkey == "ctrl+shift+f12"
+    assert fake_config_mod[-1].host == "::1"
+    assert cfg.summon_hotkey == "ctrl+shift+f12"
+    assert cfg.host == "127.0.0.1"
+
+
+# --- config: window, overlay and hotkeys apply live -------------------------
+
+
+@pytest.fixture
+def hotkey_calls():
+    return {"rebind": [], "suspend": []}
+
+
+@pytest.fixture
+def hotkey_client(manager, cfg, hotkey_calls):
+    def rebind(live_cfg):
+        hotkey_calls["rebind"].append(live_cfg)
+        live_cfg.hotkey_error = "ctrl+alt+9 is in use by another program"
+
+    app = create_app(
+        manager,
+        cfg,
+        rebind_hotkeys=rebind,
+        suspend_hotkeys=lambda flag: hotkey_calls["suspend"].append(flag),
+    )
+    with TestClient(app, base_url=f"http://127.0.0.1:{cfg.port}") as c:
+        yield c
+
+
+def test_window_settings_apply_live(client, cfg, fake_config_mod):
+    window = {"width": 1600, "height": 1000, "remember_bounds": False}
+    assert client.put("/api/config", json={"window": window}).status_code == 204
+    assert cfg.window == FakeWindowConfig(**window)
+
+
+def test_overlay_settings_apply_live(client, cfg, fake_config_mod):
+    overlay = dataclasses.asdict(FakeOverlayConfig(enabled=True, edge="bottom", height_pct=40))
+    assert client.put("/api/config", json={"overlay": overlay}).status_code == 204
+    assert cfg.overlay.enabled is True
+    assert (cfg.overlay.edge, cfg.overlay.height_pct) == ("bottom", 40)
+
+
+def test_a_changed_summon_key_rebinds_and_reports(hotkey_client, cfg, fake_config_mod, hotkey_calls):
+    response = hotkey_client.put("/api/config", json={"summon_hotkey": "ctrl+alt+9"})
+
+    assert response.status_code == 204
+    assert hotkey_calls["rebind"] == [cfg]
+    assert cfg.summon_hotkey == "ctrl+alt+9"
+    assert hotkey_client.get("/api/config").json()["hotkey_error"] == (
+        "ctrl+alt+9 is in use by another program"
+    )
+
+
+def test_a_changed_profile_key_rebinds(hotkey_client, cfg, fake_config_mod, hotkey_calls):
+    profiles = [dataclasses.asdict(p) for p in cfg.profiles]
+    profiles[0]["keybinding"] = "ctrl+alt+1"
+
+    assert hotkey_client.put("/api/config", json={"profiles": profiles}).status_code == 204
+    assert len(hotkey_calls["rebind"]) == 1
+    assert cfg.profiles[0].keybinding == "ctrl+alt+1"
+
+
+def test_a_save_that_leaves_the_keys_alone_does_not_rebind(
+    hotkey_client, cfg, fake_config_mod, hotkey_calls
+):
+    response = hotkey_client.put(
+        "/api/config", json={"font_family": "Cascadia Mono", "summon_hotkey": cfg.summon_hotkey}
+    )
+    assert response.status_code == 204
+    assert hotkey_calls["rebind"] == []
+
+
+def test_hotkeys_can_be_suspended_and_resumed(hotkey_client, hotkey_calls):
+    assert hotkey_client.post("/api/hotkeys/suspend", json={"suspended": True}).status_code == 204
+    assert hotkey_client.post("/api/hotkeys/suspend", json={"suspended": False}).status_code == 204
+    assert hotkey_calls["suspend"] == [True, False]
+
+
+@pytest.mark.parametrize("body", [{}, {"suspended": "yes"}, {"suspended": 1}, [True]])
+def test_suspend_rejects_a_bad_body(hotkey_client, hotkey_calls, body):
+    assert hotkey_client.post("/api/hotkeys/suspend", json=body).status_code == 400
+    assert hotkey_calls["suspend"] == []
+
+
+def test_suspend_without_a_hotkey_manager_is_a_no_op(client):
+    assert client.post("/api/hotkeys/suspend", json={"suspended": True}).status_code == 204
+
+
+def test_suspend_requires_the_token(manager, cfg):
+    with TestClient(
+        create_app(manager, cfg, "s3cret"), base_url=f"http://127.0.0.1:{cfg.port}"
+    ) as c:
+        assert c.post("/api/hotkeys/suspend", json={"suspended": True}).status_code == 403
 
 
 def test_an_unreadable_saved_config_is_a_500_never_the_live_one(client, cfg, fake_config_mod):

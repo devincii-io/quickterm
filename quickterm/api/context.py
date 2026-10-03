@@ -33,5 +33,12 @@ class ApiContext:
     # is hidden). Called on the loop thread, so it must return at once. None
     # without a desktop shell; the sidebar still shows the state.
     notify: Callable[[str, str, str, str | None], None] | None = None
+    # Global hotkeys, from app.py. `rebind_hotkeys(cfg)` registers exactly the
+    # keys `cfg` names and sets `cfg.hotkey_error`; `suspend_hotkeys(flag)`
+    # releases them for a key capture (auto-resumed after 20 s). Both wait for
+    # the hotkey thread, so callers run them through asyncio.to_thread. None
+    # without a hotkey manager.
+    rebind_hotkeys: Callable[[Any], None] | None = None
+    suspend_hotkeys: Callable[[bool], None] | None = None
     inventory_cache: dict[str, Any] = field(default_factory=dict)
     workspace_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
