@@ -26,6 +26,7 @@ MAIN_MODULES = (
 )
 PANE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "pane.js"
 PALETTE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "palette.js"
+PALETTE_ITEMS_JS = FRONTEND_JS / "palette_items.js"
 
 
 def test_pane_uses_the_tested_attach_protocol_state_machine():
@@ -103,8 +104,11 @@ def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy
     assert "newTerminal:" in commands and "spawnDefaultInto(pane)" in commands
     assert "registerOscHandler(7" in pane
     assert "registerOscHandler(9" in pane
-    assert "split Claude agent view:" in palette
-    assert 'claudeMode: "agents"' in spawner
+    items = PALETTE_ITEMS_JS.read_text(encoding="utf-8")
+    assert "...agentRows(p, a)" in palette
+    assert "label: `split agent view: ${profile.name}`" in items
+    assert 'agentMode: "agents"' in spawner
+    assert "normalAgentSplitMode(profile)" in spawner
 
 
 def test_panes_move_by_dragging_their_header():
@@ -218,5 +222,87 @@ def test_palette_focuses_its_input_on_open_and_returns_the_terminal_on_close():
     # Release first: the guard this palette installed would otherwise refuse its
     # own hand-off back to the terminal.
     assert close_impl.index('releaseFocus("palette")') < close_impl.index(
-        "this.app.refocusTerm()"
+        "this.app.refocusTerm?.()"
     )
+
+
+def test_the_palette_opens_workspaces_only_from_enumerated_rows():
+    # A free-text prompt here used to tear the whole layout down on a typo, and
+    # a view never switches workspace in place: the rows open or focus a view.
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    items = PALETTE_ITEMS_JS.read_text(encoding="utf-8")
+    for source in (palette, items):
+        assert "load workspace" not in source
+        assert "show workspace beside" not in source
+        assert "loadWorkspace" not in source
+    assert "label: `open workspace: ${name}`" in items
+    assert "run: () => app?.openWorkspace?.(name)" in items
+    assert "label: `close workspace view: ${label}`" in items
+    assert 'label: "new scratch view"' in items
+    assert "...workspaceRows(this.app, this.late.names, this.late.details)" in palette
+    assert 'label: "move terminal here…"' in palette
+    assert "run: () => this._foreignSessionMode()" in palette
+
+
+def test_the_palette_reaches_terminals_settings_and_configs_across_views():
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    items = PALETTE_ITEMS_JS.read_text(encoding="utf-8")
+    assert "label: `go to terminal: ${terminalName(entry)}`" in items
+    assert "run: () => app?.activateTerminal?.(entry.session)" in items
+    assert "label: `setting: ${entry.label}`" in items
+    assert "label: `edit terminal: ${profile.name}`" in items
+    assert "label: `edit snippet: ${snippet.name}`" in items
+    assert "items.push(...terminalRows(a));" in palette
+    # The kind prefixes are parsed where the list is filtered, and the input
+    # says they exist.
+    refilter = palette[palette.index("  _refilter(resetSelection = true) {"):]
+    refilter = refilter[: refilter.index("\n  }\n")]
+    assert "parsePrefix(raw)" in refilter
+    assert "rowGroup(item) === kind" in refilter
+    assert "PREFIX_HINT" in palette[palette.index("  async openPalette() {"):palette.index("\n  close() {")]
+    # Resume rows are fetched once per open and dropped when the palette moved on.
+    fill = palette[palette.index("  async _fillAgentSessions(requestId) {"):]
+    fill = fill[: fill.index("\n  }\n")]
+    assert "api.listAgentSessions(profile.terminal_type, workspace)" in fill
+    assert "if (!this._current(requestId)) return;" in fill
+
+
+def test_kill_terminal_in_the_palette_preselects_the_kill_row():
+    # The palette is a keyboard path, so the confirmation opens with Kill
+    # selected and Enter completes it (AGENTS.md destructive confirmation).
+    palette = PALETTE_JS.read_text(encoding="utf-8")
+    assert 'label: "kill terminal…"' in palette
+    assert "run: () => this._killMode()" in palette
+    confirm = palette[palette.index("  _killConfirm(entry) {"):]
+    confirm = confirm[: confirm.index("\n  }\n")]
+    assert confirm.index("label: `kill ${name}`") < confirm.index('label: "back"')
+    assert "this._refilter();" in confirm
+    assert "Enter kills, Esc goes back" in confirm
+    chosen = palette[palette.index("  async _killChosen(entry) {"):]
+    chosen = chosen[: chosen.index("\n  }\n")]
+    assert "await this.app.killTerminal?.(entry.session);" in chosen
+    # Only a verified kill closes; a failure stays on the confirmation.
+    assert chosen.index("catch (error)") < chosen.index("this.close();")
+    assert "error?.detail" in chosen
+
+
+def test_the_api_client_has_the_agent_ssh_and_hotkey_wrappers():
+    api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
+    assert "export const getAgentCatalog = (fresh = false) =>" in api
+    assert '`/api/system/agents${fresh ? "?fresh=true" : ""}`' in api
+    assert "export const listAgentSessions = (type, workspace, limit = 20) =>" in api
+    assert "/api/agent-sessions?" in api
+    assert 'export const getSshHosts = () => req("GET", "/api/system/ssh-hosts");' in api
+    assert "`/api/system/ssh-hosts/${encodeURIComponent(alias)}`" in api
+    assert 'req("POST", "/api/hotkeys/suspend", { suspended: Boolean(suspended) })' in api
+
+
+def test_the_spawner_sends_agent_mode_and_session():
+    spawner = SPAWNER_JS.read_text(encoding="utf-8")
+    assert "{ agent_mode: launch.agentMode }" in spawner
+    assert "{ agent_session: launch.agentSession }" in spawner
+    assert "claude_mode" not in spawner
+    for name in ("runAgentMode,", "resumeAgentSession,", "splitAgentView,"):
+        assert name in spawner
+    assert "runClaudeMode: runAgentMode," in spawner
+    assert "splitClaudeAgentView: splitAgentView," in spawner
