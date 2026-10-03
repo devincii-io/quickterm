@@ -1,13 +1,20 @@
-// Alt+K command palette: one input, subsequence fuzzy match over
-// profiles, actions, snippets, workspaces, and recent sessions.
-// Two-step prompts (workspace name, file path) reuse the same input.
+// Alt+K command palette: one input, subsequence fuzzy match over actions,
+// profiles, agents, snippets, workspaces, running terminals, settings and
+// configs. A leading `>`, `@`, `#` or `!` narrows the list to one kind.
+// Sub-modes (kill, search, new window, move here) and the file path prompt
+// reuse the same input.
 
 import * as api from "./api.js";
-import { displaySnippet } from "./panel_shared.js";
+import { displaySnippet, layoutSessionIds } from "./panel_shared.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { resultLabel } from "./terminal_actions.js";
 import { connectionLabel, connectionTarget } from "./panel_connections.js";
-import { workspaceLabel, isScratchWorkspace } from "./boot_context.js";
+import { workspaceLabel } from "./boot_context.js";
+import { AGENT_TYPES, agentTypeOf } from "./agent_profile.js";
+import {
+  PREFIX_HINT, agentRows, agentSessionRows, configRows, fuzzyScore, killName, killRows, parsePrefix,
+  rowGroup, settingRows, terminalRows, workspaceRows,
+} from "./palette_items.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
 // long multi-line snippet cannot push the destination out of view.
@@ -18,34 +25,9 @@ function snippetHint(text) {
   return lines.length > 1 ? `${head} … (+${lines.length - 1} more)` : head;
 }
 
-function layoutSessionIds(node, out = new Set()) {
-  if (!node) return out;
-  if (node.type === "split") {
-    for (const child of node.children || []) layoutSessionIds(child, out);
-  } else if (node.session_id) {
-    out.add(node.session_id);
-  }
-  return out;
-}
-
-function fuzzyScore(query, text) {
-  if (!query) return 1;
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  let qi = 0;
-  let score = 0;
-  let streak = 0;
-  let last = -2;
-  for (let i = 0; i < t.length && qi < q.length; i++) {
-    if (t[i] === q[qi]) {
-      streak = i === last + 1 ? streak + 1 : 1;
-      score += 1 + streak * 2;
-      if (i === 0 || t[i - 1] === " " || t[i - 1] === ":") score += 3;
-      last = i;
-      qi++;
-    }
-  }
-  return qi === q.length ? score : -1;
+// What openPalette learns after the list is already shown.
+function emptyLate() {
+  return { names: [], details: new Map(), attach: [], agentSessions: [] };
 }
 
 export class Palette {
@@ -59,7 +41,11 @@ export class Palette {
     this.foreignMode = false;
     this.windowMode = false;
     this.searchMode = false;
+    this.killMode = false;
+    this.killTarget = null;
+    this.killPending = false;
     this.foreignSessions = [];
+    this.late = emptyLate();
     this.requestId = 0;
 
     const overlay = document.createElement("div");
@@ -103,72 +89,61 @@ export class Palette {
     // claiming twice left one claim standing after close() and the terminal
     // never took the keyboard back.
     if (!wasOpen) claimFocus("palette");
-    this.prompt = null;
-    this.foreignMode = false;
-    this.windowMode = false;
-    this.searchMode = false;
+    this._leaveSubModes();
     this.overlay.hidden = false;
     this.input.value = "";
-    this.input.placeholder = "command / profile / snippet / session";
-    this.items = this._staticItems();
+    this.input.placeholder = `Find anything · ${PREFIX_HINT}`;
+    this.late = emptyLate();
+    this._compose();
     this._refilter();
     this.focusInput();
+    this._fillAgentSessions(requestId);
     // enrich with live data
     const [sessions, workspaces] = await Promise.all([
       api.getSessions().catch(() => []),
       api.listWorkspaces().catch(() => []),
     ]);
-    if (!this.open || requestId !== this.requestId || this._inSubMode()) return;
-    this.items = this._staticItems();
-    for (const name of workspaces) {
-      if (isScratchWorkspace(name)) continue;
-      this.items.push({
-        kind: "workspace",
-        label: `load workspace: ${name}`,
-        run: () => this.app.loadWorkspace(name),
-      });
-    }
+    if (!this._current(requestId)) return;
+    this.late.names = workspaces;
+    this._compose();
+    this._refilter(false);
     const workspaceData = await Promise.all(workspaces.map(async (name) => ({
       name,
       saved: await api.getWorkspace(name).catch(() => null),
     })));
-    if (!this.open || requestId !== this.requestId || this._inSubMode()) return;
+    if (!this._current(requestId)) return;
     const owners = new Map();
     const layoutBound = new Set();
     for (const { name, saved } of workspaceData) {
       if (!saved) continue;
+      // The folder is what distinguishes two similarly named workspaces, so
+      // the row shows it once the details have arrived.
+      this.late.details.set(name, saved);
       const ids = new Set(saved.session_ids || []);
       layoutSessionIds(saved.layout, ids);
       for (const sid of ids) if (!owners.has(sid)) owners.set(sid, name);
       layoutSessionIds(saved.layout, layoutBound);
     }
-    // The folder is what distinguishes two similarly named workspaces, so
-    // show it on the row once the details have arrived.
-    for (const { name, saved } of workspaceData) {
-      if (!saved || !saved.path) continue;
-      const row = this.items.find(
-        (item) => item.kind === "workspace" && item.label === `load workspace: ${name}`,
-      );
-      if (row) row.hint = saved.path_exists === false ? `${saved.path} (missing)` : saved.path;
-    }
-    const attached = new Set(this.app.attachedSessionIds());
-    const current = this.app.currentWorkspace() || "scratch";
-    const currentOwned = new Set(this.app.ownedSessionIds ? this.app.ownedSessionIds() : []);
+    const a = this.app;
+    const attached = new Set(a.attachedSessionIds?.() || []);
+    const current = a.currentWorkspace?.() || "scratch";
+    const currentOwned = new Set(a.ownedSessionIds?.() || []);
     this.foreignSessions = [];
     for (const s of sessions) {
       if (!s.alive || attached.has(s.id) || s.attachments > 0 || layoutBound.has(s.id)) continue;
       const owner = owners.get(s.id) || (currentOwned.has(s.id) ? current : null);
       if (owner === current) {
-        this.items.push({
+        this.late.attach.push({
           kind: "session",
           label: `attach here: ${s.name || s.id}`,
           hint: s.profile ? `${s.profile} · ${s.id}` : s.id,
-          run: () => this.app.attachSession(s),
+          run: () => a.attachSession?.(s),
         });
       } else {
         this.foreignSessions.push({ info: s, workspace: owner || "Unassigned" });
       }
     }
+    this._compose();
     this._refilter(false);
   }
 
@@ -176,15 +151,12 @@ export class Palette {
     if (!this.open) return;
     this.open = false;
     this.requestId++;
-    this.prompt = null;
-    this.foreignMode = false;
-    this.windowMode = false;
-    this.searchMode = false;
+    this._leaveSubModes();
     this.overlay.hidden = true;
     // Release before asking for the terminal back, or the guard this palette
     // installed would refuse its own hand-off.
     releaseFocus("palette");
-    this.app.refocusTerm();
+    this.app.refocusTerm?.();
   }
 
   // The sidebar's "new window" button and the palette's own "new window…" row
@@ -217,7 +189,50 @@ export class Palette {
   // A prompt or one of the lists reached from a command row: the command
   // list's late enrichment must not overwrite it.
   _inSubMode() {
-    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode);
+    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode || this.killMode);
+  }
+
+  _leaveSubModes() {
+    this.prompt = null;
+    this.foreignMode = false;
+    this.windowMode = false;
+    this.searchMode = false;
+    this.killMode = false;
+    this.killTarget = null;
+  }
+
+  _current(requestId) {
+    return this.open && requestId === this.requestId && !this._inSubMode();
+  }
+
+  _compose() {
+    this.items = [
+      ...this._staticItems(),
+      ...workspaceRows(this.app, this.late.names, this.late.details),
+      ...this.late.attach,
+      ...this.late.agentSessions,
+    ];
+  }
+
+  // "resume <agent> session: <title>" rows for the first profile of each agent
+  // type, from that agent's own session store for this workspace's folder.
+  async _fillAgentSessions(requestId) {
+    const a = this.app;
+    const workspace = a.currentWorkspace?.() || null;
+    if (!workspace || typeof api.listAgentSessions !== "function") return;
+    const profiles = AGENT_TYPES
+      .map((type) => (a.profiles || []).find((profile) => agentTypeOf(profile) === type))
+      .filter(Boolean);
+    if (!profiles.length) return;
+    const answers = await Promise.all(profiles.map((profile) =>
+      api.listAgentSessions(profile.terminal_type, workspace).then(
+        (answer) => ({ profile, sessions: answer?.sessions || [] }),
+        () => ({ profile, sessions: [] }),
+      )));
+    if (!this._current(requestId)) return;
+    this.late.agentSessions = answers.flatMap(({ profile, sessions }) => agentSessionRows(profile, sessions, a));
+    this._compose();
+    this._refilter(false);
   }
 
   _staticItems() {
@@ -227,42 +242,48 @@ export class Palette {
     const here = a.hereFolder?.() || null;
     const folderHint = (keys) => (here ? `${here} · ${keys}` : keys);
     const items = [
-      { kind: "action", label: "dashboard", run: () => a.openPanel("dashboard") },
-      { kind: "action", label: "settings", run: () => a.openPanel("settings") },
-      { kind: "action", label: "terminals and connections", run: () => a.setupTerminals() },
-      { kind: "action", label: "setup tour", run: () => a.setupTour() },
-      { kind: "action", label: "help", run: () => a.openPanel("help") },
-      { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal() },
-      { kind: "action", label: "previous new-terminal profile", hint: "Alt+Shift+Left", run: () => a.cycleTerminal(-1) },
-      { kind: "action", label: "next new-terminal profile", hint: "Alt+Shift+Up", run: () => a.cycleTerminal(1) },
+      { kind: "action", label: "dashboard", run: () => a.openPanel?.("dashboard") },
+      { kind: "action", label: "settings", run: () => a.openPanel?.("settings") },
+      { kind: "action", label: "terminals and connections", run: () => a.setupTerminals?.() },
+      { kind: "action", label: "setup tour", run: () => a.setupTour?.() },
+      { kind: "action", label: "help", run: () => a.openPanel?.("help") },
+      { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal?.() },
+      { kind: "action", label: "previous new-terminal profile", hint: "Alt+Shift+Left", run: () => a.cycleTerminal?.(-1) },
+      { kind: "action", label: "next new-terminal profile", hint: "Alt+Shift+Up", run: () => a.cycleTerminal?.(1) },
       ...(a.shellInstalls?.() || []).map((install) => ({
         kind: "action",
         label: `install ${install.label}`,
         hint: install.cmd ? "winget, in a new terminal" : "opens the download page",
-        run: () => a.installShell(install),
+        run: () => a.installShell?.(install),
       })),
-      { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH() },
-      { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV() },
-      { kind: "action", label: a.isZoomed?.() ? "show all panes" : "zoom pane", hint: "Alt+Z", run: () => a.zoom() },
-      { kind: "view", label: "text size: smaller", hint: "Ctrl+−", run: () => a.fontSmaller() },
-      { kind: "view", label: "text size: bigger", hint: "Ctrl++", run: () => a.fontBigger() },
-      { kind: "view", label: "text size: reset", hint: "Ctrl+0", run: () => a.fontReset() },
+      { kind: "action", label: "split right", hint: "Alt+Shift+Right · H", run: () => a.splitH?.() },
+      { kind: "action", label: "split below", hint: "Alt+Shift+Down · V", run: () => a.splitV?.() },
+      { kind: "action", label: a.isZoomed?.() ? "show all panes" : "zoom pane", hint: "Alt+Z", run: () => a.zoom?.() },
+      { kind: "view", label: "text size: smaller", hint: "Ctrl+−", run: () => a.fontSmaller?.() },
+      { kind: "view", label: "text size: bigger", hint: "Ctrl++", run: () => a.fontBigger?.() },
+      { kind: "view", label: "text size: reset", hint: "Ctrl+0", run: () => a.fontReset?.() },
       // Pane sizing lives on the splitter (drag / arrows / double-click) and in
       // Quick settings. Duplicating it as five palette rows only crowded the list.
-      { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane() },
-      { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession({ keyboard: true }) },
+      { kind: "action", label: "detach pane", hint: "Alt+D", run: () => a.closePane?.() },
+      { kind: "action", label: "kill session and close pane", hint: "Alt+W", run: () => a.killFocusedSession?.({ keyboard: true }) },
+      // Any terminal the backend runs, not only the focused pane's. Choosing
+      // one asks first, with the kill pre-selected: this is a keyboard path.
+      {
+        kind: "action", label: "kill terminal…", hint: "choose one, then confirm",
+        keepOpen: true, run: () => this._killMode(),
+      },
       // Only offered where there is something to restart; Enter in the exited
       // pane is the same action without opening the palette.
       ...(a.canRestartFocused?.() ? [{
         kind: "action", label: "restart terminal", hint: "Enter in an exited pane",
-        run: () => a.restartTerminal(),
+        run: () => a.restartTerminal?.(),
       }] : []),
       // Views beside this one are other documents with their own switch, so
       // the label says how far it reaches.
       {
         kind: "action",
         label: a.isBroadcasting?.() ? "stop broadcasting input" : "broadcast input to all panes in this workspace",
-        run: () => a.toggleBroadcast(),
+        run: () => a.toggleBroadcast?.(),
       },
       {
         kind: "action", label: "search all terminals…", hint: "every terminal's scrollback",
@@ -270,17 +291,17 @@ export class Palette {
       },
       {
         kind: "action", label: "save terminal output", hint: "as plain text into Downloads",
-        run: () => a.saveTerminalOutput(),
+        run: () => a.saveTerminalOutput?.(),
       },
       ...(a.lastSavedOutput?.() ? [{
         kind: "action", label: "open last saved output", hint: a.lastSavedOutput(),
-        run: () => a.openLastSavedOutput(),
+        run: () => a.openLastSavedOutput?.(),
       }] : []),
-      { kind: "action", label: "open folder in Explorer", hint: folderHint("Alt+Shift+E"), run: () => a.openExplorer() },
-      { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor() },
+      { kind: "action", label: "open folder in Explorer", hint: folderHint("Alt+Shift+E"), run: () => a.openExplorer?.() },
+      { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor?.() },
       {
-        kind: "action", label: "attach from another workspace…", keepOpen: true,
-        run: () => this._foreignSessionMode(),
+        kind: "action", label: "move terminal here…", hint: "from another workspace or Unassigned",
+        keepOpen: true, run: () => this._foreignSessionMode(),
       },
       // No shortcut: keys.js may only claim cold Alt combos, and every letter
       // left over is a readline or PSReadLine binding the shell needs (see
@@ -289,18 +310,13 @@ export class Palette {
         kind: "action", label: "new window…", hint: "a second window on another workspace",
         keepOpen: true, run: () => this._newWindowMode(),
       },
-      ...(a.canShowWorkspaceBeside?.() ? [{
-        kind: "view", label: "show workspace beside…", hint: "tile another workspace into this window",
-        keepOpen: true, run: () => this._newWindowMode(true),
-      }] : []),
-      // Saving and loading are name-exact operations, and a free-text prompt
-      // here used to tear the whole layout down on a typo. Loading is offered
-      // only as enumerated "load workspace: <name>" rows (added in
-      // openPalette); saving is handed to the Dashboard, which validates the
-      // name and shows the error.
+      // Workspaces are opened only from enumerated "open workspace: <name>"
+      // rows (palette_items.js workspaceRows); a free-text prompt here used to
+      // tear the whole layout down on a typo. Saving is handed to the
+      // Dashboard, which validates the name and shows the error.
       {
         kind: "action", label: "save workspace…", hint: "opens Dashboard",
-        run: () => a.openPanel("dashboard"),
+        run: () => a.openPanel?.("dashboard"),
       },
       {
         kind: "action", label: "open file viewer…", keepOpen: true,
@@ -314,30 +330,21 @@ export class Palette {
         }),
       },
     ];
-    for (const p of a.profiles) {
+    for (const p of a.profiles || []) {
       const desktop = ["rdp", "vnc"].includes(p.terminal_type);
       items.push({
         kind: desktop ? "window" : "terminal",
         label: `open ${desktop ? "window" : "terminal"}: ${p.name}`,
         hint: `${connectionLabel(p)} · ${connectionTarget(p)}`,
-        run: () => a.runProfile(p),
+        run: () => a.runProfile?.(p),
       });
-      if (p.terminal_type === "claude-code") {
-        const project = a.workspacePath?.() || "workspace folder";
-        items.push(
-          { kind: "claude", label: `claude new conversation: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "new") },
-          { kind: "claude", label: `claude continue: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "continue") },
-          { kind: "claude", label: `claude choose session: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "resume") },
-          { kind: "claude", label: `claude agent manager: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "agents") },
-          { kind: "claude", label: `split Claude agent view: ${p.name}`, hint: project, run: () => a.splitClaudeAgentView(p) },
-        );
-      }
+      items.push(...agentRows(p, a));
     }
     // Snippets type straight into the focused terminal, so the row has to show
     // both what is sent and where it lands: two similarly named snippets are
     // otherwise indistinguishable in the list.
     const target = a.focusedPaneName?.();
-    for (const s of a.snippets) {
+    for (const s of a.snippets || []) {
       // A description says why the snippet is kept; the command usually only
       // repeats what the name already implies. Snippets written before
       // descriptions existed have none, so the command stays the fallback.
@@ -352,9 +359,13 @@ export class Palette {
         // The label leads, so typing "snippet" still lists every snippet and
         // the word-start scoring bonus lands where it did before.
         search: [`snippet: ${s.name}`, s.description, command].filter(Boolean).join(" "),
-        run: () => a.sendSnippet(s),
+        run: () => a.sendSnippet?.(s),
       });
     }
+    items.push(...terminalRows(a));
+    // Settings and configs are many and only worth showing once something is
+    // typed (or `#` asks for them), so they stay out of the bare command list.
+    for (const row of [...settingRows(a), ...configRows(a)]) items.push({ ...row, quiet: true });
     return items;
   }
 
@@ -381,10 +392,8 @@ export class Palette {
   // to narrow them, Enter brings the terminal into view at that line, Escape
   // goes back to the commands.
   async _searchMode(query) {
+    this._leaveSubModes();
     this.searchMode = true;
-    this.foreignMode = false;
-    this.windowMode = false;
-    this.prompt = null;
     this.input.value = "";
     this.input.placeholder = `searching for "${query}"…`;
     const request = ++this.requestId;
@@ -395,13 +404,14 @@ export class Palette {
     this.focusInput();
     let results;
     try {
-      results = await this.app.searchTerminals(query);
+      results = await this.app.searchTerminals?.(query);
     } catch (error) {
       if (!this.open || !this.searchMode || request !== this.requestId) return;
       this.input.placeholder = error?.detail || "search failed";
       return;
     }
     if (!this.open || !this.searchMode || request !== this.requestId) return;
+    results = results || [];
     this.input.placeholder = results.length
       ? `${results.length} line${results.length === 1 ? "" : "s"} match "${query}" · type to narrow`
       : `no terminal output matches "${query}"`;
@@ -411,7 +421,7 @@ export class Palette {
         label: resultLabel(result),
         hint: [result.name, result.workspace, result.alive ? null : "exited"].filter(Boolean).join(" · "),
         search: `${result.name} ${result.text}`,
-        run: () => this.app.revealSearchResult(result, query),
+        run: () => this.app.revealSearchResult?.(result, query),
       });
     }
     // Enter goes to the first hit, unless the user already moved or typed
@@ -425,9 +435,8 @@ export class Palette {
   }
 
   _foreignSessionMode() {
+    this._leaveSubModes();
     this.foreignMode = true;
-    this.searchMode = false;
-    this.prompt = null;
     this.input.value = "";
     this.input.placeholder = "Other workspaces; choosing one moves the session here";
     this.items = [
@@ -436,11 +445,71 @@ export class Palette {
         kind: "session",
         label: `move here & attach: ${info.name || info.id}`,
         hint: `${workspaceLabel(workspace)} · ${info.id}`,
-        run: () => this.app.moveSessionHere(info, workspace === "Unassigned" ? null : workspace),
+        run: () => this.app.moveSessionHere?.(info, workspace === "Unassigned" ? null : workspace),
       })),
     ];
     this._refilter();
     this.focusInput();
+  }
+
+  // Every running terminal, wherever it lives. The back row comes last so
+  // the first terminal is the one Enter picks.
+  _killMode() {
+    this._leaveSubModes();
+    this.killMode = true;
+    this.input.value = "";
+    const rows = killRows(this.app).map((row) => ({
+      ...row, keepOpen: true, run: () => this._killConfirm(row.terminal),
+    }));
+    this.input.placeholder = rows.length ? "Kill which terminal? Esc goes back" : "No terminal is running";
+    this.items = [
+      ...rows,
+      { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
+    ];
+    this._refilter();
+    this.focusInput();
+  }
+
+  // The keyboard asked for this kill, so the kill row comes first and is
+  // selected: Enter completes it, Escape goes back to the list.
+  _killConfirm(entry) {
+    this.killTarget = entry;
+    const name = killName(entry);
+    this.input.value = "";
+    this.input.placeholder = `kill ${name}? Enter kills, Esc goes back`;
+    this.items = [
+      {
+        kind: "kill", label: `kill ${name}`, hint: "stops its whole process tree",
+        keepOpen: true, run: () => this._killChosen(entry),
+      },
+      { kind: "back", label: "back", keepOpen: true, run: () => this._killMode() },
+    ];
+    this._refilter();
+    this.focusInput();
+  }
+
+  // Only a verified kill closes the palette. A failure keeps the confirmation
+  // up with the server's reason, so Enter retries and Escape backs out.
+  async _killChosen(entry) {
+    if (this.killPending) return;
+    const name = killName(entry);
+    if (typeof this.app.killTerminal !== "function") {
+      this.input.placeholder = "Killing terminals is not available here";
+      return;
+    }
+    this.killPending = true;
+    this.input.placeholder = `killing ${name}…`;
+    try {
+      await this.app.killTerminal?.(entry.session);
+    } catch (error) {
+      if (this.open && this.killTarget === entry) {
+        this.input.placeholder = `${error?.detail || `could not kill ${name}`} · Enter retries, Esc goes back`;
+      }
+      return;
+    } finally {
+      this.killPending = false;
+    }
+    if (this.open && this.killTarget === entry) this.close();
   }
 
   // Which workspace a second window opens on. Workspaces another window already
@@ -449,26 +518,27 @@ export class Palette {
   // explains the refusal instead of opening a window that would fight over the
   // same layout file.
   async _newWindowMode(beside = false) {
+    this._leaveSubModes();
     this.windowMode = true;
-    this.foreignMode = false;
-    this.searchMode = false;
-    this.prompt = null;
     this.input.value = "";
     this.input.placeholder = beside ? "Tile a workspace beside this one…" : "Open a second window on…";
     const request = ++this.requestId;
+    const a = this.app;
     this.items = [
       { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
       ...[{
         kind: "window", label: beside ? "new scratch view" : "new window: scratch",
         hint: "a disposable layout of its own",
-        run: () => beside ? this.app.openWorkspaceBeside(null) : this.app.openNewWindow(null),
+        run: () => beside ? a.openWorkspaceBeside?.(null) : a.openNewWindow?.(null),
       }],
     ];
     this._refilter();
     this.focusInput();
-    const rows = await this.app.newWindowChoices().catch(() => []);
+    const rows = await Promise.resolve()
+      .then(() => a.newWindowChoices?.() || [])
+      .catch(() => []);
     if (!this.open || !this.windowMode || request !== this.requestId) return;
-    if (!this.app.windowRegistryAvailable()) {
+    if (a.windowRegistryAvailable?.() === false) {
       // Say so rather than let every workspace look free: the list below is
       // this window's guess, not the registry's answer.
       this.input.placeholder = "Cannot check which workspaces are already open";
@@ -481,8 +551,8 @@ export class Palette {
         // A workspace this window already shows in another view is focused,
         // not explained: it is one click away, not busy elsewhere.
         run: () => (row.taken
-          ? (beside && this.app.focusShownWorkspace?.(row.name)) || this.app.explainWindowChoice(row)
-          : beside ? this.app.openWorkspaceBeside(row.name) : this.app.openNewWindow(row.name)),
+          ? (beside && a.focusShownWorkspace?.(row.name)) || a.explainWindowChoice?.(row)
+          : beside ? a.openWorkspaceBeside?.(row.name) : a.openNewWindow?.(row.name)),
       });
     }
     this._refilter(false);
@@ -492,7 +562,11 @@ export class Palette {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      if (this.foreignMode || this.windowMode || this.searchMode) {
+      if (this.killMode && this.killTarget) {
+        this._killMode();
+        return;
+      }
+      if (this.foreignMode || this.windowMode || this.searchMode || this.killMode) {
         this.openPalette();
         return;
       }
@@ -540,10 +614,15 @@ export class Palette {
   // resetSelection=false keeps the highlighted row when the list is rebuilt for
   // a reason the user did not trigger (late session/workspace enrichment).
   // Resetting there let Enter run a different item than the one highlighted.
+  //
+  // The kind prefixes apply to the command list only: in a sub-mode the input
+  // narrows that mode's own rows, where `#` or `!` may be what is searched for.
   _refilter(resetSelection = true) {
-    const q = this.input.value.trim();
+    const raw = this.input.value.trim();
+    const { kind, text: q } = this._inSubMode() ? { kind: null, text: raw } : parsePrefix(raw);
     const previous = resetSelection ? null : this.filtered[this.sel];
     this.filtered = this.items
+      .filter((item) => (kind ? rowGroup(item) === kind : q || !item.quiet))
       // `search` widens what an item can be found by without widening what it
       // shows. A snippet carries its description there, so "deploy" finds the
       // snippet described as the deploy step even though its name is `dp`.
