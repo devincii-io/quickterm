@@ -10,8 +10,10 @@ import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 export function createPaneCommands({
   api, state, layout,
   spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
-  removeSessionsFromSavedWorkspaces, scheduleWorkspaceSave, refreshStatusSoon, showError,
+  removeSessionsFromSavedWorkspaces, scheduleWorkspaceSave, persistCurrentWorkspace, refreshStatusSoon, showError,
 }) {
+  const paneFor = (id) => layout.panes().find((pane) => pane.session?.id === id) || null;
+
   return {
     splitH: () => {
       const source = layout.focused;
@@ -124,6 +126,45 @@ export function createPaneCommands({
         scheduleWorkspaceSave();
         refreshStatusSoon();
       }, "Kill", { focusConfirm: keyboard });
+    },
+    // The shell's sidebar kill, routed here because this view holds or owns
+    // the terminal: its in-memory ownership drops the id before the next
+    // autosave could write it back. A real failure is thrown unchanged
+    // ({status, detail}) for the confirmation to show; a 404 means there is
+    // nothing left to stop, so it falls through like a verified kill.
+    killSessionById: async (id) => {
+      try {
+        await api.killSession(id);
+      } catch (error) {
+        if (!sessionAlreadyGone(error)) throw error;
+      }
+      forgetSession(id);
+      const pane = paneFor(id);
+      if (pane) layout.closePane(pane);
+      scheduleWorkspaceSave();
+      refreshStatusSoon();
+      return true;
+    },
+    // The sidebar's Detach: retain first, then close the pane that shows it.
+    // Never a kill. `forget` is the first half of moving the terminal to
+    // another view: this workspace lets go of it and says so on disk at once,
+    // so the backend drops its workspace tag before the other view attaches.
+    detachSessionById: async (id, { forget = false } = {}) => {
+      try {
+        await api.retainSession(id);
+      } catch (error) {
+        if (!sessionAlreadyGone(error)) throw error;
+      }
+      const pane = paneFor(id);
+      if (pane) layout.closePane(pane);
+      if (forget) {
+        forgetSession(id);
+        await persistCurrentWorkspace();
+      } else {
+        scheduleWorkspaceSave();
+      }
+      refreshStatusSoon();
+      return true;
     },
     killAllSessions: async () => {
       const result = await api.killAllSessions();

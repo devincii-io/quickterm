@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from quickterm.windows import (
+    DEFAULT_MAX_WINDOWS,
     DEFAULT_TTL_S,
     KEEP,
     TooManyWindows,
@@ -202,6 +203,21 @@ def test_window_limit_is_enforced_but_not_against_a_reload(registry):
     with pytest.raises(TooManyWindows):
         registry.register(window_id="w4")
     assert registry.register(window_id="w0", title="again").id == "w0"
+
+
+def test_the_default_limit_fits_a_shell_and_its_views_in_a_few_windows(clock):
+    # The shell document of every native window and each workspace view in
+    # it register on their own: two windows with fourteen views each must fit.
+    assert DEFAULT_MAX_WINDOWS == 32
+    registry = WindowRegistry(clock=clock)
+    for window in range(2):
+        registry.register(window_id=f"shell-{window}", primary=window == 0)
+        for view in range(14):
+            registry.register(window_id=f"view-{window}-{view}", workspace=f"ws-{window}-{view}")
+    registry.register(window_id="spare-1")
+    registry.register(window_id="spare-2")
+    with pytest.raises(TooManyWindows):
+        registry.register(window_id="one-too-many")
 
 
 def test_one_live_window_is_always_primary(registry):

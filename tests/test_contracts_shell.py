@@ -2,9 +2,13 @@ from pathlib import Path
 
 
 FRONTEND_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js"
+FRONTEND_CSS = Path(__file__).parents[1] / "quickterm" / "frontend" / "css"
 PANELS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "panels.js"
 MAIN_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "main.js"
-# main.js is the composition root; the code it wires lives in these modules.
+# main.js composes one workspace view; shell.js composes the window around
+# the views. The code they wire lives in these modules.
+SHELL_JS = FRONTEND_JS / "shell.js"
+SHELL_ROUTING_JS = FRONTEND_JS / "shell_routing.js"
 BOOT_CONTEXT_JS = FRONTEND_JS / "boot_context.js"
 CONFIG_SYNC_JS = FRONTEND_JS / "config_sync.js"
 HERE_JS = FRONTEND_JS / "here.js"
@@ -17,9 +21,10 @@ SPAWNER_JS = FRONTEND_JS / "spawner.js"
 WINDOW_REGISTRY_JS = FRONTEND_JS / "window_registry.js"
 WORKSPACE_ACTIONS_JS = FRONTEND_JS / "workspace_actions.js"
 WORKSPACE_SWITCH_JS = FRONTEND_JS / "workspace_switch.js"
+WORKSPACE_VIEWS_JS = FRONTEND_JS / "workspace_views.js"
 MAIN_MODULES = (
-    MAIN_JS, BOOT_CONTEXT_JS, CONFIG_SYNC_JS, HERE_JS, LAUNCH_LOOP_JS, LIFECYCLE_JS,
-    PANE_COMMANDS_JS, SCRATCH_JS, SIDEBAR_JS, SPAWNER_JS, WINDOW_REGISTRY_JS,
+    MAIN_JS, SHELL_JS, SHELL_ROUTING_JS, BOOT_CONTEXT_JS, CONFIG_SYNC_JS, HERE_JS, LAUNCH_LOOP_JS,
+    LIFECYCLE_JS, PANE_COMMANDS_JS, SCRATCH_JS, SIDEBAR_JS, SPAWNER_JS, WINDOW_REGISTRY_JS,
     WORKSPACE_ACTIONS_JS, WORKSPACE_SWITCH_JS,
     FRONTEND_JS / "app_state.js", FRONTEND_JS / "autosave.js", FRONTEND_JS / "feedback.js",
     FRONTEND_JS / "fonts.js", FRONTEND_JS / "layout_sessions.js",
@@ -29,6 +34,11 @@ PANE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "pane.js
 KEYS_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "keys.js"
 PALETTE_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "palette.js"
 LAUNCHER_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js" / "launcher.js"
+
+
+def _function(source: str, start: str, end: str) -> str:
+    begin = source.index(start)
+    return source[begin:source.index(end, begin)]
 
 
 def test_kill_all_closes_only_backend_verified_sessions():
@@ -52,6 +62,13 @@ def test_detach_retains_process_and_never_calls_kill():
     assert "await api.retainSession(session.id)" in implementation
     assert "api.killSession" not in implementation
 
+    # The sidebar's Detach, routed into the view that shows the terminal, is
+    # the same promise: retain first, close the pane, never a kill.
+    detach = _function(source, "    detachSessionById: async (id", "\n    killAllSessions:")
+    assert detach.index("await api.retainSession(id)") < detach.index("layout.closePane(pane)")
+    assert "if (!sessionAlreadyGone(error)) throw error;" in detach
+    assert "killSession" not in detach and "cleanupSessions" not in detach
+
 
 def test_workspace_restore_does_not_silently_spawn_over_missing_session():
     source = WORKSPACE_SWITCH_JS.read_text(encoding="utf-8")
@@ -66,7 +83,9 @@ def test_workspace_restore_does_not_silently_spawn_over_missing_session():
 
 def test_a_background_launch_failure_reaches_the_banner_once():
     # Autostart and hotkey launches have no pane to report into; app.py keeps
-    # the latest failure as launch_error on GET /api/config.
+    # the latest failure as launch_error on GET /api/config. Only the shell
+    # of the primary window shows it; a view never does.
+    shell = SHELL_JS.read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
     sync = CONFIG_SYNC_JS.read_text(encoding="utf-8")
     start = sync.index("  function reportLaunchError(value) {")
@@ -76,16 +95,18 @@ def test_a_background_launch_failure_reaches_the_banner_once():
     assert "!embedded && state.windowIsPrimary" in body
     assert "showError(" in body
     assert "shownLaunchError = text;" in body
-    assert "reportLaunchError(state.cfg.launch_error);" in main
+    assert "reportLaunchError(state.cfg.launch_error);" in shell
+    assert "reportLaunchError" not in main
     assert "reportLaunchError(fresh.launch_error);" in sync
-    # Boot reports it after the restore, so the restore cannot overwrite it.
-    assert main.index("reportLaunchError(state.cfg.launch_error);") > main.index(
-        "const restored = await restoreWorkspace(state.currentWorkspace);"
+    # Reported after the boot plan, so the views it opens cannot overwrite it.
+    assert shell.index("reportLaunchError(state.cfg.launch_error);") > shell.index(
+        "restored = await views.restoreSaved({"
     )
     # A hotkey fires while the window is in the background: coming back to it
     # (focus, or the page becoming visible) looks again.
-    assert 'window.addEventListener("focus", checkLaunchError);' in main
-    visible = main[main.index('document.addEventListener("visibilitychange", () => {\n    if (!document.hidden) {'):]
+    focus = shell[shell.index('window.addEventListener("focus", () => {'):]
+    assert "checkLaunchError();" in focus[: focus.index("\n  });")]
+    visible = shell[shell.index('document.addEventListener("visibilitychange", () => {'):]
     assert "checkLaunchError();" in visible[: visible.index("\n  });")]
 
 
@@ -95,13 +116,24 @@ def test_open_here_claims_one_folder_launch():
     The launcher assertion used to pin `${visible.length}/${totalLive}`, the
     count of a list filtered down to this window's own terminals. That filter
     was the bug: seven live terminals showed as "2/7" with no way to reach the
-    other five. The invariant is now the opposite one, kept by
-    test_sidebar_lists_every_live_terminal_grouped_by_workspace.
+    other five. The sidebar contract tests keep the opposite invariant.
     """
     loop = LAUNCH_LOOP_JS.read_text(encoding="utf-8")
     assert "const launch = await api.claimLaunch()" in loop
     assert 'if (kind === "folder") return await openFolder(launch.cwd);' in loop
-    assert "if (!embedded) claimLaunchLoop();" in MAIN_JS.read_text(encoding="utf-8")
+    # A folder opens a scratch view of its own, beside whatever is open.
+    assert "await openView(null, { cwd })" in loop
+
+
+def test_only_the_shell_runs_the_launch_loop():
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    assert "if (embedded) bootView(); else bootShell();" in main
+    assert "claimLaunchLoop();" in shell
+    assert "createLaunchLoop" not in main and "claimLaunchLoop" not in main
+    # A view only starts what the shell hands it, in its own layout.
+    assert "const { startLaunch } = createLaunchTarget(" in main
+    assert "startLaunch," in main
 
 
 def test_full_panels_return_focus_to_the_terminal():
@@ -112,10 +144,13 @@ def test_full_panels_return_focus_to_the_terminal():
     assert "if (!layout.focused) return false" in commands
     assert "layout.focused.setFocused(true)" in commands
     assert "...paneCommands," in MAIN_JS.read_text(encoding="utf-8")
+    # With no view open the shell has no terminal to hand back to.
+    assert "refocusTerm: () => false," in SHELL_JS.read_text(encoding="utf-8")
 
 
 def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
     sidebar = SIDEBAR_JS.read_text(encoding="utf-8")
+    shell = SHELL_JS.read_text(encoding="utf-8")
     registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
     palette = PALETTE_JS.read_text(encoding="utf-8")
     keys = KEYS_JS.read_text(encoding="utf-8")
@@ -125,6 +160,7 @@ def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
     # The footer is built from the `chrome` array, so that is where it goes.
     assert '["new window", () => {' in sidebar
     assert "palette.newWindowMode()" in sidebar
+    assert "openWorkspaceInWindow: (name) => registry.openNewWindow(name)," in shell
     assert 'label: "new window…"' in palette
     assert "run: () => this._newWindowMode()" in palette
     # No new keyboard shortcut: keys.js may claim only cold Alt combos, and the
@@ -156,12 +192,18 @@ def test_two_windows_can_never_own_one_workspace():
     assert "if (state.transitioning) return false;" in switch
     assert "showError(refusal);" in switch
 
-    # Boot claims before restoring: this window autosaves the layout on every
-    # pane change, so restoring a workspace it may not own would start
-    # overwriting the other window's file before anyone could read a warning.
+    # A view claims before restoring: it autosaves the layout on every pane
+    # change, so restoring a workspace it may not own would start overwriting
+    # the other window's file before anyone could read a warning.
     boot = main[main.index("  await acquireWindowId();"):main.index("  const initialSessions")]
     assert "const refusal = await claimWorkspaceFor(state.currentWorkspace);" in boot
     assert boot.index("state.currentWorkspace = null;") < boot.index("showError(refusal);")
+    # The shell reserves every view's claim before the iframe exists.
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
+    claim = _function(views, "  async _claimView(", "\n  // Rebuild a whole arrangement")
+    assert claim.index("await api.registerWindow({ workspace: name || null") < claim.index(
+        'document.createElement("iframe")'
+    )
 
     # Adopting scratch and naming a workspace are the other two ways to take a
     # workspace name, so both ask as well.
@@ -185,6 +227,7 @@ def test_an_unreachable_registry_lets_the_user_work_but_never_fakes_a_claim():
 
 def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     main = MAIN_JS.read_text(encoding="utf-8")
+    shell = SHELL_JS.read_text(encoding="utf-8")
     registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
     lifecycle = LIFECYCLE_JS.read_text(encoding="utf-8")
     assert "api.heartbeatWindow(state.windowId).then(" in registry
@@ -202,7 +245,9 @@ def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     assert "api.killSession" not in recover
     assert "cleanupSessions" not in recover
 
+    # Every view and the shell itself release their own registry entry.
     assert 'window.addEventListener("pagehide", persistOnExit);' in main
+    assert 'window.addEventListener("pagehide", persistOnExit);' in shell
     start = lifecycle.index("  function persistOnExit()")
     exiting = lifecycle[start:lifecycle.index("\n  // window.quicktermView.close()", start)]
     # keepalive for the same reason the layout PUT needs it: the document is
@@ -217,6 +262,21 @@ def test_a_window_heartbeats_while_it_lives_and_releases_its_claim_on_exit():
     assert "/api/sessions/cleanup" not in exiting
 
 
+def test_the_shell_registers_as_the_primary_window_and_claims_nothing():
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    boot = shell[shell.index("export async function bootShell()"):]
+    assert boot.index("await registry.acquireWindowId();") < boot.index("registry.startWindowHeartbeat();")
+    # The shell hosts no workspace, so it never asks for one.
+    assert "claimWorkspaceFor(" not in shell
+    assert "LayoutManager" not in shell and "createAutosave" not in shell
+    # Only the shell carries the window title the summon hotkey matches.
+    assert 'document.title = "QuickTerm";' in shell
+    assert "document.title" not in MAIN_JS.read_text(encoding="utf-8")
+    # Native focus lands on the shell, which hands it on to the active view.
+    focus = shell[shell.index('window.addEventListener("focus", () => {'):]
+    assert "views.focusView(views.active)" in focus[: focus.index("\n  });")]
+
+
 def test_a_window_registers_under_the_id_its_shell_gave_it():
     # app.py puts the window id in the launch URL and forgets *that* id when the
     # native window closes, so registering under any other one would keep the
@@ -224,7 +284,7 @@ def test_a_window_registers_under_the_id_its_shell_gave_it():
     context = BOOT_CONTEXT_JS.read_text(encoding="utf-8")
     registry = WINDOW_REGISTRY_JS.read_text(encoding="utf-8")
     start = context.index("export function captureWindowIdentity()")
-    identity = context[start:context.index("\n// sessionStorage is per window", start)]
+    identity = context[start:context.index("\n// The one scratch view a fresh window opens", start)]
     assert 'params.get("window")' in identity
     assert 'params.get("primary") === "1"' in identity
     # workspace is three-valued, and a secondary shell window without one was
@@ -251,11 +311,11 @@ def test_only_the_primary_window_claims_the_explorer_folder_handoff():
     start = launch.index("  async function claimLaunchLoop()")
     loop = launch[start:launch.index("\n  function stopLaunchLoop", start)]
     assert "if (!state.windowIsPrimary && state.registryAvailable) {" in loop
-    # Unchanged otherwise: one claim, and a folder alone opens in scratch
+    # Unchanged otherwise: one claim, and a folder alone opens a scratch view
     # (tests/js/launch_loop.test.mjs covers the other launch shapes).
     assert "await claimOnce()" in loop
     assert "const launch = await api.claimLaunch()" in launch
-    assert "opened = await openFolderInScratch(cwd)" in launch
+    assert "const opened = Boolean(await openView(null, { cwd }));" in launch
     # The flag is read back from the registry, which promotes a new primary when
     # that window closes, not trusted from the launch URL for the whole run.
     assert 'if (info && "primary" in info) state.windowIsPrimary = Boolean(info.primary);' in registry
@@ -269,9 +329,9 @@ def test_open_folder_actions_share_one_resolver_and_one_route():
     place and says so in the same banner when it cannot.
     """
     main = MAIN_JS.read_text(encoding="utf-8")
+    shell = SHELL_JS.read_text(encoding="utf-8")
     keys = KEYS_JS.read_text(encoding="utf-8")
     palette = PALETTE_JS.read_text(encoding="utf-8")
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
     api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
 
     assert (
@@ -280,15 +340,15 @@ def test_open_folder_actions_share_one_resolver_and_one_route():
     )
     assert 'openExplorer: () => openHere("explorer"),' in main
     assert 'openEditor: () => openHere("vscode"),' in main
-    assert "onOpenFolder: openHere," in SIDEBAR_JS.read_text(encoding="utf-8")
+    # The sidebar's folder buttons reach the active view's resolver.
+    assert "    openHere,\n" in main
+    assert "openFolder: (app) => chromeApp.openHere(app)," in shell
     # Shift layer only: plain Alt+C is readline's capitalize-word.
     assert 'if (key === "e") return done(actions.openExplorer);' in keys
     assert 'if (key === "c") return done(actions.openEditor);' in keys
     assert keys.index("// Alt+Shift layer") < keys.index('if (key === "e") return done(actions.openExplorer);')
     assert 'label: "open folder in Explorer", hint: folderHint("Alt+Shift+E")' in palette
     assert 'label: "open folder in VS Code", hint: folderHint("Alt+Shift+C")' in palette
-    assert 'openIn("explorer", "folder",' in launcher
-    assert 'openIn("vscode", "code",' in launcher
     assert 'req("POST", "/api/open", { target: path, app })' in api
 
 
@@ -302,31 +362,30 @@ def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
     layout change only writes their boxes. That box transition is also the
     animation, and it is off during drags and under reduced motion.
     """
-    views = (FRONTEND_JS / "workspace_views.js").read_text(encoding="utf-8")
-    views_css = (
-        Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "workspace_views.css"
-    ).read_text(encoding="utf-8")
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
+    views_css = (FRONTEND_CSS / "workspace_views.css").read_text(encoding="utf-8")
     layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
     tree = (FRONTEND_JS / "split_tree.js").read_text(encoding="utf-8")
     move = (FRONTEND_JS / "pane_move.js").read_text(encoding="utf-8")
-    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
-        encoding="utf-8"
-    )
+    app_css = (FRONTEND_CSS / "app.css").read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
 
     assert "export function dwindleDir(rect)" in tree
     assert 'import { findLeaf, parentOf, replaceChild } from "./split_tree.js";' in move
     assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in views
     assert (
-        "import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf }"
+        "import { dwindleDir, findLeaf, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf }"
         ' from "./split_tree.js";'
         in views
     )
     assert "this.root = insertBeside(this.root, beside, view, dwindleDir(from));" in views
-    # Never re-parented: appended once, then only its box is written.
+    # Never re-parented: appended once, then only its box is written. The
+    # shell's own grid gives way to the stage once, before any view exists.
     assert "this.stage.append(view.el);" in views
     assert "applyRect(view.el, box);" in views
     assert "this.stage.textContent" not in views and "this.stage.innerHTML" not in views
+    assert "insertBefore" not in views and "replaceChildren(view" not in views
+    assert "shell.before(this.stage);" in views
     assert "position: absolute;" in views_css
     assert ".workspace-views.resizing .workspace-view," in views_css
     # Panes: the same placement rule, and the same motion rules.
@@ -337,20 +396,103 @@ def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
     assert ".split.sliding > * { transition: flex-grow" in app_css
     assert "body.dragging .split > * { transition: none; }" in app_css
     assert "prefers-reduced-motion" in app_css and "function reducedMotion()" in layout
-    # A view can open another view: the parent window owns the tiling.
-    assert "const viewHost = () => (embedded ? window.parent?.quicktermViews || null : views);" in main
+    # A view can open another view: the shell owns the tiling.
+    assert "const viewHost = () => window.parent?.quicktermViews || null;" in main
     assert "viewHost()?.open(name, { anchorWindow: window })" in main
     assert "viewHost()?.activate(window);" in main
+    # A view tells the shell when it can take the keyboard and be asked things.
+    assert "viewHost()?.ready(window);" in main
+    assert main.index("window.quicktermView = {") < main.index("viewHost()?.ready(window);")
 
 
-def test_workspace_here_moves_the_terminal_before_switching():
+def test_views_have_no_primary_and_every_view_closes():
+    """No workspace is special. The window's document hosts none, every
+    workspace is an equal iframe view with a close button, and closing the
+    last one leaves an empty stage with a way back in.
+    """
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
+    views_css = (FRONTEND_CSS / "workspace_views.css").read_text(encoding="utf-8")
+    # Only the version 1 migration still knows what a primary leaf was.
+    manager = views[views.index("export class WorkspaceViews"):]
+    for gone in ("primary", "workspace-view-primary"):
+        assert gone not in manager, gone
+    assert "const PRIMARY = " not in views and "primaryName" not in views
+    assert "workspace-view-primary" not in views_css
+    make = _function(views, "  _makeView({", "\n  _button(")
+    assert 'view.closeButton = this._button("x",' in make
+    assert "if (!primary)" not in make
+    close = _function(views, "  async close(view) {", "\n  // One view over the whole window")
+    assert "if (!view || this.busy || !this.views().includes(view)) return false;" in close
+    # Closing saves, retains and releases through the view's own document,
+    # then removes the leaf; nothing is killed.
+    assert close.index("await child.close()") < close.index("this.root = removeLeaf(this.root, view);")
+    assert "killSession" not in close
+    assert 'EMPTY_STAGE_TEXT = "No workspace open. Open one from the sidebar.";' in views
+    assert 'button.textContent = "New scratch";' in views
+    assert "this.empty.hidden = views.length > 0;" in views
+    assert ".workspace-views-empty {" in views_css
+
+
+def test_a_view_never_draws_the_sidebar():
+    main = MAIN_JS.read_text(encoding="utf-8")
+    sidebar = SIDEBAR_JS.read_text(encoding="utf-8")
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    assert "initLauncher" not in main and "createSidebar" not in main
+    # Every change the sidebar shows is announced to the shell instead.
+    assert "const refreshStatusSoon = () => chrome.refreshSoon();" in main
+    assert "refreshSoon: () => refresh()," in shell
+    # The shell builds the sidebar once and patches it from then on.
+    assert sidebar.count("initLauncher(") == 1
+    init = _function(sidebar, "  function init() {", "\n  function refreshStatus()")
+    assert "state.launcherView = initLauncher($(\"launcher\"), {" in init
+    assert "state.launcherView?.update(model());" in sidebar
+    assert 'textContent = ""' not in sidebar
+    assert "api.getSessions({ metrics: false })" in sidebar
+    # In the shell the window has the keyboard whenever one of its views has.
+    assert "windowFocused: document.hasFocus()," in sidebar
+
+
+def test_the_sidebar_kill_routes_through_the_owning_view():
+    """A kill from the sidebar must reach the view that holds or owns the
+    terminal, or that view's in-memory ownership writes the id back on its
+    next autosave. Only verified kills disappear: a 404 is gone, a 500 is
+    thrown unchanged for the confirmation to show.
+    """
+    routing = SHELL_ROUTING_JS.read_text(encoding="utf-8")
+    commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
+    shell = SHELL_JS.read_text(encoding="utf-8")
+
+    kill = _function(routing, "  async function killTerminal(session) {", "\n  async function detachTerminal")
+    assert "const route = killRoute(session, context());" in kill
+    assert kill.index("await app.killSessionById(session.id);") < kill.index("await api.killSession(session.id);")
+    assert "if (error?.status !== 404) throw error;" in kill
+    assert "await removeSessionsFromSavedWorkspaces(new Set([session.id]));" in kill
+    assert "catch (_)" not in kill
+
+    by_id = _function(commands, "    killSessionById: async (id) =>", "\n    // The sidebar's Detach")
+    assert "await api.killSession(id);" in by_id
+    assert "if (!sessionAlreadyGone(error)) throw error;" in by_id
+    assert by_id.index("forgetSession(id);") < by_id.index("layout.closePane(pane);")
+    assert "scheduleWorkspaceSave();" in by_id
+
+    assert "killTerminal: routing.killTerminal," in shell
+    assert "detachTerminal: routing.detachTerminal," in shell
+    # Moving a terminal: its view lets go (retain, close, forget, save) first.
+    move = _function(routing, "  async function moveTerminalHere(session) {", "\n  return {")
+    assert move.index("detachSessionById(session.id, { forget: true })") < move.index(
+        "targetApp.moveSessionHere("
+    )
+
+
+def test_workspace_here_moves_the_terminal_before_opening_its_view():
     """The sidebar's offer to make the focused terminal's folder a workspace.
 
     Order matters: the target workspace is written with the terminal first,
-    the terminal is retained and detached here second, and only then does the
-    window switch, so the restore attaches it again and no step can kill it.
-    A workspace held by another window or view stops the flow before anything
-    is written. The offer is patched on every status refresh, never rebuilt.
+    the terminal is retained and detached here second, and only then is the
+    target's own view opened or focused, so its restore attaches the terminal
+    again and no step can kill it. This view stays on its own workspace. A
+    workspace held by another window or view stops the flow before anything
+    is written.
     """
     actions = WORKSPACE_ACTIONS_JS.read_text(encoding="utf-8")
     launcher = LAUNCHER_JS.read_text(encoding="utf-8")
@@ -361,12 +503,27 @@ def test_workspace_here_moves_the_terminal_before_switching():
     save = body.index("await workspace.save(name, layoutWith(")
     retain = body.index("await api.retainSession(session.id)")
     close = body.index("layout.closePane(pane, { animate: false })")
-    switch = body.index("return switchWorkspace(name)")
-    assert holder < save < retain < close < switch
+    opened = body.index("return Boolean(await openWorkspaceView(name));")
+    assert holder < save < retain < close < opened
+    assert "switchWorkspace" not in body
     assert "killSession" not in body and "cleanupSessions" not in body
-    assert "state.launcherView?.updateHere(hereState());" in SIDEBAR_JS.read_text(encoding="utf-8")
+    assert "openWorkspaceView = (name) => viewHost()?.open(name, { anchorWindow: window })" in (
+        MAIN_JS.read_text(encoding="utf-8")
+    )
+    # The offer is patched with every sidebar refresh, never rebuilt.
+    assert "here: app?.hereState?.() || null," in SIDEBAR_JS.read_text(encoding="utf-8")
     assert "state.launcherView?.updateHere(hereState());" in HERE_JS.read_text(encoding="utf-8")
-    assert "updateHere," in launcher and 'make("button", "sidebar-here")' in launcher
+    assert "updateHere" in launcher
+
+
+def test_a_deleted_workspace_loses_its_view_before_its_file():
+    actions = WORKSPACE_ACTIONS_JS.read_text(encoding="utf-8")
+    delete = _function(actions, "  async function deleteWorkspace(name) {", "\n  async function onWorkspacesChanged")
+    assert delete.index("await closeWorkspaceView(name)") < delete.index("await api.deleteWorkspace(name);")
+    # A view's own delete runs in the shell, which outlives the view it closes.
+    assert "deleteWorkspace: (name) => chrome.deleteWorkspace(name).catch(() => false)," in (
+        MAIN_JS.read_text(encoding="utf-8")
+    )
 
 
 def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
@@ -380,9 +537,7 @@ def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
     pane = PANE_JS.read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
     palette = PALETTE_JS.read_text(encoding="utf-8")
-    app_css = (Path(__file__).parents[1] / "quickterm" / "frontend" / "css" / "app.css").read_text(
-        encoding="utf-8"
-    )
+    app_css = (FRONTEND_CSS / "app.css").read_text(encoding="utf-8")
 
     assert "pane.dispose({ keepElement: true });" in layout
     assert "if (!keepElement) this.el.remove();" in pane
@@ -416,26 +571,33 @@ def test_closing_a_pane_hands_its_space_over_and_zoom_keeps_a_way_back():
     assert 'claimFocus("pane-confirm");' in pane and 'releaseFocus("pane-confirm");' in pane
 
 
-def test_tiled_views_are_restored_by_the_primary_after_its_own_workspace():
-    """The view arrangement outlives a restart, restored only by the primary window.
-
-    localStorage is shared by every window on the origin, so a second window
-    must neither restore the arrangement nor write over it. Restored views are
-    claimed through the same registry path open() uses.
+def test_the_window_restores_its_views_and_falls_back_to_one_scratch_view():
+    """The view arrangement outlives a restart, restored only by the window
+    the user started (localStorage is shared by every window on the origin, so
+    a second window must neither restore it nor write over it). Restored views
+    are claimed through the same registry path open() uses. With nothing to
+    bring back the window opens the workspace 3.x remembered, once, else one
+    scratch view, the only view that may take over the elevated first
+    terminal.
     """
+    shell = SHELL_JS.read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
-    views = (FRONTEND_JS / "workspace_views.js").read_text(encoding="utf-8")
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
 
-    assert main.index("views?.restoreSaved(") > main.index(
-        "await restoreWorkspace(state.currentWorkspace)"
-    )
     assert (
-        "const keepsViewArrangement = !embedded && requestedWorkspace === undefined"
-        " && state.windowIsPrimary;"
-    ) in main
-    assert "store: keepsViewArrangement ? viewArrangementStore() : null," in main
+        "const keepsViewArrangement = identity.workspace === undefined && state.windowIsPrimary;"
+    ) in shell
+    assert "store: keepsViewArrangement ? viewArrangementStore() : null," in shell
+    restore = shell.index("restored = await views.restoreSaved({")
+    explorer = shell.index("if (openDir) await views.open(null, { cwd: openDir });")
+    remembered = shell.index("!restored?.stored ? storedWorkspace() : null;")
+    scratch = shell.index("await views.open(null, { first: identity.workspace === undefined });")
+    assert restore < explorer < remembered < scratch
+    assert "rememberedWorkspace: storedScratchActive() ? null : storedWorkspace()," in shell
 
     assert 'export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";' in views
+    assert "export const VIEW_ARRANGEMENT_VERSION = 2;" in views
+    assert "primaryName" not in views
     store = views[views.index("export function viewArrangementStore("):]
     store = store[: store.index("\n}\n")]
     # Both the read and the write are wrapped; storage can throw at any time.
@@ -443,6 +605,11 @@ def test_tiled_views_are_restored_by_the_primary_after_its_own_workspace():
     assert store.count("catch (_)") == 2
     assert views.count("api.registerWindow(") == 1
     assert views.count("await this._claimView(") == 2
+
+    # Only the first scratch view adopts an "Administrator - " session.
+    adopt = main[main.index("const administratorSession = "):]
+    adopt = adopt[: adopt.index(");") + 2]
+    assert "firstView && !openDir" in adopt
 
 
 def test_an_exited_pane_restarts_in_place_with_its_own_launch():
