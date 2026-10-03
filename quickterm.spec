@@ -26,6 +26,9 @@ hiddenimports = collect_submodules("webview") + [
 hiddenimports += [
     "quickterm.opener",
     "quickterm.connections",
+    "quickterm.agents",
+    "quickterm.agent_sessions",
+    "quickterm.ssh_config",
     "quickterm.update",
     "quickterm.assets",
     "quickterm.workspace",
