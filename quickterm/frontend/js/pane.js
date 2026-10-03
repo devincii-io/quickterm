@@ -11,6 +11,7 @@ import { PaneAttachProtocol } from "./pane_protocol.js";
 import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
 import { RealInputGate } from "./broadcast.js";
 import { findInBuffer } from "./buffer_search.js";
+import { agentLabel, continueCommand, isAgentType, pickerCommand } from "./agent_profile.js";
 
 const ENC = new TextEncoder();
 // Written between a dead session's last output and its restart, which
@@ -72,7 +73,7 @@ function makeFilePathProvider(term, activate) {
     },
   };
 }
-// Quiet for this long and a Claude pane reads as idle. Long enough that the
+// Quiet for this long and an agent pane reads as idle. Long enough that the
 // gaps inside one streamed answer do not flicker the badge.
 const ACTIVITY_IDLE_MS = 2500;
 const BACKOFF_MIN = 500;
@@ -407,27 +408,28 @@ export class Pane {
     this._renderActivity();
   }
 
-  // Claude panes say whether Claude is still producing output. The signal is
-  // the live byte stream this pane already receives, never an OS process
-  // snapshot: the status poll runs with metrics off on purpose, and the app
-  // promises it does not sample processes continuously. Child-process presence
-  // would also read wrong here, because Claude thinking between tool calls has
-  // no child and is still working.
+  // Agent panes (Claude Code, Codex) say whether the agent is still producing
+  // output. The signal is the live byte stream this pane already receives,
+  // never an OS process snapshot: the status poll runs with metrics off on
+  // purpose, and the app promises it does not sample processes continuously.
+  // Child-process presence would also read wrong here, because an agent
+  // thinking between tool calls has no child and is still working.
   _renderActivity() {
     const el = this.tabActivityEl;
     if (!el) return;
-    if (this.terminalType !== "claude-code" || this.state !== "attached") {
+    if (!isAgentType(this.terminalType) || this.state !== "attached") {
       el.hidden = true;
       this._stopActivityTicker();
       return;
     }
     const working = Date.now() - (this._lastOutputAt || 0) < ACTIVITY_IDLE_MS;
+    const agent = agentLabel(this.terminalType);
     el.hidden = false;
     el.textContent = working ? "working" : "idle";
     el.classList.toggle("working", working);
     el.title = working
-      ? "Claude produced output in the last few seconds"
-      : "No output from Claude recently";
+      ? `${agent} produced output in the last few seconds`
+      : `No output from ${agent} recently`;
     this._startActivityTicker();
   }
 
@@ -565,10 +567,11 @@ export class Pane {
       : `Session exited with code ${exitCode}. Nothing was silently restarted.`);
     const actions = document.createElement("span");
     actions.className = "pane-recovery-actions";
-    const makeAction = (label, action, primary = false) => {
+    const makeAction = (label, action, primary = false, title = "") => {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
+      if (title) button.title = title;
       if (primary) button.classList.add("primary");
       button.addEventListener("click", async () => {
         for (const item of actions.querySelectorAll("button")) item.disabled = true;
@@ -584,8 +587,11 @@ export class Pane {
       });
       actions.append(button);
     };
-    if (onResumeClaude) makeAction("Continue latest", onResumeClaude, true);
-    if (onPickClaude) makeAction("Choose session", onPickClaude);
+    // A shell that was running claude is recovered through claude as well, so
+    // anything that is not a Codex pane names Claude's flags.
+    const agentType = this.terminalType === "codex" ? "codex" : "claude-code";
+    if (onResumeClaude) makeAction("Continue latest", onResumeClaude, true, `Runs ${continueCommand(agentType)}`);
+    if (onPickClaude) makeAction("Choose session", onPickClaude, false, `Runs ${pickerCommand(agentType)}`);
     if (onRestart) makeAction("Start replacement shell", onRestart, !onResumeClaude);
     this.exitBar.textContent = "";
     this.exitBar.append(copy, actions);

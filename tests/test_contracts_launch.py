@@ -104,7 +104,7 @@ def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy
     assert "registerOscHandler(7" in pane
     assert "registerOscHandler(9" in pane
     assert "split Claude agent view:" in palette
-    assert 'claudeMode: "agents"' in spawner
+    assert 'agentMode: "agents"' in spawner
 
 
 def test_panes_move_by_dragging_their_header():

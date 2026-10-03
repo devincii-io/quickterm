@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  normalClaudeSplitMode, splitDirectory,
+  normalAgentSplitMode, normalClaudeSplitMode, splitDirectory,
 } from "../../quickterm/frontend/js/split_policy.js";
 
 test("ordinary splits inherit compatible signalled directories", () => {
@@ -22,4 +22,24 @@ test("Claude splits keep project identity and agent view is explicit", () => {
   assert.equal(splitDirectory(null, null, choice, true), null);
   assert.equal(normalClaudeSplitMode(profile), "continue");
   assert.equal(normalClaudeSplitMode({ ...profile, claude_mode: "resume" }), undefined);
+});
+
+test("Codex splits use the workspace root like Claude", () => {
+  const codex = { kind: "profile", profile: { terminal_type: "codex", agent_mode: "new" } };
+  assert.equal(splitDirectory("C:\\unrelated", "windows-powershell", codex, true), null);
+  assert.equal(splitDirectory("C:\\unrelated", "windows-powershell", { kind: "system", id: "codex" }, true), null);
+});
+
+test("an agent-manager profile of either type splits into a normal conversation", () => {
+  assert.equal(normalClaudeSplitMode, normalAgentSplitMode);
+  assert.equal(normalAgentSplitMode({ terminal_type: "codex", agent_mode: "agents" }), "continue");
+  assert.equal(normalAgentSplitMode({ terminal_type: "claude-code", agent_mode: "agents" }), "continue");
+  // agent_mode wins over the legacy key, which is only read when it is absent.
+  assert.equal(normalAgentSplitMode({ terminal_type: "claude-code", agent_mode: "new", claude_mode: "agents" }), undefined);
+  assert.equal(normalAgentSplitMode({ terminal_type: "codex", agent_mode: "fork" }), undefined);
+  // The defaults (Claude continue, Codex new) are not the agent manager.
+  assert.equal(normalAgentSplitMode({ terminal_type: "codex" }), undefined);
+  assert.equal(normalAgentSplitMode({ terminal_type: "claude-code" }), undefined);
+  assert.equal(normalAgentSplitMode({ terminal_type: "bash", agent_mode: "agents" }), undefined);
+  assert.equal(normalAgentSplitMode(null), undefined);
 });

@@ -3,15 +3,16 @@
 // elevate). The spec helpers at the top are pure and tested in node.
 
 import { SCRATCH_WS } from "./boot_context.js";
+import { AGENT_TYPES, isAgentType } from "./agent_profile.js";
 import { launchOptions, repeatLaunchOptions } from "./launch_options.js";
-import { normalClaudeSplitMode, splitDirectory } from "./split_policy.js";
+import { normalAgentSplitMode, splitDirectory } from "./split_policy.js";
 
 // With no personal profile to open, the system shell named by `preferred`
 // (a default_profile such as "git-bash"), else the first one available.
 export function defaultSystemSpec(terminalInventory, preferred = "") {
   const types = (terminalInventory && terminalInventory.types) || [];
   const isUsable = (type) => type.executable && type.available !== false
-    && !["custom", "claude-code", "ssh", "sftp"].includes(type.id);
+    && !["custom", ...AGENT_TYPES, "ssh", "sftp"].includes(type.id);
   const usable = types.find((type) => type.id === preferred && isUsable(type)) || types.find(isUsable);
   if (!usable) return null;
   // The same arguments the new-terminal menu starts these shells with.
@@ -45,10 +46,12 @@ export function commandTerminalType(spec) {
   return null;
 }
 
+// The profile whose agent can pick a dead pane's conversation up again: an
+// agent profile (Claude Code or Codex), or a shell that was running claude.
 export function claudeProfileForPane(profiles, pane) {
   const profile = profiles.find((item) => item.name === pane.profileName) || null;
   if (!profile) return null;
-  if (profile.terminal_type === "claude-code") return profile;
+  if (isAgentType(profile.terminal_type)) return profile;
   const hint = [profile.name, profile.cmd, profile.start_command, pane.title]
     .filter(Boolean).join(" ");
   const mentionsClaude = /\bclaude(?:\.cmd|\.exe)?\b/i.test(hint);
@@ -105,8 +108,8 @@ export function createSpawner({
   }
 
   // `options` left out means "the way this pane was started": a workspace
-  // restore and a restart call it like that and get the saved Claude mode,
-  // start command or args back. A fresh launch passes its own, `{}` for none,
+  // restore and a restart call it like that and get the saved agent mode and
+  // session, start command or args back. A fresh launch passes its own, `{}` for none,
   // so a new terminal in a replaceable pane never inherits the old launch.
   async function spawnInto(pane, profileName, cwd, options) {
     const launch = repeatLaunchOptions(pane, profileName, options, profileTerminalType(profileName));
@@ -117,7 +120,8 @@ export function createSpawner({
         cwd: cwd || undefined,
         workspace: spawnWorkspaceTag(),
         ...(launch.startCommand !== undefined ? { start_command: launch.startCommand } : {}),
-        ...(launch.claudeMode !== undefined ? { claude_mode: launch.claudeMode } : {}),
+        ...(launch.agentMode !== undefined ? { agent_mode: launch.agentMode } : {}),
+        ...(launch.agentSession !== undefined ? { agent_session: launch.agentSession } : {}),
         ...(launch.args !== undefined ? { args: launch.args } : {}),
       });
       pane.profileName = profileName;
@@ -199,8 +203,8 @@ export function createSpawner({
       const cwd = splitCwd(source, state.selectedTerminal);
       if (state.selectedTerminal.kind === "profile") {
         const profile = state.selectedTerminal.profile;
-        const claudeMode = normalClaudeSplitMode(profile);
-        return spawnInto(pane, profile.name, contextCwd(cwd), { claudeMode });
+        const agentMode = normalAgentSplitMode(profile);
+        return spawnInto(pane, profile.name, contextCwd(cwd), { agentMode });
       }
       return spawnSpecInto(pane, {
         cmd: state.selectedTerminal.cmd,
@@ -214,7 +218,7 @@ export function createSpawner({
     if (profile) {
       const choice = { kind: "profile", profile };
       return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice)), {
-        claudeMode: normalClaudeSplitMode(profile),
+        agentMode: normalAgentSplitMode(profile),
       });
     }
     const system = !state.requireConfiguredTerminals && defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
@@ -238,20 +242,31 @@ export function createSpawner({
     await spawnInto(pane, profile.name, contextCwd(null), {});
   }
 
-  async function runClaudeMode(profile, claudeMode) {
+  async function runWithOptions(profile, options) {
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return;
+    if (!pane) return null;
     layout.focusPane(pane);
-    await spawnInto(pane, profile.name, contextCwd(null), { claudeMode });
+    return spawnInto(pane, profile.name, contextCwd(null), options);
   }
 
-  async function splitClaudeAgentView(profile) {
+  function runAgentMode(profile, agentMode) {
+    return runWithOptions(profile, { agentMode });
+  }
+
+  // A session picked from QuickTerm's own list (GET /api/agent-sessions).
+  // Codex can also fork it into a new session; Claude only resumes.
+  function resumeAgentSession(profile, sessionId, { fork = false } = {}) {
+    const agentMode = fork && profile.terminal_type === "codex" ? "fork" : "resume";
+    return runWithOptions(profile, { agentMode, agentSession: sessionId });
+  }
+
+  async function splitAgentView(profile) {
     const source = layout.focused || layout.init();
     const pane = layout.splitPane(source, layout.autoDir(source));
     if (!pane) return null;
     layout.focusPane(pane);
-    return spawnInto(pane, profile.name, contextCwd(null), { claudeMode: "agents" });
+    return spawnInto(pane, profile.name, contextCwd(null), { agentMode: "agents" });
   }
 
   async function runSystemTerminal(system) {
@@ -369,9 +384,10 @@ export function createSpawner({
     const profile = claudeProfileForPane(state.profiles, pane);
     if (!profile) return null;
     // Explicit recovery only: continue the latest project conversation or let
-    // Claude present its own native picker. Neither path impersonates the old PTY.
-    if (profile.terminal_type === "claude-code") {
-      return spawnInto(pane, profile.name, pane.cwd, { claudeMode: mode });
+    // the agent present its own native picker. Neither path impersonates the
+    // old PTY. Both agent types accept "continue" and "resume".
+    if (isAgentType(profile.terminal_type)) {
+      return spawnInto(pane, profile.name, pane.cwd, { agentMode: mode });
     }
     const flag = mode === "resume" ? "--resume" : "--continue";
     const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
@@ -394,8 +410,11 @@ export function createSpawner({
     spawnDefaultInto,
     spawnSplitInto,
     runProfile,
-    runClaudeMode,
-    splitClaudeAgentView,
+    runAgentMode,
+    resumeAgentSession,
+    splitAgentView,
+    runClaudeMode: runAgentMode,
+    splitClaudeAgentView: splitAgentView,
     runSystemTerminal,
     runInstaller,
     elevateProfile,
