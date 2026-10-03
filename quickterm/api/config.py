@@ -142,11 +142,14 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
-        # Apply live-updatable fields in place; port and global hotkeys need a restart.
+        before = _hotkey_bindings(cfg)
+        # Apply in place. Only port and host need a restart: the server is
+        # already bound. Window size applies to the next window, the overlay
+        # to the next summon, the hotkeys through the rebind below.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
             "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice",
-            "update_check", "scratch_dir",
+            "update_check", "scratch_dir", "window", "overlay", "summon_hotkey",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
@@ -156,3 +159,26 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         set_scrollback = getattr(manager, "set_scrollback_bytes", None)
         if set_scrollback:
             set_scrollback(cfg.scrollback_bytes)
+        if ctx.rebind_hotkeys is not None and _hotkey_bindings(cfg) != before:
+            # Waits for the hotkey thread, which may wait for the GUI thread.
+            await asyncio.to_thread(ctx.rebind_hotkeys, cfg)
+
+    @app.post("/api/hotkeys/suspend")
+    async def suspend_hotkeys(request: Request) -> Response:
+        body = await read_json(request)
+        suspended = body.get("suspended") if isinstance(body, dict) else None
+        if not isinstance(suspended, bool):
+            raise HTTPException(400, "suspended must be true or false")
+        if ctx.suspend_hotkeys is not None:
+            await asyncio.to_thread(ctx.suspend_hotkeys, suspended)
+        return Response(status_code=204)
+
+
+def _hotkey_bindings(cfg: Any) -> tuple[Any, list[str]]:
+    """What the global hotkeys depend on: the summon key and the profile keys."""
+    keys = sorted(
+        str(binding)
+        for binding in (getattr(p, "keybinding", None) for p in getattr(cfg, "profiles", []))
+        if binding
+    )
+    return getattr(cfg, "summon_hotkey", None), keys
