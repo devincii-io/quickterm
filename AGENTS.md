@@ -48,9 +48,10 @@ xterm.js + one WS per pane; write-callback backpressure; input only forwarded
 in phase "live".
 
 `docs/CONTRACTS.md` is the binding interface spec. Update it when changing any
-public interface. `app.py` boots backend + pywebview window; close-to-tray
-(`tray.py`, ctypes) only when a live session is touched, explicitly retained,
-or busy, else quit.
+public interface. `app.py` boots backend + pywebview window (configured size
+or remembered bounds from `window_state.py`, optional drop-down overlay from
+`overlay.py`); close-to-tray (`tray.py`, ctypes) only when a live session is
+touched, explicitly retained, or busy, else quit.
 `update.py` probes the pinned GitHub repo's latest release; install downloads
 the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
@@ -105,9 +106,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   visible. Destructive confirmation triggers must remain visible, their
   popovers must be clamped inside the viewport and follow a scrolling panel,
   and **Cancel** owns the initial focus when a pointer opened the bar. The
-  keyboard path (Alt+W, the palette) asked for the bar, so it opens with Kill
-  focused, a second Alt+W or Enter completes it, and Escape cancels from
-  anywhere in the pane; the bar claims the keyboard in `focus.js` while up.
+  keyboard path (Alt+W, Delete on a sidebar row, the palette) asked for the
+  bar, so it opens with Kill focused, Enter (or a second Alt+W in a pane)
+  completes it, and Escape cancels; the bar claims the keyboard in `focus.js`
+  while up. A sidebar kill uses `confirm_popover.js` and keeps the row and the
+  server's detail on a 500, with Kill relabelled Retry.
 - Panels (Dashboard/Settings/Help) are a centred, bounded sheet, never
   full-bleed: the dense styling is about the rows inside, not the frame.
   Stretching `.panel-overlay` edge to edge removes the click-outside-to-close
@@ -120,7 +123,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `togglePalette` closes the open panel first, panel close calls
   `refocusTerm()`, and the three deferred calls landed after the palette had
   focused its input. Dismissing any overlay returns focus to the focused
-  terminal; the trigger is only the fallback when there is no pane.
+  terminal; the trigger is only the fallback when there is no pane. The
+  Settings key capture (`shortcut_input.js`) is such an overlay: it claims
+  focus before it listens, and it suspends the global hotkeys
+  (`POST /api/hotkeys/suspend`) while it captures, or pressing a combination
+  QuickTerm already owns fires it instead of recording it. It resumes them on
+  finish, blur or cancel; the server resumes on its own after 20 s.
 - Live panels patch, they never rebuild (`render.js`). The dashboard refreshes
   every 5 s; emptying `.panel-body` and recreating it threw away half-typed
   input, an armed "Overwrite?", an open folder editor, and the very `<input>`
@@ -153,13 +161,24 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   computes for `graphite`, or the window flashes a different palette at boot.
   Changing the default palette means changing both.
 - No destructive action may be reachable without consent or feedback. `×` on a
-  pane detaches, never kills; kill is a separate labelled `.danger` control.
-  Clicking the workspace row you are already on is a no-op, scratch included.
+  pane detaches, never kills; kill is a separate labelled `.danger` control in
+  the pane header and on the sidebar row. Clicking an open workspace focuses
+  its view and never replaces a layout; New scratch always opens a new view.
   There is no free-text workspace prompt. Errors go to the `#app-error` banner
   or the pane notice. `#sb-save` is the saving/saved lifecycle only: it is the
-  dot on the sidebar's workspace row, driven by `data-state`, never text.
+  dot on the active workspace group in the sidebar, driven by `data-state`,
+  never text.
+- The top-level document is the shell and hosts no workspace. Every
+  workspace, scratch included, is an equal iframe view with its own claim,
+  LayoutManager and autosave; there is no primary view. A view stays on one
+  workspace for its whole life: the sidebar, palette, dashboard and launch
+  loop open or focus a view, never switch one in place. Closing any view
+  saves, retains its terminals and releases its claim; nothing is killed.
 - The sidebar is the whole chrome. No status bar, no top bar, no drawer: the
-  workspace, the terminals and the panel icons all live in `launcher.js`, and
+  workspaces, the terminals and the panel icons all live in `launcher.js`, one
+  flat list in a stable order (alphabetical groups, rows by name; state never
+  reorders anything, "needs you" is a chip), with no drag except the width
+  grip. `initLauncher` runs once per shell and every refresh patches, and
   a lone pane has no header (`#grid > .pane > .pane-tab { display: none }`;
   the sidebar row names it). Headers return with a second pane, actions only
   on hover. A zoomed pane is not a lone pane: it hides its siblings, so it
@@ -190,8 +209,18 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   (`kill`, the reaper, `/api/sessions/cleanup`), the workspace-file scan,
   `save_workspace` (it fsyncs, and the layout autosaves on every pane change),
   config load/save, asset writes, folder checks (`launch.validate_dir`),
-  starting a PTY (`SessionManager.spawn_async`), and the `ShellExecuteW` UAC
-  handshake all go through `asyncio.to_thread`. The
+  starting a PTY (`SessionManager.spawn_async`), the `ShellExecuteW` UAC
+  handshake, and rebinding or suspending the global hotkeys all go through
+  `asyncio.to_thread`. Win32 window work never runs on the loop either:
+  `SetWindowPos` on a window another thread owns waits for that thread. The
+  summon toggle and the overlay run on the hotkey thread
+  (`register(..., on_hotkey_thread=True)`), tray Open on the tray thread, and
+  the remembered window bounds are written from a `threading.Timer`. The
+  overlay's focus-loss hook (`SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`,
+  out of context) is installed on the hotkey thread, whose message loop
+  delivers it; JS `blur` cannot replace it, because focus moving into a view
+  iframe fires blur. QuickTerm launching Explorer, VS Code or a UAC prompt
+  calls `overlay.hold_open()` so that hand-off does not hide the overlay. The
   session registry is mutated on the loop thread but read from the threadpool
   and the GUI thread, so every iteration snapshots with `list(...)` first.
 - The WS attach must never lose bytes: a fresh subscription is drained from the
@@ -212,13 +241,24 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   workspace: `suggestedWorkspaceFolder()` offers the focused pane's real
   directory instead, so promoting a scratch you `cd`'d into your project names
   that project.
-- Claude Code profiles use `terminal_type="claude-code"` plus `claude_mode`
-  (`new`, `continue`, `resume`, or `agents`) and a project folder that always
-  comes from the workspace. `launch.resolve_profile`
-  raises only when nothing resolves (a 400 on the spawn, not a config-save
-  error). Every launch path (REST, elevate, autostart, hotkeys, the elevated
-  first terminal) goes through `launch.resolve`; do not add a second one. Recovery uses Claude's own CLI flags and must remain explicit when
-  the old PTY is gone.
+- Agent profiles are `terminal_type` `claude-code` or `codex`, with
+  `agent_mode` (claude-code `new | continue | resume | agents`, default
+  `continue`; codex adds `fork`, default `new`; a legacy `claude_mode` migrates
+  on load and stays an accepted request alias), typed options in
+  `Profile.agent` (allowlisted per type in `agents.py`, served to Settings by
+  `GET /api/system/agents`) and a project folder that always comes from the
+  workspace. `launch.resolve_profile` raises only when nothing resolves (a 400
+  on the spawn, not a config-save error). Every launch path (REST, elevate,
+  autostart, hotkeys, the elevated first terminal) goes through
+  `launch.resolve`; do not add a second one. Recovery uses the agent's own CLI
+  (`claude --continue`, `codex resume --last`, a session id from
+  `/api/agent-sessions`) and must remain explicit when the old PTY is gone.
+  A `.cmd`/`.bat` agent executable refuses arguments cmd.exe would re-parse.
+- Global hotkeys apply live: saving a changed summon key or profile key
+  rebinds them through `ctx.rebind_hotkeys`, and only `port` and `host` need a
+  restart. With `overlay.enabled`, the summon key toggles the primary window
+  as a drop-down (`overlay.py`); close-to-tray treats a hidden overlay as a
+  hidden window.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
@@ -245,7 +285,8 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   hidden console is what console programs QuickTerm starts (`code` is
   code.cmd) inherit instead of opening a visible window of their own.
 - Any module reached ONLY via `importlib.import_module("quickterm.X")` (server
-  stubbable modules: `opener`, `update`, plus `workspace`/`config` which happen
+  stubbable modules: `opener`, `update`, `agents`, `ssh_config`,
+  `agent_sessions`, plus `workspace`/`config` which happen
   to also be static-imported) is invisible to PyInstaller's static graph and
   MUST be listed in `hiddenimports` in `quickterm.spec`, or the frozen build
   500s that endpoint with `ModuleNotFoundError`. When you add a new
@@ -266,6 +307,13 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `scripts/fetch_putty.py` from the official `sha256sums` (plain `w64/` lines,
   not "installer version"), re-run the script, rebuild. Also ship
   `THIRD-PARTY-NOTICES.md` (referenced by `packaging/quickterm.iss`).
+- OpenSSH runs next to the bundled PuTTY: `Profile.ssh_client` `"openssh"`
+  uses Windows' own `%SystemRoot%\System32\OpenSSH\ssh.exe`/`sftp.exe` (never
+  bundled), null or `"putty"` keeps plink/psftp, so every pre-4.0 profile is
+  unchanged. `~/.ssh/config` is parsed by `ssh_config.py` and resolved with
+  `ssh -G`; key files are never read. Host, user and ProxyJump values are
+  checked against argument injection (no leading `-`, no whitespace) for both
+  clients.
 
 ## Local release workflow
 
