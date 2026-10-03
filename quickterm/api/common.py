@@ -125,6 +125,8 @@ async def resolve_request(
                 name=body.get("name"),
                 start_command=body.get("start_command"),
                 claude_mode=body.get("claude_mode"),
+                agent_mode=body.get("agent_mode"),
+                agent_session=body.get("agent_session"),
                 request_cwd=request_cwd,
                 workspace_root=root,
                 append_tools=append_tools,

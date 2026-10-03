@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from quickterm import browse, putty_tools
 from quickterm.api.common import asdict, read_json, resolve_request
@@ -66,6 +66,76 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         value = await asyncio.to_thread(_terminal_inventory)
         inventory_cache.update(value=value, at=time.monotonic())
         return value
+
+    @app.get("/api/system/agents")
+    async def get_agent_catalog(fresh: bool = False) -> dict:
+        # The option schema the Settings editor is generated from, plus PATH
+        # lookups and Codex's model cache. Remembered for a minute like the
+        # shell inventory; `fresh` rescans after an install.
+        agents = importlib.import_module("quickterm.agents")  # stubbable in tests
+        cached = inventory_cache.get("agents")
+        if not fresh and cached is not None and time.monotonic() - cached[1] < 60.0:
+            return cached[0]
+        value = await asyncio.to_thread(agents.catalog)
+        inventory_cache["agents"] = (value, time.monotonic())
+        return value
+
+    @app.get("/api/system/ssh-hosts")
+    async def get_ssh_hosts() -> dict:
+        ssh_config = importlib.import_module("quickterm.ssh_config")  # stubbable in tests
+
+        def scan() -> dict:
+            path = ssh_config.config_path()
+            try:
+                exists = path.is_file()
+            except OSError:
+                exists = False
+            return {
+                "path": str(path),
+                "exists": exists,
+                "openssh": _optional_str(ssh_config.openssh_path("ssh")),
+                "hosts": ssh_config.hosts(path) if exists else [],
+            }
+
+        return await asyncio.to_thread(scan)
+
+    @app.get("/api/system/ssh-hosts/{alias}")
+    async def resolve_ssh_host(alias: str) -> dict:
+        ssh_config = importlib.import_module("quickterm.ssh_config")  # stubbable in tests
+        if not ssh_config.valid_alias(alias):
+            raise HTTPException(400, "invalid host alias")
+        try:
+            # Runs `ssh -G` with a timeout of its own.
+            return await asyncio.to_thread(ssh_config.resolve, alias)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except KeyError:
+            raise HTTPException(404, f"unknown host alias: {alias}") from None
+
+    @app.get("/api/agent-sessions")
+    async def list_agent_sessions(
+        kind: str | None = Query(None, alias="type"),
+        workspace: str | None = None,
+        cwd: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        agent_sessions = importlib.import_module("quickterm.agent_sessions")  # stubbable in tests
+        if kind not in ("claude-code", "codex"):
+            raise HTTPException(400, "type must be claude-code or codex")
+        limit = max(1, min(100, limit))
+        if workspace and workspace.strip():
+            folder = await asyncio.to_thread(_workspace_root, workspace.strip())
+        elif cwd and cwd.strip():
+            folder = cwd.strip()
+        else:
+            raise HTTPException(400, "workspace or cwd is required")
+        if not folder:
+            return {"sessions": []}
+        # The same expansion the spawn applies (launch.validate_dir), so the
+        # folder matches the one the agent was started in.
+        folder = str(Path(os.path.expandvars(os.path.expanduser(folder))))
+        found = await asyncio.to_thread(agent_sessions.sessions, kind, folder, limit)
+        return {"sessions": found}
 
     @app.post("/api/elevate")
     async def elevate_terminal(request: Request) -> dict:
@@ -196,6 +266,47 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(404 if exc.missing else 400, str(exc)) from exc
 
 
+def _workspace_root(name: str) -> str | None:
+    """A workspace's folder as the spawn path sees it; 404 when unknown."""
+    workspace = importlib.import_module("quickterm.workspace")
+    try:
+        saved = workspace.load_workspace(name)
+    except (OSError, ValueError):
+        saved = None
+    if saved is None:
+        raise HTTPException(404, f"unknown workspace: {name}")
+    return workspace.resolve_start_dir(getattr(saved, "path", None))
+
+
+def _codex_entry() -> dict:
+    agents = importlib.import_module("quickterm.agents")
+    executable = agents.codex_executable()
+    return {"id": "codex", "label": "Codex CLI", "executable": executable, "available": executable is not None}
+
+
+def _ssh_entries(putty_ssh: str | None, putty_sftp: str | None, *, windows: bool) -> list[dict]:
+    """ssh and sftp with both clients' paths.
+
+    On Windows `executable` and `available` still describe the bundled PuTTY
+    client, as before OpenSSH was an option; `openssh` names the other one.
+    POSIX has no PuTTY build, so there they describe OpenSSH.
+    """
+    ssh_config = importlib.import_module("quickterm.ssh_config")
+    entries = []
+    for type_id, label, putty in (("ssh", "SSH", putty_ssh), ("sftp", "SFTP", putty_sftp)):
+        openssh = _optional_str(ssh_config.openssh_path(type_id))
+        executable = putty if windows else openssh
+        entries.append({
+            "id": type_id,
+            "label": label,
+            "executable": executable,
+            "available": executable is not None,
+            "openssh": openssh,
+            "putty": putty,
+        })
+    return entries
+
+
 def _terminal_inventory() -> dict:
     if os.name != "nt":
         return _posix_inventory()
@@ -243,8 +354,6 @@ def _terminal_inventory() -> dict:
             ),
         ),
         ("nushell", "Nushell", _first_executable("nu.exe")),
-        ("ssh", "SSH (PuTTY plink)", _optional_str(putty_tools.plink_path())),
-        ("sftp", "SFTP (PuTTY psftp)", _optional_str(putty_tools.psftp_path())),
     ]
     distributions: list[str] = []
     wsl = next((exe for type_id, _label, exe in shells if type_id == "wsl"), None)
@@ -269,16 +378,21 @@ def _terminal_inventory() -> dict:
         except (OSError, subprocess.SubprocessError):
             pass
     pwsh = next(exe for type_id, _label, exe in shells if type_id == "powershell-core")
+    types = [
+        {
+            "id": type_id,
+            "label": label,
+            "executable": executable,
+            "available": executable is not None,
+        }
+        for type_id, label, executable in shells
+    ]
+    types.insert(1, _codex_entry())
+    types += _ssh_entries(
+        _optional_str(putty_tools.plink_path()), _optional_str(putty_tools.psftp_path()), windows=True
+    )
     return {
-        "types": [
-            {
-                "id": type_id,
-                "label": label,
-                "executable": executable,
-                "available": executable is not None,
-            }
-            for type_id, label, executable in shells
-        ] + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
+        "types": types + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
         "wsl_distributions": distributions,
         "installs": [] if pwsh else [_powershell_install()],
     }
@@ -331,6 +445,7 @@ def _posix_inventory() -> dict:
         "executable": claude,
         "available": claude is not None,
     })
+    types.append(_codex_entry())
     for shell in order:
         if not shell:
             continue
@@ -341,5 +456,6 @@ def _posix_inventory() -> dict:
             "executable": exe or shell,
             "available": exe is not None,
         })
+    types += _ssh_entries(None, None, windows=False)
     types.append({"id": "custom", "label": "Custom command", "executable": None, "available": True})
     return {"types": types, "wsl_distributions": [], "installs": []}
