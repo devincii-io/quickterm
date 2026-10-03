@@ -35,6 +35,7 @@ class Workspace:
     # Workspace ownership is wider than the visible layout: detaching a pane
     # removes it from `layout` but its live session remains here for reattach.
     session_ids: list[str] = field(default_factory=list)
+    temporary: bool = False
 
 
 def normalize_root(value: object) -> str | None:
@@ -299,6 +300,7 @@ def _workspace_from(raw: dict, name: str) -> Workspace:
         logo=raw.get("logo"),
         path=path,
         session_ids=[sid for sid in session_ids if isinstance(sid, str) and sid],
+        temporary=raw.get("temporary") is True,
     )
 
 
@@ -318,6 +320,7 @@ def save_workspace(ws: Workspace) -> None:
             "logo": ws.logo,
             "path": root,
             "session_ids": sorted(set(ws.session_ids)),
+            "temporary": ws.temporary,
         },
         indent=2,
     )

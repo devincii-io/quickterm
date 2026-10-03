@@ -6,6 +6,7 @@
 // attention on the server, it tells the server that terminal was seen.
 
 import { initLauncher } from "./launcher.js";
+import { embedded, isScratchWorkspace } from "./boot_context.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -59,6 +60,7 @@ export function createSidebar({
   }
 
   function renderSessions() {
+    if (viewHost()?.active !== viewHost()?.viewFor(window)) return;
     state.launcherView?.updateSessions(lastSessions, [...app.attachedSessionIds()], [...app.ownedSessionIds()]);
   }
 
@@ -71,15 +73,29 @@ export function createSidebar({
       window.addEventListener("focus", refreshStatusSoon);
     }
     viewHost()?.update();
-    state.launcherView = initLauncher($("launcher"), {
+    const host = viewHost();
+    if (host && host.active !== host.viewFor(window)) {
+      (embedded ? window.parent : window).quicktermChrome?.refresh();
+      return;
+    }
+    const render = (embedded ? window.parent : window).quicktermChrome?.render
+      || ((options) => initLauncher($("launcher"), options));
+    state.launcherView = render({
       profiles: state.profiles,
       inventory: state.terminalInventory,
-      workspaces: state.workspaceNames,
+      workspaces: state.workspaceNames.filter((name) => !isScratchWorkspace(name) || name === state.currentWorkspace),
       currentWorkspace: state.currentWorkspace,
+      workspaceLabel: host?.nameOf(host.viewFor(window)),
       workspacePath: state.workspacePath,
       workspacePathExists: state.workspacePathExists,
       selectedTerminal: state.selectedTerminal,
       defaultProfile: state.cfg.default_profile,
+      configuredOnly: true,
+      onSetup: () => app.setupTerminals(),
+      windowLabel: (embedded ? window.parent : window).quicktermChrome?.windowLabel || "QuickTerm window",
+      onTour: () => app.setupTour(),
+      onNewWindow: () => { panels.close(); palette.newWindowMode(); },
+      onPickView: () => { panels.close(); palette.newWindowMode(true); },
       onSelectTerminal: (choice) => { state.selectedTerminal = choice; },
       logoUrl: api.assetUrl(state.workspaceLogo || state.cfg.logo),
       onRunProfile: runProfile,
@@ -88,17 +104,19 @@ export function createSidebar({
       onLaunchComplete: () => layout.focused?.focusSoon(),
       onElevateProfile: elevateProfile,
       onElevateSystem: elevateSystemTerminal,
-      onWorkspace: switchWorkspace,
-      onNewScratch: newScratchWorkspace,
+      onWorkspace: (name) => host?.focusWorkspace(name || "scratch") || switchWorkspace(name),
+      onNewScratch: () => host?.open(null, { anchorWindow: window }) || newScratchWorkspace(),
       onNewTerminal: app.newTerminal,
       onRenameSession: (session, name) => app.renameSession(session.id, name),
       onFocusSession: (sessionId) => {
         markSeen(sessionId);
+        if (host?.focusSession(sessionId)) return;
         const pane = layout.panes().find((item) => item.session?.id === sessionId);
         if (pane) layout.focusPane(pane);
       },
       onAttachSession: (session) => {
         markSeen(session?.id);
+        if (host?.focusSession(session?.id)) return;
         return attachSession(session);
       },
       onOpenFinished: (session) => {
@@ -121,6 +139,9 @@ export function createSidebar({
       here: hereState(),
       onWorkspaceHere: () => createWorkspaceHere(),
       onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
+      onFocusShownSession: (id) => Boolean(host?.focusSession(id)),
+      visibleSessionIds: () => (host?.views() || []).flatMap((view) =>
+        (view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow)?.quicktermView?.app.attachedSessionIds() || []),
       onOpenFolder: openHere,
       sessions: lastSessions,
       attachedSessionIds: app.attachedSessionIds(),
@@ -158,7 +179,7 @@ export function createSidebar({
     // The focused terminal's folder changes with every cd and focus change,
     // so the "workspace here" offer is patched here, not rebuilt with the
     // sidebar.
-    state.launcherView?.updateHere(hereState());
+    if (viewHost()?.active === viewHost()?.viewFor(window)) state.launcherView?.updateHere(hereState());
     api.getSessions({ metrics: false }).then((list) => {
       lastSessions = list;
       // layout.js calls refreshStatusSoon on every focus change, so this

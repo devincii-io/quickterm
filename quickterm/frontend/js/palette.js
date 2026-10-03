@@ -6,6 +6,8 @@ import * as api from "./api.js";
 import { displaySnippet } from "./panel_shared.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { resultLabel } from "./terminal_actions.js";
+import { connectionLabel, connectionTarget } from "./panel_connections.js";
+import { workspaceLabel, isScratchWorkspace } from "./boot_context.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
 // long multi-line snippet cannot push the destination out of view.
@@ -119,6 +121,7 @@ export class Palette {
     if (!this.open || requestId !== this.requestId || this._inSubMode()) return;
     this.items = this._staticItems();
     for (const name of workspaces) {
+      if (isScratchWorkspace(name)) continue;
       this.items.push({
         kind: "workspace",
         label: `load workspace: ${name}`,
@@ -226,6 +229,8 @@ export class Palette {
     const items = [
       { kind: "action", label: "dashboard", run: () => a.openPanel("dashboard") },
       { kind: "action", label: "settings", run: () => a.openPanel("settings") },
+      { kind: "action", label: "terminals and connections", run: () => a.setupTerminals() },
+      { kind: "action", label: "setup tour", run: () => a.setupTour() },
       { kind: "action", label: "help", run: () => a.openPanel("help") },
       { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal() },
       { kind: "action", label: "previous new-terminal profile", hint: "Alt+Shift+Left", run: () => a.cycleTerminal(-1) },
@@ -310,19 +315,21 @@ export class Palette {
       },
     ];
     for (const p of a.profiles) {
+      const desktop = ["rdp", "vnc"].includes(p.terminal_type);
       items.push({
-        kind: "profile",
-        label: `run: ${p.name}`,
-        hint: [p.cmd, ...(p.args || [])].join(" "),
+        kind: desktop ? "window" : "terminal",
+        label: `open ${desktop ? "window" : "terminal"}: ${p.name}`,
+        hint: `${connectionLabel(p)} · ${connectionTarget(p)}`,
         run: () => a.runProfile(p),
       });
       if (p.terminal_type === "claude-code") {
+        const project = a.workspacePath?.() || "workspace folder";
         items.push(
-          { kind: "claude", label: `claude new conversation: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "new") },
-          { kind: "claude", label: `claude continue: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "continue") },
-          { kind: "claude", label: `claude choose session: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "resume") },
-          { kind: "claude", label: `claude agent manager: ${p.name}`, hint: p.cwd || "project", run: () => a.runClaudeMode(p, "agents") },
-          { kind: "claude", label: `split Claude agent view: ${p.name}`, hint: `claude agents --cwd ${p.cwd || "project"}`, run: () => a.splitClaudeAgentView(p) },
+          { kind: "claude", label: `claude new conversation: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "new") },
+          { kind: "claude", label: `claude continue: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "continue") },
+          { kind: "claude", label: `claude choose session: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "resume") },
+          { kind: "claude", label: `claude agent manager: ${p.name}`, hint: project, run: () => a.runClaudeMode(p, "agents") },
+          { kind: "claude", label: `split Claude agent view: ${p.name}`, hint: project, run: () => a.splitClaudeAgentView(p) },
         );
       }
     }
@@ -428,7 +435,7 @@ export class Palette {
       ...this.foreignSessions.map(({ info, workspace }) => ({
         kind: "session",
         label: `move here & attach: ${info.name || info.id}`,
-        hint: `${workspace} · ${info.id}`,
+        hint: `${workspaceLabel(workspace)} · ${info.id}`,
         run: () => this.app.moveSessionHere(info, workspace === "Unassigned" ? null : workspace),
       })),
     ];
@@ -451,11 +458,11 @@ export class Palette {
     const request = ++this.requestId;
     this.items = [
       { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
-      ...(!beside ? [{
-        kind: "window", label: "new window: scratch",
+      ...[{
+        kind: "window", label: beside ? "new scratch view" : "new window: scratch",
         hint: "a disposable layout of its own",
-        run: () => this.app.openNewWindow(null),
-      }] : []),
+        run: () => beside ? this.app.openWorkspaceBeside(null) : this.app.openNewWindow(null),
+      }],
     ];
     this._refilter();
     this.focusInput();

@@ -8,7 +8,7 @@ import {
 test("ordinary splits inherit compatible signalled directories", () => {
   const powershell = { kind: "profile", profile: { terminal_type: "windows-powershell", cwd: "C:\\home" } };
   assert.equal(splitDirectory("C:\\work\\repo", "windows-powershell", powershell, true), "C:\\work\\repo");
-  assert.equal(splitDirectory("/home/dev", "wsl", powershell, true), "C:\\home");
+  assert.equal(splitDirectory("/home/dev", "wsl", powershell, true), null);
 
   const wsl = { kind: "system", id: "wsl" };
   assert.equal(splitDirectory("C:\\work\\repo", "windows-powershell", wsl, true), "C:\\work\\repo");
@@ -18,7 +18,8 @@ test("ordinary splits inherit compatible signalled directories", () => {
 test("Claude splits keep project identity and agent view is explicit", () => {
   const profile = { terminal_type: "claude-code", cwd: "C:\\projects\\app", claude_mode: "agents" };
   const choice = { kind: "profile", profile };
-  assert.equal(splitDirectory("C:\\unrelated", "windows-powershell", choice, true), profile.cwd);
+  assert.equal(splitDirectory("C:\\unrelated", "windows-powershell", choice, true), null);
+  assert.equal(splitDirectory(null, null, choice, true), null);
   assert.equal(normalClaudeSplitMode(profile), "continue");
   assert.equal(normalClaudeSplitMode({ ...profile, claude_mode: "resume" }), undefined);
 });

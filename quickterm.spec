@@ -25,6 +25,7 @@ hiddenimports = collect_submodules("webview") + [
 # or they go missing from the frozen build (a missing one 500s the endpoint).
 hiddenimports += [
     "quickterm.opener",
+    "quickterm.connections",
     "quickterm.update",
     "quickterm.assets",
     "quickterm.workspace",

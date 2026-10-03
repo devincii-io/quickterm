@@ -119,6 +119,13 @@ test("the store survives a storage that throws", () => {
   assert.doesNotThrow(() => broken.save(null));
 });
 
+test("generated scratch identities are pruned instead of restoring their display labels", () => {
+  const stored = { version: 1, tree: split("h", pane(P), pane(W("scratch-view-0123456789ab"))), active: W("scratch-view-0123456789ab") };
+  const plan = restorePlan(stored, { exists: () => false });
+  assert.equal(shape(plan.tree), "P");
+  assert.deepEqual(plan.skipped, [{ workspace: "scratch-view-0123456789ab", reason: "scratch" }]);
+});
+
 test("a failed restore speaks only when nothing came back", () => {
   assert.equal(restoreFailureMessage(["api"], ["docs"]), null);
   assert.equal(restoreFailureMessage([], []), null);
@@ -160,6 +167,7 @@ function installDom() {
       }
     }
     before(node) { node.parentNode = this.parentNode || { stub: true }; }
+    replaceChildren(...nodes) { this.children.forEach((node) => { node.parentNode = null; }); this.children = []; this.append(...nodes); }
     remove() {
       if (this.parentNode?.children) this.parentNode.children = this.parentNode.children.filter((n) => n !== this);
       this.parentNode = null;
@@ -177,7 +185,9 @@ function installDom() {
   const app = new Element("div");
   globalThis.document = {
     createElement: (tag) => new Element(tag),
+    createElementNS: (_, tag) => new Element(tag),
     getElementById: (id) => (id === "app" ? app : null),
+    querySelector: (selector) => selector === "#app > .workspace-shell" ? app : null,
   };
   globalThis.window = { addEventListener() {}, matchMedia: () => ({ matches: true }) };
   globalThis.location = { pathname: "/" };

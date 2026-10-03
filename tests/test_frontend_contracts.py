@@ -178,9 +178,7 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
 
 
 def test_the_scratch_folder_is_a_setting_that_round_trips():
-    # scratch_dir could only be set by hand-editing config.json. Settings PUTs
-    # the whole draft it loaded from /api/config/full, so the field only has to
-    # write into that draft; config_sync.js re-reads the resolved root after a save.
+    # The form edits the draft and its partial save re-reads the resolved root.
     general = (FRONTEND_JS / "panel_settings_general.js").read_text(encoding="utf-8")
     sync = CONFIG_SYNC_JS.read_text(encoding="utf-8")
     panels = PANELS_JS.read_text(encoding="utf-8")
@@ -188,8 +186,9 @@ def test_the_scratch_folder_is_a_setting_that_round_trips():
     assert "cfg.scratch_dir = scratch.value.trim();" in general
     assert 'this._field("Scratch folder", scratchField,' in general
     assert "this.settingsDraft = JSON.parse(JSON.stringify(cfg));" in panels
-    assert "await api.putConfig(this.settingsDraft);" in panels
-    assert "state.scratchRoot = fresh.scratch_dir || state.scratchRoot;" in sync
+    assert "settingsPatch(this.settingsDraft, this.settingsBaseline, fresh)" in panels
+    assert "await api.putConfig(patch);" in panels
+    assert "state.scratchRoot = fresh.scratch_dir || null;" in sync
 
 
 def test_a_background_launch_failure_reaches_the_banner_once():
@@ -328,7 +327,8 @@ def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
     end = launcher.index("\n  const sessionGroup =", start)
     entry = launcher[start:end]
     # A foreign row arms its choices; only the two labelled buttons act.
-    assert 'const foreign = !isHere && group.kind === "workspace";' in entry
+    assert 'const foreign = !isHere && group.kind === "workspace" && !shown;' in entry
+    assert "options.onFocusShownSession?.(session.id)" in entry
     assert entry.index("if (!foreign) {") < entry.index("options.onAttachSession?.(session)")
     assert "row.addEventListener(\"click\", () => setArmed(" in entry
     assert "options.onWorkspace?.(target)" in entry

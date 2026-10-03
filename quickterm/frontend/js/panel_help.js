@@ -3,6 +3,9 @@ export function renderHelp() {
     const intro = make("div", "help-intro");
     intro.append(make("h2", "", "Your terminals stay organized."), make("p", "", "Alt+D detaches a terminal without stopping it. X or Alt+W always asks before killing its process tree."));
     this.bodyEl.append(intro);
+    const tour = this._button("Setup tour", "secondary-button compact");
+    tour.addEventListener("click", () => this.show("setup"));
+    this.bodyEl.append(tour);
     const grid = make("div", "help-grid");
     const shortcuts = [
       ["Alt K", "Open command palette"], ["Alt Shift →", "Split selected profile right in current folder"],

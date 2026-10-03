@@ -98,9 +98,9 @@ export function createWorkspaceSwitch({
         await workspace.save(
           state.currentWorkspace,
           layout.serialize(),
-          state.workspaceLogo,
+          state.currentWorkspace === SCRATCH_WS ? state.workspaceLogo : undefined,
           [...ownedSessionIds()],
-          state.workspacePath,
+          state.currentWorkspace === SCRATCH_WS ? state.workspacePath : undefined,
         );
       } catch (_) {
         state.transitioning = false;

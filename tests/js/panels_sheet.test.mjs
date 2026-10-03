@@ -16,6 +16,9 @@ test("every launcher kind has its own label, not Custom command", () => {
   assert.equal(label({ cmd: "x", terminal_type: "git-bash" }), "Git Bash");
   assert.equal(label({ cmd: "pwsh.exe" }), "PowerShell 7");
   assert.equal(label({ cmd: "htop" }), "Custom command");
+  assert.equal(terminalTypeLabel("serial"), "Serial console");
+  assert.equal(terminalTypeLabel("docker"), "Docker");
+  assert.equal(terminalTypeLabel("rdp"), "Remote Desktop");
   assert.equal(terminalTypeLabel("something-new"), "Custom command");
 });
 

@@ -41,6 +41,7 @@ class FakeProfile:
     ssh_port: int | None = None
     ssh_user: str | None = None
     ssh_key: str | None = None
+    connection: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -296,6 +297,7 @@ def fake_workspace(monkeypatch):
         logo: str | None = None
         path: str | None = None
         session_ids: list[str] = field(default_factory=list)
+        temporary: bool = False
 
     store: dict[str, Workspace] = {}
     mod.Workspace = Workspace
@@ -707,6 +709,36 @@ def test_fresh_inventory_skips_the_cache(client, monkeypatch):
     assert client.get("/api/system/terminals").json()["scan"] == 2  # the fresh scan is cached
 
 
+def test_desktop_connection_uses_the_client_not_a_pty(client, manager, cfg, monkeypatch):
+    from quickterm import connections
+
+    cfg.profiles.append(FakeProfile("Desktop", "viewer.exe", terminal_type="vnc", connection={"host": "server"}))
+    threads = []
+
+    def open_client(profile):
+        threads.append(threading.current_thread().name)
+        return {"pid": 42, "profile": profile.name, "type": "vnc", "external": True}
+
+    monkeypatch.setattr(connections, "open_desktop", open_client)
+    response = client.post("/api/connections/Desktop/open")
+    assert response.status_code == 200
+    assert response.json()["external"] is True
+    assert not manager.sessions
+    assert threads and not threads[0].startswith("asyncio-portal")
+    assert client.post("/api/connections/missing/open").status_code == 404
+
+
+def test_desktop_connection_rejects_terminal_and_missing_client(client, cfg, monkeypatch):
+    from quickterm import connections
+
+    assert client.post("/api/connections/powershell/open").status_code == 400
+    cfg.profiles.append(FakeProfile("Desktop", "viewer.exe", terminal_type="vnc", connection={"host": "server"}))
+    monkeypatch.setattr(connections.shutil, "which", lambda executable: None)
+    response = client.post("/api/connections/Desktop/open")
+    assert response.status_code == 400
+    assert "Client not found" in response.json()["detail"]
+
+
 def test_spawn_unknown_profile_404(client):
     assert client.post("/api/sessions", json={"profile": "nope"}).status_code == 404
 
@@ -988,7 +1020,7 @@ def test_workspace_crud(client, fake_workspace):
     ws = client.get("/api/workspaces/dev").json()
     assert ws == {
         "name": "dev", "layout": layout, "logo": None, "path": None,
-        "session_ids": [], "path_exists": False,
+        "session_ids": [], "path_exists": False, "temporary": False,
     }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
@@ -1011,6 +1043,32 @@ def test_workspace_save_and_delete_sync_live_ownership(client, manager, fake_wor
 
     assert client.delete("/api/workspaces/dev").status_code == 204
     assert moved.workspace is None
+
+
+def test_temporary_workspace_flag_survives_layout_autosaves(client, fake_workspace):
+    url = "/api/workspaces/scratch-view-0123456789ab"
+    assert client.put(url, json={"layout": {}, "temporary": True}).status_code == 204
+    assert client.put(url, json={"layout": {"type": "pane"}}).status_code == 204
+    assert client.get(url).json()["temporary"] is True
+    assert client.put(url, json={"layout": {}, "temporary": "true"}).status_code == 400
+    assert client.put(url, json={"layout": {}, "temporary": False}).status_code == 204
+    assert client.get(url).json()["temporary"] is False
+
+
+def test_workspace_metadata_patch_keeps_layout_ownership_and_temporary_flag(client, manager, fake_workspace):
+    session = manager.add_session()
+    layout = {"type": "pane", "session_id": session.id}
+    url = "/api/workspaces/scratch-view-0123456789ab"
+    assert client.put(url, json={"layout": layout, "session_ids": [session.id], "temporary": True}).status_code == 204
+    assert client.patch(url, json={"path": None, "logo": "new.png"}).status_code == 204
+    saved = client.get(url).json()
+    assert saved["layout"] == layout
+    assert saved["session_ids"] == [session.id]
+    assert saved["temporary"] is True
+    assert saved["logo"] == "new.png"
+    assert client.patch(url, json={"layout": {}}).status_code == 400
+    assert client.patch(url, json={"logo": 42}).status_code == 400
+    assert client.patch("/api/workspaces/missing", json={"logo": None}).status_code == 404
 
 
 def test_workspace_put_requires_layout(client, fake_workspace):

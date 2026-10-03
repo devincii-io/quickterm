@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/css/dashboard.css">
 <link rel="stylesheet" href="/css/browser.css">
 <link rel="stylesheet" href="/css/workspace_views.css">
+<link rel="stylesheet" href="/css/connections.css">
 </head>
 <body>
 <div id="app">
@@ -25,10 +26,10 @@
   <div class="workspace-shell">
     <main id="grid" class="grid" aria-label="Terminal workspace"></main>
     <div id="zoom-host" class="zoom-host" hidden></div>
-    <div id="app-error" class="app-error" role="alert" hidden>
-      <span id="app-error-text"></span>
-      <button id="app-error-close" type="button" aria-label="Dismiss message">Dismiss</button>
-    </div>
+  </div>
+  <div id="app-error" class="app-error" role="alert" hidden>
+    <span id="app-error-text"></span>
+    <button id="app-error-close" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
   <!-- Stands in for the sidebar while it is hidden: a "+" over the terminal's
        left edge that can be dragged up and down by its handle. -->

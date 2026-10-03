@@ -31,12 +31,13 @@ QuickTerm opens as its own native desktop window. The installer adds an
 optional **Open QuickTerm here** entry to the right-click menu, both on a folder
 and inside one. It opens a terminal in that directory. When a new
 version is published, the app shows a small **Update** pill; Settings → About
-has the details and a one-click, checksum-verified install. The sidebar
-detects installed PowerShell, Command Prompt, WSL distributions, Git Bash, and
-Nushell, and offers Claude Code directly (continue, new, resume) when the CLI
-is on this computer, no profile needed. Without PowerShell 7, the list under
-**+** offers to install it: winget runs in a new terminal, where you answer its
-prompts yourself (without winget, the download page opens). The shield beside **+** starts the
+has the details and a one-click, checksum-verified install. On first run,
+the setup tour opens the terminal and connection manager. Detected shells
+populate its setup forms; only saved configurations appear under **+**.
+Choose local PowerShell, Command Prompt, WSL, Git Bash, Nushell, another shell,
+Claude Code, or a remote connection. The palette offers to install missing
+PowerShell 7: winget runs in a new terminal, where you answer its prompts
+yourself; without winget, the download page opens. The shield beside **+** starts the
 selected terminal in a separate UAC-approved window. Both the
 window and the session are labeled `Administrator`.
 
@@ -61,7 +62,8 @@ terminal there. You can then save or move it deliberately.
 
 **A workspace is a folder.** Give a workspace the directory you work in and
 every terminal it opens starts there, so switching workspace switches project.
-Set or change the folder from the Dashboard, with a native folder picker.
+Set or change the folder and logo from Dashboard's workspace Settings editor.
+Browse uses the in-app folder browser, with a native picker also available.
 Terminal profiles carry no folder of their own, so one "Claude Code" or
 "PowerShell" profile is usable in every project and none of them can point
 somewhere you cannot see. A folder that has been moved or deleted is reported
@@ -86,12 +88,15 @@ To see several projects at once, tile more workspaces into the window: choose
 under a terminal that belongs to another workspace. Each new view takes half
 of the view you asked from, cut along its longer side, the way a tiling
 window manager places a window, and there is no limit on how many you open.
-Every view has its own colour, its own sidebar, its own terminal splits and
-its own autosave. Drag a view's header onto another view to dock it on that
+Every view has its own colour, terminal splits and autosave. Each native
+window has one sidebar shared by its views; selecting a view changes the
+sidebar's active workspace. The window menu distinguishes a new native
+window from a workspace or scratch view inside this one.
+Drag a view's header onto another view to dock it on that
 side or swap the two, drag a divider (or use its arrow keys) to resize,
 **zoom** to see one view alone, and **close** to save that workspace and
-leave its terminals running. The arrangement is not reopened after restarting
-QuickTerm.
+leave its terminals running. The primary window's named workspace arrangement
+is restored after a restart; disposable scratch views are not.
 
 `Alt+N` places a new terminal the same way: it takes half of the focused pane
 along its longer side, so repeated presses spiral inward instead of stacking
@@ -103,11 +108,12 @@ folder a workspace named after it, moves the terminal into it and switches
 there; if the folder already is a workspace's root the offer reads
 **open <name>** and takes the terminal along instead.
 
-**Scratch** is the disposable mode. It opens in a throwaway folder under your
-system temp directory, and the moment you type into a scratch layout it starts
-autosaving as the special `scratch` workspace, replacing the previous one. It
-survives closing the window during a run and is deleted for good when the app
-quits. Naming a scratch in the Dashboard offers the folder the focused terminal
+**Scratch** is a temporary workspace. It opens in a throwaway folder under your
+system temp directory and autosaves during the current run. Each additional
+scratch view gets its own identity and layout; opening one never replaces
+another view. Closing a view keeps its terminals running, while quitting the
+application ends the backend and discards temporary layouts. QuickTerm does
+not delete the scratch folder's contents. Naming a scratch in the Dashboard offers the folder the focused terminal
 is actually in, so a shell you `cd`'d into your project suggests that project,
 never the temp folder.
 
@@ -202,8 +208,8 @@ Alt+K → **Split Claude agent view** for an explicit project-scoped manager.
 puts it back; the saved default for every pane is in Settings. Split dividers
 are wide, keyboard-adjustable, and can be double-clicked to balance them.
 
-Per-profile global hotkeys (for example `Ctrl+Alt+1` to spawn the claude
-profile) are set with `keybinding` in the profile config.
+Per-terminal global hotkeys, such as `Ctrl+Alt+1` to launch Claude Code,
+are set in its configuration form.
 
 Every live terminal appears in the sidebar, grouped by the workspace that owns
 it, as a state dot and a name; double-click a row to rename it. Dashboard
@@ -234,14 +240,15 @@ window, including for sessions near the bottom of a scrolled dashboard.
 ## Configuration
 
 `%APPDATA%\quickterm\config.json` is created with defaults on first run.
-Terminal profiles can be managed from **Settings → Terminals**. Choose Claude
-Code, PowerShell 7, Windows PowerShell, Command Prompt, WSL (including a
-detected distribution), SSH or SFTP (powered by bundled PuTTY plink/psftp), or
-a custom executable. A profile sets a command to run inside the shell,
+Manage saved configurations in **Settings → Terminals and connections**.
+Choose Claude Code, PowerShell 7, Windows PowerShell, Command Prompt, WSL,
+Git Bash, Bash, Zsh, Fish, Nushell, or any custom executable. Typed forms also
+cover SSH/SFTP and Telnet through bundled PuTTY tools, serial consoles,
+Docker, Podman, Kubernetes, Remote Desktop and VNC. Remote desktops open
+external client windows rather than terminal panes. A profile sets a command to run inside the shell,
 environment variables, a global shortcut and autostart. It has no folder: the
 workspace you launch it from supplies that, which is what makes one profile
-usable in every project. Set the workspace folder in the Dashboard, where the
-native **Browse** picker lives. With no workspace folder at all, Windows shells
+usable in every project. Set the workspace folder in the Dashboard. With no workspace folder at all, Windows shells
 start in the Windows user home and WSL in the distro's Linux home.
 
 Claude Code is a real profile type rather than a name convention. It opens in
@@ -267,26 +274,25 @@ inherits them, so use a dedicated profile when a credential should have a
 narrow scope. On POSIX, QuickTerm relies on `0700`/`0600` directory and file
 permissions instead of storing an encryption key beside the data.
 
-The same fields are available through Settings → Advanced. A plaintext config
-value written by hand still works and is protected on the next load:
+Configuration fields have controls in Settings; no JSON editing is required.
+Server binding and stored voice preferences are under Advanced. Voice capture
+is currently unavailable. Arguments are entered one per line and environment
+variables as name/value rows. Profiles have no starting-folder field.
 
-```json
-{"name": "project", "cmd": "wsl.exe", "args": [], "cwd": "~/dev/project",
- "env": {}, "keybinding": "ctrl+alt+1", "autostart": false,
- "terminal_type": "wsl", "wsl_distro": "Ubuntu",
- "start_command": "source .venv/bin/activate"}
-```
-
-Snippets, custom themes, global and per-workspace logos, the idle-session
-timeout, summon hotkey, port, scrollback size, and font live in the same file.
+Snippets, custom themes, the app logo, idle-session timeout, summon hotkey,
+port, scrollback size, and font defaults live in the app configuration.
+Workspace folders, logos, layouts and terminal ownership live in workspace
+files. Sidebar mode, width, selected launch configuration and focus belong to
+the native window. Text zoom is temporary and belongs to a pane.
 The full validated 64 KB to 64 MB in-memory scrollback range is available in
 the normal settings UI and applies to live sessions immediately. Settings shows
 four featured color themes and groups the full catalog into Dark, Neon, Soft,
 Warm, Light, and Custom sections. The expanded dark catalog includes low-glare,
 pastel, blue-black, and true-black palettes. Theme previews update the whole
-workbench and every open terminal immediately, then revert on Cancel. A local
-voice-input mode exists behind `uv sync --extra voice`, but it is parked until
-it gets a proper capture overlay.
+window and its terminals immediately, then revert on Cancel. Saving updates
+other native windows. Settings sends only changed fields and reports conflicting
+edits from another window instead of silently overwriting them. Changing an
+unrelated setting preserves pane-local text zoom.
 
 Named workspaces are saved under the QuickTerm config directory and can be
 switched from the sidebar or dashboard. Terminal output is never written to

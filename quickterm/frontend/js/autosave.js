@@ -2,6 +2,8 @@
 // a time, a failed save retried, and the sidebar's save dot kept in step. It
 // never saves while a workspace switch is under way or the window is leaving.
 
+import { isScratchWorkspace } from "./boot_context.js";
+
 export function createAutosave({ state, layout, workspace, ownedSessionIds, setWorkspaceSaveState }) {
   let workspaceSaveTimer = null;
   let workspaceRetryTimer = null;
@@ -27,9 +29,9 @@ export function createAutosave({ state, layout, workspace, ownedSessionIds, setW
       await workspace.save(
         targetWorkspace,
         layout.serialize(),
-        state.workspaceLogo,
+        isScratchWorkspace(targetWorkspace) ? state.workspaceLogo : undefined,
         [...ownedSessionIds()],
-        state.workspacePath,
+        isScratchWorkspace(targetWorkspace) ? state.workspacePath : undefined,
       );
       saved = true;
       if (state.currentWorkspace === targetWorkspace) {

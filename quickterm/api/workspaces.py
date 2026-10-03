@@ -48,6 +48,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if body.get("logo") is not None and not isinstance(body["logo"], str):
             raise HTTPException(400, "logo must be a string or null")
         raw_session_ids = body.get("session_ids")
+        if "temporary" in body and not isinstance(body["temporary"], bool):
+            raise HTTPException(400, "temporary must be true or false")
         if raw_session_ids is not None and not isinstance(raw_session_ids, list):
             raise HTTPException(400, "session_ids must be a list or null")
         async with workspace_write_lock:
@@ -58,7 +60,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # dropped the folder, the logo, and the detached sessions the
             # workspace owns (which the reaper then took).
             existing = None
-            if any(key not in body for key in ("path", "logo", "session_ids")):
+            if any(key not in body for key in ("path", "logo", "session_ids", "temporary")):
                 existing = await asyncio.to_thread(workspace.load_workspace, name)
             if "path" in body:
                 try:
@@ -89,9 +91,34 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     logo=logo,
                     path=path,
                     session_ids=session_ids,
+                    temporary=body.get("temporary", getattr(existing, "temporary", False)),
                 ),
             )
             manager.sync_workspace(name, set(session_ids))
+        return Response(status_code=204)
+
+    @app.patch("/api/workspaces/{name}")
+    async def patch_workspace(name: str, request: Request) -> Response:
+        workspace = importlib.import_module("quickterm.workspace")
+        body = await read_json(request)
+        if not isinstance(body, dict) or not body or set(body) - {"path", "logo"}:
+            raise HTTPException(400, "body must contain path or logo only")
+        if body.get("logo") is not None and not isinstance(body["logo"], str):
+            raise HTTPException(400, "logo must be a string or null")
+        async with workspace_write_lock:
+            saved = await asyncio.to_thread(workspace.load_workspace, name)
+            if saved is None:
+                raise HTTPException(404, "no such workspace")
+            try:
+                path = workspace.normalize_root(body["path"]) if "path" in body else saved.path
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            # Metadata edits must not submit a stale layout from another viewer.
+            await asyncio.to_thread(workspace.save_workspace, workspace.Workspace(
+                name=name, layout=saved.layout, path=path,
+                logo=body.get("logo", saved.logo), session_ids=saved.session_ids,
+                temporary=getattr(saved, "temporary", False),
+            ))
         return Response(status_code=204)
 
     @app.delete("/api/workspaces/{name}")

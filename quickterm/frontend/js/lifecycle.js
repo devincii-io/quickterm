@@ -3,6 +3,7 @@
 // awaited when the parent window closes this document as a workspace view.
 
 import { sessionAlreadyGone } from "./panel_shared.js";
+import { isScratchWorkspace } from "./boot_context.js";
 
 export function createLifecycle({
   api, workspace, state, layout, ownedSessionIds,
@@ -30,7 +31,7 @@ export function createLifecycle({
       // Use the same queue as autosave: a queued older snapshot must never
       // arrive after this one. Unload remains best-effort; explicit view close
       // awaits the save while its document is still alive.
-      workspace.save(state.currentWorkspace, layout.serialize(), state.workspaceLogo,
+      workspace.save(state.currentWorkspace, layout.serialize(), isScratchWorkspace(state.currentWorkspace) ? state.workspaceLogo : undefined,
         [...ownedSessionIds()], undefined, { keepalive: true })
         .catch(() => {}).finally(release);
     } else release();
@@ -47,8 +48,8 @@ export function createLifecycle({
     cancelWorkspaceRetry();
     try {
       if (state.currentWorkspace) {
-        await workspace.save(state.currentWorkspace, layout.serialize(), state.workspaceLogo,
-          [...ownedSessionIds()], state.workspacePath);
+        await workspace.save(state.currentWorkspace, layout.serialize(), isScratchWorkspace(state.currentWorkspace) ? state.workspaceLogo : undefined,
+          [...ownedSessionIds()]);
       }
       for (const id of ownedSessionIds()) {
         await api.retainSession(id).catch((error) => { if (!sessionAlreadyGone(error)) throw error; });

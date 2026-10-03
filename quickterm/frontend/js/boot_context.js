@@ -7,13 +7,22 @@ import * as api from "./api.js";
 
 const ACTIVE_WORKSPACE_KEY = "quickterm.activeWorkspace";
 const SCRATCH_ACTIVE_KEY = "quickterm.scratchActive";
-export const SCRATCH_WS = "scratch";
 const WINDOW_ID_KEY = "qt.windowId";
 // The typeof guard only matters outside a browser (the node tests import this
 // module); in a window it is always an object.
 export const embedded = typeof window !== "undefined"
   && window.parent !== window
   && new URLSearchParams(location.search).get("embedded") === "1";
+const launchParams = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+const scratchId = launchParams.get("scratch") || (launchParams.get("primary") !== "1" && launchParams.get("window")
+  ? `scratch-view-${launchParams.get("window")}` : null);
+export const SCRATCH_WS = /^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(scratchId || "") ? scratchId : "scratch";
+export const isScratchWorkspace = (name) => name === "scratch" || /^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(name || "");
+export function workspaceLabel(name) {
+  if (!isScratchWorkspace(name)) return name || "scratch";
+  const host = typeof window !== "undefined" ? (embedded ? window.parent : window) : null;
+  return host?.quicktermChrome?.scratchLabels?.get(name) || (name === "scratch" ? "scratch" : `scratch ${name.slice(-4)}`);
+}
 
 export function storedWorkspace() {
   try { return localStorage.getItem(ACTIVE_WORKSPACE_KEY); } catch (_) { return null; }
@@ -30,7 +39,7 @@ export function storedScratchActive() {
 // run (tray close and reopen) the scratch file still exists and wins, and on
 // a fresh start it is gone and the named workspace comes back.
 export function rememberWorkspace(name) {
-  if (embedded) return;
+  if (embedded || (launchParams.has("window") && launchParams.get("primary") !== "1")) return;
   try {
     if (name === SCRATCH_WS) {
       localStorage.setItem(SCRATCH_ACTIVE_KEY, "1");

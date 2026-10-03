@@ -53,6 +53,16 @@ def test_save_load_roundtrip():
     assert ws.session_ids == ["deadbeef"]
 
 
+def test_scratch_cleanup_removes_only_disposable_layouts():
+    from quickterm.app import _discard_scratch_workspace
+
+    for name, temporary in [("scratch", False), ("scratch-view-0123456789ab", True), ("Project", False), ("scratch-view-existing-project", False)]:
+        save_workspace(Workspace(name=name, layout=LAYOUT, temporary=temporary))
+    assert load_workspace("scratch-view-0123456789ab").temporary is True
+    _discard_scratch_workspace()
+    assert list_workspaces() == ["Project", "scratch-view-existing-project"]
+
+
 def test_old_workspace_infers_session_ownership_from_layout(fake_appdata):
     path = fake_appdata / "quickterm" / "workspaces"
     path.mkdir(parents=True)

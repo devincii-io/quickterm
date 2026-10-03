@@ -15,8 +15,9 @@
 // properties is what makes a split, a move or a close slide into place.
 
 import * as api from "./api.js";
-import { SCRATCH_WS } from "./boot_context.js";
+import { SCRATCH_WS, isScratchWorkspace } from "./boot_context.js";
 import { claimFocus, releaseFocus } from "./focus.js";
+import { icon } from "./icons.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
 
@@ -31,7 +32,8 @@ const SLIDE_MS = 240;
 const DRAG_START_PX = 6;
 
 export function companionUrl(path, workspace, id, token) {
-  const query = new URLSearchParams({ workspace, window: id, embedded: "1" });
+  const query = new URLSearchParams({ workspace: workspace || "", window: id, embedded: "1" });
+  if (!workspace) query.set("scratch", `scratch-view-${id}`);
   return `${path || "/"}?${query}#t=${encodeURIComponent(token || "")}`;
 }
 
@@ -43,6 +45,12 @@ export function clampViewRatio(value) {
 export function pickViewColor(used = []) {
   const taken = new Set(used);
   return VIEW_COLORS.find((color) => !taken.has(color)) || VIEW_COLORS[used.length % VIEW_COLORS.length];
+}
+
+export function nextScratchLabel(names) {
+  let index = 1;
+  while (names.includes(`scratch ${index}`)) index++;
+  return `scratch ${index}`;
 }
 
 // Ratio bounds for one split of `total` pixels: the percent clamp, tightened
@@ -167,7 +175,7 @@ export function restorePlan(arrangement, { exists = () => true, primaryName = nu
     if (view.primary) return view;
     const name = view.workspace;
     let reason = null;
-    if (name === SCRATCH_WS) reason = "scratch";
+    if (isScratchWorkspace(name)) reason = "scratch";
     else if (name === primaryName) reason = "primary";
     else if (seen.has(name)) reason = "duplicate";
     else if (!exists(name)) reason = "missing";
@@ -246,7 +254,7 @@ export class WorkspaceViews {
     this.companionClaimed = false;
     this.stage = document.createElement("div");
     this.stage.className = "workspace-views";
-    const app = document.getElementById("app");
+    const app = document.querySelector("#app > .workspace-shell");
     app.before(this.stage);
     this.primary = this._makeView({ primary: true, color: VIEW_COLORS[0], label: current() || "scratch" });
     this.primary.el.append(app);
@@ -276,9 +284,10 @@ export class WorkspaceViews {
   }
 
   nameOf(view) {
-    if (view.primary) return this.current() || "scratch";
+    if (view.primary) return isScratchWorkspace(this.current()) ? "scratch" : this.current() || "scratch";
     const child = view.frame?.contentWindow?.quicktermView;
-    return (child ? child.workspace() : view.label) || "scratch";
+    const name = child?.workspace();
+    return name && !isScratchWorkspace(name) ? name : view.label || "scratch";
   }
 
   names() {
@@ -290,6 +299,7 @@ export class WorkspaceViews {
   list() {
     return this.views().map((view) => ({
       name: this.nameOf(view),
+      workspace: view.primary ? this.current() : view.frame?.contentWindow?.quicktermView?.workspace() ?? view.label,
       color: view.color,
       primary: view.primary,
       active: view === this.active,
@@ -312,7 +322,10 @@ export class WorkspaceViews {
     if (!this.store || !this.persisting) return;
     const arrangement = describeArrangement({
       root: this.root,
-      nameOf: (view) => this.nameOf(view),
+      nameOf: (view) => {
+        const name = view.frame?.contentWindow?.quicktermView?.workspace();
+        return isScratchWorkspace(name) ? name : view.label?.startsWith("scratch ") && !name ? "scratch" : this.nameOf(view);
+      },
       active: this.active,
       zoomed: this.zoomed,
     });
@@ -339,13 +352,17 @@ export class WorkspaceViews {
       each.frame?.contentWindow?.quicktermView?.suspend(each !== view);
     }
     this._persist();
+    window.quicktermChrome?.refresh();
   }
 
   focusView(view) {
     this.activate(view);
     if (view.primary) this.focus();
     else {
-      try { view.frame.contentWindow.focus(); } catch (_) { /* not loaded yet */ }
+      try {
+        view.frame.contentWindow.focus();
+        view.frame.contentWindow.quicktermView?.app.refocusTerm();
+      } catch (_) { /* not loaded yet */ }
     }
   }
 
@@ -366,8 +383,7 @@ export class WorkspaceViews {
 
   async open(name, { anchorWindow = null, anchor = null } = {}) {
     if (this.busy) return false;
-    if (!name) return false;
-    const shown = this.views().find((view) => this.nameOf(view) === name);
+    const shown = name && this.views().find((view) => this.nameOf(view) === name);
     if (shown) {
       this.zoomed = null;
       this.layout();
@@ -402,16 +418,17 @@ export class WorkspaceViews {
   // to the stage exactly once. Throws when the registry refuses the claim.
   async _claimView(name, usedColors) {
     // Reserve first: a failed registry must never create two layout writers.
-    const info = await api.registerWindow({ workspace: name, title: `Side view: ${name}` });
+    const info = await api.registerWindow({ workspace: name || null, title: `Side view: ${name || "scratch"}` });
     if (!info?.id) throw new Error("Missing workspace view identity");
     const view = this._makeView({
       primary: false,
       color: pickViewColor(usedColors),
-      label: name,
+      label: name || nextScratchLabel([...this.names(), ...(window.quicktermChrome?.scratchLabels?.values() || [])]),
       id: String(info.id),
     });
+    if (!name) window.quicktermChrome?.scratchLabels?.set(`scratch-view-${info.id}`, view.label);
     view.frame = document.createElement("iframe");
-    view.frame.title = `Workspace: ${name}`;
+    view.frame.title = `Workspace: ${view.label}`;
     view.frame.src = companionUrl(location.pathname, name, info.id, api.token());
     view.frame.addEventListener("load", () => {
       this.update();
@@ -425,6 +442,21 @@ export class WorkspaceViews {
     });
     view.el.append(view.frame);
     return view;
+  }
+
+  focusSession(id) {
+    for (const view of this.views()) {
+      const app = (view.primary ? window : view.frame?.contentWindow)?.quicktermView?.app;
+      if (!app?.attachedSessionIds().includes(id)) continue;
+      if (this.zoomed && this.zoomed !== view) {
+        this.zoomed = null;
+        this.layout();
+      }
+      this.focusView(view);
+      app.focusSession(id);
+      return true;
+    }
+    return false;
   }
 
   // Rebuild a whole arrangement around the primary in one step, where open()
@@ -589,9 +621,10 @@ export class WorkspaceViews {
     if (this.zoomed && views.includes(this.zoomed)) {
       for (const view of views) {
         view.el.hidden = view !== this.zoomed;
-        view.zoomButton.textContent = view === this.zoomed ? "unzoom" : "zoom";
+        view.zoomButton.replaceChildren(icon(view === this.zoomed ? "minimize" : "maximize", 14));
         view.zoomButton.title = view === this.zoomed
           ? "Show every workspace view again" : "Show only this workspace view";
+        view.zoomButton.setAttribute("aria-label", view.zoomButton.title);
       }
       applyRect(this.zoomed.el, stage);
     } else {
@@ -601,8 +634,9 @@ export class WorkspaceViews {
       for (const view of views) {
         const box = boxes.get(view);
         view.el.hidden = false;
-        view.zoomButton.textContent = "zoom";
+        view.zoomButton.replaceChildren(icon("maximize", 14));
         view.zoomButton.title = "Show only this workspace view";
+        view.zoomButton.setAttribute("aria-label", view.zoomButton.title);
         if (view === entering && from && !still) {
           view.el.classList.add("entering");
           applyRect(view.el, from);
@@ -715,10 +749,10 @@ export class WorkspaceViews {
     dot.className = "workspace-view-dot";
     view.nameEl = document.createElement("strong");
     view.nameEl.textContent = label;
-    view.zoomButton = this._button("zoom", "Show only this workspace view", () => this.zoom(view));
+    view.zoomButton = this._button("maximize", "Show only this workspace view", () => this.zoom(view));
     view.header.append(dot, view.nameEl, view.zoomButton);
     if (!primary) {
-      view.closeButton = this._button("close", "Save and close this view; its terminals keep running", () => this.close(view));
+      view.closeButton = this._button("x", "Save and close this view; its terminals keep running", () => this.close(view));
       view.header.append(view.closeButton);
       view.el.addEventListener("pointerdown", () => this.activate(view), true);
     } else {
@@ -732,8 +766,9 @@ export class WorkspaceViews {
   _button(label, title, action) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = label;
+    button.append(icon(label, 14));
     button.title = title;
+    button.setAttribute("aria-label", title);
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       action();

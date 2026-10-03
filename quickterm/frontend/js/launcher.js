@@ -1,6 +1,8 @@
 import { icon } from "./icons.js";
 import { toggleMenu } from "./menu.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
+import { connectionLabel, connectionTarget } from "./panel_connections.js";
+import { workspaceLabel } from "./boot_context.js";
 
 // The sidebar is the whole chrome. Three modes, one hotkey (Alt+Shift+S)
 // cycles them, and the choice is remembered per machine:
@@ -183,6 +185,7 @@ const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread"];
 export function groupSessionsByWorkspace(sessions = [], context = {}) {
   const owned = asSet(context.ownedIds);
   const attached = asSet(context.attachedIds);
+  const visible = asSet(context.visibleIds);
   const currentName = context.currentWorkspace || SCRATCH_GROUP;
   const groups = new Map();
   const groupFor = (name, kind) => {
@@ -202,7 +205,7 @@ export function groupSessionsByWorkspace(sessions = [], context = {}) {
     const group = isHere
       ? groupFor(currentName, "current")
       : groupFor(claimed || UNASSIGNED_GROUP, claimed ? "workspace" : "unassigned");
-    const state = sessionState(session, isAttached);
+    const state = sessionState(session, isAttached || visible.has(session.id));
     group.sessions.push({ session, isAttached, isHere, state, finished: !session.alive });
     if (COUNTED_STATES.includes(state.key)) group[state.key] += 1;
   }
@@ -300,7 +303,7 @@ export function terminalChoices(options) {
   for (const profile of options.profiles || []) {
     choices.push({
       key: `profile:${profile.name}`,
-      group: "Personal",
+      group: ["rdp", "vnc"].includes(profile.terminal_type) ? "Desktop windows" : "Saved terminals",
       kind: "profile",
       profile,
       label: profile.name,
@@ -311,6 +314,7 @@ export function terminalChoices(options) {
       detail: (profile.description || "").trim() || shellLabel(profile),
     });
   }
+  if (options.configuredOnly) return choices.filter((choice) => !["rdp", "vnc"].includes(choice.profile.terminal_type));
   const types = options.inventory?.types || [];
   for (const type of types) {
     if (!type.executable || type.available === false || ["custom", "ssh", "sftp", "claude-code"].includes(type.id)) continue;
@@ -404,7 +408,7 @@ function handBack(options) {
 
 function loadMode() {
   try {
-    const stored = localStorage.getItem(SIDEBAR_MODE_KEY);
+    const stored = sessionStorage.getItem(SIDEBAR_MODE_KEY) || localStorage.getItem(SIDEBAR_MODE_KEY);
     if (SIDEBAR_MODES.includes(stored)) return stored;
     // Sidebars collapsed before modes existed stay collapsed.
     return localStorage.getItem(LEGACY_COLLAPSED_KEY) === "1" ? "rail" : "full";
@@ -412,18 +416,20 @@ function loadMode() {
 }
 
 function saveMode(mode) {
+  try { sessionStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) { /* optional */ }
   try { localStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) { /* optional */ }
 }
 
 function loadWidth() {
   try {
-    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    const raw = sessionStorage.getItem(SIDEBAR_WIDTH_KEY) || localStorage.getItem(SIDEBAR_WIDTH_KEY);
     if (raw === null) return SIDEBAR_WIDTH_DEFAULT;
     return clampSidebarWidth(parseInt(raw, 10), window.innerWidth);
   } catch (_) { return SIDEBAR_WIDTH_DEFAULT; }
 }
 
 function saveWidth(width) {
+  try { sessionStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch (_) { /* optional */ }
   try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch (_) { /* optional */ }
 }
 
@@ -432,23 +438,24 @@ function saveWidth(width) {
 // every config change.
 function loadClosedGroups() {
   try {
-    const raw = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) || "[]");
+    const raw = JSON.parse(sessionStorage.getItem(SIDEBAR_GROUPS_KEY) || "[]");
     return new Set(Array.isArray(raw) ? raw.filter((name) => typeof name === "string") : []);
   } catch (_) { return new Set(); }
 }
 
 function saveClosedGroups(names) {
-  try { localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify([...names])); } catch (_) { /* optional */ }
+  try { sessionStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify([...names])); } catch (_) { /* optional */ }
 }
 
 function loadFloatTop() {
   try {
-    const raw = Number.parseInt(localStorage.getItem(FLOAT_TOP_KEY), 10);
+    const raw = Number.parseInt(sessionStorage.getItem(FLOAT_TOP_KEY) || localStorage.getItem(FLOAT_TOP_KEY), 10);
     return Number.isFinite(raw) ? raw : 12;
   } catch (_) { return 12; }
 }
 
 function saveFloatTop(top) {
+  try { sessionStorage.setItem(FLOAT_TOP_KEY, String(top)); } catch (_) { /* optional */ }
   try { localStorage.setItem(FLOAT_TOP_KEY, String(top)); } catch (_) { /* optional */ }
 }
 
@@ -507,7 +514,38 @@ export function initLauncher(el, options) {
   el._launcherAbort = abort;
   el.textContent = "";
   el.classList.add("sidebar");
-  const workspaceName = options.currentWorkspace || "scratch";
+  const workspaceName = options.workspaceLabel || options.currentWorkspace || "scratch";
+  const windowRow = make("div", "sidebar-window");
+  windowRow.append(icon("new-window", 13), make("span", "sidebar-window-label", options.windowLabel || "QuickTerm window"));
+  const windowMenu = iconButton("sidebar-window-menu", "chevron-down", "Window and workspace views");
+  windowMenu.addEventListener("click", () => toggleMenu({
+    anchor: windowRow, trigger: windowMenu, label: "Window",
+    items: [
+      { label: "Add scratch view", icon: "workspaces", run: () => options.onOpenBeside?.(null) },
+      { label: "Add workspace view", icon: "workspaces", run: () => options.onPickView?.() },
+      { label: "New QuickTerm window", icon: "new-window", run: () => options.onNewWindow?.() },
+      { separator: true },
+      { label: "Setup tour", icon: "help", run: () => options.onTour?.() },
+    ], onClose: () => handBack(options),
+  }));
+  windowRow.append(windowMenu);
+  el.append(windowRow);
+  const shownViews = options.shownViews?.() || [];
+  if (shownViews.length > 1) {
+    const viewList = make("nav", "sidebar-view-list");
+    viewList.setAttribute("aria-label", "Workspace views in this window");
+    for (const view of shownViews) {
+      const button = make("button", `sidebar-view${view.active ? " active" : ""}`);
+      button.type = "button";
+      button.title = `Focus workspace view: ${view.name}`;
+      const dot = make("span", "sidebar-view-dot");
+      dot.style.backgroundColor = view.color;
+      button.append(dot, make("span", "sidebar-view-name", view.name));
+      button.addEventListener("click", () => options.onFocusView?.(view.name));
+      viewList.append(button);
+    }
+    el.append(viewList);
+  }
 
   // Mode -------------------------------------------------------------------
   let mode = loadMode();
@@ -550,14 +588,14 @@ export function initLauncher(el, options) {
   const openLabel = make("span", "sidebar-label");
   open.append(icon("plus", 15), openLabel);
   const describeOpen = () => {
-    openLabel.textContent = selected ? selected.label : "no shell found";
+    openLabel.textContent = selected ? selected.label : "Set up terminal";
     open.title = selected
       ? `New ${selected.label} (Alt+N) · ${selected.detail}`
       : "No shell was found on this computer";
-    open.disabled = !selected;
+    open.disabled = !selected && !options.onSetup;
   };
   open.addEventListener("click", () => {
-    if (!selected) return;
+    if (!selected) { options.onSetup?.(); return; }
     const launched = selected.kind === "profile"
       ? options.onRunProfile(selected.profile)
       : options.onRunSystem(selected);
@@ -569,7 +607,7 @@ export function initLauncher(el, options) {
   pick.setAttribute("aria-expanded", "false");
   pick.disabled = !menuChoices.length;
   const openTerminalMenu = () => {
-    if (!menuChoices.length) return;
+    if (!menuChoices.length) { options.onSetup?.(); return; }
     const items = [];
     let group = null;
     for (const choice of menuChoices) {
@@ -593,6 +631,7 @@ export function initLauncher(el, options) {
         },
       });
     }
+    items.push({ separator: true }, { label: "Manage terminals and connections", icon: "settings", run: () => options.onSetup?.() });
     toggleMenu({
       anchor: launch,
       trigger: pick,
@@ -610,6 +649,8 @@ export function initLauncher(el, options) {
   });
   describeOpen();
   launch.append(open, pick);
+  const setup = iconButton("sidebar-setup", "settings", "Manage terminals and connections", () => options.onSetup?.());
+  launch.append(setup);
   if (!options.elevated) {
     // Elevation spawns a separate process, so success is invisible here and a
     // declined UAC prompt is indistinguishable from a dead button. Hold the
@@ -651,7 +692,7 @@ export function initLauncher(el, options) {
     const roots = typeof options.workspaceRoots === "function" ? options.workspaceRoots() : new Map();
     const canBeside = typeof options.onOpenBeside === "function" && options.canOpenBeside?.() !== false;
     const entry = (name, value) => {
-      const current = name === workspaceName;
+      const current = name === workspaceName || name === options.currentWorkspace;
       const view = current ? null : shown.find((each) => each.name === name);
       const root = roots.get(name) || null;
       const item = {
@@ -676,7 +717,7 @@ export function initLauncher(el, options) {
       }
       return item;
     };
-    const named = (options.workspaces || []).filter((name) => name !== "scratch");
+    const named = (options.workspaces || []).filter((name) => name !== "scratch" && !name.startsWith("scratch-view-"));
     const items = [entry("scratch", null)];
     if (named.length) items.push({ separator: true });
     for (const name of named) items.push(entry(name, name));
@@ -988,7 +1029,8 @@ export function initLauncher(el, options) {
     // Foreign means "another workspace owns it". Unassigned is not foreign:
     // there is nobody to take it from, so attaching is the honest reading of a
     // click, and main.js already allows exactly that.
-    const foreign = !isHere && group.kind === "workspace";
+    const shown = (options.shownViews?.() || []).some((view) => view.name === group.name || view.workspace === group.name);
+    const foreign = !isHere && group.kind === "workspace" && !shown;
     const wrap = make("div", [
       "session-entry",
       foreign ? "foreign" : "",
@@ -1007,6 +1049,11 @@ export function initLauncher(el, options) {
     row.title = sessionTooltip(session, group.name);
     const name = make("span", "session-name", session.name || session.id.slice(0, 8));
     row.append(make("span", "session-state"), name);
+    const profile = (options.profiles || []).find((item) => item.name === session.profile);
+    if (profile) {
+      row.title += `\n${connectionLabel(profile)}: ${connectionTarget(profile)}`;
+      row.dataset.connectionType = profile.terminal_type || "custom";
+    }
     // The folder is the fact that tells one project's shell from another's, so
     // it gets its own line as soon as the sidebar is wide enough to hold it.
     // It is where the shell is now when the shell says so, else where it began.
@@ -1021,6 +1068,7 @@ export function initLauncher(el, options) {
 
     if (!foreign) {
       row.addEventListener("click", () => {
+        if (options.onFocusShownSession?.(session.id)) return;
         if (isAttached) options.onFocusSession?.(session.id);
         // Finished: read what it left, through the replay-only reattach.
         else if (finished) options.onOpenFinished?.(session);
@@ -1118,7 +1166,8 @@ export function initLauncher(el, options) {
         : `Terminals owned by workspace ${group.name}`) + ` · ${groupSummary(group)}`;
     const chevron = make("span", "session-group-chevron");
     chevron.append(icon(closed ? "chevron-right" : "chevron-down", 10));
-    head.append(chevron, make("span", "session-group-name", group.name),
+    const label = options.shownViews?.().find((view) => view.workspace === group.name)?.name || workspaceLabel(group.name);
+    head.append(chevron, make("span", "session-group-name", label),
       make("span", "sidebar-count", String(group.sessions.length)));
 
     const rows = make("div", "session-group-rows");
@@ -1149,6 +1198,7 @@ export function initLauncher(el, options) {
       currentWorkspace: options.currentWorkspace,
       attachedIds,
       ownedIds,
+      visibleIds: options.visibleSessionIds?.() || [],
     });
     const totalLive = (sessions || []).filter((session) => session.alive).length;
     const here = groups.find((group) => group.kind === "current")?.sessions.length || 0;

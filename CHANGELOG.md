@@ -2,6 +2,51 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 3.13.0
+
+Released 2026-10-03.
+
+### Windows and workspaces
+
+- Each native window has one sidebar, command palette and settings sheet.
+  Workspace views share that sidebar and keep their own terminal layouts.
+  Colored view navigation identifies the active workspace separately from
+  the native window.
+- New scratch views have independent temporary workspace identities. Opening
+  another scratch no longer replaces the workspace you are using. Closing a
+  view saves its layout and keeps its terminals running.
+- Workspace folder and logo edits preserve the latest layout and terminal
+  ownership. Layout autosaves cannot undo newer metadata edits.
+
+### Terminal and connection setup
+
+- A setup tour introduces windows, workspace views and terminals. Save a
+  terminal configuration before launching it; detected shells populate setup,
+  not the sidebar's launch menu.
+- Typed forms cover local shells, WSL, Claude Code, custom commands, SSH/SFTP,
+  Telnet, serial consoles, Docker, Podman, Kubernetes, Remote Desktop and VNC.
+  Desktop connections open their own client windows and never create PTYs.
+- Configure arguments, environment variables, shortcuts and autostart in
+  forms. The raw JSON editor is removed.
+
+### Settings
+
+- Saved themes, font defaults, terminals, connections, snippets and app
+  preferences refresh other native windows. Sidebar state stays per window;
+  text zoom stays per pane until the saved font default changes.
+- Settings saves send only changed fields and reject conflicting stale edits.
+  Cancelling a logo draft no longer deletes a previously saved image.
+- The Windows kill regression test launches a detached base interpreter and
+  waits for its PID. Python's virtual-environment launcher can no longer
+  terminate the intended survivor through its own job object.
+
+### Verification limits
+
+- Remote hosts, container engines, serial hardware and desktop servers were
+  not connected during release verification. Their launch arguments and
+  validation are covered by tests; real connections remain UNVERIFIED.
+- Windows release binaries remain unsigned and can trigger SmartScreen.
+
 ## QuickTerm 3.12.0
 
 ### Resizing

@@ -5,13 +5,16 @@ import { Panels } from "./panels.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
-import { claimFocus, releaseFocus } from "./focus.js";
+import { claimFocus, releaseFocus, focusOwners } from "./focus.js";
+import { initLauncher } from "./launcher.js";
+import { setupNeeded } from "./setup.js";
+import { watchGlobalSettings } from "./global_settings.js";
 import { WorkspaceViews, viewArrangementStore } from "./workspace_views.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import { createAutosave } from "./autosave.js";
 import {
-  SCRATCH_WS, captureOpenDir, captureToken, captureWindowIdentity, embedded, loadInventoryCache,
+  SCRATCH_WS, isScratchWorkspace, captureOpenDir, captureToken, captureWindowIdentity, embedded, loadInventoryCache,
   rememberWorkspace, saveInventoryCache, storedScratchActive, storedWorkspace,
 } from "./boot_context.js";
 import { createConfigSync } from "./config_sync.js";
@@ -32,6 +35,7 @@ import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actio
 import { createWorkspaceSwitch } from "./workspace_switch.js";
 
 document.title = "QuickTerm";
+document.body.classList.toggle("embedded", embedded);
 
 const $ = (id) => document.getElementById(id);
 
@@ -71,6 +75,7 @@ async function boot() {
     terminalInventory: loadedInventory,
     windowIsPrimary: identity.primary,
   });
+  state.requireConfiguredTerminals = true;
 
   const remembered = storedWorkspace();
   if (requestedWorkspace !== undefined) {
@@ -255,7 +260,7 @@ async function boot() {
     // itself is not offered by name, exactly as the sidebar does not list it;
     // the disposable scratch row is the way to open one.
     newWindowChoices: async () => windowChoices(
-      state.workspaceNames.filter((item) => item !== SCRATCH_WS),
+      state.workspaceNames.filter((item) => !isScratchWorkspace(item)),
       await listWindowsSafe(),
       state.windowId,
       state.currentWorkspace,
@@ -282,8 +287,18 @@ async function boot() {
     setWorkspaceFolder: actions.setWorkspaceFolder,
     setWorkspacePath: actions.setWorkspacePath,
     setWorkspaceLogo: actions.setWorkspaceLogo,
+    setWorkspaceAppearance: actions.setWorkspaceAppearance,
     attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
+    focusSession: (id) => {
+      const pane = layout.panes().find((item) => item.session?.id === id);
+      if (pane) layout.focusPane(pane);
+    },
+    setupTerminals: () => {
+      panels.settingsTab = "connections";
+      panels.show("settings");
+    },
+    setupTour: () => panels.show("setup"),
   };
 
   const {
@@ -293,14 +308,88 @@ async function boot() {
     api, state, app, layout, setFontSize, showError,
     buildLauncher: () => buildLauncher(),
   });
-  app.onConfigSaved = onConfigSaved;
+  app.onConfigSaved = async () => {
+    await onConfigSaved();
+    for (const view of viewHost()?.views() || []) {
+      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
+      if (target !== window) await target?.quicktermView?.syncConfig();
+    }
+    (embedded ? window.parent : window).quicktermChrome?.settingsEvents.publish();
+  };
+  app.onWorkspacesChanged = async () => {
+    for (const view of viewHost()?.views() || []) {
+      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
+      if (target === window) await actions.onWorkspacesChanged();
+      else await target?.quicktermView?.syncWorkspaces();
+    }
+    (embedded ? window.parent : window).quicktermChrome?.settingsEvents.publish();
+  };
+  for (const name of ["saveWorkspace", "deleteWorkspace", "createWorkspaceHere", "setWorkspaceFolder", "setWorkspacePath", "setWorkspaceLogo", "setWorkspaceAppearance"]) {
+    const change = app[name];
+    app[name] = async (...args) => {
+      const result = await change(...args);
+      if (result !== false && typeof result !== "string") await app.onWorkspacesChanged();
+      return result;
+    };
+  }
   // The palette offers the same installs as the new-terminal menu.
   app.shellInstalls = () => state.terminalInventory?.installs || [];
   app.installShell = (install) => runInstaller(install);
 
-  const palette = new Palette(app);
-  const panels = new Panels(app);
+  const chromeApp = new Proxy(app, {
+    get(target, key) {
+      const active = views?.active;
+      const activeApp = active && !active.primary ? active.frame?.contentWindow?.quicktermView?.app : null;
+      return Reflect.get(activeApp || target, key);
+    },
+  });
+  const palette = embedded ? window.parent.quicktermChrome.palette : new Palette(chromeApp);
+  const panels = embedded ? window.parent.quicktermChrome.panels : new Panels(chromeApp);
+  if (!embedded) {
+    let refreshingChrome = false;
+    window.quicktermChrome = {
+      palette, panels,
+      saveState: (text, status) => setWorkspaceSaveState(text, status, true),
+      showError, clearError,
+      get windowLabel() { return `${state.windowIsPrimary ? "Main window" : `Window ${String(state.windowId || "").slice(0, 4)}`}${state.cfg.elevated ? " (admin)" : ""}`; },
+      scratchLabels: new Map(),
+      ownsKeyboard: () => focusOwners().some((owner) => owner !== "companion"),
+      render: (options) => initLauncher($("launcher"), options),
+      refresh: () => {
+        if (refreshingChrome) return;
+        const activeWindow = views.active.primary ? window : views.active.frame?.contentWindow;
+        if (!activeWindow?.quicktermView) return;
+        refreshingChrome = true;
+        try { activeWindow.quicktermView.sidebar.buildLauncher(); }
+        finally { refreshingChrome = false; }
+      },
+    };
+    window.quicktermChrome.settingsEvents = watchGlobalSettings({
+      refresh: async () => {
+        if (!window.quicktermView) return;
+        for (const view of views.views()) {
+          const target = view.primary ? window : view.frame?.contentWindow;
+          await target?.quicktermView?.syncConfig();
+          await target?.quicktermView?.syncWorkspaces();
+        }
+        if (panels._themePreviewDirty) {
+          app.previewTheme(panels.settingsDraft.theme, panels.settingsDraft.custom_theme);
+        }
+      },
+    });
+    window.addEventListener("pagehide", () => window.quicktermChrome.settingsEvents.dispose(), { once: true });
+  }
+  const chrome = (embedded ? window.parent : window).quicktermChrome;
+  Object.defineProperty(state, "selectedTerminal", {
+    get: () => chrome.selectedTerminal || null,
+    set: (choice) => { chrome.selectedTerminal = choice; },
+  });
   app.openPanel = (name) => panels.show(name);
+  const newConfiguredTerminal = app.newTerminal;
+  app.newTerminal = () => {
+    if (!state.profiles.some((profile) => !["rdp", "vnc"].includes(profile.terminal_type))) return app.setupTerminals();
+    return newConfiguredTerminal();
+  };
   $("app-error-close").addEventListener("click", () => {
     clearError();
     app.refocusTerm();
@@ -313,7 +402,13 @@ async function boot() {
   app.fontReset = resetScopedFontSize;
   app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
   app.balanceFocused = () => layout.balanceFocusedSplit();
-  app.previewTheme = previewTheme;
+  app.previewTheme = (id, custom) => {
+    previewTheme(id, custom);
+    for (const view of viewHost()?.views() || []) {
+      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
+      if (target !== window) target?.quicktermView?.previewTheme(id, custom);
+    }
+  };
   app.appliedTheme = appliedTheme;
   app.version = state.cfg.version || "";
 
@@ -344,12 +439,13 @@ async function boot() {
     fontReset: resetScopedFontSize,
   });
 
-  const { buildLauncher, refreshStatus, refreshStatusSoon } = createSidebar({
+  const sidebar = createSidebar({
     api, state, layout, app, panels, palette, viewHost, initialSessions,
     runProfile, runSystemTerminal, runInstaller, elevateProfile, elevateSystemTerminal, attachSession,
     switchWorkspace, newScratchWorkspace, hereState, openHere,
     createWorkspaceHere: actions.createWorkspaceHere,
   });
+  const { buildLauncher, refreshStatus, refreshStatusSoon } = sidebar;
   const { claimLaunchLoop, stopLaunchLoop } = createLaunchLoop({
     api, state, layout, openFolderInScratch, spawnInto, spawnDefaultInto, switchWorkspace,
     focusShownWorkspace: (name) => app.focusShownWorkspace(name), showError,
@@ -396,10 +492,16 @@ async function boot() {
   // before this window and intentionally have no saved workspace yet. The
   // backend idle reaper already removes only safe, untouched, non-busy shells.
   state.transitioning = false;
+  if (!state.currentWorkspace) await ensureScratchWorkspace();
   window.quicktermView = {
     workspace: () => state.currentWorkspace,
     suspend: suspendView,
     close: closeView,
+    app,
+    sidebar,
+    syncConfig: onConfigSaved,
+    syncWorkspaces: actions.onWorkspacesChanged,
+    previewTheme,
   };
   buildLauncher();
   refreshStatus();
@@ -415,6 +517,7 @@ async function boot() {
   // Off the boot path: one small request per saved workspace.
   setTimeout(() => refreshWorkspaceRoots(), 1200);
   if (cachedInventory) refreshCachedInventory();
+  if (!embedded && setupNeeded(state.profiles)) panels.show("setup");
 }
 
 boot();

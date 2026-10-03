@@ -20,6 +20,7 @@
 // of which the apply phase keeps current.
 
 import * as api from "./api.js";
+import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
 import { icon } from "./icons.js";
 import {
   countPanes, folderPickerControl, formatBytes, formatUptime, layoutSessionIds, make,
@@ -293,7 +294,7 @@ function buildDashboard() {
     create: () => createSessionGroup(),
     update: (section, group) => {
       const parts = groupParts.get(section);
-      setText(parts.heading, group.name);
+      setText(parts.heading, workspaceLabel(group.name));
       patchList(parts.rows, group.sessions, view.rowSpec);
     },
   };
@@ -304,7 +305,7 @@ function buildDashboard() {
   profileCard.append(panel._sectionHeading("Quick launch", "Your terminal profiles"));
   view.profileList = make("div", "quick-profile-list");
   view.profileEmpty = make("p", "quiet-empty",
-    "No personal terminals yet. Create one in Settings; system shells are always available in the launcher.");
+    "No saved terminals or connections.");
   profileCard.append(view.profileList, view.profileEmpty);
   lower.append(profileCard);
   root.append(lower);
@@ -348,7 +349,7 @@ function applyDashboard(view, data) {
   const currentFolder = panel.app.workspacePath ? panel.app.workspacePath() : null;
   const folderMissing = Boolean(currentFolder) && panel.app.workspacePathExists
     && panel.app.workspacePathExists() === false;
-  setText(view.heroTitle, panel.app.currentWorkspace() || "Scratch");
+  setText(view.heroTitle, workspaceLabel(panel.app.currentWorkspace()));
   setText(view.heroText, currentFolder
     ? `Every terminal here opens in ${currentFolder}${folderMissing ? ", but that folder is missing" : ""}.`
     : "Open layouts, reattach background terminals, or clean up sessions from one place.");
@@ -375,7 +376,7 @@ function applyDashboard(view, data) {
   const groups = detachedGroups(panel, workspaces, sessions, currentName);
   const currentGroup = groups.find((group) => group.name === currentName);
   view.currentGroup.hidden = !currentGroup;
-  setText(view.currentGroupTitle, currentName === "scratch" ? "Scratch" : currentName);
+  setText(view.currentGroupTitle, workspaceLabel(currentName));
   patchList(view.currentGroupRows, currentGroup ? currentGroup.sessions : [], view.rowSpec);
   const otherGroups = groups.filter((group) => group !== currentGroup);
   view.otherGroups.hidden = otherGroups.length === 0;
@@ -502,8 +503,8 @@ function createWorkspaceCard(panel, index) {
     panel.close();
     panel.app.loadWorkspace(itemFor(card).name);
   });
-  const editFolder = panel._button("Folder", "text-button compact");
-  editFolder.title = "Choose the folder every terminal in this workspace opens in";
+  const editFolder = panel._button("Settings", "text-button compact");
+  editFolder.title = "Workspace folder and logo";
   editFolder.addEventListener("click", (event) => {
     event.stopPropagation();
     openFolderEditor(panel, card, editFolder);
@@ -540,7 +541,7 @@ function updateWorkspaceCard(panel, card, workspace, index) {
 
   const panes = countPanes(layout);
   setText(parts.badge, isCurrent ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
-  setText(parts.title, workspace.name);
+  setText(parts.title, workspaceLabel(workspace.name));
 
   const logo = workspace.data && workspace.data.logo;
   if (logo) {
@@ -555,7 +556,7 @@ function updateWorkspaceCard(panel, card, workspace, index) {
   setClass(parts.folderLine, "warning", missing);
   setText(parts.folderLine, folder
     ? (missing ? `${shortPath(folder)} · folder missing` : shortPath(folder))
-    : workspace.name === "scratch"
+    : isScratchWorkspace(workspace.name)
       ? "Disposable · gone when the app quits"
       : "No folder yet · terminals open in your home folder");
   setAttrs(parts.folderLine, { title: folder || false });
@@ -581,6 +582,11 @@ function openFolderEditor(panel, card, editFolder) {
   const input = panel._textInput((workspace.data && workspace.data.path) || "", "Folder for this workspace");
   const control = folderPickerControl(input, { label: `Choose the folder for ${workspace.name}` });
   holdRefreshWhilePicking(panel, control);
+  let logo = workspace.data?.logo || null;
+  const appearance = panel._logoPicker({
+    title: "Workspace logo", value: logo, hint: "Overrides the app logo for this workspace.",
+    onChange: async (assetId) => { logo = assetId; },
+  });
   const apply = panel._button("Save", "secondary-button compact");
   const cancel = panel._button("Cancel", "text-button compact");
   const dismiss = () => {
@@ -591,7 +597,7 @@ function openFolderEditor(panel, card, editFolder) {
   };
   apply.addEventListener("click", async () => {
     apply.disabled = true;
-    const saved = await panel.app.setWorkspaceFolder(workspace.name, input.value);
+    const saved = await panel.app.setWorkspaceAppearance(workspace.name, input.value, logo);
     apply.disabled = false;
     if (!saved) return;
     dismiss();
@@ -602,7 +608,7 @@ function openFolderEditor(panel, card, editFolder) {
     if (event.key === "Enter") apply.click();
     else if (event.key === "Escape") { event.stopPropagation(); dismiss(); }
   });
-  editor.append(control, apply, cancel);
+  editor.append(control, appearance, apply, cancel);
   editFolder.disabled = true;
   markEditing(card, true);
   card.append(editor);

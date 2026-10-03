@@ -7,21 +7,17 @@ function targetType(choice) {
 
 export function splitDirectory(sourceCwd, sourceType, choice, windowsHost = false) {
   const type = targetType(choice);
-  const configured = choice?.kind === "profile" ? (choice.profile?.cwd || null) : null;
-
-  // Claude conversations are project identities. A split starts in that
-  // profile's project instead of borrowing an unrelated shell directory.
-  if (type === "claude-code") return configured;
-  if (type === "ssh" || type === "sftp") return configured;
-  if (!sourceCwd) return configured;
+  // Project tools and remote clients use the workspace root, not a shell's cd.
+  if (["claude-code", "ssh", "sftp", "telnet", "serial", "docker", "podman", "kubernetes"].includes(type)) return null;
+  if (!sourceCwd) return null;
 
   // WSL accepts both Linux paths and Windows paths through `wsl --cd`.
   if (type === "wsl") return sourceCwd;
   // A Linux cwd signalled by WSL is meaningless to a native Windows shell.
   if (sourceType === "wsl" && !/^[A-Za-z]:[\\/]|^\\\\/.test(sourceCwd)) {
-    return configured;
+    return null;
   }
-  if (windowsHost && /^(?:\/|~)/.test(sourceCwd)) return configured;
+  if (windowsHost && /^(?:\/|~)/.test(sourceCwd)) return null;
   return sourceCwd;
 }
 

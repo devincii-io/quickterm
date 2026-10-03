@@ -267,7 +267,7 @@ async def test_kill_verifies_the_whole_tree():
 
 
 @windows_only
-async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(monkeypatch):
+async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(monkeypatch, tmp_path):
     """#38 and the retry after a failed kill.
 
     A descendant taskkill could not stop went unnoticed once the root died;
@@ -276,13 +276,29 @@ async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(m
     """
     # The grandchild is detached from the console, so closing the ConPTY does
     # not take it down with the root; only an explicit kill does.
+    ready = tmp_path / "grandchild.pid"
+    child = (
+        "import os,sys,time;"
+        "open(sys.argv[1],chr(119)).write(str(os.getpid()));"
+        "time.sleep(30)"
+    )
     spawner = (
         "import subprocess,sys,time;"
-        " subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],creationflags=8);"
+        f" subprocess.Popen([sys._base_executable,'-c','{child}',{ready.as_posix()!r}],creationflags=8);"
         " time.sleep(30)"
     )
-    sess, exited, below, identities = await _session_with_child(spawner, count=2)
-    (grandchild,) = [pid for pid, parent in identities if pid in below and parent != sess.pid]
+    sess, exited, _, _ = await _session_with_child(spawner, count=2)
+    # The venv redirector's job kills its interpreter when the redirector dies.
+    # Launch the base interpreter directly and wait for the detached child's PID.
+    deadline = time.monotonic() + _SLOW_S
+    while True:
+        pid_text = ready.read_text() if ready.exists() else ""
+        if pid_text.isdecimal():
+            grandchild = int(pid_text)
+            break
+        assert time.monotonic() < deadline, "the detached child never became ready"
+        await asyncio.sleep(0.05)
+    assert grandchild in process_usage.descendants(process_usage.process_identities(), sess.pid)
     real_terminate = pty_module._k32.TerminateProcess
     real_identities = process_usage.process_identities
     get_pid = ctypes.WinDLL("kernel32").GetProcessId
