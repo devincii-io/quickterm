@@ -2,7 +2,7 @@
 
 Starts the real packaged app with isolated configuration, creates a PTY through
 the authenticated API, verifies replay and live WebSocket traffic, then checks
-the two importlib-backed routes that are easy to omit from a PyInstaller build.
+the importlib-backed routes that are easy to omit from a PyInstaller build.
 """
 
 from __future__ import annotations
@@ -187,6 +187,56 @@ def smoke(executable: Path, port: int) -> None:
             )
             if open_status != 400:
                 raise RuntimeError(f"packaged opener route returned {open_status}, expected 400")
+            before_status, before_config = _request(base, "/api/config/full", token=token)
+            config_status, _ = _request(
+                base, "/api/config", token=token, method="PUT", payload={"profiles": [{
+                    "name": "Missing desktop viewer", "cmd": str(Path(isolated) / "missing.exe"),
+                    "terminal_type": "vnc", "connection": {"host": "localhost"},
+                }]},
+            )
+            if config_status != 204:
+                raise RuntimeError(f"packaged connection config returned {config_status}")
+            connection_status, _ = _request(
+                base, "/api/connections/Missing%20desktop%20viewer/open", token=token, method="POST",
+            )
+            if connection_status != 400:
+                raise RuntimeError(f"packaged connection route returned {connection_status}, expected 400")
+            desktop_pty_status, _ = _request(
+                base, "/api/sessions", token=token, method="POST",
+                payload={"profile": "Missing desktop viewer"},
+            )
+            if desktop_pty_status != 400:
+                raise RuntimeError("packaged desktop connection must not create a PTY")
+            layout = {"type": "pane", "title": "Package workspace"}
+            workspace_status, _ = _request(
+                base, "/api/workspaces/Package", token=token, method="PUT",
+                payload={"layout": layout, "path": isolated, "session_ids": []},
+            )
+            project = Path(isolated) / "project"
+            project.mkdir()
+            patch_status, _ = _request(
+                base, "/api/workspaces/Package", token=token, method="PATCH",
+                payload={"path": str(project)},
+            )
+            read_status, saved = _request(base, "/api/workspaces/Package", token=token)
+            if (
+                workspace_status != 204 or patch_status != 204 or read_status != 200
+                or not isinstance(saved, dict) or saved.get("layout") != layout
+                or saved.get("path") != str(project) or saved.get("session_ids") != []
+            ):
+                raise RuntimeError("packaged metadata edit changed the workspace layout or ownership")
+            history_status, history = _request(base, "/api/config/history", token=token)
+            if history_status != 200 or not isinstance(history, list) or not history:
+                raise RuntimeError("packaged settings backup was not retained")
+            restore_status, _ = _request(
+                base, f"/api/config/history/{history[0]['id']}/restore", token=token, method="POST",
+            )
+            after_status, restored_config = _request(base, "/api/config/full", token=token)
+            if (
+                before_status != 200 or restore_status != 204 or after_status != 200
+                or restored_config != before_config
+            ):
+                raise RuntimeError("packaged settings restore did not recover the previous configuration")
             update_status, _ = _request(base, "/api/update", token=token, timeout=20)
             # 502 is the deliberate network-failure mapping, so an offline or
             # rate-limited machine must not fail the release gate. Only a 500
