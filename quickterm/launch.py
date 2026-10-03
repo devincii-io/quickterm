@@ -18,7 +18,6 @@ import importlib
 import os
 import re
 import shlex
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +26,9 @@ from quickterm import putty_tools
 from quickterm.config import validate_environment
 
 CLAUDE_MODES = ("new", "continue", "resume", "agents")
+OPENSSH_MISSING = (
+    "OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client."
+)
 START_COMMAND_MAX_CHARS = 8192
 ARGS_MAX = 1024
 NAME_MAX_CHARS = 80
@@ -144,36 +146,34 @@ def _without_login_flags(args: list[str]) -> list[str]:
     return [arg for arg in args if arg not in ("-l", "--login")]
 
 
-def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], str | None]:
+def resolve_profile(
+    prof: Any,
+    cwd: str | None = None,
+    *,
+    agent_mode: str | None = None,
+    agent_session: str | None = None,
+) -> tuple[str, list[str], str | None]:
     """Command, arguments and process folder for one profile.
 
     `cwd` is what the caller resolved from the request or the workspace root;
-    a profile has no folder of its own. Raises ValueError only when nothing
-    can resolve (a Claude Code profile without a folder, missing PuTTY tools).
+    a profile has no folder of its own. `agent_mode` and `agent_session`
+    override an agent profile's launch for this one start. Raises ValueError
+    only when nothing can resolve (an agent profile without a folder, a
+    missing SSH client).
     """
     terminal_type = getattr(prof, "terminal_type", None)
     start = (getattr(prof, "start_command", None) or "").strip()
     configured = (getattr(prof, "cmd", None) or "").strip()
     existing_args = list(getattr(prof, "args", []) or [])
+    from .agents import AGENT_TYPES, resolve as resolve_agent
     from .connections import CONNECTION_TYPES, DESKTOP_TYPES, resolve as resolve_connection
 
     if terminal_type in DESKTOP_TYPES:
         raise ValueError("Desktop connections open in a separate client window from Connections")
     if terminal_type in CONNECTION_TYPES:
         return resolve_connection(prof, cwd)
-
-    if terminal_type == "claude-code":
-        executable = configured
-        if not executable:
-            executable = shutil.which("claude") or ("claude.exe" if os.name == "nt" else "claude")
-        mode = getattr(prof, "claude_mode", None) or "continue"
-        if not isinstance(cwd, str) or not cwd.strip():
-            raise ValueError("Claude Code profile requires a project folder")
-        mode_args = {
-            "new": [], "continue": ["--continue"], "resume": ["--resume"],
-            "agents": ["agents", "--cwd", cwd],
-        }
-        return executable, mode_args.get(mode, ["--continue"]) + existing_args, cwd
+    if terminal_type in AGENT_TYPES:
+        return resolve_agent(prof, cwd, mode=agent_mode, session=agent_session)
     if terminal_type in ("powershell-core", "windows-powershell"):
         # The inventory resolves an absolute path on purpose (PATH is stale in
         # a tray-resident app) and Settings stores it in `cmd`; the bare name
@@ -229,13 +229,17 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
         args = existing_args + (["-e", start] if start else [])
         return configured or "nu", args, cwd
     if terminal_type in ("ssh", "sftp"):
-        tool = putty_tools.plink_path() if terminal_type == "ssh" else putty_tools.psftp_path()
-        if tool is None:
-            raise ValueError("PuTTY tools are not installed (run scripts/fetch_putty.py)")
         host = (getattr(prof, "ssh_host", None) or "").strip()
         user = (getattr(prof, "ssh_user", None) or "").strip()
         port = getattr(prof, "ssh_port", None)
         key = (getattr(prof, "ssh_key", None) or "").strip()
+        if host.startswith("-") or user.startswith("-"):
+            raise ValueError("SSH host and user must not start with -")
+        if getattr(prof, "ssh_client", None) == "openssh":
+            return _openssh(terminal_type, prof, host, user, port, key, start, existing_args, cwd)
+        tool = putty_tools.plink_path() if terminal_type == "ssh" else putty_tools.psftp_path()
+        if tool is None:
+            raise ValueError("PuTTY tools are not installed (run scripts/fetch_putty.py)")
         args = ["-ssh"] if terminal_type == "ssh" else []
         if port:
             args += ["-P", str(port)]
@@ -248,6 +252,71 @@ def resolve_profile(prof: Any, cwd: str | None = None) -> tuple[str, list[str], 
             args.append(start)
         return str(tool), args, cwd
     return prof.cmd, existing_args, cwd
+
+
+def _openssh(
+    kind: str, prof: Any, host: str, user: str, port: Any, key: str, start: str,
+    extra: list[str], cwd: str | None,
+) -> tuple[str, list[str], str | None]:
+    # Through sys.modules so tests can stub the client lookup.
+    ssh_config = importlib.import_module("quickterm.ssh_config")
+    tool = ssh_config.openssh_path(kind)
+    if tool is None:
+        raise ValueError(OPENSSH_MISSING)
+    args: list[str] = []
+    if port:
+        # sftp spells the port flag in capitals, like scp.
+        args += ["-p" if kind == "ssh" else "-P", str(port)]
+    if key:
+        args += ["-i", key]
+    jump = (getattr(prof, "ssh_proxy_jump", None) or "").strip()
+    if jump.startswith("-"):
+        raise ValueError("ProxyJump must not start with -")
+    if jump:
+        args += ["-J", jump]
+    args += extra
+    # An alias in `host` lets ssh apply its own ssh_config entry; the fields
+    # set here override it.
+    args.append(f"{user}@{host}" if user else host)
+    if kind == "ssh" and start:
+        args.append(start)
+    return str(tool), args, cwd
+
+
+AGENT_MODE_PROFILE = "agent_mode requires a Claude Code or Codex profile"
+
+
+def _agent_mode(prof: Any, claude_mode: Any, agent_mode: Any, agent_session: Any) -> str | None:
+    """The launch-mode override of one request, or None for the profile's own.
+
+    `claude_mode` keeps its pre-4.0 checks and messages word for word, since
+    older clients match on them.
+    """
+    from .agents import AGENT_TYPES, MODES, SESSION_ID
+
+    kind = getattr(prof, "terminal_type", None)
+    if agent_mode is not None and claude_mode is not None and agent_mode != claude_mode:
+        raise LaunchError("agent_mode and claude_mode disagree")
+    if agent_mode is None and claude_mode is not None:
+        if kind != "claude-code":
+            raise LaunchError("claude_mode requires a Claude Code profile")
+        if claude_mode not in CLAUDE_MODES:
+            raise LaunchError("claude_mode must be new, continue, resume, or agents")
+        agent_mode = claude_mode
+    elif agent_mode is not None:
+        if kind not in AGENT_TYPES:
+            raise LaunchError(AGENT_MODE_PROFILE)
+        if not isinstance(agent_mode, str) or agent_mode not in MODES[kind]:
+            names = ", ".join(MODES[kind][:-1]) + f", or {MODES[kind][-1]}"
+            raise LaunchError(f"agent_mode must be {names}")
+    if agent_session is not None:
+        if kind not in AGENT_TYPES:
+            raise LaunchError(AGENT_MODE_PROFILE)
+        if not isinstance(agent_session, str) or not SESSION_ID.fullmatch(agent_session):
+            raise LaunchError("agent_session must be a session id")
+        if agent_mode not in (None, "resume") and not (kind == "codex" and agent_mode == "fork"):
+            raise LaunchError("agent_session needs resume or fork")
+    return agent_mode
 
 
 def find_profile(cfg: Any, name: Any) -> Any:
@@ -269,6 +338,8 @@ def resolve(
     name: Any = None,
     start_command: Any = None,
     claude_mode: Any = None,
+    agent_mode: Any = None,
+    agent_session: Any = None,
     request_cwd: str | None = None,
     workspace_root: str | None = None,
     append_tools: bool = True,
@@ -277,11 +348,14 @@ def resolve(
 
     `profile` is a profile name (a request) or a profile object (autostart,
     hotkeys). An explicit `cmd`, `args` or `env` overrides the profile's own.
+    `agent_mode` overrides an agent profile's launch mode (`claude_mode` is
+    its pre-4.0 name); `agent_session` resumes one session by id.
     Folder precedence: `request_cwd`, else `workspace_root`, else None (the
     session manager then uses the home folder). `append_tools=False` leaves
     the PuTTY tools off PATH, for a spec that another instance resolves again.
     """
     prof = None
+    mode = None
     if profile is not None:
         # A request carries a name (or garbage, which find_profile refuses).
         is_object = hasattr(profile, "name") and hasattr(profile, "cmd")
@@ -292,14 +366,11 @@ def resolve(
                     f"start_command must be a string of at most {START_COMMAND_MAX_CHARS} characters"
                 )
             prof = dataclasses.replace(prof, start_command=start_command)
-        if claude_mode is not None:
-            if getattr(prof, "terminal_type", None) != "claude-code":
-                raise LaunchError("claude_mode requires a Claude Code profile")
-            if claude_mode not in CLAUDE_MODES:
-                raise LaunchError("claude_mode must be new, continue, resume, or agents")
-            prof = dataclasses.replace(prof, claude_mode=claude_mode)
+        mode = _agent_mode(prof, claude_mode, agent_mode, agent_session)
     elif start_command is not None or claude_mode is not None:
         raise LaunchError("start_command and claude_mode require a profile")
+    elif agent_mode is not None or agent_session is not None:
+        raise LaunchError(AGENT_MODE_PROFILE)
     if name is not None and not isinstance(name, str):
         raise LaunchError("name must be a string")
     requested_name = name.strip()[:NAME_MAX_CHARS] if name and name.strip() else None
@@ -307,7 +378,9 @@ def resolve(
     folder = request_cwd or workspace_root
     if prof is not None:
         try:
-            resolved_cmd, resolved_args, cwd = resolve_profile(prof, folder)
+            resolved_cmd, resolved_args, cwd = resolve_profile(
+                prof, folder, agent_mode=mode, agent_session=agent_session
+            )
         except ValueError as exc:
             raise LaunchError(str(exc), label=prof.name) from exc
         cmd = cmd or resolved_cmd
