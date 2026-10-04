@@ -42,8 +42,8 @@ export function clampSidebarWidth(width, viewport) {
   return Math.min(maxSidebarWidth(viewport), Math.max(SIDEBAR_WIDTH_MIN, wanted));
 }
 
-// Past this the terminal rows get a second line (the folder each shell is
-// sitting in) instead of hiding it behind a tooltip. Dragging the sidebar wide
+// Past this a terminal row names the folder its shell is sitting in, after the
+// name, instead of hiding it behind a tooltip. Dragging the sidebar wide
 // should buy information, not whitespace.
 export const SIDEBAR_WIDE_AT = 280;
 
@@ -85,6 +85,21 @@ export function sessionState(session, isAttached) {
 // else where it started.
 export function sessionFolder(session) {
   return session?.current_cwd || session?.cwd || "";
+}
+
+// The text after a row's name. The folder is the fact that tells one
+// project's shell from another's, but under its workspace it shows only where
+// it differs from the workspace's own folder: a terminal that `cd`'d away says
+// so, one at home says nothing the head does not already say. Scratch has no
+// saved folder, so its home is wherever the terminal started. The flat list
+// names the workspace, and the folder only when it is not the same word.
+export function rowWhere(item, group) {
+  const session = item?.session || {};
+  const folder = folderName(sessionFolder(session));
+  const same = (other) => String(other || "").toLowerCase() === folder.toLowerCase();
+  if (group?.kind === "flat") return [item.owner, same(item.owner) ? "" : folder].filter(Boolean).join(" · ");
+  const home = folderName(group?.kind === "scratch" ? session.cwd : group?.path);
+  return same(home) || same(group?.label) ? "" : folder;
 }
 
 // What a terminal asked for, in words, for the tooltip and the dashboard.
