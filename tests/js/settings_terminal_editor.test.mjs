@@ -205,6 +205,21 @@ test("the global shortcut field says what it holds and stamps no type", () => {
   assert.equal(byClass(pane, "shortcut-error").length, 0);
 });
 
+test("removing an environment variable keeps the keyboard in the editor", () => {
+  const shell = profile({ name: "Env", cmd: "pwsh.exe", env: { A: "1", B: "2" } });
+  const { pane } = render([shell]);
+  const removes = walk(pane).filter((node) => node.attributes["aria-label"] === "Remove variable");
+  assert.equal(removes.length, 2);
+  removes[0].fire("click");
+  assert.deepEqual(shell.env, { B: "2" });
+  const focused = globalThis.document.activeElement;
+  assert.equal(focused?.attributes["aria-label"], "Environment variable name");
+  assert.equal(focused.value, "B", "the row that moved up takes the focus");
+  const last = walk(pane).find((node) => node.attributes["aria-label"] === "Remove variable");
+  last.fire("click");
+  assert.equal(globalThis.document.activeElement.textContent, "Add variable");
+});
+
 test("removing the default terminal clears default_profile", async () => {
   const first = profile({ name: "First", cmd: "pwsh.exe", terminal_type: "powershell-core" });
   const second = profile({ name: "Second", cmd: "cmd.exe", terminal_type: "command-prompt" });

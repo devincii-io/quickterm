@@ -56,7 +56,9 @@ export function renderConfigList({
   const master = make("div", "config-master");
   const head = make("div", "config-master-head");
   const rowsEl = make("div", "config-rows");
-  rowsEl.setAttribute("role", "listbox");
+  // A plain list of focusable rows: a listbox option may not hold the Open
+  // and Remove buttons, and screen readers flattened them away.
+  rowsEl.setAttribute("role", "list");
   rowsEl.setAttribute("aria-label", noun);
   const emptyEl = make("div", "config-master-empty");
   const detail = make("div", "config-detail");
@@ -129,7 +131,7 @@ export function renderConfigList({
   const createRow = () => {
     const node = make("div", "config-row");
     node.tabIndex = 0;
-    node.setAttribute("role", "option");
+    node.setAttribute("role", "listitem");
     const dot = make("span", "config-row-dot");
     const name = make("span", "config-row-name");
     const summary = make("span", "config-row-summary");
@@ -198,7 +200,7 @@ export function renderConfigList({
     if (p.remove) setAttrs(p.remove, { title: `Remove ${title}`, "aria-label": `Remove ${title}` });
     setClass(node, "selected", item === current);
     setClass(node, "has-problem", problems.length > 0);
-    setAttrs(node, { "aria-selected": item === current ? "true" : "false" });
+    setAttrs(node, { "aria-current": item === current ? "true" : false });
   };
 
   const drawEditor = () => {

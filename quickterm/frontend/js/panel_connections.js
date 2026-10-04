@@ -742,7 +742,17 @@ function renderEnvironment(profile, touched) {
       remove.append(icon("x", 14));
       remove.title = "Remove variable";
       remove.setAttribute("aria-label", remove.title);
-      remove.addEventListener("click", () => { rows.splice(rows.indexOf(row), 1); sync(); draw(); });
+      remove.addEventListener("click", () => {
+        const index = rows.indexOf(row);
+        rows.splice(index, 1);
+        sync();
+        draw();
+        // draw() rebuilt every row and dropped focus to <body>, outside the
+        // modal sheet. Keep the place: the row that moved up, else the one
+        // before, else Add variable.
+        const next = rowsHost.children[Math.min(index, rowsHost.children.length - 1)];
+        (next?.children?.[0] || add).focus();
+      });
       line.append(remove);
       rowsHost.append(line);
     }

@@ -63,6 +63,7 @@ export function renderShortcutSettings(host) {
     const row = make("div", "shortcut-table-row");
     row.setAttribute("role", "row");
     const name = make("div", "shortcut-table-name");
+    name.setAttribute("role", "rowheader");
     name.append(make("strong", "", profile.name || "Untitled"), make("small", "", kindLabel(kind)));
     const warnings = make("div", "shortcut-warnings");
     const input = shortcutInput({
@@ -75,12 +76,18 @@ export function renderShortcutSettings(host) {
       },
     });
     const control = make("div", "shortcut-table-control");
+    control.setAttribute("role", "cell");
     control.append(input.el, warnings);
     row.append(name, control);
     table.append(row);
     rows.push({ profile, warnings });
   }
-  if (!rows.length) table.append(make("p", "settings-note", "No saved terminals yet. Add one under Terminals to give it a global key."));
+  if (!rows.length) {
+    // An empty table with a loose paragraph in it is not a table.
+    table.removeAttribute("role");
+    table.removeAttribute("aria-label");
+    table.append(make("p", "settings-note", "No saved terminals yet. Add one under Terminals to give it a global key."));
+  }
   global.append(make("h3", "settings-group-title shortcut-table-title", "Terminals"), table);
   refreshAll();
   host.append(global);

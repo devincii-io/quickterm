@@ -165,6 +165,12 @@ test("typing in the editor patches its row and keeps the editor node and focus",
   list.refresh();
   assert.equal(list.pane.children[0], input, "a refresh patches rows only");
   assert.ok(first.classList.contains("selected"));
+  // A plain list with aria-current: a listbox option may not hold the Open
+  // and Remove buttons.
+  assert.equal(first.getAttribute("role"), "listitem");
+  assert.equal(first.parentNode.getAttribute("role"), "list");
+  assert.equal(first.getAttribute("aria-current"), "true");
+  assert.equal(second.hasAttribute("aria-current"), false);
   assert.equal(byClass(first, "config-row-summary")[0].textContent, "Thing · pwsh");
 });
 
