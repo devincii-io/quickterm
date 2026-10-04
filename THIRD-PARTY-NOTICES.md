@@ -1,7 +1,7 @@
 # Third-party notices
 
-QuickTerm releases redistribute the third-party binaries below. Each is
-MIT-licensed; the required notices follow.
+QuickTerm releases redistribute the third-party binaries and colour themes
+below. The required notices follow.
 
 ## PuTTY (plink.exe, pscp.exe, psftp.exe)
 
@@ -42,3 +42,37 @@ Bundled in the `conpty/` folder, taken from the pywinpty package
 contributors); built from Microsoft's Windows Terminal / Console repository
 (https://github.com/microsoft/terminal), copyright (c) Microsoft
 Corporation, released under the MIT License.
+
+## Terminal colour themes
+
+The built-in themes in `quickterm/frontend/js/themes.js` reproduce the colour
+values of these themes, taken from each project's own terminal port and UI
+palette. Each is MIT-licensed under the permission notice quoted in the PuTTY
+section above, with the copyright line given here, except where noted.
+
+- Catppuccin (https://github.com/catppuccin/ghostty,
+  https://github.com/catppuccin/palette): Copyright (c) 2021 Catppuccin.
+- Tokyo Night (https://github.com/folke/tokyonight.nvim): by Folke
+  Lemaitre. The repository is licensed under the Apache License 2.0
+  (https://www.apache.org/licenses/LICENSE-2.0); the terminal ports under
+  `extras/` that the values come from are labelled MIT.
+- Rosé Pine (https://github.com/rose-pine/ghostty,
+  https://github.com/rose-pine/palette): Copyright (c) Rosé Pine,
+  Copyright (c) mvllow.
+- Kanagawa (https://github.com/rebelot/kanagawa.nvim): Copyright (c) 2021
+  Tommaso Laurenzi.
+- Gruvbox (https://github.com/morhetz/gruvbox,
+  https://github.com/morhetz/gruvbox-contrib): by Pavel Pertsev (morhetz),
+  MIT/X11.
+- Everforest (https://github.com/sainnhe/everforest): Copyright (c) 2019
+  sainnhe.
+- Nord (https://github.com/nordtheme/alacritty): Copyright (c) 2016-present
+  Sven Greb.
+- Dracula (https://github.com/dracula/ghostty,
+  https://github.com/dracula/visual-studio-code): Copyright (c) 2023 and
+  2016 Dracula Theme.
+- GitHub (https://github.com/primer/github-vscode-theme,
+  https://github.com/primer/primitives): Copyright (c) 2020 Primer,
+  Copyright (c) 2018 GitHub Inc.
+- Nightfox / Carbonfox (https://github.com/EdenEast/nightfox.nvim):
+  Copyright (c) 2021 James Simpson.

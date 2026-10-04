@@ -22,7 +22,10 @@ import { icon } from "./icons.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 import { dwindleDir, findLeaf, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
 
-export const VIEW_COLORS = ["#d4ad63", "#6daedb", "#8fcf8a", "#c78fd6", "#e0907a", "#6fc7c2"];
+// Theme tokens, not literals: applyChromeTheme() sets --view-1..6 from the
+// theme's ANSI hues, so a view frame follows the theme, light ones included.
+export const VIEW_COLORS = ["--view-1", "--view-2", "--view-3", "--view-4", "--view-5", "--view-6"]
+  .map((token) => `var(${token})`);
 export const VIEW_RATIO_MIN = 15;
 export const VIEW_RATIO_MAX = 85;
 // The narrowest a divider drag may make a view, when the window has the room.

@@ -1,17 +1,7 @@
 import { openFolderBrowser } from "./folder_browser.js";
 import { icon } from "./icons.js";
-import { CUSTOM_THEME } from "./themes.js";
 
 export const DASHBOARD_REFRESH_MS = 5000;
-
-export const THEME_CATALOG_GROUPS = [
-  ["Dark", ["graphite", "one-dark", "dracula", "github-dark", "github-dark-dimmed", "solarized-dark", "material-ocean", "night-owl", "oxocarbon"]],
-  ["Neon", ["tokyo-night", "tokyo-night-storm", "cobalt2"]],
-  ["Soft", ["catppuccin-mocha", "catppuccin-macchiato", "catppuccin-frappe", "nord", "everforest", "rose-pine", "rose-pine-moon", "ayu-mirage"]],
-  ["Warm", ["gruvbox-dark", "kanagawa", "monokai", "horizon"]],
-  ["Light", ["rose-pine-dawn", "github-light", "solarized-light"]],
-  ["Custom", [CUSTOM_THEME]],
-];
 
 export const TERMINAL_TYPES = [
   { id: "claude-code", label: "Claude Code", executable: "claude.exe" },

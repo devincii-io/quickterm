@@ -1,9 +1,8 @@
 /* In-app directory browser (js/folder_browser.js).
    Loaded after app.css on purpose, so these rules win on order rather than on
    specificity. Every colour here reads a token from app.css, or a palette
-   change stops reaching this modal. The one literal is the overlay scrim,
-   which has no token and is copied from .panel-overlay so the two backdrops
-   cannot drift apart. */
+   change stops reaching this modal. The overlay uses --scrim, the same
+   token as .panel-overlay, so the two backdrops cannot drift apart. */
 
 .fb-overlay {
   position: fixed;
@@ -15,7 +14,7 @@
   align-items: center;
   justify-content: center;
   padding: 30px;
-  background: rgba(7, 10, 9, .74);
+  background: var(--scrim);
 }
 
 .fb {

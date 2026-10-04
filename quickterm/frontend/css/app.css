@@ -1,56 +1,91 @@
-/* Chrome palette: warm amber on near-black, shared with the sibling QuickCode
-   UI so the two apps read as one toolchain.
+/* Chrome palette: QuickTerm's house theme "graphite", warm amber on
+   near-black, shared with the sibling QuickCode UI so the two apps read as one
+   toolchain.
 
-   Only five colours are chosen here; everything else is mixed from them.
-   applyChromeTheme() in js/themes.js recomputes the identical mixes at runtime
-   from whichever terminal theme is selected, so this block is the pre-boot
-   default and nothing more. The numbers below are exactly what that function
-   produces for "graphite", which is why the window does not flash a different
-   palette before the config arrives. Edit a base here and you MUST edit the
-   matching graphite chrome entry in themes.js, or the flash comes back. */
+   applyChromeTheme() in js/themes.js writes every token in the first group
+   below at runtime, derived from the selected theme's six chrome colours, so
+   this group is only the pre-boot default. Its values are exactly what
+   chromeTokens("graphite") returns (tests/js/themes.test.mjs compares them),
+   which is why the window does not flash a different palette before the config
+   arrives. Change the graphite chrome in themes.js and regenerate these, or the
+   flash comes back.
+
+   The second group is derived here with color-mix() from the first, so it
+   follows every theme without JavaScript. Outside :root no stylesheet names a
+   colour literal (tests/test_contracts_tokens.py): a literal is the one pixel
+   that does not follow the theme, and on a light theme it is usually a dark
+   smudge. */
 :root {
+  color-scheme: dark;
+
+  /* Written by applyChromeTheme(). */
   --bg: #15140f;
   --surface: #24221b;
-  --text: #e9e3d5;
-  --accent: #c8973f;
-  --danger: #d76c53;
-
-  --surface-raised: color-mix(in srgb, #ffffff 4%, var(--surface));
-  --surface-soft: color-mix(in srgb, #ffffff 7.5%, var(--surface));
-  --well: var(--bg);
-  --card: color-mix(in srgb, var(--surface) 62%, var(--bg));
-  --field: color-mix(in srgb, var(--surface) 40%, var(--bg));
-
+  --surface-raised: #2d2b24;
+  --surface-soft: #34332c;
+  --well: #15140f;
+  --card: #1e1d16;
+  --field: #1b1a14;
   /* The ink ladder. --muted is ink at 62%, not the 55% the sibling palette
-     uses for the same role: a percentage of ink on paper is not the mirror of
-     a percentage of paper on ink, and 55% measures 4.38:1 on --surface here,
-     under the 4.5:1 floor for body text. --fg-dim and --fg-faint keep the
-     softer steps available for decoration, which owes no contrast floor. */
-  --text-soft: color-mix(in srgb, var(--bg) 16%, var(--text));
-  --muted: color-mix(in srgb, var(--text) 62%, var(--bg));
-  --fg-dim: color-mix(in srgb, var(--text) 55%, transparent);
-  --fg-faint: color-mix(in srgb, var(--text) 32%, transparent);
-
-  --accent-soft: color-mix(in srgb, var(--accent) 17%, var(--bg));
-  --accent-hover: color-mix(in srgb, #ffffff 16%, var(--accent));
-  --accent-press: color-mix(in srgb, #000000 12%, var(--accent));
-  --accent-border: color-mix(in srgb, var(--accent) 50%, var(--bg));
-  --accent-ring: color-mix(in srgb, var(--accent) 14%, transparent);
+     uses for the same role: 55% measures 4.38:1 on --surface, under the 4.5:1
+     floor for body text. */
+  --text: #e9e3d5;
+  --text-soft: #c7c2b5;
+  --muted: #98948a;
+  --accent: #c8973f;
+  --accent-soft: #332a17;
+  --accent-hover: #d1a85e;
+  --accent-press: #b08537;
+  --accent-border: #6f5627;
+  --accent-ring: rgba(200, 151, 63, 0.14);
   /* Amber is bright enough that dark type wins on it, 7.04:1 against 2.35:1. */
   --on-accent: #111318;
-  --sage: color-mix(in srgb, #a7d5b3 36%, var(--muted));
-  --danger-soft: color-mix(in srgb, var(--danger) 10%, transparent);
+  --sage: #9dab99;
+  --danger: #d76c53;
+  --danger-soft: rgba(215, 108, 83, 0.1);
+  /* Status hues are the theme's own ANSI green and yellow, lifted to 4.5:1 on
+     the chrome surfaces. */
+  --success: #85a95e;
+  --warning: #c8973f;
+  --line: #36332c;
+  --line-strong: #444139;
+  --line-hover: #5f5c53;
+  /* Ink for drop shadows: black on a dark theme, the theme's own ink at half
+     strength on a light one, where --bg is paper but a shadow is still ink. */
+  --shadow-color: #000000;
+  /* What dims the terminals behind a sheet or the palette. On a light theme
+     it is a thin layer of ink, because paper over paper is no scrim at all. */
+  --scrim: rgba(8, 8, 6, 0.72);
+  /* One colour per open workspace view (VIEW_COLORS in workspace_views.js),
+     from the theme's ANSI hues, at least 3:1 on the chrome. */
+  --view-1: #c8973f;
+  --view-2: #69a3cb;
+  --view-3: #85a95e;
+  --view-4: #bd86b7;
+  --view-5: #d76c53;
+  --view-6: #65aea4;
 
-  --line: color-mix(in srgb, var(--text) 9%, var(--surface));
-  --line-strong: color-mix(in srgb, var(--text) 16%, var(--surface));
-  --line-hover: color-mix(in srgb, var(--text) 30%, var(--surface));
+  /* Derived here. --fg-dim and --fg-faint are the softer ink steps for
+     decoration, which owes no contrast floor. */
+  --fg-dim: color-mix(in srgb, var(--text) 55%, transparent);
+  --fg-faint: color-mix(in srgb, var(--text) 32%, transparent);
+  --focus-ring: var(--accent);
+  --selection: color-mix(in srgb, var(--accent) 30%, transparent);
+  --drop-target: color-mix(in srgb, var(--accent) 16%, transparent);
+  --pane-dim: color-mix(in srgb, var(--bg) 18%, transparent);
+  --scrollbar-thumb: var(--line-strong);
+  --scrollbar-thumb-hover: var(--line-hover);
+  --shadow-sm: 0 2px 8px color-mix(in srgb, var(--shadow-color) 30%, transparent);
+  --shadow-md: 0 12px 32px color-mix(in srgb, var(--shadow-color) 40%, transparent);
+  --shadow-lg: 0 18px 48px color-mix(in srgb, var(--shadow-color) 42%, transparent);
+  --shadow: 0 24px 80px color-mix(in srgb, var(--shadow-color) 40%, transparent);
 
   --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
-  /* Stays black rather than a mix of --bg: four shipped themes are light, and
-     there --bg is paper while a drop shadow is still ink. */
-  --shadow: 0 24px 80px rgba(0, 0, 0, .4);
 }
+/* Native scrollbars, colour inputs and any control left unstyled follow the
+   theme's mode instead of the browser default. */
+:root[data-theme-mode="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -85,8 +120,10 @@ button .icon { pointer-events: none; }
 .no-entrance .workspace-card, .no-entrance .panel, .no-entrance .dashboard-hero { animation: none !important; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--line-strong); border: 3px solid var(--surface); border-radius: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border: 3px solid var(--surface); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::selection { background: var(--selection); }
 
 #app { display: flex; flex-direction: column; height: 100vh; }
 
@@ -114,9 +151,9 @@ body.dragging .pane { pointer-events: none; }
 
 .pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); transition: border-color .14s ease, opacity .14s ease; }
 .pane::before { content: ""; position: absolute; z-index: 8; top: 10px; bottom: 10px; left: 0; width: 2px; border-radius: 0 2px 2px 0; background: transparent; }
-.pane.focused { border-color: #4b4d43; }
+.pane.focused { border-color: var(--line-hover); }
 .pane.focused::before { background: var(--accent); }
-.pane-tab { position: absolute; z-index: 7; top: 0; left: 0; right: 0; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 10px; color: var(--muted); font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em; cursor: default; user-select: none; background: linear-gradient(rgba(0, 0, 0, .16), transparent); }
+.pane-tab { position: absolute; z-index: 7; top: 0; left: 0; right: 0; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 10px; color: var(--muted); font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em; cursor: default; user-select: none; background: linear-gradient(color-mix(in srgb, var(--shadow-color) 16%, transparent), transparent); }
 .pane.focused .pane-tab { color: var(--text-soft); }
 .pane-tab-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; opacity: .5; transition: opacity .14s ease; }
 .pane.focused .pane-tab-dot { opacity: 1; }
@@ -125,7 +162,7 @@ body.dragging .pane { pointer-events: none; }
    accent only appears while output is actually arriving. */
 .pane-tab-activity { flex: none; padding: 0 5px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 8.5px; line-height: 13px; letter-spacing: .06em; }
 .pane-tab-activity.working { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
-.pane-tab-input { width: 160px; max-width: 60%; border: 1px solid var(--line-strong); border-radius: 4px; outline: 0; padding: 1px 6px; background: rgba(0, 0, 0, .35); color: var(--text); font-family: var(--mono); font-size: 9.5px; }
+.pane-tab-input { width: 160px; max-width: 60%; border: 1px solid var(--line-strong); border-radius: 4px; outline: 0; padding: 1px 6px; background: var(--field); color: var(--text); font-family: var(--mono); font-size: 9.5px; }
 .term-host { position: absolute; inset: 26px 3px 5px 9px; }
 /* xterm 6 draws its own scrollbar (VS Code's scrollable element) and fades
    it out when idle. Keep the rail permanently visible, as the native one was.
@@ -141,14 +178,14 @@ body.dragging .pane { pointer-events: none; }
    and drop the full-height thumb, as a native scrollbar does. */
 .term-host .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible:not(.fade) > .slider { display: none; }
 .pane-empty { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; user-select: none; pointer-events: none; }
-.pane-dim { position: absolute; inset: 0; z-index: 5; background: rgba(20, 24, 23, .18); pointer-events: none; }
+.pane-dim { position: absolute; inset: 0; z-index: 5; background: var(--pane-dim); pointer-events: none; }
 .pane.focused .pane-dim { display: none; }
-.pane-exitbar { position: absolute; z-index: 6; right: 8px; bottom: 7px; padding: 4px 8px; border: 1px solid rgba(212, 124, 115, .25); border-radius: 5px; background: #2c2221; color: var(--danger); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.pane-exitbar { position: absolute; z-index: 6; right: 8px; bottom: 7px; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--danger); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .pane-exitbar.confirming { max-width: min(420px, calc(100% - 16px)); display: flex; align-items: center; gap: 10px; padding: 8px 9px; letter-spacing: 0; text-transform: none; }
 .pane-confirm-copy { min-width: 0; line-height: 1.35; }
 .pane-confirm-actions { flex: none; display: flex; gap: 5px; }
 .pane-confirm-actions button { min-height: 25px; padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--text-soft); font: inherit; cursor: pointer; }
-.pane-confirm-actions .pane-confirm-accept { border-color: rgba(212, 124, 115, .5); color: var(--danger); }
+.pane-confirm-actions .pane-confirm-accept { border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: var(--danger); }
 
 /* The single visible failure surface. Above .panel-overlay (z-index 100) so a
    Dashboard or Settings gesture that fails is still readable, and dismissible
@@ -204,7 +241,7 @@ body.dragging .pane { pointer-events: none; }
 
 /* Command palette */
 
-.palette-overlay { position: fixed; inset: 0; z-index: 110; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: rgba(8, 11, 10, .72); backdrop-filter: blur(5px); }
+.palette-overlay { position: fixed; inset: 0; z-index: 110; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: var(--scrim); backdrop-filter: blur(5px); }
 .palette { width: 580px; max-width: 92vw; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
 .palette input { width: 100%; border: 0; border-bottom: 1px solid var(--line); outline: 0; padding: 15px 16px; background: var(--field); color: var(--text); caret-color: var(--accent); font-size: 14px; }
 .palette input::placeholder { color: var(--muted); }
@@ -218,7 +255,7 @@ body.dragging .pane { pointer-events: none; }
 
 /* Panels */
 
-.panel-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 30px; background: rgba(7, 10, 9, .74); backdrop-filter: blur(6px); }
+.panel-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 30px; background: var(--scrim); backdrop-filter: blur(6px); }
 .panel { width: min(1120px, 96vw); height: min(820px, 92vh); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); animation: panel-in .18s ease-out both; }
 .panel-head { flex: none; min-height: 105px; display: flex; align-items: flex-start; justify-content: space-between; padding: 24px 28px 18px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
 .panel-eyebrow { display: block; margin-bottom: 6px; color: var(--accent); font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; }
@@ -237,14 +274,14 @@ body.dragging .pane { pointer-events: none; }
 /* Dashboard */
 
 .panel[data-view="dashboard"] .panel-body { padding: 24px 28px 34px; }
-.dashboard-hero { position: relative; min-height: 164px; display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; overflow: hidden; padding: 27px 30px; border: 1px solid #3c4139; border-radius: 13px; background: linear-gradient(105deg, #2b2b22, #222a26 62%, #24302a); }
-.dashboard-hero::after { content: ""; position: absolute; right: 11%; bottom: -85px; width: 260px; height: 170px; border: 1px solid rgba(230, 169, 75, .11); border-radius: 50%; transform: rotate(-18deg); box-shadow: 0 0 0 28px rgba(141, 168, 149, .025), 0 0 0 58px rgba(230, 169, 75, .018); }
+.dashboard-hero { position: relative; min-height: 164px; display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; overflow: hidden; padding: 27px 30px; border: 1px solid var(--line); border-radius: 13px; background: var(--card); }
+.dashboard-hero::after { content: ""; position: absolute; right: 11%; bottom: -85px; width: 260px; height: 170px; border: 1px solid color-mix(in srgb, var(--accent) 11%, transparent); border-radius: 50%; transform: rotate(-18deg); box-shadow: 0 0 0 28px color-mix(in srgb, var(--sage) 2.5%, transparent), 0 0 0 58px color-mix(in srgb, var(--accent) 1.8%, transparent); }
 .hero-copy { position: relative; z-index: 1; max-width: 570px; }
 .hero-kicker { display: block; margin-bottom: 9px; color: var(--accent); font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
 .hero-title { margin: 0; font-size: clamp(22px, 3vw, 31px); font-weight: 620; letter-spacing: -.035em; }
 .hero-text { max-width: 520px; margin: 9px 0 0; color: var(--text-soft); line-height: 1.55; }
 .dashboard-stats { position: relative; z-index: 1; display: flex; gap: 8px; }
-.dashboard-stat { min-width: 88px; padding: 12px 13px; border: 1px solid rgba(255, 255, 255, .07); border-radius: 9px; background: rgba(17, 20, 18, .38); }
+.dashboard-stat { min-width: 88px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--bg) 38%, transparent); }
 .dashboard-stat strong { display: block; font-family: var(--mono); font-size: 19px; font-weight: 500; }
 .dashboard-stat span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; letter-spacing: .07em; text-transform: uppercase; }
 .dashboard-section { margin-top: 29px; }
@@ -268,8 +305,8 @@ body.dragging .pane { pointer-events: none; }
 
 .workspace-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
 .workspace-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--card); animation: card-rise .35s calc(var(--card-index, 0) * 55ms) ease-out both; transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
-.workspace-card:hover { z-index: 1; transform: translateY(-4px); border-color: #535c57; box-shadow: 0 14px 28px rgba(0, 0, 0, .2); }
-.workspace-card.current { border-color: #5b5947; box-shadow: inset 0 0 0 1px rgba(230, 169, 75, .08); }
+.workspace-card:hover { z-index: 1; transform: translateY(-4px); border-color: var(--line-hover); box-shadow: 0 14px 28px color-mix(in srgb, var(--shadow-color) 20%, transparent); }
+.workspace-card.current { border-color: var(--accent-border); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent); }
 .workspace-card.current .workspace-badge { color: var(--accent); }
 .workspace-card-top { min-height: 38px; display: flex; align-items: center; justify-content: space-between; padding: 6px 9px 4px 12px; }
 .workspace-card-logo { width: 25px; height: 25px; flex: none; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); object-fit: contain; }
@@ -278,10 +315,10 @@ body.dragging .pane { pointer-events: none; }
 .workspace-preview-split { flex: 1; min-width: 0; min-height: 0; display: flex; gap: 4px; }
 .workspace-preview-split.vertical { flex-direction: column; }
 .workspace-preview-split.horizontal { flex-direction: row; }
-.workspace-preview-pane { position: relative; min-width: 0; min-height: 0; display: flex; align-items: flex-end; overflow: hidden; padding: 6px; border: 1px solid #37403c; border-radius: 4px; background: #202725; }
-.workspace-preview-pane::before { content: ""; position: absolute; top: 9px; left: 8px; width: 62%; height: 18px; opacity: .6; background: repeating-linear-gradient(to bottom, #53615b 0 2px, transparent 2px 6px); animation: terminal-lines 4.5s ease-in-out infinite; }
+.workspace-preview-pane { position: relative; min-width: 0; min-height: 0; display: flex; align-items: flex-end; overflow: hidden; padding: 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--well); }
+.workspace-preview-pane::before { content: ""; position: absolute; top: 9px; left: 8px; width: 62%; height: 18px; opacity: .6; background: repeating-linear-gradient(to bottom, var(--line-strong) 0 2px, transparent 2px 6px); animation: terminal-lines 4.5s ease-in-out infinite; }
 .workspace-preview-pane::after { content: ""; position: absolute; left: 0; bottom: 0; width: 2px; height: 38%; border-radius: 0 2px 0 0; background: var(--accent); }
-.workspace-preview-pane i { position: relative; z-index: 1; overflow: hidden; color: #707b75; font-family: var(--mono); font-size: 7px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-preview-pane i { position: relative; z-index: 1; overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 7px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 13px 15px; }
 .workspace-card-footer h3 { overflow: hidden; margin: 0; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-card-footer p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
@@ -296,7 +333,7 @@ body.dragging .pane { pointer-events: none; }
 .detached-group, .other-workspace-sessions { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
 .detached-group.current { border-color: var(--accent-border); }
 .detached-group h3 { margin: 0; padding: 10px 13px; border-bottom: 1px solid var(--line); color: var(--text-soft); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
-.detached-session-row { min-height: 58px; display: flex; align-items: center; gap: 14px; padding: 9px 12px; border-bottom: 1px solid rgba(48, 55, 53, .7); }
+.detached-session-row { min-height: 58px; display: flex; align-items: center; gap: 14px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .detached-session-row:last-child { border-bottom: 0; }
 .detached-session-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .detached-session-copy strong, .detached-session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -312,7 +349,7 @@ body.dragging .pane { pointer-events: none; }
 .dashboard-lower { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 25px; }
 .dashboard-list-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 
-.profile-mark { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #4c4b3d; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-family: var(--mono); font-size: 9px; }
+.profile-mark { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--accent-border); border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-family: var(--mono); font-size: 9px; }
 .profile-mark.large { width: 38px; height: 38px; border-radius: 9px; }
 
 .profile-arrow { color: var(--muted); }
@@ -335,7 +372,7 @@ body.dragging .pane { pointer-events: none; }
 .settings-footer { flex: none; min-height: 65px; display: flex; align-items: center; gap: 9px; padding: 11px 22px; border-top: 1px solid var(--line); background: var(--bg); }
 .settings-message { color: var(--muted); font-size: 11px; }
 .settings-message.error { color: var(--danger); }
-.inline-confirmation { position: fixed; z-index: 120; width: min(390px, calc(100vw - 24px)); display: flex; align-items: center; gap: 12px; padding: 10px 11px; border: 1px solid rgba(212, 124, 115, .45); border-radius: 4px; background: var(--surface-raised); box-shadow: 0 12px 32px rgba(0, 0, 0, .42); }
+.inline-confirmation { position: fixed; z-index: 120; width: min(390px, calc(100vw - 24px)); display: flex; align-items: center; gap: 12px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); border-radius: 4px; background: var(--surface-raised); box-shadow: var(--shadow-md); }
 .inline-confirmation-copy { flex: 1; min-width: 0; color: var(--text-soft); font-size: 10px; line-height: 1.4; }
 .inline-confirmation-actions { flex: none; display: flex; align-items: center; gap: 5px; }
 .footer-spacer { flex: 1; }
@@ -355,23 +392,6 @@ body.dragging .pane { pointer-events: none; }
 .theme-picker { margin-top: 18px; }
 .theme-picker-title { margin: 0 0 3px; color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .theme-picker > .field-hint { display: block; margin-bottom: 11px; }
-.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 9px; }
-.theme-catalog { margin-top: 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
-.theme-catalog-trigger { padding: 9px 11px; color: var(--text-soft); font-size: 11px; font-weight: 600; cursor: pointer; }
-.theme-catalog-trigger:hover { color: var(--text); background: var(--surface-raised); }
-.theme-catalog-body { padding: 2px 9px 10px; }
-.theme-category { padding: 9px 0 10px; }
-.theme-category + .theme-category { border-top: 1px solid var(--line); }
-.theme-category-title { margin: 0 0 7px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
-.theme-grid-catalog { padding: 0; }
-.theme-card { display: flex; flex-direction: column; align-items: stretch; gap: 3px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--field); text-align: left; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease; }
-.theme-card:hover { border-color: var(--line-hover); }
-.theme-card.active { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(230, 169, 75, .1); }
-.theme-card strong { margin-top: 5px; font-size: 11.5px; font-weight: 620; }
-.theme-card small { color: var(--muted); font-size: 9.5px; }
-.theme-strip { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 8px; border: 1px solid rgba(255, 255, 255, .06); border-radius: 6px; }
-.theme-strip-prompt { flex: 1; font-family: var(--mono); font-size: 10px; font-style: normal; }
-.theme-strip-dot { width: 8px; height: 8px; border-radius: 50%; }
 .custom-theme-editor { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 11px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
 .custom-color-field { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 10px; text-transform: capitalize; }
 .custom-color-field input { width: 34px; height: 28px; flex: none; padding: 2px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); cursor: pointer; }
@@ -404,9 +424,9 @@ body.dragging .pane { pointer-events: none; }
    panels.css), which is required rather than a workaround: .sr-only clips with
    clip-path, and a clipped element clips its outline too. */
 .toggle-row input { pointer-events: none; }
-.toggle-control { position: relative; width: 32px; height: 18px; border-radius: 10px; background: #414946; transition: background .18s ease; }
+.toggle-control { position: relative; width: 32px; height: 18px; border-radius: 10px; background: var(--line-strong); transition: background .18s ease; }
 .toggle-control::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--text-soft); transition: transform .18s ease, background .18s ease; }
-.toggle-row input:checked + .toggle-control { background: #6a5732; }
+.toggle-row input:checked + .toggle-control { background: var(--accent-border); }
 .toggle-row input:checked + .toggle-control::after { transform: translateX(14px); background: var(--accent); }
 .toggle-copy { user-select: none; }
 
@@ -430,11 +450,11 @@ body.dragging .pane { pointer-events: none; }
 .update-pill { color: var(--accent); font-weight: 650; }
 .update-pill:hover { color: var(--accent); }
 
-.voice-callout { display: flex; align-items: center; gap: 18px; margin: 17px 0; padding: 19px; border: 1px solid #3f493f; border-radius: 11px; background: linear-gradient(100deg, #232b27, #242820); }
+.voice-callout { display: flex; align-items: center; gap: 18px; margin: 17px 0; padding: 19px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
 .voice-callout h3 { margin: 0; font-size: 14px; }
 .voice-callout p { margin: 5px 0 0; color: var(--muted); line-height: 1.45; }
 .voice-wave { color: var(--accent); font-family: var(--mono); font-size: 20px; letter-spacing: -4px; transform: rotate(90deg); animation: voice-pulse 1.8s ease-in-out infinite; }
-.advanced-notice { margin: 15px 0 11px; padding: 11px 13px; border-left: 2px solid var(--sage); border-radius: 0 7px 7px 0; background: rgba(141, 168, 149, .06); color: var(--muted); font-size: 11px; }
+.advanced-notice { margin: 15px 0 11px; padding: 11px 13px; border-left: 2px solid var(--sage); border-radius: 0 7px 7px 0; background: color-mix(in srgb, var(--sage) 6%, transparent); color: var(--muted); font-size: 11px; }
 .settings-json { width: 100%; min-height: 430px; resize: vertical; border: 1px solid var(--line-strong); border-radius: 9px; outline: 0; padding: 14px; background: var(--well); color: var(--text); caret-color: var(--accent); font-family: var(--mono); font-size: 11px; line-height: 1.55; tab-size: 2; }
 .settings-json:focus { border-color: var(--accent-border); }
 
@@ -447,10 +467,10 @@ body.dragging .pane { pointer-events: none; }
 .help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 .help-card { padding: 20px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); }
 .help-card h3 { margin: 0 0 16px; font-size: 14px; }
-.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 43px; border-bottom: 1px solid rgba(48, 55, 53, .7); color: var(--text-soft); }
+.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 43px; border-bottom: 1px solid var(--line); color: var(--text-soft); }
 .shortcut-row:last-child { border-bottom: 0; }
-.shortcut-row kbd { min-width: 84px; padding: 5px 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: #171b1a; color: var(--accent); font-family: var(--mono); font-size: 9px; text-align: center; }
-.concept-row { padding: 8px 0 11px; border-bottom: 1px solid rgba(48, 55, 53, .7); }
+.shortcut-row kbd { min-width: 84px; padding: 5px 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--well); color: var(--accent); font-family: var(--mono); font-size: 9px; text-align: center; }
+.concept-row { padding: 8px 0 11px; border-bottom: 1px solid var(--line); }
 .concept-row:last-child { border-bottom: 0; }
 .concept-row strong { color: var(--text-soft); font-size: 12px; }
 .concept-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
@@ -513,7 +533,7 @@ body.dragging .pane { pointer-events: none; }
    `outline: 0` after this line now states its own :focus-visible ring, and the
    one place that deliberately indicates focus with a fill instead is given an
    inset ring below rather than left with nothing. */
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:not(:focus-visible), textarea:focus:not(:focus-visible) { outline: 0; }
 
 .dropdown-item-mark, .profile-mark, .profile-mark.large { border-radius: 3px; background: var(--surface-raised); color: var(--text-soft); }
@@ -534,14 +554,14 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .pane-dim { display: none !important; }
 .pane-exitbar { border-radius: 2px; background: var(--surface-raised); text-transform: none; letter-spacing: 0; }
 
-.palette-overlay, .panel-overlay { background: rgba(1, 4, 9, .72); backdrop-filter: none; }
-.palette { border-radius: 6px; box-shadow: 0 16px 48px rgba(0, 0, 0, .4); }
+.palette-overlay, .panel-overlay { background: var(--scrim); backdrop-filter: none; }
+.palette { border-radius: 6px; box-shadow: var(--shadow-lg); }
 .palette input { padding: 13px 14px; background: var(--bg); }
 .palette-list { padding: 4px; }
 .palette-item { padding: 8px 9px; border-radius: 3px; }
 .palette-item .kind { font-size: 10px; letter-spacing: 0; text-transform: none; }
 
-.panel { border-radius: 6px; box-shadow: 0 18px 48px rgba(0, 0, 0, .42); animation: none; }
+.panel { border-radius: 6px; box-shadow: var(--shadow-lg); animation: none; }
 .panel-head { min-height: 76px; padding: 15px 20px 13px; background: var(--bg); }
 .panel-eyebrow { display: none; }
 .panel-title { font-size: 20px; }
@@ -571,7 +591,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .quick-profile:hover .profile-arrow { color: var(--accent); }
 .quick-profile { min-height: 38px; border-radius: 0; }
 
-.card-open-button, .quick-profile, .settings-tab, .theme-card, .logo-preview, .branding-scratch-note { border-radius: 3px; }
+.card-open-button, .quick-profile, .settings-tab, .logo-preview, .branding-scratch-note { border-radius: 3px; }
 
 .settings-main { grid-template-columns: 200px 1fr; }
 .settings-tabs { padding: 12px 8px; background: var(--bg); }
@@ -581,8 +601,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .settings-content { padding: 18px 22px 28px; }
 .settings-footer { min-height: 56px; }
 .settings-group { padding: 15px; }
-.theme-card.active { box-shadow: inset 0 0 0 1px var(--accent); }
-.theme-strip, .custom-theme-editor, .settings-json, .ui-input { border-radius: 3px; }
+.custom-theme-editor, .settings-json, .ui-input { border-radius: 3px; }
 .primary-button, .secondary-button { min-height: 34px; border-radius: 3px; }
 .text-button, .icon-button, .card-open-button { border-radius: 3px; }
 .voice-callout { border-radius: 4px; background: var(--card); }
@@ -600,7 +619,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 }
 
 @media (forced-colors: active) {
-  .pane.focused, .settings-tab.active, .theme-card.active { outline: 2px solid Highlight; }
+  .pane.focused, .settings-tab.active { outline: 2px solid Highlight; }
   .pane::before, .pane-tab-dot { background: Highlight; }
 }
 
@@ -716,7 +735,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
   width: min(1180px, 94vw);
   height: min(880px, 88vh);
   border-radius: 4px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, .42);
+  box-shadow: var(--shadow-lg);
 }
 .panel-head { min-height: 58px; padding: 10px 14px 9px; }
 .panel-title { font-family: var(--mono); font-size: 16px; font-weight: 600; }
@@ -840,7 +859,7 @@ body.pane-dragging, body.pane-dragging .pane-tab { cursor: grabbing; }
   box-sizing: border-box;
   pointer-events: none;
   border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: var(--drop-target);
 }
 .pane-drop-hint[data-zone="center"] { border-style: dashed; }
 

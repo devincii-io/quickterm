@@ -1,113 +1,131 @@
 import * as api from "./api.js";
 import { icon } from "./icons.js";
+import { panelMenu } from "./panel_settings_kit.js";
+import { make } from "./panel_shared.js";
 import {
-  CUSTOM_THEME, CUSTOM_THEME_DEFAULTS, DEFAULT_THEME, TERMINAL_THEMES,
-  customColors, getTheme,
+  CUSTOM_THEME, CUSTOM_THEME_DEFAULTS, customColors, getTheme, resolveThemeId, themeGroups,
 } from "./themes.js";
-import {
-  THEME_CATALOG_GROUPS, make,
-} from "./panel_shared.js";
-export function renderThemePicker(cfg) {
-    const wrap = make("div", "theme-picker");
-    wrap.append(make("h4", "theme-picker-title", "Color theme"), make("p", "field-hint", "Previews the workbench and every open terminal instantly. Press Save to keep it."));
-    const featuredGrid = make("div", "theme-grid theme-grid-featured");
-    const catalog = make("details", "theme-catalog");
-    const catalogBody = make("div", "theme-catalog-body");
-    const current = () => cfg.theme || DEFAULT_THEME;
-    const entries = [
-      ...Object.entries(TERMINAL_THEMES),
-      [CUSTOM_THEME, getTheme(CUSTOM_THEME, cfg.custom_theme)],
-    ];
-    const selectedThemeId = entries.some(([id]) => id === current()) ? current() : DEFAULT_THEME;
-    const featuredIds = ["graphite", "github-dark", "one-dark", "rose-pine-dawn"];
-    if (!featuredIds.includes(selectedThemeId)) featuredIds[featuredIds.length - 1] = selectedThemeId;
-    const featured = new Set(featuredIds);
-    const catalogCount = entries.filter(([id]) => !featured.has(id)).length;
-    const catalogTargets = new Map();
-    const availableIds = new Set(entries.map(([id]) => id));
-    for (const [label, ids] of THEME_CATALOG_GROUPS) {
-      const visibleIds = ids.filter((id) => availableIds.has(id) && !featured.has(id));
-      if (!visibleIds.length) continue;
-      const section = make("section", "theme-category");
-      const grid = make("div", "theme-grid theme-grid-catalog");
-      section.append(make("h5", "theme-category-title", label), grid);
-      catalogBody.append(section);
-      for (const id of visibleIds) catalogTargets.set(id, grid);
-    }
-    const ungroupedIds = entries
-      .map(([id]) => id)
-      .filter((id) => !featured.has(id) && !catalogTargets.has(id));
-    if (ungroupedIds.length) {
-      const section = make("section", "theme-category");
-      const grid = make("div", "theme-grid theme-grid-catalog");
-      section.append(make("h5", "theme-category-title", "Other"), grid);
-      catalogBody.append(section);
-      for (const id of ungroupedIds) catalogTargets.set(id, grid);
-    }
-    catalog.append(make("summary", "theme-catalog-trigger", `Theme catalog · ${catalogCount} more`), catalogBody);
-    const cards = new Map();
-    const editor = make("div", "custom-theme-editor");
-    const renderStrip = (card, def) => {
-      const strip = card.querySelector(".theme-strip");
-      strip.style.background = def.xterm.background;
-      strip.querySelector(".theme-strip-prompt").style.color = def.xterm.foreground;
-      const dots = strip.querySelectorAll(".theme-strip-dot");
-      ["red", "yellow", "green", "cyan", "blue", "magenta"].forEach((key, index) => {
-        dots[index].style.background = def.xterm[key];
-      });
-    };
-    for (const [id, def] of entries) {
-      const card = make("button", "theme-card");
-      card.type = "button";
-      card.dataset.theme = id;
-      card.classList.toggle("active", selectedThemeId === id);
-      card.setAttribute("aria-pressed", String(selectedThemeId === id));
-      const strip = make("span", "theme-strip");
-      strip.setAttribute("aria-hidden", "true");
-      const prompt = make("i", "theme-strip-prompt", "~ $");
-      strip.append(prompt);
-      for (const key of ["red", "yellow", "green", "cyan", "blue", "magenta"]) {
-        const dot = make("i", "theme-strip-dot");
-        strip.append(dot);
-      }
-      card.append(strip, make("strong", "", def.label), make("small", "", def.note));
-      renderStrip(card, def);
-      card.addEventListener("click", () => {
-        cfg.theme = id;
-        for (const other of cards.values()) {
-          const active = other === card;
-          other.classList.toggle("active", active);
-          other.setAttribute("aria-pressed", String(active));
-        }
-        editor.hidden = id !== CUSTOM_THEME;
-        this._themePreviewDirty = true;
-        this.app.previewTheme(id, cfg.custom_theme);
-      });
-      (featured.has(id) ? featuredGrid : catalogTargets.get(id) || catalogBody).append(card);
-      cards.set(id, card);
-    }
-    cfg.custom_theme = customColors(cfg.custom_theme || {});
-    for (const [key, fallback] of Object.entries(CUSTOM_THEME_DEFAULTS)) {
-      const label = make("label", "custom-color-field");
-      const input = make("input");
-      input.type = "color";
-      input.value = cfg.custom_theme[key] || fallback;
-      label.append(input, make("span", "", key.replace(/^./, (char) => char.toUpperCase())));
-      input.addEventListener("input", () => {
-        cfg.custom_theme[key] = input.value.toUpperCase();
-        renderStrip(cards.get(CUSTOM_THEME), getTheme(CUSTOM_THEME, cfg.custom_theme));
-        if (cfg.theme === CUSTOM_THEME) {
-          this._themePreviewDirty = true;
-          this.app.previewTheme(CUSTOM_THEME, cfg.custom_theme);
-        }
-      });
-      editor.append(label);
-    }
-    editor.hidden = selectedThemeId !== CUSTOM_THEME;
-    wrap.append(featuredGrid, catalog, editor);
-    return wrap;
-  }
 
+// What a swatch shows: the theme's accent, then the eight normal ANSI
+// colours, all on the terminal background, so a row reads like a prompt.
+const SWATCH_KEYS = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+
+function paintSwatch(swatch, def) {
+  swatch.textContent = "";
+  swatch.style.setProperty("--swatch-bg", def.xterm.background);
+  const accent = make("i", "theme-swatch-accent");
+  accent.style.setProperty("--swatch", def.accent);
+  swatch.append(accent);
+  for (const key of SWATCH_KEYS) {
+    const dot = make("i");
+    dot.style.setProperty("--swatch", def.xterm[key]);
+    swatch.append(dot);
+  }
+}
+
+function themeSwatch(def) {
+  const swatch = make("span", "theme-swatch");
+  swatch.setAttribute("aria-hidden", "true");
+  paintSwatch(swatch, def);
+  return swatch;
+}
+
+// The theme chooser is a menu.js menu like every other chooser (AGENTS.md):
+// Dark, Light and Custom sections, a swatch on every row, the current theme
+// checked. Choosing previews at once; Save keeps it.
+export function renderThemePicker(cfg) {
+  const wrap = make("div", "theme-picker");
+  wrap.append(
+    make("h4", "theme-picker-title", "Color theme"),
+    make("p", "field-hint", "Previews the workbench and every open terminal instantly. Press Save to keep it."),
+  );
+  cfg.custom_theme = customColors(cfg.custom_theme || {});
+  // A saved id from an older release resolves through THEME_ALIASES; the
+  // config keeps that id until the user picks another theme.
+  const selectedId = () => (cfg.theme === CUSTOM_THEME ? CUSTOM_THEME : resolveThemeId(cfg.theme));
+  const definition = (id) => getTheme(id, cfg.custom_theme);
+
+  const button = make("button", "config-choice theme-choice");
+  button.type = "button";
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-label", "Color theme");
+  const swatch = make("span", "theme-swatch");
+  swatch.setAttribute("aria-hidden", "true");
+  const name = make("span", "config-choice-label");
+  const detail = make("small", "theme-choice-detail");
+  const copy = make("span", "theme-choice-copy");
+  copy.append(name, detail);
+  button.append(swatch, copy, icon("chevron-down", 12));
+  const paint = () => {
+    const def = definition(selectedId());
+    paintSwatch(swatch, def);
+    name.textContent = def.label;
+    detail.textContent = `${def.light ? "Light" : "Dark"} · ${def.note}`;
+  };
+
+  const editor = make("div", "custom-theme-editor");
+  const choose = (id) => {
+    cfg.theme = id;
+    paint();
+    editor.hidden = id !== CUSTOM_THEME;
+    this._themePreviewDirty = true;
+    this.app.previewTheme(id, cfg.custom_theme);
+  };
+
+  button.addEventListener("click", () => {
+    const current = selectedId();
+    const items = [];
+    const swatches = [];
+    for (const [heading, ids] of [...themeGroups(), ["Custom", [CUSTOM_THEME]]]) {
+      items.push({ heading });
+      for (const id of ids) {
+        const def = definition(id);
+        swatches.push([items.length, def]);
+        // The hint slot is where the swatch goes once the menu is drawn.
+        items.push({ label: def.label, detail: def.note, hint: " ", selected: id === current, run: () => choose(id) });
+      }
+    }
+    const menu = panelMenu({
+      anchor: button,
+      label: "Color theme",
+      items,
+      width: 380,
+      onClose: (reason) => {
+        if (reason === "run" || reason === "escape") button.focus();
+      },
+    });
+    if (!menu) return;
+    for (const [index, def] of swatches) {
+      const hint = menu.root.querySelector(`#qt-menu-item-${index} > .qt-menu-hint`);
+      if (!hint) continue;
+      hint.textContent = "";
+      hint.classList.add("theme-swatch-slot");
+      hint.append(themeSwatch(def));
+    }
+  });
+
+  for (const [key, fallback] of Object.entries(CUSTOM_THEME_DEFAULTS)) {
+    const label = make("label", "custom-color-field");
+    const input = make("input");
+    input.type = "color";
+    input.value = cfg.custom_theme[key] || fallback;
+    label.append(input, make("span", "", key.replace(/^./, (char) => char.toUpperCase())));
+    input.addEventListener("input", () => {
+      cfg.custom_theme[key] = input.value.toUpperCase();
+      if (cfg.theme === CUSTOM_THEME) {
+        paint();
+        this._themePreviewDirty = true;
+        this.app.previewTheme(CUSTOM_THEME, cfg.custom_theme);
+      }
+    });
+    editor.append(label);
+  }
+  editor.hidden = selectedId() !== CUSTOM_THEME;
+  paint();
+  wrap.append(button, editor);
+  return wrap;
+}
 
 export function renderLogoPicker({ title, value, hint, onChange }) {
     const row = make("div", "logo-picker");

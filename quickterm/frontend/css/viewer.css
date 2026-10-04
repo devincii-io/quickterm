@@ -1,13 +1,18 @@
-/* QuickTerm file viewer: same tokens, minimal chrome. */
+/* QuickTerm file viewer (viewer.html): a standalone page that never loads
+   themes.js, so it cannot follow the selected theme. It carries the house
+   theme's pre-boot tokens instead (app.css :root, "graphite"), and below this
+   block it names no colour of its own. */
 
 :root {
-  --bg: #16181A;
-  --surface: #1E2124;
-  --text: #D6D3C9;
-  --accent: #E0A030;
-  --muted: #6E8898;
-  --danger: #B4544B;
-  --hairline: #2A2E33;
+  color-scheme: dark;
+  --bg: #15140f;
+  --surface: #1b1a15;
+  --text: #e9e3d5;
+  --accent: #c8973f;
+  --muted: #98948a;
+  --danger: #d76c53;
+  --hairline: #36332c;
+  --scrollbar-thumb: #444139;
   --font: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
 }
 
@@ -25,8 +30,8 @@ body {
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #2E3338; border: 2px solid var(--bg); border-radius: 2px; }
-::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border: 2px solid var(--bg); border-radius: 2px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 
 header {
   flex: none;

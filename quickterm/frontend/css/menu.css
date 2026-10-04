@@ -14,7 +14,7 @@
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--surface);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  box-shadow: var(--shadow-md);
   color: var(--text);
   font: 11px var(--mono);
   outline: 0;
