@@ -35,11 +35,14 @@ test("every text token is 4.5:1 on every panel surface, in every theme", () => {
   for (const id of Object.keys(TERMINAL_THEMES)) {
     const tokens = palette(id);
     for (const fg of ["--text", "--text-soft", "--muted", "--sage", "--danger", "--accent-text"]) {
-      for (const bg of ["--bg", "--surface", "--field", "--surface-raised"]) {
+      for (const bg of ["--bg", "--surface", "--field", "--surface-raised", "--surface-soft"]) {
         const measured = ratio(tokens[fg], tokens[bg]);
         if (measured < 4.5) failures.push(`${id} ${fg} on ${bg}: ${measured.toFixed(2)}`);
       }
     }
+    // The active Settings tab and the git chip draw the accent on its own tint.
+    const onTint = ratio(tokens["--accent-text"], tokens["--accent-soft"]);
+    if (onTint < 4.5) failures.push(`${id} --accent-text on --accent-soft: ${onTint.toFixed(2)}`);
   }
   assert.deepEqual(failures, []);
 });
@@ -48,7 +51,7 @@ test("the pre-boot :root colours are what graphite computes", () => {
   const tokens = palette("graphite");
   const css = readFileSync(new URL("../../quickterm/frontend/css/app.css", import.meta.url), "utf8");
   const root = css.slice(css.indexOf(":root {"), css.indexOf("}", css.indexOf(":root {")));
-  for (const key of ["--bg", "--surface", "--text", "--accent", "--danger"]) {
+  for (const key of ["--bg", "--surface", "--text", "--muted", "--accent", "--danger"]) {
     const match = root.match(new RegExp(`${key}: (#[0-9a-f]{6});`, "i"));
     assert.ok(match, `${key} is a literal in :root`);
     assert.equal(match[1].toLowerCase(), tokens[key].toLowerCase(), key);

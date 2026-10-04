@@ -27,7 +27,8 @@ export const CUSTOM_THEME_DEFAULTS = {
   surface: "#24221b",
   text: "#e9e3d5",
   // Ink at 62% over the background. 55% reads as the right weight but measures
-  // 4.38:1 on --surface, so readableColor() would drag it back up anyway.
+  // 4.38:1 on --surface, so readableColor() would drag it back up anyway. On
+  // --surface-soft even 62% is short (4.19:1), and the token lands at #a09c92.
   muted: "#98948a",
   accent: "#c8973f",
   danger: "#d76c53",
@@ -402,11 +403,13 @@ export function applyChromeTheme(id, custom = {}) {
   const lift = light ? "#000000" : "#FFFFFF";
   const field = mix(background, surface, 0.4);
   const raised = mix(surface, lift, 0.04);
+  const soft = mix(surface, lift, 0.075);
   const contrastEndpoint = light ? "#000000" : "#FFFFFF";
-  // Every text token is held to 4.5:1 on each surface it sits on, the raised
-  // one included: secondary buttons (Kill in a confirmation) and selected
-  // config rows are drawn on it.
-  const surfaces = [background, surface, field, raised];
+  // Every text token is held to 4.5:1 on each surface it sits on. That
+  // includes the raised one (secondary buttons such as Kill in a confirmation,
+  // selected config rows) and the soft one (hovered buttons, tabs and sidebar
+  // actions, the selected palette row, the active menu item).
+  const surfaces = [background, surface, field, raised, soft];
   const text = readableColor(rawText, contrastEndpoint, surfaces);
   const textSoft = readableColor(mix(text, background, 0.16), text, surfaces);
   const muted = readableColor(
@@ -421,7 +424,10 @@ export function applyChromeTheme(id, custom = {}) {
   const danger = readableColor(rawDanger, contrastEndpoint, surfaces);
   // The accent as a text colour (kbd chips, active tabs, links). The raw
   // accent stays for fills, borders and dots, which owe no text contrast.
-  const accentText = readableColor(accent, text, surfaces);
+  // It also sits on its own tint: the active Settings tab, profile marks and
+  // the file browser's git chip.
+  const accentSoft = mix(background, accent, 0.17);
+  const accentText = readableColor(accent, text, [...surfaces, accentSoft]);
   // .text-button's colour (Cancel, Open). A fixed green mix read 2.8:1 on
   // the light themes.
   const sage = readableColor(mix(muted, "#A7D5B3", 0.36), text, surfaces);
@@ -429,7 +435,7 @@ export function applyChromeTheme(id, custom = {}) {
     "--bg": background,
     "--surface": surface,
     "--surface-raised": raised,
-    "--surface-soft": mix(surface, lift, 0.075),
+    "--surface-soft": soft,
     // semantic surfaces that used to be hardcoded graphite hexes
     "--well": background,
     "--card": mix(background, surface, 0.62),
@@ -438,7 +444,7 @@ export function applyChromeTheme(id, custom = {}) {
     "--text-soft": textSoft,
     "--muted": muted,
     "--accent": accent,
-    "--accent-soft": mix(background, accent, 0.17),
+    "--accent-soft": accentSoft,
     "--accent-hover": mix(accent, lift, 0.16),
     "--accent-press": mix(accent, light ? "#FFFFFF" : "#000000", 0.12),
     "--accent-border": mix(background, accent, 0.5),

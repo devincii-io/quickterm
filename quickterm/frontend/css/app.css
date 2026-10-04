@@ -13,7 +13,7 @@
   --surface: #24221b;
   --text: #e9e3d5;
   --accent: #c8973f;
-  --danger: #db7b64;   /* graphite #d76c53, lifted to 4.5:1 on --surface-raised */
+  --danger: #dd826d;   /* graphite #d76c53, lifted to 4.5:1 on --surface-soft */
 
   --surface-raised: color-mix(in srgb, #ffffff 4%, var(--surface));
   --surface-soft: color-mix(in srgb, #ffffff 7.5%, var(--surface));
@@ -21,13 +21,16 @@
   --card: color-mix(in srgb, var(--surface) 62%, var(--bg));
   --field: color-mix(in srgb, var(--surface) 40%, var(--bg));
 
-  /* The ink ladder. --muted is ink at 62%, not the 55% the sibling palette
-     uses for the same role: a percentage of ink on paper is not the mirror of
-     a percentage of paper on ink, and 55% measures 4.38:1 on --surface here,
-     under the 4.5:1 floor for body text. --fg-dim and --fg-faint keep the
-     softer steps available for decoration, which owes no contrast floor. */
+  /* The ink ladder. Graphite's --muted is ink at 62%, not the 55% the sibling
+     palette uses for the same role: a percentage of ink on paper is not the
+     mirror of a percentage of paper on ink, and 55% measures 4.38:1 on
+     --surface here, under the 4.5:1 floor for body text. The selected palette
+     row and hovered controls sit on --surface-soft, where 62% still measures
+     4.19:1, so applyChromeTheme() lifts it a tenth of the way to ink: #a09c92.
+     --fg-dim and --fg-faint keep the softer steps available for decoration,
+     which owes no contrast floor. */
   --text-soft: color-mix(in srgb, var(--bg) 16%, var(--text));
-  --muted: color-mix(in srgb, var(--text) 62%, var(--bg));
+  --muted: #a09c92;
   --fg-dim: color-mix(in srgb, var(--text) 55%, transparent);
   --fg-faint: color-mix(in srgb, var(--text) 32%, transparent);
 
