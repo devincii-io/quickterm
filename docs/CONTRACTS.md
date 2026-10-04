@@ -1597,6 +1597,14 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `app.killSessionById(id)`, so its in-memory ownership drops the id before
   the next autosave; else the shell calls `api.killSession(id)` and
   `removeSessionsFromSavedWorkspaces`. A 500 is thrown back to the popover.
+  `removeSessionsFromSavedWorkspaces` removes the whole leaf
+  (`layout_sessions.withoutSessionLeaf`, collapsing its split), the same tree
+  a closed pane leaves in an open view; a bare `{profile}` leaf would be
+  restored as a template and spawn a new process. A file that cannot be
+  edited is retried once and then named in `#app-error`. Moving a terminal
+  out of a closed workspace still only strips the id
+  (`removeSessionFromLayout`). Deleting a workspace releases its on-screen
+  terminals in one save and aborts before the DELETE when that save fails.
   The pure decisions are `rowAction` and `killRoute` in `shell_routing.js`.
 - Kill all (Dashboard) is a shell member, `killAllSessions()` in
   `shell_routing.js`, whichever view is active. Only the backend's

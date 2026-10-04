@@ -19,7 +19,7 @@ const MODULES = {
   "fonts.js": ["DEFAULT_FONT", "clampFont", "createFontSize"],
   "here.js": ["pathKey", "samePath", "insidePath", "baseName", "createHere"],
   "launch_loop.js": ["createLaunchLoop", "createLaunchTarget"],
-  "layout_sessions.js": ["sessionIdsInLayout", "removeSessionFromLayout", "layoutWith"],
+  "layout_sessions.js": ["sessionIdsInLayout", "removeSessionFromLayout", "withoutSessionLeaf", "layoutWith"],
   "lifecycle.js": ["createLifecycle"],
   "pane_commands.js": ["createPaneCommands"],
   "scratch.js": ["discardScratchWarning", "createScratch"],
@@ -137,6 +137,23 @@ test("saved layouts are read and edited without a layout manager", async () => {
   assert.equal(removeSessionFromLayout(tree, "b"), true);
   assert.equal(removeSessionFromLayout(tree, "b"), false);
   assert.deepEqual([...sessionIdsInLayout(tree)], ["a"]);
+
+  const { withoutSessionLeaf } = await load("layout_sessions.js");
+  const three = {
+    type: "split", dir: "h", ratio: 0.3, children: [
+      { type: "pane", session_id: "a" },
+      { type: "split", dir: "v", ratio: 0.6, children: [{ type: "pane", session_id: "b" }, { type: "pane", session_id: "c" }] },
+    ],
+  };
+  const before = structuredClone(three);
+  assert.deepEqual(withoutSessionLeaf(three, "b"), {
+    changed: true,
+    layout: { type: "split", dir: "h", ratio: 0.3, children: [{ type: "pane", session_id: "a" }, { type: "pane", session_id: "c" }] },
+  });
+  assert.deepEqual(three, before, "the input tree is not modified");
+  assert.deepEqual(withoutSessionLeaf(three, "zz"), { changed: false, layout: three });
+  assert.deepEqual(withoutSessionLeaf({ type: "pane", session_id: "a" }, "a"), { changed: true, layout: null });
+  assert.deepEqual(withoutSessionLeaf(null, "a"), { changed: false, layout: null });
 
   const leaf = { type: "pane", session_id: "c" };
   assert.deepEqual(layoutWith(null, null), { type: "pane" });
@@ -462,6 +479,83 @@ test("deleting a workspace open in a view spares the terminals on screen, whatev
   assert.equal(await actions.deleteWorkspace("alpha"), true);
   assert.deepEqual(order, [["close", "alpha"], ["delete", "alpha", ["background"]]]);
   assert.deepEqual([...state.workspaceNames], []);
+});
+
+test("a failed release of the on-screen terminals stops the workspace delete", async () => {
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const errors = [];
+  let deleted = false;
+  const actions = createWorkspaceActions({
+    api: { deleteWorkspace: async () => { deleted = true; } },
+    workspace: {
+      details: async () => ({ layout: { type: "pane", session_id: "a" }, session_ids: ["a"], logo: null }),
+      save: async () => { throw Object.assign(new Error("PUT -> 500"), { status: 500 }); },
+    },
+    state,
+    layout: null,
+    listWindowsSafe: async () => [],
+    closeWorkspaceView: async () => true,
+    viewSessionIds: () => ["a"],
+    showError: (text) => errors.push(text),
+    buildLauncher() {},
+    refreshStatusSoon() {},
+    scheduleWorkspaceSave() {},
+  });
+  assert.equal(await actions.deleteWorkspace("alpha"), false);
+  assert.equal(deleted, false);
+  assert.match(errors[0], /Could not release the terminals that were open in "alpha"; nothing was deleted/);
+});
+
+test("a kill takes the leaf out of a closed workspace, so reopening spawns nothing", async () => {
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { sessionIdsInLayout } = await load("layout_sessions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha", "beta"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const files = {
+    alpha: {
+      layout: { type: "split", dir: "h", ratio: 0.5, children: [
+        { type: "pane", profile: "cmd", session_id: "dead" },
+        { type: "pane", profile: "Codex", session_id: "live" },
+      ] },
+      session_ids: ["dead", "live"], logo: null,
+    },
+    beta: { layout: { type: "pane", profile: "cmd", session_id: "dead" }, session_ids: ["dead"], logo: null },
+  };
+  const errors = [];
+  let failBeta = 0;
+  const actions = createWorkspaceActions({
+    api: { listWorkspaces: async () => ["alpha", "beta"] },
+    workspace: {
+      details: async (name) => structuredClone(files[name]),
+      save: async (name, layout, logo, ids) => {
+        if (name === "beta" && failBeta-- > 0) throw new Error("PUT -> 500");
+        files[name] = { layout, logo, session_ids: ids };
+      },
+    },
+    state,
+    layout: null,
+    showError: (text) => errors.push(text),
+  });
+
+  failBeta = 1; // one transient failure is retried
+  assert.equal(await actions.removeSessionsFromSavedWorkspaces(new Set(["dead"])), true);
+  assert.deepEqual(files.alpha.layout, { type: "pane", profile: "Codex", session_id: "live" });
+  assert.deepEqual(files.alpha.session_ids, ["live"]);
+  // No leaf without a session id is left behind to be spawned as a template.
+  assert.equal(files.beta.layout, null);
+  assert.deepEqual([...sessionIdsInLayout(files.alpha.layout)], ["live"]);
+  assert.deepEqual(errors, []);
+
+  files.beta = { layout: { type: "pane", session_id: "x" }, session_ids: ["x"], logo: null };
+  failBeta = 2; // the retry fails too: said out loud, never swallowed
+  assert.equal(await actions.removeSessionsFromSavedWorkspaces(new Set(["x"])), false);
+  assert.match(errors[0], /"beta" could not be updated/);
 });
 
 test("a workspace saved with a folder and no layout opens as itself, in its folder", async () => {

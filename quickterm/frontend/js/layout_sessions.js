@@ -23,6 +23,33 @@ export function removeSessionFromLayout(node, sessionId) {
   return true;
 }
 
+// The tree without the leaf that shows `sessionId`, with a split left holding
+// one child collapsed into that child: the tree LayoutManager.closePane
+// leaves behind when a view kills a terminal. Stripping only the session id
+// (removeSessionFromLayout) turns the leaf into a template, and the next
+// restore spawns a fresh process there, so a killed agent came back as a new
+// conversation. Returns {layout, changed}; the input is not modified, and a
+// tree with no leaf left is null.
+export function withoutSessionLeaf(node, sessionId) {
+  if (!node) return { layout: node ?? null, changed: false };
+  if (node.type !== "split") {
+    return node.session_id === sessionId
+      ? { layout: null, changed: true }
+      : { layout: node, changed: false };
+  }
+  let changed = false;
+  const children = [];
+  for (const child of node.children || []) {
+    const result = withoutSessionLeaf(child, sessionId);
+    changed = changed || result.changed;
+    if (result.layout) children.push(result.layout);
+  }
+  if (!changed) return { layout: node, changed: false };
+  if (!children.length) return { layout: null, changed: true };
+  if (children.length === 1) return { layout: children[0], changed: true };
+  return { layout: { ...node, children }, changed: true };
+}
+
 // The layout JSON is the same split tree layout.js serializes, so a leaf
 // can be docked beside a saved layout without loading it into a manager.
 export function layoutWith(saved, extra) {
