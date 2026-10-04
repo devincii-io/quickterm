@@ -45,7 +45,7 @@ const noop = () => {};
 // whole window, so a view must never answer them for itself.
 export const SHELL_MEMBERS = Object.freeze([
   "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
-  "liveTerminals", "activateTerminal", "killTerminal", "detachTerminal", "moveTerminalHere",
+  "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal", "moveTerminalHere",
   "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals", "setupTour",
   "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme",
   "deleteWorkspace", "revealSearchResult",
@@ -351,12 +351,6 @@ export async function bootShell() {
     moveSessionHere: viaView("moveSessionHere"),
     createWorkspaceHere: async () => false,
     saveWorkspace: async () => "Open a workspace view first.",
-    killAllSessions: async () => {
-      const result = await api.killAllSessions();
-      await actions.removeSessionsFromSavedWorkspaces(new Set(result?.killed_ids || []));
-      refresh();
-      return { killed: result?.killed || 0, failed: (result?.failed_ids || []).length };
-    },
   });
   const chromeApp = shellApp({ shell, facade, activeApp });
   palette = new Palette(chromeApp);

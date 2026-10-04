@@ -186,6 +186,18 @@ export function agentRows(profile, app) {
   ];
 }
 
+// Which folder's agent conversations the resume rows list. A named workspace
+// is asked for by name, so the backend resolves its folder exactly as a spawn
+// does. A scratch view (or no view at all) has no saved folder worth naming,
+// so it is asked for by the folder a resume would start in there: the view's
+// own answer, else the scratch root. null when there is no folder at all.
+export function agentSessionTarget(app) {
+  const workspace = app?.currentWorkspace?.() || null;
+  if (workspace && !isScratchWorkspace(workspace)) return { workspace };
+  const cwd = app?.agentSessionFolder?.() || app?.scratchRoot?.() || null;
+  return cwd ? { cwd } : null;
+}
+
 // "resume Claude session: <title>" rows from GET /api/agent-sessions.
 export function agentSessionRows(profile, sessions, app) {
   const type = agentTypeOf(profile);

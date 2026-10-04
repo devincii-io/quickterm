@@ -395,7 +395,7 @@ test("the shell answers window-wide members itself and everything else from the 
   const { shellApp, SHELL_MEMBERS } = await load("shell.js");
   for (const name of [
     "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
-    "liveTerminals", "activateTerminal", "killTerminal", "detachTerminal",
+    "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal",
     "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals",
   ]) assert.ok(SHELL_MEMBERS.includes(name), name);
   const shell = { openWorkspace: () => "shell", killTerminal: () => "shell" };

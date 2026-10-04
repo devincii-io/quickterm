@@ -42,15 +42,33 @@ def _function(source: str, start: str, end: str) -> str:
 
 
 def test_kill_all_closes_only_backend_verified_sessions():
-    source = PANE_COMMANDS_JS.read_text(encoding="utf-8")
-    start = source.index("    killAllSessions: async () =>")
-    end = source.index("\n    focusedPaneName:", start)
-    implementation = source[start:end]
+    # Kill-all is the shell's, whichever view is active, and only the
+    # verified ids travel to the sidebar, every view and the saved files.
+    routing = SHELL_ROUTING_JS.read_text(encoding="utf-8")
+    kill_all = _function(routing, "  async function killAllSessions() {", "\n  async function detachTerminal")
+    assert "new Set(result?.killed_ids || [])" in kill_all
+    assert "for (const id of killed) forgetSession(id);" in kill_all
+    assert "(views.views?.() || []).map(" in kill_all
+    assert "?.dropKilledSessions?.(killed)" in kill_all
+    assert "await removeSessionsFromSavedWorkspaces(killed);" in kill_all
+    assert "result?.failed_ids || []" in kill_all
+    assert "killAllSessions," in routing[routing.index("  return { activateTerminal"):]
 
-    assert "new Set(result?.killed_ids || [])" in implementation
-    assert "!killedIds.has(pane.session.id)" in implementation
-    assert "result?.failed_ids || []" in implementation
-    assert "workspaceSessionIds.clear()" not in implementation
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    members = shell[shell.index("export const SHELL_MEMBERS"):shell.index("]);", shell.index("export const SHELL_MEMBERS"))]
+    assert '"killAllSessions"' in members
+    assert "api.killAllSessions" not in shell
+
+    # Each view's share: close the panes on verified ids and forget them.
+    source = PANE_COMMANDS_JS.read_text(encoding="utf-8")
+    drop = _function(source, "    dropKilledSessions: (ids) =>", "\n    focusedPaneName:")
+    assert "!killedIds.has(pane.session.id)" in drop
+    assert drop.index("for (const sessionId of killedIds) forgetSession(sessionId);") < drop.index(
+        "layout.closePane(pane);"
+    )
+    assert "scheduleWorkspaceSave();" in drop
+    assert "workspaceSessionIds.clear()" not in drop
+    assert "api.killAllSessions" not in source
 
 
 def test_detach_retains_process_and_never_calls_kill():
@@ -64,7 +82,7 @@ def test_detach_retains_process_and_never_calls_kill():
 
     # The sidebar's Detach, routed into the view that shows the terminal, is
     # the same promise: retain first, close the pane, never a kill.
-    detach = _function(source, "    detachSessionById: async (id", "\n    killAllSessions:")
+    detach = _function(source, "    detachSessionById: async (id", "\n    dropKilledSessions:")
     assert detach.index("await api.retainSession(id)") < detach.index("layout.closePane(pane)")
     assert "if (!sessionAlreadyGone(error)) throw error;" in detach
     assert "killSession" not in detach and "cleanupSessions" not in detach
@@ -468,7 +486,7 @@ def test_the_sidebar_kill_routes_through_the_owning_view():
     commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
     shell = SHELL_JS.read_text(encoding="utf-8")
 
-    kill = _function(routing, "  async function killTerminal(session) {", "\n  async function detachTerminal")
+    kill = _function(routing, "  async function killTerminal(session) {", "\n  async function killAllSessions")
     assert "const route = killRoute(session, context());" in kill
     assert kill.index("await app.killSessionById(session.id);") < kill.index("await api.killSession(session.id);")
     assert "if (error?.status !== 404) throw error;" in kill

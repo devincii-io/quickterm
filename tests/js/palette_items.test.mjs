@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  agentRows, agentSessionRows, configRows, fuzzyScore, killRows, parsePrefix, rowGroup, settingRows,
+  agentRows, agentSessionRows, agentSessionTarget, configRows, fuzzyScore, killRows, parsePrefix, rowGroup, settingRows,
   terminalRows, workspaceRows,
 } from "../../quickterm/frontend/js/palette_items.js";
 
@@ -201,6 +201,25 @@ test("resume rows name the agent and the conversation", () => {
   rows[0].run();
   assert.deepEqual(calls, [["resumeAgentSession", claude, SESSION]]);
   assert.deepEqual(agentSessionRows({ name: "x", terminal_type: "bash" }, [{ id: SESSION }], app), []);
+});
+
+test("resume rows list a named workspace by name and a scratch view by its folder", () => {
+  // A named workspace: the backend resolves the folder by name.
+  assert.deepEqual(agentSessionTarget({
+    currentWorkspace: () => "api", agentSessionFolder: () => null, scratchRoot: () => "C:\\scratch",
+  }), { workspace: "api" });
+  // A scratch view, adopted or not yet: the folder its resumes start in.
+  for (const name of ["scratch-view-0123456789ab", "scratch", null]) {
+    assert.deepEqual(agentSessionTarget({
+      currentWorkspace: () => name, agentSessionFolder: () => "C:\\proj", scratchRoot: () => "C:\\scratch",
+    }), { cwd: "C:\\proj" }, String(name));
+  }
+  // No view open (the shell's facade): the scratch root a new view starts in.
+  assert.deepEqual(agentSessionTarget({ currentWorkspace: () => null, scratchRoot: () => "C:\\scratch" }),
+    { cwd: "C:\\scratch" });
+  // No folder at all: nothing to ask for.
+  assert.equal(agentSessionTarget({ currentWorkspace: () => null, scratchRoot: () => null }), null);
+  assert.equal(agentSessionTarget(null), null);
 });
 
 test("kill rows list only running terminals and carry the entry, not a kill", () => {

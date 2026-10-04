@@ -135,6 +135,30 @@ export function createTerminalRouting({
     return true;
   }
 
+  // Kill-all belongs to the window, not to the view that happens to be
+  // active. Only the ids the backend verified as stopped go anywhere: the
+  // sidebar forgets their rows at once, every view of this window closes its
+  // panes on them and drops them from its ownership (so no autosave writes
+  // them back), and the saved workspaces no view shows are edited on disk.
+  // A terminal that could not be stopped stays everywhere.
+  async function killAllSessions() {
+    const result = await api.killAllSessions();
+    const killed = new Set(result?.killed_ids || []);
+    for (const id of killed) forgetSession(id);
+    if (killed.size) {
+      await Promise.all((views.views?.() || []).map(async (view) => {
+        try {
+          await (await readyApp(view))?.dropKilledSessions?.(killed);
+        } catch (_) {
+          // A view closing meanwhile has nothing left to drop.
+        }
+      }));
+      await removeSessionsFromSavedWorkspaces(killed);
+    }
+    refreshSoon();
+    return { killed: result?.killed || 0, failed: (result?.failed_ids || []).length };
+  }
+
   async function detachTerminal(session) {
     if (!session?.id) return false;
     const { attached = {} } = context();
@@ -166,5 +190,5 @@ export function createTerminalRouting({
     return Boolean(moved);
   }
 
-  return { activateTerminal, killTerminal, detachTerminal, moveTerminalHere };
+  return { activateTerminal, killTerminal, killAllSessions, detachTerminal, moveTerminalHere };
 }

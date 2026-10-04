@@ -113,10 +113,13 @@ export const getTerminalOptions = (fresh = false) =>
 // Settings editor is generated from. Cached for a minute like the terminals.
 export const getAgentCatalog = (fresh = false) =>
   req("GET", `/api/system/agents${fresh ? "?fresh=true" : ""}`);
-// A workspace folder's recent agent conversations, newest first.
-export const listAgentSessions = (type, workspace, limit = 20) => {
+// A folder's recent agent conversations, newest first: a saved workspace's
+// folder by name ({workspace}), or a plain folder ({cwd}), which is how a
+// scratch view asks.
+export const listAgentSessions = (type, { workspace = null, cwd = null } = {}, limit = 20) => {
   const query = new URLSearchParams({ type, limit: String(limit) });
   if (workspace) query.set("workspace", workspace);
+  else if (cwd) query.set("cwd", cwd);
   return req("GET", `/api/agent-sessions?${query}`);
 };
 // Host aliases from ~/.ssh/config, and one alias resolved through `ssh -G`.

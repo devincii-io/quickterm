@@ -97,6 +97,7 @@ async function bootView() {
   // the given folder. Decided here rather than just before the restore, so
   // this view never claims a workspace it is not going to open.
   if (openDir) state.currentWorkspace = null;
+  state.scratchCwd = openDir || null;
 
   const registry = createWindowRegistry({
     api, state, identity, showError,
@@ -217,7 +218,6 @@ async function bootView() {
   const paneCommands = createPaneCommands({
     api, state, layout,
     spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
-    removeSessionsFromSavedWorkspaces: actions.removeSessionsFromSavedWorkspaces,
     scheduleWorkspaceSave, persistCurrentWorkspace, showError,
     refreshStatusSoon: () => refreshStatusSoon(),
   });
@@ -302,7 +302,7 @@ async function bootView() {
   };
   // The agent launches arrive with the 4.0 spawner; until then the view
   // simply does not offer them.
-  for (const name of ["runAgentMode", "resumeAgentSession", "splitAgentView"]) {
+  for (const name of ["runAgentMode", "resumeAgentSession", "agentSessionFolder", "splitAgentView"]) {
     if (typeof spawner[name] === "function") app[name] = spawner[name];
   }
 
