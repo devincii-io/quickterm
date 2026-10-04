@@ -71,7 +71,9 @@ export function workspaceRows(app, names = [], details = new Map()) {
   const open = list(app?.openWorkspaces?.());
   const openNames = new Set(open.map(viewName).filter(Boolean));
   const rows = [];
-  for (const name of list(names)) {
+  // Same order as the sidebar: by name, ignoring case, numbers as numbers.
+  const sorted = [...list(names)].sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true }));
+  for (const name of sorted) {
     if (isScratchWorkspace(name)) continue;
     const saved = details.get(name);
     const folder = saved?.path

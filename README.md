@@ -72,10 +72,14 @@ in the Dashboard and sidebar rather than silently failing the next terminal.
 The sidebar is the whole interface: there is no status bar and no header on
 a lone pane. `Alt+Shift+S` cycles it through full, a 30 px rail of state dots,
 and hidden; hidden leaves a small **+** over the terminal's left edge. The
-sidebar is one list in a fixed order: every saved workspace alphabetically,
-empty ones included, then scratch views, then **Unassigned**, each with its
-terminals sorted by name. State never reorders it; a terminal that needs you
-gets a chip instead. The active workspace has a second line with its folder,
+sidebar is one list in a fixed order: the workspaces that hold a terminal or
+are open, alphabetically, then scratch views, then **Unassigned**, each with
+its terminals sorted by name on a guide line under it. Empty workspaces sit
+behind a **Show N empty workspaces** line. The view button next to search
+shows empty workspaces and finished terminals, drops the grouping for one
+list, or sorts by recent activity instead. State never reorders the default
+list; a terminal that needs you gets a chip instead. The search button opens
+the palette on `@`, the workspaces and terminals. The active workspace has a second line with its folder,
 the save dot and two buttons that open the focused terminal's folder in
 Explorer or VS Code (`Alt+Shift+E` / `Alt+Shift+C`). A named workspace
 autosaves its exact split arrangement and live session IDs for reattachment

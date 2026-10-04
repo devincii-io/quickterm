@@ -161,7 +161,7 @@ export function sessionTooltip(session, groupName) {
 }
 
 export const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread"];
-export const KIND_ORDER = { workspace: 0, scratch: 1, unassigned: 2 };
+export const KIND_ORDER = { flat: 0, workspace: 0, scratch: 1, unassigned: 2 };
 
 export function lookup(map, id) {
   if (!map) return undefined;
@@ -185,7 +185,12 @@ export function byText(a, b) {
 // view that has a pane on the session, then an in-memory claim not yet
 // autosaved, then the backend's `workspace` field (mirrored from every saved
 // workspace's session_ids on each workspace PUT).
-export function sidebarGroups(sessions = [], { workspaces = [], views = [], attached = {}, owned = {} } = {}) {
+//
+// `view` (the sidebar's view menu) may hide finished terminals, sort by
+// recent activity instead, or drop the grouping for one flat list. Hiding
+// empty workspaces is visibleGroups()'s job, so this list stays complete.
+export function sidebarGroups(sessions = [], { workspaces = [], views = [], attached = {}, owned = {}, view } = {}) {
+  const options = { ...SIDEBAR_VIEW_DEFAULTS, ...(view || {}) };
   const viewOf = new Map();
   for (const view of views || []) if (view?.workspace) viewOf.set(view.workspace, view);
   const saved = new Map();
@@ -222,24 +227,101 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
 
   for (const name of saved.keys()) if (!isScratchWorkspace(name)) ensure(name);
   for (const name of viewOf.keys()) ensure(name);
+  const flat = options.group === "none";
   for (const session of sessions || []) {
     if (!isListedSession(session)) continue;
+    // A finished terminal that still asks for you stays: hiding it would hide
+    // the question.
+    if (!options.finished && session.alive === false && !session.attention) continue;
     const attachedIn = lookup(attached, session.id) || null;
     const owner = attachedIn || lookup(owned, session.id) || session.workspace || null;
-    const group = ensure(owner);
+    const ownerGroup = ensure(owner);
+    const group = flat ? ensureFlat(groups) : ownerGroup;
     const state = sessionState(session, Boolean(attachedIn));
-    group.sessions.push({ session, state, attachedIn, finished: session.alive === false });
+    group.sessions.push({ session, state, attachedIn, finished: session.alive === false, owner: ownerGroup.label });
     if (COUNTED_STATES.includes(state.key)) group.counts[state.key] += 1;
   }
 
   const rowName = (entry) => entry.session.name || entry.session.id || "";
+  const byName = (a, b) => rowName(a).localeCompare(rowName(b), undefined, { numeric: true })
+    || String(a.session.id).localeCompare(String(b.session.id), undefined, { numeric: true });
+  const recent = options.sort === "activity";
   for (const group of groups.values()) {
-    group.sessions.sort((a, b) => rowName(a).localeCompare(rowName(b), undefined, { numeric: true })
-      || String(a.session.id).localeCompare(String(b.session.id), undefined, { numeric: true }));
+    group.sessions.sort(recent ? (a, b) => idleOf(a.session) - idleOf(b.session) || byName(a, b) : byName);
   }
-  return [...groups.values()].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+  const ordered = [...groups.values()].filter((group) => !flat || group.kind === "flat");
+  return ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+    || (recent ? groupIdle(a) - groupIdle(b) : 0)
     || byText(a.label, b.label)
     || byText(a.key, b.key));
+}
+
+// Seconds since a terminal last did anything. Busy and ringing terminals are
+// happening now; a finished one sorts after every live one.
+function idleOf(session) {
+  if (session?.attention || session?.busy === true) return 0;
+  if (session?.alive === false) return Number.MAX_SAFE_INTEGER;
+  const seconds = Number(session?.activity?.idle_seconds);
+  return Number.isFinite(seconds) ? seconds : Number.MAX_SAFE_INTEGER - 1;
+}
+
+function groupIdle(group) {
+  return group.sessions.length ? idleOf(group.sessions[0].session) : Number.MAX_SAFE_INTEGER;
+}
+
+function ensureFlat(groups) {
+  let group = groups.get("flat");
+  if (!group) {
+    group = {
+      key: "flat", name: null, label: "Terminals", kind: "flat", open: false, active: false,
+      color: null, path: null, pathExists: null, sessions: [],
+      counts: { attention: 0, open: 0, busy: 0, unread: 0, finished: 0 },
+    };
+    groups.set("flat", group);
+  }
+  return group;
+}
+
+// What the sidebar draws. A workspace with no terminal is one more row to scan
+// past on every glance, so unless the view menu asks for empty ones it shows
+// only workspaces that hold a terminal or are open in this window. `hidden`
+// counts the rest for the "show them" line under the list.
+export function visibleGroups(groups = [], view) {
+  const options = { ...SIDEBAR_VIEW_DEFAULTS, ...(view || {}) };
+  if (options.empty) return { groups, hidden: 0 };
+  const shown = groups.filter((group) => group.sessions.length > 0 || group.open || group.active);
+  return { groups: shown, hidden: groups.length - shown.length };
+}
+
+// The sidebar's view menu, per window like its mode and width.
+export const SIDEBAR_VIEW_KEY = "quickterm.sidebarView";
+export const SIDEBAR_VIEW_DEFAULTS = Object.freeze({ empty: false, finished: true, group: "workspace", sort: "name" });
+
+export function normalizeView(value) {
+  const view = value && typeof value === "object" ? value : {};
+  return {
+    empty: view.empty === true,
+    finished: view.finished !== false,
+    group: view.group === "none" ? "none" : "workspace",
+    sort: view.sort === "activity" ? "activity" : "name",
+  };
+}
+
+export function isDefaultView(view) {
+  const normal = normalizeView(view);
+  return Object.entries(SIDEBAR_VIEW_DEFAULTS).every(([key, value]) => normal[key] === value);
+}
+
+export function loadView() {
+  try {
+    return normalizeView(JSON.parse(localStorage.getItem(SIDEBAR_VIEW_KEY) || "{}"));
+  } catch {
+    return normalizeView({});
+  }
+}
+
+export function saveView(view) {
+  try { localStorage.setItem(SIDEBAR_VIEW_KEY, JSON.stringify(normalizeView(view))); } catch { /* private mode */ }
 }
 
 // The group's one-line summary. A collapsed group has to keep saying what is

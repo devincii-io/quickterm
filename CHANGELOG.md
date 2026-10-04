@@ -2,6 +2,35 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.1.0
+
+Released 2026-10-04.
+
+### Sidebar
+
+- Workspaces with no terminal that are not open are hidden. A **Show N
+  empty workspaces** line under the list brings them back.
+- A view button next to search sets what the list shows: empty workspaces,
+  finished terminals (a finished one that still asks for you always shows),
+  grouping by workspace or one list of terminals, and sorting by name or by
+  recent activity. **Reset view** goes back to the default. The button is
+  tinted while the view differs from the default, and the choice is kept
+  per window.
+- Workspaces are proper rows: an arrow that folds their terminals (pointing
+  right when there is nothing inside), the view color and the name. A
+  count shows only when there is something to count.
+- Terminals hang under their workspace on a guide line; the active
+  workspace's line is in its accent.
+- The search button opens the palette already narrowed to workspaces and
+  terminals (`@`).
+
+### Palette
+
+- Opening the palette selects the first row. Before, rows that arrive a
+  moment later (saved workspaces, agent sessions) pushed the first row to
+  the bottom and left it selected, so Enter could close a workspace view.
+- Workspaces are listed in the same order as the sidebar, ignoring case.
+
 ## QuickTerm 4.0.0
 
 Released 2026-10-04.

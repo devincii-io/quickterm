@@ -57,7 +57,7 @@ def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
     assert "for (const name of saved.keys()) if (!isScratchWorkspace(name)) ensure(name);" in groups
     # No rank table and no current-first sort.
     assert "rank" not in groups and '"current"' not in launcher
-    assert "const KIND_ORDER = { workspace: 0, scratch: 1, unassigned: 2 };" in launcher
+    assert "const KIND_ORDER = { flat: 0, workspace: 0, scratch: 1, unassigned: 2 };" in launcher
     assert 'localeCompare(rowName(b), undefined, { numeric: true })' in groups
     # Claude and Codex need no profile: the CLI found by the inventory is offered as is.
     assert 'key: prefix === "claude" ? `claude:${mode}` : `${prefix}:${mode}`' in launcher
@@ -226,7 +226,8 @@ def test_the_sidebar_has_menus_not_native_selects():
     assert ".launcher.sidebar select" not in sidebar_css
     # The rail rules survive: one dot per terminal across every group.
     assert "body.sidebar-collapsed .sidebar-terminal-pick," in sidebar_css
-    assert "body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; padding: 0; }" in sidebar_css
+    # The rail drops the guide line and its indent with the padding.
+    assert "body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; margin: 0; padding: 0; border: 0; }" in sidebar_css
 
 
 def test_the_sidebar_honours_reduced_motion_and_forced_colours():

@@ -213,7 +213,7 @@ def test_the_deferred_terminal_refocus_stands_down_for_an_overlay():
 
 def test_palette_focuses_its_input_on_open_and_returns_the_terminal_on_close():
     palette = PALETTE_JS.read_text(encoding="utf-8")
-    open_start = palette.index("  async openPalette() {")
+    open_start = palette.index("  async openPalette(query = \"\") {")
     open_impl = palette[open_start:palette.index("\n  close() {", open_start)]
     assert open_impl.index('claimFocus("palette")') < open_impl.index("this.focusInput()")
 
@@ -259,7 +259,7 @@ def test_the_palette_reaches_terminals_settings_and_configs_across_views():
     refilter = refilter[: refilter.index("\n  }\n")]
     assert "parsePrefix(raw)" in refilter
     assert "rowGroup(item) === kind" in refilter
-    assert "PREFIX_HINT" in palette[palette.index("  async openPalette() {"):palette.index("\n  close() {")]
+    assert "PREFIX_HINT" in palette[palette.index("  async openPalette(query = \"\") {"):palette.index("\n  close() {")]
     # Resume rows are fetched once per open and dropped when the palette moved on.
     fill = palette[palette.index("  async _fillAgentSessions(requestId) {"):]
     fill = fill[: fill.index("\n  }\n")]
