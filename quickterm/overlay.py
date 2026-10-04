@@ -30,7 +30,15 @@ SLIDE_S = 0.12
 SLIDE_STEPS = 6
 HOLD_S = 3.0
 
+# The window's min_size in pywebview logical units. Windows clamps every
+# SetWindowPos to it, so the drop-down is sized to at least this much
+# (converted to physical pixels) instead of being positioned for a size the
+# window cannot take. app.py passes the same value to create_window.
+MIN_LOGICAL_SIZE = (760, 480)
+
 _GWL_STYLE = -16
+_WS_MINIMIZE = 0x20000000
+_WS_MAXIMIZE = 0x01000000
 _WS_CAPTION = 0x00C00000
 _WS_THICKFRAME = 0x00040000
 _HWND_TOPMOST = -1
@@ -66,19 +74,28 @@ def _clamp_pct(value: Any, bounds: tuple[int, int], default: int) -> int:
 
 
 def overlay_rect(
-    work_area: tuple[int, int, int, int], edge: str, width_pct: Any, height_pct: Any
+    work_area: tuple[int, int, int, int],
+    edge: str,
+    width_pct: Any,
+    height_pct: Any,
+    min_size: tuple[int, int] = (0, 0),
 ) -> tuple[int, int, int, int]:
     """The drop-down's `(x, y, width, height)` inside `work_area`.
 
     `work_area` is a RECT `(left, top, right, bottom)`. The window is centred
     horizontally and touches the top edge, or the bottom one for "bottom".
-    Percentages are clamped to WIDTH_PCT and HEIGHT_PCT.
+    Percentages are clamped to WIDTH_PCT and HEIGHT_PCT. The size is then
+    raised to `min_size` (physical pixels, never past the work area), and the
+    position is computed for that size, so a bottom drop-down stays flush
+    with the work area and a narrow one stays centred.
     """
     left, top, right, bottom = (int(v) for v in work_area)
     area_w = max(0, right - left)
     area_h = max(0, bottom - top)
     width = area_w * _clamp_pct(width_pct, WIDTH_PCT, DEFAULT_WIDTH_PCT) // 100
     height = area_h * _clamp_pct(height_pct, HEIGHT_PCT, DEFAULT_HEIGHT_PCT) // 100
+    width = min(area_w, max(width, int(min_size[0])))
+    height = min(area_h, max(height, int(min_size[1])))
     x = left + (area_w - width) // 2
     y = bottom - height if edge == "bottom" else top
     return x, y, width, height
@@ -170,6 +187,12 @@ class _Win32:
         user32.IsZoomed.argtypes = [HWND]
         user32.SetForegroundWindow.argtypes = [HWND]
         user32.GetForegroundWindow.restype = HWND
+        user32.IsWindow.argtypes = [HWND]
+        user32.GetShellWindow.restype = HWND
+        self._dpi_for_window = getattr(user32, "GetDpiForWindow", None)
+        if self._dpi_for_window is not None:
+            self._dpi_for_window.argtypes = [HWND]
+            self._dpi_for_window.restype = wintypes.UINT
         user32.GetWindowPlacement.argtypes = [HWND, ctypes.POINTER(WINDOWPLACEMENT)]
         user32.SetWindowPlacement.argtypes = [HWND, ctypes.POINTER(WINDOWPLACEMENT)]
         user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
@@ -234,6 +257,18 @@ class _Win32:
     def set_foreground(self, hwnd: int) -> None:
         self.user32.SetForegroundWindow(hwnd)
 
+    def is_window(self, hwnd: int) -> bool:
+        return bool(hwnd and self.user32.IsWindow(hwnd))
+
+    def shell_window(self) -> int:
+        return int(self.user32.GetShellWindow() or 0)
+
+    def dpi(self, hwnd: int) -> int:
+        """The window's DPI (96 = 100 %); 96 when Windows cannot say."""
+        if self._dpi_for_window is None:
+            return 96
+        return int(self._dpi_for_window(hwnd) or 96)
+
     def rect(self, hwnd: int) -> tuple[int, int, int, int]:
         box = self.wintypes.RECT()
         self.user32.GetWindowRect(hwnd, ctypes.byref(box))
@@ -257,6 +292,9 @@ _win: Any = None
 _win_lock = threading.Lock()
 _state_lock = threading.RLock()
 _saved: dict[int, _Saved] = {}
+# The other program's window that had the foreground when the drop-down was
+# summoned. Hiding with the summon key hands the foreground back to it.
+_previous: dict[int, int] = {}
 
 
 def _api() -> Any | None:
@@ -293,20 +331,32 @@ def show_overlay(hwnd: int, cfg: Any) -> None:
     win = _api()
     if win is None or not hwnd:
         return
+    previous = win.foreground()
     # First, while the hotkey press still grants this process foreground rights.
     win.set_foreground(hwnd)
+    with _state_lock:
+        _previous.pop(hwnd, None)
+        if previous and previous != hwnd and win.pid_of(previous) != os.getpid():
+            _previous[hwnd] = previous
     edge = _setting(cfg, "edge", "top")
     work = win.work_area(_setting(cfg, "monitor", "cursor"))
+    scale = win.dpi(hwnd)
     x, y, width, height = overlay_rect(
         work,
         edge,
         _setting(cfg, "width_pct", DEFAULT_WIDTH_PCT),
         _setting(cfg, "height_pct", DEFAULT_HEIGHT_PCT),
+        min_size=(MIN_LOGICAL_SIZE[0] * scale // 96, MIN_LOGICAL_SIZE[1] * scale // 96),
     )
     was_visible = win.visible(hwnd)
     with _state_lock:
         if hwnd not in _saved:
-            _saved[hwnd] = _Saved(style=win.get_style(hwnd), placement=win.get_placement(hwnd))
+            # Maximized or minimized lives in the placement only. Writing a
+            # style that still carries WS_MAXIMIZE back after the restore
+            # below made the drop-down a "maximized" window at the overlay
+            # rect, and restore_normal could then never re-maximize it.
+            style = win.get_style(hwnd) & ~(_WS_MAXIMIZE | _WS_MINIMIZE)
+            _saved[hwnd] = _Saved(style=style, placement=win.get_placement(hwnd))
         style = _saved[hwnd].style
     if win.minimized_or_maximized(hwnd):
         win.show(hwnd, _SW_RESTORE)
@@ -324,8 +374,15 @@ def show_overlay(hwnd: int, cfg: Any) -> None:
     win.set_foreground(hwnd)
 
 
-def hide_overlay(hwnd: int, cfg: Any) -> None:
-    """Slide the drop-down back out of its edge, then hide it."""
+def hide_overlay(hwnd: int, cfg: Any, *, hand_back: bool = True) -> None:
+    """Slide the drop-down back out of its edge, then hide it.
+
+    A hidden window stays the foreground window, so keystrokes would go to
+    the invisible terminal. With `hand_back` the foreground goes back to the
+    program the drop-down was summoned over (or the desktop when that window
+    is gone). The focus-loss path passes False: another program already has
+    the foreground there.
+    """
     win = _api()
     if win is None or not hwnd:
         return
@@ -339,6 +396,14 @@ def hide_overlay(hwnd: int, cfg: Any) -> None:
             win.set_pos(hwnd, 0, left, frame_y, right - left, height, flags)
             _sleep_step()
     win.show(hwnd, _SW_HIDE)
+    with _state_lock:
+        previous = _previous.pop(hwnd, 0)
+    if not hand_back:
+        return
+    if not (win.is_window(previous) and win.visible(previous)):
+        previous = win.shell_window()
+    if previous:
+        win.set_foreground(previous)
 
 
 def restore_normal(hwnd: int) -> None:
@@ -350,9 +415,14 @@ def restore_normal(hwnd: int) -> None:
     win = _api()
     with _state_lock:
         saved = _saved.pop(hwnd, None)
+        _previous.pop(hwnd, None)
     if win is None or saved is None:
         return
-    win.set_style(hwnd, saved.style)
+    if win.minimized_or_maximized(hwnd):
+        # SetWindowPlacement(SW_SHOWMAXIMIZED) does nothing to a window that
+        # is already flagged maximized, so take the flag off first.
+        win.show(hwnd, _SW_RESTORE)
+    win.set_style(hwnd, saved.style & ~(_WS_MAXIMIZE | _WS_MINIMIZE))
     win.set_placement(hwnd, saved.placement)
     win.set_pos(
         hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -386,7 +456,7 @@ def _on_foreground(get_cfg: Callable[[], Any], hwnd: int) -> None:
         return
     for target in applied_windows():
         if win.visible(target):
-            hide_overlay(target, cfg)
+            hide_overlay(target, cfg, hand_back=False)
 
 
 def install_foreground_watcher(get_cfg: Callable[[], Any]) -> bool:

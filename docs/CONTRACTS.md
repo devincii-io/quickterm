@@ -855,11 +855,14 @@ def hotkey_error_text(failed: list[str]) -> str | None
   with the spec defaults when a config lacks them.
 - The primary window opens at `cfg.window.width` x `height`, or, with
   `remember_bounds`, at the bounds in `window_state.json` (x, y, width, height,
-  maximized) when `window_state.clamp_to_screens(load(), webview.screens())`
+  maximized) when `window_state.clamp_to_screens(load(), _screen_list())`
   finds them still overlapping a monitor by at least 64 px both ways. The
-  minimum size stays 760 x 480.
+  minimum size stays 760 x 480. `_screen_list()` iterates `webview.screens`
+  (a module property holding a list proxy in pywebview 6) and only calls it
+  when it cannot be iterated (older releases).
 - Secondary windows open at the configured size, 32 px down and right of the
-  primary when its position is known. The elevated "QuickTerm -
+  primary when that position still meets a screen (`clamp_to_screens`); a
+  minimized primary reports about -32000 and the offset is dropped. The elevated "QuickTerm -
   Administrator" window shares `%APPDATA%`, so it opens at the configured size
   and records no bounds.
 - `_BoundsRecorder` listens to the primary window's `resized`, `moved`,
@@ -898,14 +901,17 @@ geometry is Win32 physical pixels (the monitor work area and `SetWindowPos`
 share that space), never pywebview units.
 
 ```python
+MIN_LOGICAL_SIZE = (760, 480)   # equals app.MIN_WINDOW_SIZE
 def overlay_rect(work_area: tuple[int, int, int, int], edge: str,
-                 width_pct, height_pct) -> tuple[int, int, int, int]
+                 width_pct, height_pct,
+                 min_size: tuple[int, int] = (0, 0)) -> tuple[int, int, int, int]
     # work_area is a RECT (left, top, right, bottom); returns (x, y, w, h),
     # centred horizontally, on the top or bottom edge, percentages clamped to
-    # 30..100 and 20..100, integer pixels
+    # 30..100 and 20..100, then raised to min_size (never past the work
+    # area); x and y are computed for that final size, integer pixels
 def enabled(cfg) -> bool
 def show_overlay(hwnd: int, cfg) -> None
-def hide_overlay(hwnd: int, cfg) -> None
+def hide_overlay(hwnd: int, cfg, *, hand_back: bool = True) -> None
 def restore_normal(hwnd: int) -> None
 def show_normal(hwnd: int) -> None        # restore_normal, then show and focus
 def is_applied(hwnd: int | None = None) -> bool   # None: any window
@@ -918,17 +924,29 @@ def remove_foreground_watcher() -> None
 - **Show**: `SetForegroundWindow` first, while the hotkey press still grants
   foreground rights. Then the work area of the monitor under the cursor
   (`MonitorFromPoint(GetCursorPos)`), or the primary monitor for
-  `monitor: "primary"`. The old `GWL_STYLE` and `WINDOWPLACEMENT` are saved
-  once per window; a minimized or maximized window is restored; `WS_CAPTION`
-  and `WS_THICKFRAME` are stripped; `SetWindowPos` with `HWND_TOPMOST` (or
+  `monitor: "primary"`. The foreground window before the summon is remembered
+  when it belongs to another process. The old `GWL_STYLE` (without
+  `WS_MAXIMIZE`/`WS_MINIMIZE`; that state lives in the placement) and
+  `WINDOWPLACEMENT` are saved once per window; a minimized or maximized window
+  is restored; `WS_CAPTION` and `WS_THICKFRAME` are stripped; the size is at
+  least `MIN_LOGICAL_SIZE` scaled by `GetDpiForWindow / 96`, because Windows
+  clamps `SetWindowPos` to the window's minimum track size; `SetWindowPos` with `HWND_TOPMOST` (or
   `HWND_NOTOPMOST` without `always_on_top`) and
   `SWP_SHOWWINDOW | SWP_FRAMECHANGED`. A hidden window slides in from its edge
   in 6 steps over about 120 ms when `animate` is on and Windows client-area
   animations are enabled.
 - **Hide**: slide back out of the edge, then `SW_HIDE`. The window stays in
-  overlay style for the next summon.
-- **Restore**: the saved style and placement go back (a maximized window comes
-  back maximized) and the window drops `HWND_TOPMOST`.
+  overlay style for the next summon. A hidden window stays the foreground
+  window, so with `hand_back` (the summon key) the remembered window gets the
+  foreground back, or the shell window when it is gone. The focus-loss path
+  passes `hand_back=False`.
+- **Restore**: a window flagged minimized or maximized is `SW_RESTORE`d first,
+  then the saved style and placement go back (a maximized window comes back
+  maximized) and the window drops `HWND_TOPMOST`.
+- The summon toggle (`hotkeys.toggle_window`) only looks at this process's
+  windows (`_quickterm_windows(title, own_process=True)`): it restyles what it
+  finds, and another instance also has a window titled "QuickTerm". The
+  second-launch `summon_window` handoff still looks across processes.
 - **Focus loss**: `install_foreground_watcher` runs on the hotkey thread
   (`HotkeyManager.run_on_thread`), whose message loop delivers the
   out-of-context `EVENT_SYSTEM_FOREGROUND` hook. With `hide_on_blur`, the

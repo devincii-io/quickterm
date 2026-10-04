@@ -405,14 +405,29 @@ def _title_matches(candidate: str, requested: str) -> bool:
     return candidate == requested
 
 
-def _quickterm_windows(title: str) -> tuple[Any, list[int], list[int]]:
+def _quickterm_windows(
+    title: str, *, own_process: bool = False
+) -> tuple[Any, list[int], list[int]]:
+    """Top-level windows titled exactly `title`, visible ones first.
+
+    `own_process` keeps only this process's windows. The summon toggle needs
+    that: it restyles the window it finds as the overlay, and a second
+    instance (another `--port`, a dev server) also has a window titled
+    "QuickTerm". The second-launch handoff looks across processes on purpose.
+    """
     user32 = ctypes.windll.user32
     user32.GetForegroundWindow.restype = wintypes.HWND
     visible: list[int] = []
     hidden: list[int] = []
+    me = os.getpid()
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _enum(hwnd, _lparam):
+        if own_process:
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value != me:
+                return True
         n = user32.GetWindowTextLengthW(hwnd)
         if n:
             buf = ctypes.create_unicode_buffer(n + 1)
@@ -453,7 +468,7 @@ def toggle_window(title: str = "QuickTerm", overlay: Any = None) -> None:
     from quickterm import overlay as overlay_mod
 
     try:
-        user32, visible, hidden = _quickterm_windows(title)
+        user32, visible, hidden = _quickterm_windows(title, own_process=True)
         if not (visible or hidden):
             return
         hwnd = (visible or hidden)[0]

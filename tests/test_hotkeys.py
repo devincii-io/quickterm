@@ -314,7 +314,10 @@ def toggle_env(monkeypatch):
 
     state = SimpleNamespace(visible=[7], hidden=[], applied=set(), calls=[], user32=None)
 
-    def windows(_title):
+    def windows(_title, *, own_process=False):
+        # The toggle restyles what it finds, so it must never look at another
+        # process's "QuickTerm" window.
+        assert own_process is True
         return state.user32, state.visible, state.hidden
 
     monkeypatch.setattr(hotkeys, "_quickterm_windows", windows)

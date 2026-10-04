@@ -146,11 +146,11 @@ export function renderWindowSettings(host) {
     this._field("Width", configNumber({
       value: overlay.width_pct, min: 30, max: 100, label: "Overlay width in percent",
       onChange: (value) => setOverlay("width_pct", value),
-    }), "Percent of the screen, 30 to 100", { id: "overlay.width_pct" }),
+    }), "Percent of the screen, 30 to 100, never narrower than the window minimum (760 px at 100 % scaling)", { id: "overlay.width_pct" }),
     this._field("Height", configNumber({
       value: overlay.height_pct, min: 20, max: 100, label: "Overlay height in percent",
       onChange: (value) => setOverlay("height_pct", value),
-    }), "Percent of the screen, 20 to 100", { id: "overlay.height_pct" }),
+    }), "Percent of the screen, 20 to 100, never shorter than the window minimum (480 px at 100 % scaling)", { id: "overlay.height_pct" }),
   );
   drop.append(overlayGrid);
   for (const [id, label] of [
