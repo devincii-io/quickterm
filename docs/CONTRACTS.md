@@ -1569,12 +1569,18 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
      window, Workspace settings (the Dashboard workspace editor) and Delete
      workspace… (confirm popover: "Delete workspace <name>? Detached
      terminals it owns are killed; attached ones keep running."). The
-     **active** group adds a second line: the folder name, the **workspace
-     here** button when offered, Explorer and VS Code buttons on hover
-     (`openFolder`; also Alt+Shift+E / Alt+Shift+C and two palette rows) and
-     the one `#sb-save` dot (same id and `data-state` contract, driven by
-     `feedback.js`).
-  4. The footer: new window, dashboard, settings, help, collapse chevron.
+     **active** group keeps one head row: the folder name after the label
+     (hidden when it equals the label), the one `#sb-save` dot after the
+     count (same id and `data-state` contract, driven by `feedback.js`), and
+     Explorer and VS Code in the hover tray before Close view (`openFolder`;
+     also Alt+Shift+E / Alt+Shift+C and two palette rows). Only the
+     **workspace here** button takes a line below the head, and only while
+     it is offered. A terminal row is one line too: past `SIDEBAR_WIDE_AT`
+     its folder follows the name, and under a workspace only when it differs
+     from the workspace folder (for scratch, from where the terminal
+     started).
+  4. The footer: new window, dashboard, settings, help, centred, and the
+     collapse chevron on the right edge.
 
   The view menu (per window, `quickterm.sidebarView`, normalised by
   `normalizeView`): **Show** empty workspaces (default off) and finished

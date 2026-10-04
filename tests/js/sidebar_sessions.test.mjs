@@ -5,6 +5,28 @@ import {
   SIDEBAR_WIDE_AT, UNASSIGNED_GROUP, groupSummary,
   isWideSidebar, sessionState, sessionSummary, sidebarGroups,
 } from "../../quickterm/frontend/js/launcher.js";
+import { rowWhere } from "../../quickterm/frontend/js/sidebar_model.js";
+
+test("a row names its folder only where it says something the head does not", () => {
+  const qt = { kind: "workspace", label: "qt", path: "C:\\src\\quickterm" };
+  const at = (cwd, extra = {}) => ({ session: { id: "s", cwd: "C:\\src\\quickterm", current_cwd: cwd, ...extra } });
+  // At home under its workspace: one line, nothing after the name.
+  assert.equal(rowWhere(at("C:\\src\\quickterm"), qt), "");
+  assert.equal(rowWhere(at("C:\\src\\QuickTerm"), qt), "");
+  // Moved away: the folder is the news.
+  assert.equal(rowWhere(at("C:\\src\\acme"), qt), "acme");
+  // A folder named like the workspace says nothing twice either.
+  assert.equal(rowWhere(at("D:\\qt"), qt), "");
+  // Scratch has no saved folder: home is where the terminal started.
+  const scratch = { kind: "scratch", label: "scratch 1", path: null };
+  const temp = { session: { id: "t", cwd: "C:\\Temp\\QuickTerm\\scratch" } };
+  assert.equal(rowWhere(temp, scratch), "");
+  assert.equal(rowWhere({ session: { ...temp.session, current_cwd: "C:\\src\\acme" } }, scratch), "acme");
+  // The flat list names the workspace, and the folder when it differs.
+  const flat = { kind: "flat", label: "Terminals" };
+  assert.equal(rowWhere({ ...at("C:\\src\\quickterm"), owner: "quickterm" }, flat), "quickterm");
+  assert.equal(rowWhere({ ...at("C:\\src\\acme"), owner: "qt" }, flat), "qt · acme");
+});
 
 function session(id, extra = {}) {
   return {

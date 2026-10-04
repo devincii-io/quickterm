@@ -79,9 +79,9 @@ behind a **Show N empty workspaces** line. The view button next to search
 shows empty workspaces and finished terminals, drops the grouping for one
 list, or sorts by recent activity instead. State never reorders the default
 list; a terminal that needs you gets a chip instead. The search button opens
-the palette on `@`, the workspaces and terminals. The active workspace has a second line with its folder,
-the save dot and two buttons that open the focused terminal's folder in
-Explorer or VS Code (`Alt+Shift+E` / `Alt+Shift+C`). A named workspace
+the palette on `@`, the workspaces and terminals. The active workspace's row shows its folder and
+the save dot, and on hover two buttons that open the focused terminal's folder
+in Explorer or VS Code (`Alt+Shift+E` / `Alt+Shift+C`). A named workspace
 autosaves its exact split arrangement and live session IDs for reattachment
 with in-memory scrollback, for as long as those processes are alive. If a
 saved process is gone, QuickTerm restores an explicitly unavailable pane and

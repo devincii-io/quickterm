@@ -181,19 +181,18 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
    mystery: the tint says the list is filtered. */
 .sidebar-section-view.custom { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); }
 
-/* ---------- the active workspace's second line ---------- */
+/* ---------- what the active workspace adds ---------- */
 
-/* Folder, "workspace here", Explorer and VS Code, and the save dot. One node
-   that launcher.js moves under the active group's head. */
+/* launcher.js moves these into the active group: the folder and the save dot
+   into its head, Explorer and VS Code into its hover tray. The head stays one
+   row; only the "workspace here" offer gets a line below it. */
 .sidebar-active-line {
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-height: 16px;
+  min-height: 20px;
   padding: 0 4px 2px 20px;
 }
-.sidebar-active-line .sidebar-folder { flex: 1 1 auto; min-width: 0; }
-.session-group-detail:empty { display: none; }
+.sidebar-active-line[hidden] { display: none; }
 /* "workspace here": shown only while the focused terminal sits outside this
    workspace's folder. Same fill as "+" above, because it also opens
    something, and gone the moment the terminal is back home. */
@@ -216,20 +215,22 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .sidebar-here .sidebar-label { min-width: 0; }
 .sidebar-here:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .sidebar-here:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* The folder follows the name and gives way first when the row is narrow. */
 .sidebar-folder {
+  flex: 0 10 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: 9px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sidebar-folder[hidden] { display: none; }
 .sidebar-folder.warning { color: var(--danger); }
-/* Explorer and VS Code for the folder named above, drawn on hover and focus:
-   this line is about where the terminal is, and these are the two ways out
-   of it. */
-.sidebar-folder-tools { flex: none; display: flex; gap: 1px; margin-left: auto; visibility: hidden; }
-.session-group.active:hover .sidebar-folder-tools,
-.session-group.active:focus-within .sidebar-folder-tools { visibility: visible; }
+/* Explorer and VS Code, the two ways out of the folder, in the head's hover
+   tray before Close view. */
+.sidebar-folder-tools { flex: none; display: flex; gap: 1px; }
 .sidebar-folder-open {
   width: 18px;
   height: 18px;
@@ -267,7 +268,6 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   min-width: 0;
   min-height: 26px;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 0 6px;
   padding: 2px 6px 2px 7px;
@@ -283,7 +283,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .session-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-row.attached { color: var(--text); }
 .session-name {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: 11px;
@@ -339,15 +339,27 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .session-row.finished.state-attention { opacity: .85; }
 .session-row.finished.state-attention .session-state { background: var(--accent); }
 
-/* The folder is a second line and only once the sidebar has been dragged wide
-   enough to hold one; below that the tooltip carries it. */
-.session-where { display: none; flex-basis: 100%; padding-left: 13px; color: var(--muted); font-size: 8.5px; }
+/* The folder follows the name on the same line, only once the sidebar has
+   been dragged wide enough; below that the tooltip carries it. It shrinks
+   ten times faster than the name, so the name is the last thing cut. */
+.session-where {
+  display: none;
+  flex: 0 10 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 body.sidebar-wide .session-where { display: block; }
 /* In the ungrouped list the row names its workspace, at any width. */
 .session-where.always { display: block; }
+body .session-where[hidden] { display: none; }
 
 .session-chip {
   flex: none;
+  margin-left: auto;
   padding: 0 4px;
   border-radius: 20px;
   font-size: 7.5px;
@@ -482,14 +494,17 @@ body.sidebar-wide .session-where { display: block; }
 
 /* ---------- footer ---------- */
 
-/* Four icons in a row and the collapse chevron on the right. No labels: the
+/* Four icons centred in the row and the collapse chevron on the right edge,
+   out of the flow so it does not pull the icons off centre. No labels: the
    tooltip carries the name and the shortcut. */
 .sidebar-footer {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 1px;
-  padding: 3px 4px;
+  padding: 3px 30px;
   border-top: 1px solid var(--line);
 }
 .sidebar-nav-button, .sidebar-collapse {
@@ -505,7 +520,7 @@ body.sidebar-wide .session-where { display: block; }
 }
 .sidebar-nav-button:hover, .sidebar-collapse:hover { background: var(--surface-raised); color: var(--text); }
 .sidebar-nav-button:focus-visible, .sidebar-collapse:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.sidebar-collapse { margin-left: auto; }
+.sidebar-collapse { position: absolute; top: 3px; right: 4px; }
 .sidebar-collapse svg { transform: rotate(180deg); transition: transform .14s ease; }
 .sidebar-admin-badge { display: grid; place-items: center; width: 20px; color: var(--danger); }
 /* The update notice is a dot on the settings icon, not a pill: it has to fit
@@ -571,7 +586,7 @@ body.sidebar-collapsed .session-group.active .session-row { border-radius: 0; bo
 body.sidebar-collapsed .launcher.sidebar .sidebar-terminal-pick,
 body.sidebar-collapsed .launcher.sidebar .sidebar-setup { display: none; }
 body.sidebar-collapsed .sidebar-footer { flex-direction: column; padding: 3px 0; }
-body.sidebar-collapsed .sidebar-collapse { margin: 0; }
+body.sidebar-collapsed .sidebar-collapse { position: static; }
 body.sidebar-collapsed .sidebar-collapse svg { transform: none; }
 body.sidebar-collapsed .update-pill { width: 24px; }
 

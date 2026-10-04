@@ -7,7 +7,7 @@ import { claimFocus, releaseFocus } from "./focus.js";
 import { confirmNear } from "./confirm_popover.js";
 import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
-  clampSidebarWidth, isWideSidebar, sessionFolder, sessionTooltip, sidebarGroups, groupSummary,
+  clampSidebarWidth, isWideSidebar, rowWhere, sessionTooltip, sidebarGroups, groupSummary,
   folderName, terminalChoices, canLaunch, choiceKey, loadMode, saveMode, loadWidth, saveWidth,
   loadClosedGroups, saveClosedGroups, foldId, visibleGroups,
 } from "./sidebar_model.js";
@@ -222,10 +222,13 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   section.append(make("span", "sidebar-section-label", "Workspaces"), viewControls.search, viewControls.button, add);
   el.append(section);
 
-  // The active workspace's second line: its folder, the "workspace here"
-  // offer, Explorer and VS Code, and the save dot. One node, moved under
-  // whichever group head is active, so #sb-save is always the same element.
+  // What the active workspace adds, all on its one head row: the folder after
+  // the name, the save dot at the end, Explorer and VS Code in the hover tray.
+  // Only the "workspace here" offer takes a line of its own, and only while
+  // it is offered. The nodes move to whichever group is active, so #sb-save
+  // is always the same element.
   const activeLine = make("div", "sidebar-active-line");
+  activeLine.hidden = true;
   const folderLine = make("small", "sidebar-folder");
   const hereButton = make("button", "sidebar-here");
   hereButton.type = "button";
@@ -236,7 +239,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     actions.workspaceHere?.();
     handBack();
   }, { signal });
-  const tools = make("div", "sidebar-folder-tools");
+  const tools = make("span", "sidebar-folder-tools");
   const openIn = (app, iconName, label) => {
     const button = iconButton("sidebar-folder-open", iconName, label, () => {
       actions.openFolder?.(app);
@@ -255,11 +258,23 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   save.id = "sb-save";
   save.setAttribute("role", "status");
   save.setAttribute("aria-live", "polite");
-  activeLine.append(folderLine, hereButton, tools, save);
-  // Where the line waits while no view is open, so #sb-save stays in the DOM.
+  activeLine.append(hereButton);
+  // Where these wait while no view is open, so #sb-save stays in the DOM.
   const parking = make("div", "sidebar-parking");
   parking.hidden = true;
-  parking.append(activeLine);
+  parking.append(folderLine, save, tools, activeLine);
+  const parkActive = () => {
+    if (save.parentNode !== parking) parking.append(folderLine, save, tools, activeLine);
+  };
+  // The folder goes right after the name, the save dot after the count, the
+  // tools before Close view. insertBefore only when a node is not already in
+  // place: moving a focused button would drop the keyboard out of it.
+  const placeActive = ({ head, count, tray, closeView, slot }) => {
+    if (folderLine.parentNode !== head) head.insertBefore(folderLine, count);
+    if (save.parentNode !== head) head.append(save);
+    if (tools.parentNode !== tray) tray.insertBefore(tools, closeView);
+    if (activeLine.parentNode !== slot) slot.append(activeLine);
+  };
 
   const hereLabel = (here) => (here.action === "open" ? `open ${here.name}` : `workspace here: ${here.name}`);
   function hereTitle(here) {
@@ -272,6 +287,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const patchHere = () => {
     const here = model.here || null;
     hereButton.hidden = !here;
+    activeLine.hidden = !here;
     if (!here) return;
     setText(hereText, hereLabel(here));
     setLabel(hereButton, hereTitle(here));
@@ -504,16 +520,10 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       delete row.dataset.connectionType;
     }
     setAttrs(row, { title });
-    // The folder is the fact that tells one project's shell from another's, so
-    // it gets its own line as soon as the sidebar is wide enough to hold it.
-    const folder = folderName(sessionFolder(session));
-    const flat = group?.kind === "flat";
-    // "qt · qt" says nothing twice: the folder joins only when it differs.
-    const sameName = String(item.owner || "").toLowerCase() === folder.toLowerCase();
-    const whereText = flat ? [item.owner, sameName ? "" : folder].filter(Boolean).join(" · ") : folder;
+    const whereText = rowWhere(item, group);
     setText(where, whereText);
     where.hidden = !whereText;
-    setClass(where, "always", flat);
+    setClass(where, "always", group?.kind === "flat");
     // Chips only for the states worth interrupting for: a plain background
     // shell is a hollow dot, or the list turns into a wall of badges.
     const chipped = ["attention", "unread", "busy", "elsewhere"].includes(state.key);
@@ -588,7 +598,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const slot = make("div", "session-group-detail");
     const rows = make("div", "session-group-rows");
     node.append(headline, slot, rows);
-    parts.set(node, { headline, head, chevron, dot, name, count, closeView, kebab, slot, rows });
+    parts.set(node, { headline, head, chevron, dot, name, count, tray, closeView, kebab, slot, rows });
 
     head.addEventListener("click", (event) => {
       const group = itemFor(node);
@@ -617,7 +627,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   };
 
   const updateGroup = (node, group) => {
-    const { head, chevron, dot, name, count, closeView, kebab, slot, rows } = parts.get(node);
+    const groupParts = parts.get(node);
+    const { head, chevron, dot, name, count, closeView, kebab, rows } = groupParts;
     const hasRows = group.sessions.length > 0;
     const closed = hasRows && closedGroups.has(foldId(group));
     for (const kind of ["workspace", "scratch", "unassigned", "flat"]) setClass(node, kind, group.kind === kind);
@@ -654,7 +665,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     kebab.hidden = !group.name;
     setLabel(kebab, `${group.label}: workspace actions`);
     if (group.active) {
-      if (activeLine.parentNode !== slot) slot.append(activeLine);
+      placeActive(groupParts);
       patchActiveLine(group);
     }
     // Folding is the `.folded` class, not `hidden`: the rail still shows the
@@ -676,7 +687,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       create: createGroup,
       update: updateGroup,
     });
-    if (!nodes.some((node) => itemFor(node)?.active) && activeLine.parentNode !== parking) parking.append(activeLine);
+    if (!nodes.some((node) => itemFor(node)?.active)) parkActive();
     emptyNote.hidden = groups.length > 0 || hidden > 0;
     hiddenNote.hidden = hidden === 0;
     setText(hiddenNote, `Show ${hidden} empty workspace${hidden === 1 ? "" : "s"}`);
