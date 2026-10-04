@@ -5,6 +5,7 @@
 // cannot be opened until it is saved.
 
 import * as api from "./api.js";
+import { AGENT_MODE_LABELS, agentModeOf, isAgentType } from "./agent_profile.js";
 import { icon } from "./icons.js";
 import { TERMINAL_TYPES, inferTerminalType, make, environmentError } from "./panel_shared.js";
 import {
@@ -14,8 +15,8 @@ import { itemDirty, renderConfigList } from "./config_list.js";
 import { renderAgentFields } from "./panel_agent_fields.js";
 import { shortcutInput, shortcutWarnings } from "./shortcut_input.js";
 import {
-  AGENT_MODE_LABELS, agentConflicts, agentModeOf, commandLineText, defaultArgsFor, fitsCommandLine,
-  isAgentType, isShellKind, kindForCommand, purposeFor, runLine, splitCommandLine, sshProblems,
+  agentConflicts, commandLineText, defaultArgsFor, fitsCommandLine,
+  isShellKind, kindForCommand, purposeFor, runLine, splitCommandLine, sshProblems,
   takesArguments, takesStartCommand,
 } from "./profile_model.js";
 

@@ -32,23 +32,6 @@ export function make(tag, className, text) {
   return node;
 }
 
-export function envToLines(env) {
-  return Object.entries(env || {}).map(([key, value]) => `${key}=${value}`).join("\n");
-}
-
-export function parseEnvLines(text) {
-  const env = {};
-  for (const raw of (text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    if (key) env[key] = line.slice(eq + 1);
-  }
-  return env;
-}
-
 export function environmentError(env) {
   const seen = new Set();
   for (const [key, value] of Object.entries(env || {})) {

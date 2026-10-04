@@ -8,10 +8,12 @@ import assert from "node:assert/strict";
 
 import { commandPreview, snippetProblems } from "../../quickterm/frontend/js/panel_settings_snippets.js";
 import {
-  agentConflicts, agentModeOf, commandLineText, defaultArgsFor, fitsCommandLine, joinCommandLine,
-  kindForCommand, profileProblems, purposeFor, runLine, splitCommandLine, sshProblems, takesStartCommand,
+  agentConflicts, commandLineText, defaultArgsFor, fitsCommandLine, joinCommandLine,
+  kindForCommand, purposeFor, runLine, splitCommandLine, sshProblems, takesStartCommand,
 } from "../../quickterm/frontend/js/profile_model.js";
 import { matchesQuery } from "../../quickterm/frontend/js/panel_settings_kit.js";
+import { agentModeOf } from "../../quickterm/frontend/js/agent_profile.js";
+import { connectionProblems } from "../../quickterm/frontend/js/panel_connections.js";
 
 test("a snippet preview hides the carriage return that runs it", () => {
   assert.equal(commandPreview("git status\r"), "git status");
@@ -61,16 +63,16 @@ test("the agent mode reads agent_mode, then the legacy claude_mode, then the typ
 });
 
 test("a profile reports the problem that would stop it from starting", () => {
-  const ok = { name: "Dev", cmd: "pwsh.exe", env: {} };
-  assert.deepEqual(profileProblems(ok, [ok], "powershell-core"), []);
-  assert.match(profileProblems({ name: "", cmd: "x", env: {} }, [], "custom")[0], /no name/);
-  assert.match(profileProblems({ name: "a", cmd: "", env: {} }, [], "custom")[0], /No executable/);
-  assert.match(profileProblems({ name: "a", cmd: "", env: {} }, [], "ssh")[0], /No host/);
+  const ok = { name: "Dev", cmd: "pwsh.exe", terminal_type: "powershell-core", env: {} };
+  assert.deepEqual(connectionProblems(ok, [ok]), []);
+  assert.match(connectionProblems({ name: "", cmd: "x", terminal_type: "custom", env: {} }, [])[0], /Enter a name/);
+  assert.match(connectionProblems({ name: "a", cmd: "", terminal_type: "custom", env: {} }, [])[0], /client executable/);
+  assert.match(connectionProblems({ name: "a", cmd: "", terminal_type: "ssh", env: {} }, [])[0], /Enter a host/);
   const clash = { name: "dev", cmd: "x", env: {} };
-  assert.match(profileProblems(ok, [ok, clash], "custom")[0], /unique/);
+  assert.match(connectionProblems(ok, [ok, clash])[0], /already used/);
   // The environment rule is the shared one, not a second copy of it.
   assert.match(
-    profileProblems({ name: "a", cmd: "x", env: { "A=B": "1" } }, [], "custom")[0],
+    connectionProblems({ name: "a", cmd: "x", terminal_type: "custom", env: { "A=B": "1" } }, [])[0],
     /environment variable name/i,
   );
 });

@@ -1689,8 +1689,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   command, shortcut and autostart. Serial, Telnet, Docker, Podman,
   Kubernetes, RDP and VNC expose their typed fields. Desktop profiles say Open
   window, terminal profiles Open terminal. The pure helpers `runLine`,
-  `profileProblems`, `kindForCommand`, `splitCommandLine`, `joinCommandLine`,
-  `takesStartCommand` and `purposeFor` live in `profile_model.js`.
+  `kindForCommand`, `splitCommandLine`, `joinCommandLine`,
+  `takesStartCommand` and `purposeFor` live in `profile_model.js`; what is
+  wrong with a profile is `connectionProblems` in `panel_connections.js`.
+  Agent types, modes, mode labels (`AGENT_MODE_LABELS`), `agentModeOf(profile,
+  type = profile.terminal_type)` and the arguments a mode adds (`modeArgs`)
+  exist once, in `agent_profile.js`; Settings, the sidebar's terminal choices
+  and the palette import them from there.
 - Agent editor (`claude-code`, `codex`): the fields are generated from
   `GET /api/system/agents`, so the frontend hardcodes no option list. The
   mode is `profile.agent_mode ?? profile.claude_mode ?? (codex ? "new" :

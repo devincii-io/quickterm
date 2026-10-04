@@ -295,7 +295,8 @@ export class WorkspaceViews {
     this.store = store;
     this.persisting = false;
     this.lastStored = undefined;
-    this.busy = false;
+    // No busy flag: open, close and rebuild all run through _serial(), so
+    // one never sees another half done.
     this.zoomed = null;
     this.root = null;
     this.active = null;
@@ -528,7 +529,6 @@ export class WorkspaceViews {
     const shown = name && this.viewForWorkspace(name);
     if (shown) return this._focusShown(shown);
     const beside = this.viewFor(anchor || anchorWindow) || this.active;
-    this.busy = true;
     let view = null;
     try {
       view = await this._claimView(name, this.views().map((each) => each.color), { cwd, first });
@@ -547,8 +547,6 @@ export class WorkspaceViews {
         ? `Could not open "${name}" here. It may already be open elsewhere.`
         : "Could not open a scratch view here."));
       return false;
-    } finally {
-      this.busy = false;
     }
     return view;
   }
@@ -596,43 +594,38 @@ export class WorkspaceViews {
 
   async _rebuild(tree, { active = null, zoomed = null } = {}) {
     const result = { restored: [], failed: [] };
-    if (this.busy || this.views().length || !tree) return result;
-    this.busy = true;
-    try {
-      const claimed = new Map();
-      for (const descriptor of leaves(tree)) {
-        const name = descriptor.workspace;
-        try {
-          // The iframe this view had before a reload is gone, but its claim
-          // outlives it: its goodbye on pagehide rarely leaves in time, and
-          // the registry keeps an entry for its whole TTL, so the claim below
-          // was refused as "open in another window". The id was minted for
-          // that view alone and nothing else holds it (a rebuild only runs
-          // while no view is open), so releasing it is safe; after a real
-          // restart the registry is empty and this is a no-op.
-          if (descriptor.window) await api.unregisterWindow(descriptor.window).catch(() => {});
-          const used = [...claimed.values()].map((view) => view.color);
-          claimed.set(name, await this._claimView(name, used));
-          result.restored.push(name);
-        } catch (_) {
-          result.failed.push(name);
-        }
+    if (this.views().length || !tree) return result;
+    const claimed = new Map();
+    for (const descriptor of leaves(tree)) {
+      const name = descriptor.workspace;
+      try {
+        // The iframe this view had before a reload is gone, but its claim
+        // outlives it: its goodbye on pagehide rarely leaves in time, and
+        // the registry keeps an entry for its whole TTL, so the claim below
+        // was refused as "open in another window". The id was minted for
+        // that view alone and nothing else holds it (a rebuild only runs
+        // while no view is open), so releasing it is safe; after a real
+        // restart the registry is empty and this is a no-op.
+        if (descriptor.window) await api.unregisterWindow(descriptor.window).catch(() => {});
+        const used = [...claimed.values()].map((view) => view.color);
+        claimed.set(name, await this._claimView(name, used));
+        result.restored.push(name);
+      } catch (_) {
+        result.failed.push(name);
       }
-      if (!claimed.size) return result;
-      this.root = mapLeaves(tree, (descriptor) => claimed.get(descriptor.workspace) || null);
-      for (const view of claimed.values()) this.stage.append(view.el);
-      const find = (descriptor) => claimed.get(descriptor?.workspace) || null;
-      this.zoomed = find(zoomed);
-      const focused = find(active) || leaves(this.root)[0];
-      this.layout({ animate: false });
-      this.activate(focused);
-      // An iframe cannot take the keyboard before its document exists;
-      // ready() hands it over.
-      this.pendingFocus = focused;
-      return result;
-    } finally {
-      this.busy = false;
     }
+    if (!claimed.size) return result;
+    this.root = mapLeaves(tree, (descriptor) => claimed.get(descriptor.workspace) || null);
+    for (const view of claimed.values()) this.stage.append(view.el);
+    const find = (descriptor) => claimed.get(descriptor?.workspace) || null;
+    this.zoomed = find(zoomed);
+    const focused = find(active) || leaves(this.root)[0];
+    this.layout({ animate: false });
+    this.activate(focused);
+    // An iframe cannot take the keyboard before its document exists;
+    // ready() hands it over.
+    this.pendingFocus = focused;
+    return result;
   }
 
   // Once per boot: read the stored arrangement, rebuild what can come back,
@@ -657,20 +650,20 @@ export class WorkspaceViews {
     return result;
   }
 
-  // Any view closes the same way: its document saves, retains every terminal
-  // it owns and releases its claim, then the iframe goes. Nothing is killed.
+  // Any view closes the same way: its document saves, retains its terminals
+  // (a scratch view only those holding work, lifecycle.closeView) and
+  // releases its claim, then the iframe goes. Nothing is killed.
   close(view) {
     return this._serial(() => this._close(view));
   }
 
   async _close(view) {
-    if (!view || this.busy || !this.views().includes(view)) return false;
+    if (!view || !this.views().includes(view)) return false;
     const child = view.frame?.contentWindow?.quicktermView;
     if (!child) {
       this.error("That workspace view is still loading. Try closing it again once it has loaded.");
       return false;
     }
-    this.busy = true;
     view.closeButton.disabled = true;
     try {
       if (!await child.close()) {
@@ -693,7 +686,6 @@ export class WorkspaceViews {
       this.error(error?.detail || "Could not save that workspace. Its view remains open.");
       return false;
     } finally {
-      this.busy = false;
       view.closeButton.disabled = false;
     }
   }

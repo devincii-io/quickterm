@@ -3,31 +3,8 @@
 // No DOM, so the rules are testable on their own and must not quietly disagree
 // with the backend validation in config.py, agents.py and connections.py.
 
-import { environmentError, inferTerminalType, shortPath } from "./panel_shared.js";
-
-export const AGENT_TYPES = new Set(["claude-code", "codex"]);
-
-export const AGENT_MODE_LABELS = {
-  new: "new conversation",
-  continue: "continue latest",
-  resume: "choose session",
-  fork: "fork a session",
-  agents: "agent manager",
-};
-
-// Used when the agent catalog cannot be loaded: the launch mode still works.
-export const AGENT_MODES = {
-  "claude-code": ["new", "continue", "resume", "agents"],
-  codex: ["new", "continue", "resume", "fork", "agents"],
-};
-
-export function isAgentType(kind) {
-  return AGENT_TYPES.has(kind);
-}
-
-export function agentModeOf(profile, kind = inferTerminalType(profile)) {
-  return profile.agent_mode ?? profile.claude_mode ?? (kind === "codex" ? "new" : "continue");
-}
+import { agentModeOf, isAgentType, modeArgs } from "./agent_profile.js";
+import { inferTerminalType, shortPath } from "./panel_shared.js";
 
 const KIND_PURPOSE = {
   "claude-code": "Claude Code, started in the folder of the workspace you launch it from. The launch mode decides whether it picks up your last conversation there or starts a fresh one.",
@@ -48,18 +25,8 @@ export function usesOpenSsh(profile) {
 }
 
 function agentRunParts(profile, kind) {
-  const mode = agentModeOf(profile, kind);
-  if (kind === "codex") {
-    const parts = [profile.cmd || "codex"];
-    if (mode === "continue") parts.push("resume", "--last");
-    else if (mode === "resume" || mode === "fork" || mode === "agents") parts.push(mode);
-    return parts;
-  }
-  const parts = [profile.cmd || "claude"];
-  if (mode === "continue") parts.push("--continue");
-  else if (mode === "resume") parts.push("--resume");
-  else if (mode === "agents") parts.push("agents");
-  return parts;
+  const cli = profile.cmd || (kind === "codex" ? "codex" : "claude");
+  return [cli, ...modeArgs(kind, agentModeOf(profile, kind))];
 }
 
 function remoteRunParts(profile, kind) {
@@ -90,27 +57,6 @@ export function runLine(profile, kind) {
   const line = parts.join(" ");
   const start = takesStartCommand(kind) ? (profile.start_command || "").trim() : "";
   return start ? `${line} · then ${start}` : line;
-}
-
-// Everything that would stop this one profile from starting, said at the
-// profile. The footer Save still refuses the save; this only answers "which?".
-export function profileProblems(profile, all, kind) {
-  const name = (profile.name || "").trim();
-  const problems = [];
-  if (!name) {
-    problems.push("This profile has no name, so nothing can launch it.");
-  } else if (all.filter((other) => (other.name || "").trim().toLowerCase() === name.toLowerCase()).length > 1) {
-    problems.push("Another profile already has this name. Names must be unique.");
-  }
-  if (kind === "custom" && !(profile.cmd || "").trim()) {
-    problems.push("No executable. A custom terminal has nothing to run without one.");
-  }
-  if ((kind === "ssh" || kind === "sftp") && !(profile.ssh_host || "").trim()) {
-    problems.push("No host. A remote profile needs somewhere to connect to.");
-  }
-  const badEnvironment = environmentError(profile.env);
-  if (badEnvironment) problems.push(badEnvironment);
-  return problems;
 }
 
 // Mirrors agents.validate in the backend for the one rule a person can break

@@ -1,3 +1,4 @@
+import { agentModeOf, modeArgs, modeLabel } from "./agent_profile.js";
 import { icon } from "./icons.js";
 import { toggleMenu } from "./menu.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
@@ -284,25 +285,11 @@ function make(tag, className, text) {
   return node;
 }
 
-// The agent mode of a profile. `claude_mode` is the pre-4.0 field name and is
-// still written for Claude Code profiles, so it is read as the fallback.
-const AGENT_MODE_LABELS = {
-  new: "new conversation",
-  continue: "continue latest",
-  resume: "choose session",
-  fork: "fork a session",
-  agents: "agent manager",
-};
-
-function agentMode(profile) {
-  return profile.agent_mode ?? profile.claude_mode ?? (profile.terminal_type === "codex" ? "new" : "continue");
-}
-
 function shellLabel(profile) {
   const target = profile.ssh_host
     ? (profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host)
     : "";
-  const mode = AGENT_MODE_LABELS[agentMode(profile)] || agentMode(profile);
+  const mode = modeLabel(agentModeOf(profile));
   const labels = {
     "claude-code": `Claude Code · ${mode}`,
     codex: `Codex · ${mode}`,
@@ -337,18 +324,18 @@ const AGENT_CHOICES = {
     group: "Claude",
     prefix: "claude",
     modes: [
-      ["continue", ["--continue"], "Claude · continue", "Continue the latest conversation in this folder"],
-      ["new", [], "Claude · new", "Start a new conversation in this folder"],
-      ["resume", ["--resume"], "Claude · resume", "Choose one of Claude's sessions in this folder"],
+      ["continue", "Claude · continue", "Continue the latest conversation in this folder"],
+      ["new", "Claude · new", "Start a new conversation in this folder"],
+      ["resume", "Claude · resume", "Choose one of Claude's sessions in this folder"],
     ],
   },
   codex: {
     group: "Codex",
     prefix: "codex",
     modes: [
-      ["new", [], "Codex · new conversation", "Start a new Codex conversation in this folder"],
-      ["continue", ["resume", "--last"], "Codex · continue latest", "Continue the latest Codex conversation in this folder"],
-      ["resume", ["resume"], "Codex · choose session", "Choose one of Codex's sessions"],
+      ["new", "Codex · new conversation", "Start a new Codex conversation in this folder"],
+      ["continue", "Codex · continue latest", "Continue the latest Codex conversation in this folder"],
+      ["resume", "Codex · choose session", "Choose one of Codex's sessions"],
     ],
   },
 };
@@ -407,7 +394,7 @@ export function terminalChoices(options) {
   for (const [id, agent] of Object.entries(AGENT_CHOICES)) {
     const found = types.find((type) => type.id === id && type.executable && type.available !== false);
     if (!found) continue;
-    for (const [mode, args, label, detail] of agent.modes) {
+    for (const [mode, label, detail] of agent.modes) {
       const prefix = agent.prefix;
       choices.push({
         key: prefix === "claude" ? `claude:${mode}` : `${prefix}:${mode}`,
@@ -415,7 +402,7 @@ export function terminalChoices(options) {
         kind: "system",
         id,
         cmd: found.executable,
-        args,
+        args: modeArgs(id, mode),
         mode,
         label,
         detail,

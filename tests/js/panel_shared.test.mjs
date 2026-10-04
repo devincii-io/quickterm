@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   countPanes, displaySnippet, environmentError, formatBytes, inferTerminalType,
-  layoutSessionIds, nativeFolderPickerAvailable, parseEnvLines, pickNativeFolder,
+  layoutSessionIds, nativeFolderPickerAvailable, pickNativeFolder,
   runnableSnippet, sessionAlreadyGone, TERMINAL_TYPES,
 } from "../../quickterm/frontend/js/panel_shared.js";
 
@@ -32,10 +32,7 @@ test("layout helpers count panes and collect bound sessions", () => {
   assert.deepEqual([...layoutSessionIds(layout)], ["one", "two"]);
 });
 
-test("environment editor parses comments and rejects unsafe values", () => {
-  assert.deepEqual(parseEnvLines("# note\nA=one\nB=two=three\n"), {
-    A: "one", B: "two=three",
-  });
+test("the environment rule rejects unsafe values", () => {
   assert.equal(environmentError({ Path: "a", PATH: "b" }).includes("unique"), true);
   assert.equal(environmentError({ GOOD: "value" }), "");
 });

@@ -11,7 +11,7 @@
 //     reporting that the list is empty.
 
 import { icon } from "./icons.js";
-import { closeMenu, toggleMenu } from "./menu.js";
+import { toggleMenu } from "./menu.js";
 import { make } from "./panel_shared.js";
 
 /** Case-insensitive substring match over every searchable field of an item. */
@@ -55,33 +55,16 @@ export function configFilter({ value = "", placeholder = "Filter", hint = "", on
 }
 
 /**
- * A menu.js menu opened from inside the sheet. The sheet closes itself on
- * Escape from a capture listener on document, which runs before the menu ever
- * sees the key. A capture listener on window runs earlier still, so Escape
- * closes the menu and only the menu.
+ * A menu.js menu opened from inside the sheet. Escape needs nothing extra
+ * here: the sheet's own key listener (panels.js `sheetKeyRoute`) steps aside
+ * for a key inside the menu and closes an open menu, never the sheet, when
+ * the key comes from anywhere else.
  */
 export function panelMenu({ anchor, label = "", items, align, width, onClose }) {
-  const escape = (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    closeMenu("escape");
-  };
-  const menu = toggleMenu({
-    anchor,
-    label,
-    items,
-    align,
-    width,
-    onClose: (reason) => {
-      window.removeEventListener("keydown", escape, true);
-      onClose?.(reason);
-    },
-  });
+  const menu = toggleMenu({ anchor, label, items, align, width, onClose });
   if (!menu) return null;
   // The sheet sits above the sidebar's menu layer.
   menu.root.classList.add("in-panel");
-  window.addEventListener("keydown", escape, true);
   return menu;
 }
 

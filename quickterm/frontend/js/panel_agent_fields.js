@@ -7,12 +7,13 @@
 // key, so a profile only carries what the user actually set. Drawing the
 // fields writes nothing, so looking at a profile never marks it unsaved.
 
+import { AGENT_MODES, AGENT_MODE_LABELS, agentModeOf } from "./agent_profile.js";
 import { make } from "./panel_shared.js";
 import {
   comboInput, configChoice, configProblems, configToggle,
 } from "./panel_settings_kit.js";
 import {
-  AGENT_MODES, AGENT_MODE_LABELS, agentConflicts, agentModeOf,
+  agentConflicts,
 } from "./profile_model.js";
 
 function field(label, control, hint, key) {

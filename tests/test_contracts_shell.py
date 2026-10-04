@@ -446,7 +446,9 @@ def test_views_have_no_primary_and_every_view_closes():
     # Opens, closes and rebuilds run one after another instead of refusing.
     assert "    return this._serial(() => this._close(view));" in views
     close = _function(views, "  async _close(view) {", "\n  // One view over the whole window")
-    assert "if (!view || this.busy || !this.views().includes(view)) return false;" in close
+    assert "if (!view || !this.views().includes(view)) return false;" in close
+    # _serial() orders open, close and rebuild; a busy flag could never be set.
+    assert "this.busy" not in views
     # Closing saves, retains and releases through the view's own document,
     # then removes the leaf; nothing is killed.
     assert close.index("await child.close()") < close.index("this.root = removeLeaf(this.root, view);")

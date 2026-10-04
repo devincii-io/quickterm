@@ -212,10 +212,14 @@ def test_config_pages_are_rows_and_a_side_editor_not_cards():
     for selector in (".terminal-profile-card", ".profile-main", ".profile-more", ".snippet-card", ".connection-type"):
         assert selector not in panels_css, selector
         assert selector not in connections_css, selector
-    # Menus opened from the sheet close on Escape before the sheet does.
-    assert 'import { closeMenu, toggleMenu } from "./menu.js";' in kit
-    assert 'window.addEventListener("keydown", escape, true);' in kit
-    assert "event.stopImmediatePropagation();" in kit
+    # Menus opened from the sheet close on Escape before the sheet does. The
+    # sheet's own router does it (a second window listener in panelMenu
+    # duplicated it): it steps aside for a key inside the menu and closes an
+    # open menu, never the sheet, for a key anywhere else.
+    panels = read(PANELS_JS)
+    assert 'if (menuOpen) return inMenu ? "menu" : "close-menu";' in panels
+    assert 'if (route === "close-menu") closeMenu("escape");' in panels
+    assert 'window.addEventListener("keydown", escape, true);' not in kit
     assert ".qt-menu.in-panel { z-index: 105; }" in panels_css
 
 
