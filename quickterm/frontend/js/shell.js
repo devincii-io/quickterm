@@ -42,6 +42,8 @@ import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actio
 
 const $ = (id) => document.getElementById(id);
 const noop = () => {};
+// Verified kill-all ids, published to the other native windows of this app.
+const KILLED_SESSIONS_KEY = "quickterm.killedSessions";
 
 // Shell members win over the active view's app (spec 4.4): they concern the
 // whole window, so a view must never answer them for itself.
@@ -220,6 +222,21 @@ export async function bootShell() {
     markSeen: (id) => sidebar.markSeen(id),
     refreshSoon: () => refresh(),
     forgetSession: (id) => sidebar.forget(id),
+    publishKilled: (ids) => {
+      try {
+        localStorage.setItem(KILLED_SESSIONS_KEY, JSON.stringify({ ids, nonce: `${Date.now()}:${Math.random()}` }));
+      } catch (_) { /* the other windows' panes still exit on their own */ }
+    },
+  });
+  // Kill all in another native window: the backend is shared, and this
+  // window's views still hold panes on what it stopped. Only verified ids
+  // travel, through the storage event, which reaches the other windows only.
+  window.addEventListener("storage", (event) => {
+    if (event.key !== KILLED_SESSIONS_KEY || !event.newValue) return;
+    let ids = [];
+    try { ids = JSON.parse(event.newValue)?.ids; } catch (_) { return; }
+    const killed = new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string"));
+    if (killed.size) routing.dropKilledEverywhere(killed).finally(() => refresh());
   });
   const search = createTerminalActions({
     api, layout: { panes: () => [], focused: null }, attachSession: () => false, restartSavedPane: noop, showError,

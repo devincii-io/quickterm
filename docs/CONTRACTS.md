@@ -1635,7 +1635,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   the window runs `app.dropKilledSessions(ids)` (close the panes on them,
   forget them, autosave), and `removeSessionsFromSavedWorkspaces` edits the
   saved workspaces no view shows. `failed_ids` stay visible everywhere and
-  the confirmation says how many.
+  the confirmation says how many. The verified ids also go to the app's other
+  native windows (`localStorage["quickterm.killedSessions"]`, whose storage
+  event reaches only them), where `dropKilledEverywhere(ids)` closes and
+  forgets them in every view without another backend call.
 - Dashboard: dense saved-workspace rows, global/current ownership and resource
   statistics, detached-session management, and quick profile launch.
 - Workspaces: named workspaces autosave layout and session IDs and restore the

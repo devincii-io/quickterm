@@ -68,7 +68,7 @@ export function killRoute(session, { attached = {}, owned = {}, openWorkspaces =
 // the sidebar's confirmation can show it and keep the row.
 export function createTerminalRouting({
   api, views, context, removeSessionsFromSavedWorkspaces, markSeen = () => {}, refreshSoon = () => {},
-  forgetSession = () => {},
+  forgetSession = () => {}, publishKilled = () => {},
 }) {
   // A view restored at boot, or opened a moment ago, may still be booting:
   // its app exists only once its document is ready, so every gesture waits
@@ -141,18 +141,27 @@ export function createTerminalRouting({
   // panes on them and drops them from its ownership (so no autosave writes
   // them back), and the saved workspaces no view shows are edited on disk.
   // A terminal that could not be stopped stays everywhere.
+  // Verified kills leave every view of this window: each closes its panes on
+  // them and forgets them, so no autosave writes them back. Also what another
+  // native window's kill-all asks of this one (`publishKilled`).
+  async function dropKilledEverywhere(killed) {
+    for (const id of killed) forgetSession(id);
+    await Promise.all((views.views?.() || []).map(async (view) => {
+      try {
+        await (await readyApp(view))?.dropKilledSessions?.(killed);
+      } catch (_) {
+        // A view closing meanwhile has nothing left to drop.
+      }
+    }));
+  }
+
   async function killAllSessions() {
     const result = await api.killAllSessions();
     const killed = new Set(result?.killed_ids || []);
-    for (const id of killed) forgetSession(id);
     if (killed.size) {
-      await Promise.all((views.views?.() || []).map(async (view) => {
-        try {
-          await (await readyApp(view))?.dropKilledSessions?.(killed);
-        } catch (_) {
-          // A view closing meanwhile has nothing left to drop.
-        }
-      }));
+      // The other windows' views hold panes on these too.
+      publishKilled([...killed]);
+      await dropKilledEverywhere(killed);
       await removeSessionsFromSavedWorkspaces(killed);
     }
     refreshSoon();
@@ -190,5 +199,5 @@ export function createTerminalRouting({
     return Boolean(moved);
   }
 
-  return { activateTerminal, killTerminal, killAllSessions, detachTerminal, moveTerminalHere };
+  return { activateTerminal, killTerminal, killAllSessions, dropKilledEverywhere, detachTerminal, moveTerminalHere };
 }

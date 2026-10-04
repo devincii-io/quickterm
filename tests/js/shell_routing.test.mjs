@@ -290,6 +290,7 @@ function paneView(name, sessionIds) {
 function killAllSetup(result, viewList, { whenReady } = {}) {
   const order = [];
   const removed = [];
+  const published = [];
   const forgotten = [];
   let refreshed = 0;
   const views = {
@@ -305,8 +306,9 @@ function killAllSetup(result, viewList, { whenReady } = {}) {
     removeSessionsFromSavedWorkspaces: async (ids) => { order.push("saved"); removed.push([...ids]); },
     refreshSoon: () => { refreshed += 1; },
     forgetSession: (id) => { order.push(`forget ${id}`); forgotten.push(id); },
+    publishKilled: (ids) => { published.push(ids); },
   });
-  return { routing, order, removed, forgotten, refreshed: () => refreshed };
+  return { routing, order, removed, forgotten, published, refreshed: () => refreshed };
 }
 
 test("kill all drops the verified ids from every view, not only the active one", async () => {
@@ -332,6 +334,22 @@ test("kill all drops the verified ids from every view, not only the active one",
   assert.deepEqual(forgotten, ["a", "b", "c"]);
   assert.deepEqual(removed, [["a", "b", "c"]]);
   assert.ok(refreshed() >= 1);
+});
+
+test("kill all tells the other windows, and their views drop what was stopped", async () => {
+  const here = paneView("api", ["a", "keep"]);
+  const { routing, published } = killAllSetup({ killed: 1, killed_ids: ["a"], failed_ids: ["keep"] }, [here]);
+  await routing.killAllSessions();
+  assert.deepEqual(published, [["a"]], "only verified ids travel");
+
+  // Another window received them: its views close and forget, no backend call.
+  const there = paneView("docs", ["a", "b"]);
+  const other = killAllSetup({ killed: 0, killed_ids: [] }, [there]);
+  await other.routing.dropKilledEverywhere(new Set(["a"]));
+  assert.deepEqual(there.shown(), ["b"]);
+  assert.deepEqual(there.forgotten, ["a"]);
+  assert.deepEqual(other.forgotten, ["a"]);
+  assert.deepEqual(other.removed, [], "the window that killed edits the saved files");
 });
 
 test("kill all forgets the sidebar rows before waiting for a loading view", async () => {

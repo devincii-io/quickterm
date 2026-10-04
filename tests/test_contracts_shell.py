@@ -45,13 +45,15 @@ def test_kill_all_closes_only_backend_verified_sessions():
     # Kill-all is the shell's, whichever view is active, and only the
     # verified ids travel to the sidebar, every view and the saved files.
     routing = SHELL_ROUTING_JS.read_text(encoding="utf-8")
-    kill_all = _function(routing, "  async function killAllSessions() {", "\n  async function detachTerminal")
+    kill_all = _function(routing, "  async function dropKilledEverywhere(killed) {", "\n  async function detachTerminal")
     assert "new Set(result?.killed_ids || [])" in kill_all
     assert "for (const id of killed) forgetSession(id);" in kill_all
     assert "(views.views?.() || []).map(" in kill_all
     assert "?.dropKilledSessions?.(killed)" in kill_all
     assert "await removeSessionsFromSavedWorkspaces(killed);" in kill_all
     assert "result?.failed_ids || []" in kill_all
+    # The other native windows hear the verified ids before this one drops them.
+    assert kill_all.index("publishKilled([...killed]);") < kill_all.index("await dropKilledEverywhere(killed);")
     assert "killAllSessions," in routing[routing.index("  return { activateTerminal"):]
 
     shell = SHELL_JS.read_text(encoding="utf-8")
@@ -488,7 +490,7 @@ def test_the_sidebar_kill_routes_through_the_owning_view():
     commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
     shell = SHELL_JS.read_text(encoding="utf-8")
 
-    kill = _function(routing, "  async function killTerminal(session) {", "\n  async function killAllSessions")
+    kill = _function(routing, "  async function killTerminal(session) {", "\n  // Verified kills leave every view")
     assert "const route = killRoute(session, context());" in kill
     assert kill.index("await app.killSessionById(session.id);") < kill.index("await api.killSession(session.id);")
     assert "if (error?.status !== 404) throw error;" in kill
