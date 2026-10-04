@@ -766,6 +766,9 @@
 .config-advanced > .settings-field, .config-advanced > div { margin-top: 10px; }
 .agent-fields { margin-top: 2px; }
 .agent-options { margin-top: 12px; }
+/* The switches of an agent: one full-width column under the labelled
+   fields, so none floats beside a field in a half-empty grid cell. */
+.agent-toggles { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 
 /* Free text with a suggestions chevron, drawn as one field. */
 .config-combo { display: flex; min-width: 0; }

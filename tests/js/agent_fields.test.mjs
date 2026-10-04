@@ -136,6 +136,19 @@ test("every option kind renders as its own control, and advanced ones wait under
   assert.ok(option(container, "agent_mode"), "the launch mode comes first");
 });
 
+test("switches sit in their own full-width group, never in the field grid", () => {
+  const { container } = render({ terminal_type: "codex", agent: {} });
+  const grid = byClass(container, "agent-options")[0];
+  const toggles = byClass(container, "agent-toggles")[0];
+  assert.ok(toggles.contains(option(container, "bypass")));
+  assert.equal(grid.contains(option(container, "bypass")), false);
+  assert.ok(grid.contains(option(container, "config_profile")));
+  // The advanced group holds only a switch: no empty grid is left behind.
+  const details = tagged(container, "DETAILS");
+  assert.equal(byClass(details, "agent-options").length, 0);
+  assert.equal(byClass(details, "agent-toggles").length, 1);
+});
+
 test("drawing the fields changes nothing in the profile", () => {
   const profile = { terminal_type: "codex" };
   render(profile);

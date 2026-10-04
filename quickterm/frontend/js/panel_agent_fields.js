@@ -126,10 +126,20 @@ export function renderAgentFields(container, profile, catalogType, { onChange, m
     return { refresh: showConflicts };
   }
 
-  const basic = make("div", "settings-grid two-column agent-options");
-  const advanced = make("div", "settings-grid two-column agent-options");
+  // Labelled fields share a two-column grid; switches get a full-width row
+  // group of their own after them. Mixed into the grid, a switch floated in
+  // a cell beside a tall field and left a hole under it.
+  const group = () => {
+    const fields = make("div", "settings-grid two-column agent-options");
+    const toggles = make("div", "agent-toggles");
+    const wrap = make("div", "agent-option-group");
+    wrap.append(fields, toggles);
+    return { wrap, fields, toggles };
+  };
+  const basicGroup = group();
+  const advancedGroup = group();
   for (const option of catalogType.options || []) {
-    const target = option.advanced ? advanced : basic;
+    const { fields, toggles } = option.advanced ? advancedGroup : basicGroup;
     if (option.kind === "toggle") {
       const toggle = configToggle({
         label: option.label || option.key,
@@ -138,17 +148,21 @@ export function renderAgentFields(container, profile, catalogType, { onChange, m
         onChange: (checked) => changed(option.key, checked ? "true" : ""),
       });
       toggle.el.dataset.option = option.key;
-      target.append(toggle.el);
+      toggles.append(toggle.el);
       continue;
     }
-    target.append(field(option.label || option.key, optionControl(option, profile, changed), option.hint, option.key));
+    fields.append(field(option.label || option.key, optionControl(option, profile, changed), option.hint, option.key));
   }
-  container.append(basic, conflictSlot);
-  if (advanced.children.length) {
-    if (advancedHost) advancedHost.append(advanced);
+  for (const { fields, toggles } of [basicGroup, advancedGroup]) {
+    if (!fields.children.length) fields.remove();
+    if (!toggles.children.length) toggles.remove();
+  }
+  container.append(basicGroup.wrap, conflictSlot);
+  if (advancedGroup.wrap.children.length) {
+    if (advancedHost) advancedHost.append(advancedGroup.wrap);
     else {
       const more = make("details", "config-advanced");
-      more.append(make("summary", "", "More options"), advanced);
+      more.append(make("summary", "", "More options"), advancedGroup.wrap);
       container.append(more);
     }
   }
