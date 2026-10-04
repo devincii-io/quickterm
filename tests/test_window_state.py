@@ -210,18 +210,18 @@ def _recorder(cfg=None, overlay=False, initial=None, delay=0.01):
 
 
 def test_a_resize_is_saved_once_after_the_burst():
-    window, _recorder_obj, saved, done = _recorder(delay=0.2)
+    window, _recorder_obj, saved, done = _recorder(delay=0.05)
     for width in (1000, 1100, 1300):
         window.events.resized.fire(width, 820)
     window.events.moved.fire(10, 20)
     assert done.wait(2)
     # Debounced: one write, with the geometry read from the window at the end.
-    threading.Event().wait(0.3)
+    threading.Event().wait(0.1)  # twice the delay: a second write would have landed
     assert saved == [{"x": 10, "y": 20, "width": 1300, "height": 820, "maximized": False}]
 
 
 def test_maximizing_keeps_the_normal_bounds_and_sets_the_flag():
-    window, recorder, saved, done = _recorder(initial=BOUNDS, delay=0.2)
+    window, recorder, saved, done = _recorder(initial=BOUNDS, delay=0.05)
     window.width, window.height = 1920, 1040
     window.events.resized.fire(1920, 1040)
     window.events.maximized.fire()

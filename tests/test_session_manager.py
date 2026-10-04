@@ -294,7 +294,10 @@ async def test_touch_ignores_unknown_and_exited_sessions(fake_manager):
     mgr.touch("no-such-id")
 
 
-async def test_kill_and_list_and_focus(manager):
+async def test_kill_and_list_and_focus(manager, monkeypatch):
+    # The removal grace, shortened: the order (still listed right after the
+    # kill, gone once the grace has passed) is what is under test.
+    monkeypatch.setattr(session_manager, "_KILL_REMOVE_GRACE_S", 0.1)
     cmd, args = _interactive()
     info = manager.spawn(cmd=cmd, args=args, name="longlived")
     assert any(s.id == info.id for s in manager.list())
@@ -303,7 +306,7 @@ async def test_kill_and_list_and_focus(manager):
     assert manager.kill(info.id) is True
     await _drain(att)  # sentinel arrives on tree kill
     assert manager.get(info.id).info.alive is False
-    await asyncio.sleep(1.2)  # grace period: session removed from registry
+    await asyncio.sleep(0.3)  # grace period: session removed from registry
     assert manager.get(info.id) is None
     with pytest.raises(KeyError):
         manager.kill(info.id)  # gone: the caller answers 404, not 500

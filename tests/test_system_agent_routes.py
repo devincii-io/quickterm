@@ -197,6 +197,10 @@ def test_an_unreadable_store_is_an_empty_list(client, tmp_path, monkeypatch):
 def test_the_new_routes_need_the_token(path, monkeypatch, tmp_path):
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
     monkeypatch.setattr(ssh_config, "config_path", lambda: tmp_path / "config")
+    # Never the developer's own conversation stores: scanning them is slow and
+    # not this test's business.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     with TestClient(create_app(FakeSessionManager(), FakeConfig(), "s3cret"), base_url=BASE) as c:
         assert c.get(path).status_code == 403
         assert c.get(path, headers={"X-QuickTerm-Token": "s3cret"}).status_code != 403
