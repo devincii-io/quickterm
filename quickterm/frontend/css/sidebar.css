@@ -551,7 +551,7 @@ body.sidebar-collapsed .update-pill { width: 24px; }
   border-left: 0;
   border-radius: 0 4px 4px 0;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+  box-shadow: var(--shadow-sm);
   opacity: .55;
   transition: opacity .12s ease;
 }

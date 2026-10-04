@@ -33,7 +33,10 @@ export {
   describeArrangement, parseArrangement, restoreFailureMessage, restorePlan, viewArrangementStore,
 } from "./view_arrangement.js";
 
-export const VIEW_COLORS = ["#d4ad63", "#6daedb", "#8fcf8a", "#c78fd6", "#e0907a", "#6fc7c2"];
+// Theme tokens, not literals: applyChromeTheme() sets --view-1..6 from the
+// theme's ANSI hues, so a view frame follows the theme, light ones included.
+export const VIEW_COLORS = ["--view-1", "--view-2", "--view-3", "--view-4", "--view-5", "--view-6"]
+  .map((token) => `var(${token})`);
 // The narrowest a divider drag may make a view, when the window has the room.
 export const VIEW_MIN_PX = 160;
 export const EMPTY_STAGE_TEXT = "No workspace open. Open one from the sidebar.";

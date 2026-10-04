@@ -58,5 +58,5 @@ test("the pre-boot :root colours are what graphite computes", () => {
   }
   // Graphite's accent already reads as text, so the token is the accent.
   assert.equal(tokens["--accent-text"], tokens["--accent"]);
-  assert.match(root, /--accent-text: var\(--accent\);/);
+  assert.match(root, new RegExp(`--accent-text: ${tokens["--accent"]};`, "i"));
 });

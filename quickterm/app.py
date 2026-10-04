@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
 REAP_INTERVAL_S = 30
 MIN_WINDOW_SIZE = (760, 480)
+# Painted before the page loads. Keep it equal to --bg in css/app.css :root
+# (the default theme's background), or the window flashes another colour.
+WINDOW_BACKGROUND = "#15140f"
 SECONDARY_OFFSET = 32
 BOUNDS_SAVE_DELAY_S = 0.5
 # Spec defaults, for a config.py that predates the window and overlay fields.
@@ -599,7 +602,7 @@ class _ViewerWindows:
             ),
             **self._secondary_geometry(),
             min_size=MIN_WINDOW_SIZE,
-            background_color="#171918",
+            background_color=WINDOW_BACKGROUND,
             js_api=api,
             text_select=True,
         )
@@ -822,7 +825,7 @@ def _run_desktop(
         _window_url(cfg.port, cwd, host=cfg.host, window_id=window_id, primary=True),
         **geometry,
         min_size=MIN_WINDOW_SIZE,
-        background_color="#171918",
+        background_color=WINDOW_BACKGROUND,
         js_api=desktop_api,
         text_select=True,
     )
