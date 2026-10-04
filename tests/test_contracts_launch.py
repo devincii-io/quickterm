@@ -263,8 +263,11 @@ def test_the_palette_reaches_terminals_settings_and_configs_across_views():
     # Resume rows are fetched once per open and dropped when the palette moved on.
     fill = palette[palette.index("  async _fillAgentSessions(requestId) {"):]
     fill = fill[: fill.index("\n  }\n")]
-    assert "api.listAgentSessions(profile.terminal_type, workspace)" in fill
+    assert "api.listAgentSessions(profile.terminal_type, target)" in fill
     assert "if (!this._current(requestId)) return;" in fill
+    # A scratch view lists the folder it resumes in, not nothing.
+    assert "const target = agentSessionTarget(a);" in fill
+    assert "currentWorkspace" not in fill
 
 
 def test_kill_terminal_in_the_palette_preselects_the_kill_row():
@@ -290,7 +293,8 @@ def test_the_api_client_has_the_agent_ssh_and_hotkey_wrappers():
     api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
     assert "export const getAgentCatalog = (fresh = false) =>" in api
     assert '`/api/system/agents${fresh ? "?fresh=true" : ""}`' in api
-    assert "export const listAgentSessions = (type, workspace, limit = 20) =>" in api
+    assert "export const listAgentSessions = (type, { workspace = null, cwd = null } = {}, limit = 20) =>" in api
+    assert 'else if (cwd) query.set("cwd", cwd);' in api
     assert "/api/agent-sessions?" in api
     assert 'export const getSshHosts = () => req("GET", "/api/system/ssh-hosts");' in api
     assert "`/api/system/ssh-hosts/${encodeURIComponent(alias)}`" in api
@@ -302,7 +306,12 @@ def test_the_spawner_sends_agent_mode_and_session():
     assert "{ agent_mode: launch.agentMode }" in spawner
     assert "{ agent_session: launch.agentSession }" in spawner
     assert "claude_mode" not in spawner
-    for name in ("runAgentMode,", "resumeAgentSession,", "splitAgentView,"):
+    for name in ("runAgentMode,", "resumeAgentSession,", "agentSessionFolder,", "splitAgentView,"):
         assert name in spawner
+    # A resume starts in the folder the palette listed it for.
+    assert "runWithOptions(profile, { agentMode, agentSession: sessionId }, agentSessionFolder())" in spawner
+    main = MAIN_JS.read_text(encoding="utf-8")
+    assert '["runAgentMode", "resumeAgentSession", "agentSessionFolder", "splitAgentView"]' in main
+    assert "state.scratchCwd = openDir || null;" in main
     assert "runClaudeMode: runAgentMode," in spawner
     assert "splitClaudeAgentView: splitAgentView," in spawner

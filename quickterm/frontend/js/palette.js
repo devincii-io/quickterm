@@ -12,8 +12,8 @@ import { connectionLabel, connectionTarget } from "./panel_connections.js";
 import { workspaceLabel } from "./boot_context.js";
 import { AGENT_TYPES, agentTypeOf } from "./agent_profile.js";
 import {
-  PREFIX_HINT, agentRows, agentSessionRows, configRows, fuzzyScore, killName, killRows, parsePrefix,
-  rowGroup, settingRows, terminalRows, workspaceRows,
+  PREFIX_HINT, agentRows, agentSessionRows, agentSessionTarget, configRows, fuzzyScore, killName, killRows,
+  parsePrefix, rowGroup, settingRows, terminalRows, workspaceRows,
 } from "./palette_items.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
@@ -215,17 +215,18 @@ export class Palette {
   }
 
   // "resume <agent> session: <title>" rows for the first profile of each agent
-  // type, from that agent's own session store for this workspace's folder.
+  // type, from that agent's own session store for this view's folder: a named
+  // workspace's, or the one a scratch view starts its agents in.
   async _fillAgentSessions(requestId) {
     const a = this.app;
-    const workspace = a.currentWorkspace?.() || null;
-    if (!workspace || typeof api.listAgentSessions !== "function") return;
+    const target = agentSessionTarget(a);
+    if (!target || typeof api.listAgentSessions !== "function") return;
     const profiles = AGENT_TYPES
       .map((type) => (a.profiles || []).find((profile) => agentTypeOf(profile) === type))
       .filter(Boolean);
     if (!profiles.length) return;
     const answers = await Promise.all(profiles.map((profile) =>
-      api.listAgentSessions(profile.terminal_type, workspace).then(
+      api.listAgentSessions(profile.terminal_type, target).then(
         (answer) => ({ profile, sessions: answer?.sessions || [] }),
         () => ({ profile, sessions: [] }),
       )));

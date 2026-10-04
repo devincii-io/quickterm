@@ -242,12 +242,21 @@ export function createSpawner({
     await spawnInto(pane, profile.name, contextCwd(null), {});
   }
 
-  async function runWithOptions(profile, options) {
+  async function runWithOptions(profile, options, cwd = null) {
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return null;
     layout.focusPane(pane);
-    return spawnInto(pane, profile.name, contextCwd(null), options);
+    return spawnInto(pane, profile.name, contextCwd(cwd), options);
+  }
+
+  // The folder whose agent conversations this view lists and resumes. A
+  // named workspace answers null: the backend resolves its folder by name,
+  // for the list and for the spawn alike. Scratch uses the folder the view
+  // was opened on ("Open QuickTerm here"), else its throwaway root.
+  function agentSessionFolder() {
+    if (state.currentWorkspace && state.currentWorkspace !== SCRATCH_WS) return null;
+    return state.scratchCwd || state.scratchRoot || null;
   }
 
   function runAgentMode(profile, agentMode) {
@@ -255,10 +264,11 @@ export function createSpawner({
   }
 
   // A session picked from QuickTerm's own list (GET /api/agent-sessions).
-  // Codex can also fork it into a new session; Claude only resumes.
+  // Codex can also fork it into a new session; Claude only resumes. Either
+  // finds the conversation only in the folder it was listed for.
   function resumeAgentSession(profile, sessionId, { fork = false } = {}) {
     const agentMode = fork && profile.terminal_type === "codex" ? "fork" : "resume";
-    return runWithOptions(profile, { agentMode, agentSession: sessionId });
+    return runWithOptions(profile, { agentMode, agentSession: sessionId }, agentSessionFolder());
   }
 
   async function splitAgentView(profile) {
@@ -412,6 +422,7 @@ export function createSpawner({
     runProfile,
     runAgentMode,
     resumeAgentSession,
+    agentSessionFolder,
     splitAgentView,
     runClaudeMode: runAgentMode,
     splitClaudeAgentView: splitAgentView,

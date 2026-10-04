@@ -1573,6 +1573,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   the next autosave; else the shell calls `api.killSession(id)` and
   `removeSessionsFromSavedWorkspaces`. A 500 is thrown back to the popover.
   The pure decisions are `rowAction` and `killRoute` in `shell_routing.js`.
+- Kill all (Dashboard) is a shell member, `killAllSessions()` in
+  `shell_routing.js`, whichever view is active. Only the backend's
+  `killed_ids` travel: the sidebar forgets those rows at once, every view of
+  the window runs `app.dropKilledSessions(ids)` (close the panes on them,
+  forget them, autosave), and `removeSessionsFromSavedWorkspaces` edits the
+  saved workspaces no view shows. `failed_ids` stay visible everywhere and
+  the confirmation says how many.
 - Dashboard: dense saved-workspace rows, global/current ownership and resource
   statistics, detached-session management, and quick profile launch.
 - Workspaces: named workspaces autosave layout and session IDs and restore the
@@ -1792,7 +1799,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   - agent rows per agent profile: "<type> new / continue / choose session /
     fork (codex) / agent manager: <profile>", "split agent view: <profile>",
     and `resume <Claude|Codex> session: <title>` for the active workspace,
-    filled late from `api.listAgentSessions`
+    filled late from `api.listAgentSessions`. `agentSessionTarget(app)` in
+    `palette_items.js` picks the folder: a named workspace by name, a scratch
+    view (or no view) by `cwd`, the view's `agentSessionFolder()` (the folder
+    it was opened on, else the scratch root), which is also where
+    `resumeAgentSession` starts the agent
   - prefix filters parsed in `_refilter`: `>` actions, `@` workspaces and
     terminals, `#` settings and configs, `!` snippets; a prefix alone lists
     that kind
@@ -1807,11 +1818,14 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   shell members win over the active view's app): `openWorkspace(name)`,
   `loadWorkspace(name)` (alias), `closeWorkspaceView(name)`, `newScratchView()`,
   `openWorkspaces()`, `liveTerminals() -> [{session, workspace, label,
-  attachedIn}]`, `activateTerminal`, `killTerminal`, `detachTerminal`,
+  attachedIn}]`, `activateTerminal`, `killTerminal`, `killAllSessions`,
+  `detachTerminal`,
   `settingEntries`, `openSetting`, `editTerminalConfig`, `editSnippet`,
   `setupTerminals`. Per view, from the spawner: `runAgentMode(profile, mode)`,
-  `resumeAgentSession(profile, sessionId)`, `splitAgentView(profile)`, with
-  the aliases `runClaudeMode` and `splitClaudeAgentView`.
+  `resumeAgentSession(profile, sessionId)`, `splitAgentView(profile)`,
+  `agentSessionFolder()`, with the aliases `runClaudeMode` and
+  `splitClaudeAgentView`. Per view, from the pane commands:
+  `dropKilledSessions(ids)` for the shell's kill-all.
 - Split actions launch the selected terminal choice in the source pane's
   best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
   signals, falling back to their launch folder; prompt text is never parsed.

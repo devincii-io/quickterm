@@ -184,6 +184,29 @@ test("Claude resumes a chosen session and never forks one", async () => {
   assert.equal(spawner.splitClaudeAgentView, spawner.splitAgentView);
 });
 
+test("a resume starts in the folder its conversation was listed for", async () => {
+  const claude = { name: "Claude", terminal_type: "claude-code" };
+  const harness = withLayout(spawnerHarness([claude]));
+  harness.state.scratchRoot = "C:\\scratch";
+  // A named workspace: no folder from here, the backend resolves it by name.
+  assert.equal(harness.spawner.agentSessionFolder(), null);
+  await harness.spawner.resumeAgentSession(claude, SESSION);
+  assert.equal(harness.requests.at(-1).cwd, undefined);
+  // Scratch, before and after adoption: its throwaway root.
+  for (const name of [null, "scratch"]) {
+    harness.state.currentWorkspace = name;
+    assert.equal(harness.spawner.agentSessionFolder(), "C:\\scratch");
+    await harness.spawner.resumeAgentSession(claude, SESSION);
+    assert.equal(harness.requests.at(-1).cwd, "C:\\scratch");
+  }
+  // A scratch view opened on a folder lists and resumes there.
+  harness.state.scratchCwd = "C:\\proj";
+  assert.equal(harness.spawner.agentSessionFolder(), "C:\\proj");
+  await harness.spawner.resumeAgentSession(claude, SESSION);
+  assert.equal(harness.requests.at(-1).cwd, "C:\\proj");
+  assert.equal(harness.requests.at(-1).agent_session, SESSION);
+});
+
 test("the agent view splits beside the focused pane, and ordinary splits do not open it", async () => {
   const codex = { name: "Codex", terminal_type: "codex", agent_mode: "agents" };
   const harness = withLayout(spawnerHarness([codex]));

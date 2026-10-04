@@ -37,6 +37,9 @@ export function createAppState({
     // instead of the user's home directory. Re-read whenever settings are saved,
     // because scratch_dir is configurable.
     scratchRoot: cfg.scratch_dir || null,
+    // The folder a scratch view was opened on ("Open QuickTerm here"), where
+    // its agent conversations are listed and resumed. null: the scratch root.
+    scratchCwd: null,
     // What this layout owns: a named workspace's terminals, and separately a
     // never-adopted scratch's, which are the ones leaving scratch cleans up.
     scratchSessionIds: new Set(),

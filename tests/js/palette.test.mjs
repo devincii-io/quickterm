@@ -189,3 +189,35 @@ test("resume rows arrive late for the first agent profile of each type", async (
   await palette._fillAgentSessions(stale);
   assert.ok(!palette.items.some((item) => item.label.startsWith("resume Codex session")));
 });
+
+test("a scratch view gets resume rows for the folder it starts agents in", async (t) => {
+  const urls = [];
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    const sessions = [{ id: SESSION, title: "Sketch the idea", updated_at: "2026-10-03T08:00:00Z" }];
+    return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ sessions }) };
+  };
+  const resumed = [];
+  const claude = { name: "Claude", terminal_type: "claude-code" };
+  const palette = fakePalette({
+    profiles: [claude],
+    snippets: [],
+    currentWorkspace: () => "scratch-view-0123456789ab",
+    agentSessionFolder: () => "C:\\Temp\\quickterm-scratch",
+    scratchRoot: () => "C:\\Temp\\quickterm-scratch",
+    resumeAgentSession: (profile, id) => resumed.push([profile, id]),
+  });
+  palette._compose();
+  await palette._fillAgentSessions(palette.requestId);
+  assert.equal(urls.length, 1);
+  const query = new URLSearchParams(urls[0].split("?")[1]);
+  assert.equal(query.get("type"), "claude-code");
+  assert.equal(query.get("cwd"), "C:\\Temp\\quickterm-scratch");
+  assert.equal(query.has("workspace"), false, "a scratch view is never looked up by its throwaway name");
+  const row = palette.items.find((item) => item.label === "resume Claude session: Sketch the idea");
+  assert.ok(row);
+  row.run();
+  assert.deepEqual(resumed, [[claude, SESSION]]);
+});

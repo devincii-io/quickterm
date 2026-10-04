@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   createTerminalRouting, finishedAttachRecord, killRoute, rowAction, sessionOwner,
 } from "../../quickterm/frontend/js/shell_routing.js";
+import { createPaneCommands } from "../../quickterm/frontend/js/pane_commands.js";
 
 const live = (id, extra = {}) => ({ id, name: id, alive: true, ...extra });
 
@@ -79,6 +80,7 @@ function setup({ open = ["api", "docs"], active = "docs", context = {}, api = {}
   const views = new Map(open.map((name) => [name, { name, app: fakeApp(name, calls, opened[name]) }]));
   const fake = {
     get active() { return active ? views.get(active) : null; },
+    views: () => [...views.values()],
     appFor: (view) => view?.app || null,
     viewForWorkspace: (name) => views.get(name) || null,
     workspaceOf: (view) => view.name,
@@ -256,4 +258,132 @@ test("move here lets the owning view go of the terminal before the active view t
   const here = setup({ context: { attached: { u: "docs" } } });
   await here.routing.moveTerminalHere(live("u"));
   assert.deepEqual(here.calls, [["markSeen", "u"], ["focusSession", "u"]]);
+});
+
+// ---- kill all: the window's, not the active view's ----
+
+// One view's real pane commands over a layout of fake panes, so the test
+// sees what each view keeps after the shell's kill-all.
+function paneView(name, sessionIds) {
+  const panes = sessionIds.map((id) => ({ session: { id } }));
+  const forgotten = [];
+  let saves = 0;
+  const layout = {
+    focused: null,
+    panes: () => panes,
+    closePane: (pane) => { panes.splice(panes.indexOf(pane), 1); },
+  };
+  const app = createPaneCommands({
+    api: {}, state: {}, layout,
+    forgetSession: (id) => forgotten.push(id),
+    scheduleWorkspaceSave: () => { saves += 1; },
+    refreshStatusSoon: () => {},
+    showError: () => {},
+  });
+  return {
+    name, app, forgotten,
+    shown: () => panes.map((pane) => pane.session.id),
+    saves: () => saves,
+  };
+}
+
+function killAllSetup(result, viewList, { whenReady } = {}) {
+  const order = [];
+  const removed = [];
+  const forgotten = [];
+  let refreshed = 0;
+  const views = {
+    active: viewList[0] || null,
+    views: () => viewList,
+    appFor: (view) => view?.app || null,
+    ...(whenReady ? { whenReady } : {}),
+  };
+  const routing = createTerminalRouting({
+    api: { killAllSessions: async () => { order.push("api"); return result; } },
+    views,
+    context: () => ({ attached: {}, owned: {}, openWorkspaces: [] }),
+    removeSessionsFromSavedWorkspaces: async (ids) => { order.push("saved"); removed.push([...ids]); },
+    refreshSoon: () => { refreshed += 1; },
+    forgetSession: (id) => { order.push(`forget ${id}`); forgotten.push(id); },
+  });
+  return { routing, order, removed, forgotten, refreshed: () => refreshed };
+}
+
+test("kill all drops the verified ids from every view, not only the active one", async () => {
+  const api = paneView("api", ["a", "b", "keep"]);
+  const docs = paneView("docs", ["c", "stuck"]);
+  const idle = paneView("idle", ["other"]);
+  const { routing, removed, forgotten, refreshed } = killAllSetup(
+    { killed: 3, killed_ids: ["a", "b", "c"], failed_ids: ["stuck"] },
+    [api, docs, idle],
+  );
+  assert.deepEqual(await routing.killAllSessions(), { killed: 3, failed: 1 });
+  // Each view closes its own panes on verified ids and nothing else.
+  assert.deepEqual(api.shown(), ["keep"]);
+  assert.deepEqual(docs.shown(), ["stuck"], "a terminal that could not be stopped stays on screen");
+  assert.deepEqual(idle.shown(), ["other"]);
+  // Every view forgets every verified id, so no autosave writes one back.
+  for (const view of [api, docs, idle]) {
+    assert.deepEqual(view.forgotten, ["a", "b", "c"], view.name);
+    assert.equal(view.saves(), 1, view.name);
+  }
+  // The sidebar forgets the rows, the saved files lose them once, and the
+  // sidebar refreshes.
+  assert.deepEqual(forgotten, ["a", "b", "c"]);
+  assert.deepEqual(removed, [["a", "b", "c"]]);
+  assert.ok(refreshed() >= 1);
+});
+
+test("kill all forgets the sidebar rows before waiting for a loading view", async () => {
+  let release;
+  const loading = paneView("loading", ["a"]);
+  const { routing, order } = killAllSetup(
+    { killed: 1, killed_ids: ["a"], failed_ids: [] },
+    [loading],
+    { whenReady: () => new Promise((resolve) => { release = resolve; }) },
+  );
+  const done = routing.killAllSessions();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(order, ["api", "forget a"], "the row goes at once");
+  assert.deepEqual(loading.shown(), ["a"]);
+  release(true);
+  await done;
+  assert.deepEqual(loading.shown(), [], "the view drops it once its document is ready");
+  assert.deepEqual(order, ["api", "forget a", "saved"]);
+});
+
+test("kill all with nothing verified touches no view and no saved file", async () => {
+  const api = paneView("api", ["stuck"]);
+  const { routing, removed, forgotten } = killAllSetup(
+    { killed: 0, killed_ids: [], failed_ids: ["stuck"] },
+    [api],
+  );
+  assert.deepEqual(await routing.killAllSessions(), { killed: 0, failed: 1 });
+  assert.deepEqual(api.shown(), ["stuck"]);
+  assert.deepEqual(api.forgotten, []);
+  assert.equal(api.saves(), 0);
+  assert.deepEqual(forgotten, []);
+  assert.deepEqual(removed, []);
+});
+
+test("one view failing to drop does not keep the others or the saved files stale", async () => {
+  const broken = { name: "broken", app: { dropKilledSessions: () => { throw new Error("gone"); } } };
+  const docs = paneView("docs", ["a"]);
+  const { routing, removed } = killAllSetup({ killed: 1, killed_ids: ["a"], failed_ids: [] }, [broken, docs]);
+  assert.deepEqual(await routing.killAllSessions(), { killed: 1, failed: 0 });
+  assert.deepEqual(docs.shown(), []);
+  assert.deepEqual(removed, [["a"]]);
+});
+
+test("a kill-all failure from the backend is thrown and changes nothing", async () => {
+  const api = paneView("api", ["a"]);
+  const failed = Object.assign(new Error("500"), { status: 500 });
+  const routing = createTerminalRouting({
+    api: { killAllSessions: async () => { throw failed; } },
+    views: { views: () => [api], appFor: (view) => view.app },
+    context: () => ({}),
+    removeSessionsFromSavedWorkspaces: async () => { throw new Error("must not run"); },
+  });
+  await assert.rejects(routing.killAllSessions(), (error) => error === failed);
+  assert.deepEqual(api.shown(), ["a"]);
 });
