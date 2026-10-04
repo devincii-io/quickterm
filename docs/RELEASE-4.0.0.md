@@ -16,7 +16,14 @@ is intended and was kept. Follow-up commits closed the kill-all and scratch
 resume gaps, restored remembered bounds on screen, fixed the overlay over a
 maximized window, kept `config.json` readable for 3.x after a 4.0 shortcut
 capture, and stopped retaining idle untouched shells when a scratch view
-closes. No release-blocking source findings remain.
+closes. A second review of the release commit found three more: text on
+`--surface-soft` (hovered controls, the selected palette row) and the accent
+on its own tint fell under 4.5:1 in most themes, the kill-all comment and
+contract said open workspaces were not edited on disk when they are, and the
+native smoke below had run before the review fixes. The contrast is now
+derived and tested for both surfaces, the docs describe the code, and the
+smoke ran again on the final tree. No release-blocking source findings
+remain.
 
 Limitations that stay: workspace layout ownership is still advisory for
 authenticated API clients, and Settings conflict detection is a client-side
@@ -35,10 +42,14 @@ the list and leaves the CLI's own picker as the fallback.
   `package.json` in the working copy, which was left alone.
 - Native workspace smoke (`scripts/smoke_workspace_views.py`, run the same
   way, with TEMP and TMP pointing at a scratch folder so its isolated APPDATA
-  lived there, a free port and no summon key): exit 0, every check passed,
-  plus "Native close-to-tray with retained terminals passed", in 46.6 s.
+  lived there, a free port and no summon key): exit 0, all 48 checks passed,
+  plus "Native close-to-tray with retained terminals passed", in 36.8 s. This
+  run is on the final tree, after every review fix; the first run (46.6 s)
+  was on the integration tree before them.
 - PyInstaller built `dist/QuickTerm` from `quickterm.spec` with the bundled
-  PuTTY tools present.
+  PuTTY tools present. That build and the frozen checks below predate the
+  second review's fixes (frontend colours, comments and docs), so the
+  published artifacts must be rebuilt from the final commit.
 - Frozen v4.0.0 smoke (`scripts/smoke_packaged.py`, isolated APPDATA under a
   scratch folder): passed. It verified authenticated PTY creation, replay,
   live output and exit, the dynamically loaded open, update and connection
@@ -57,7 +68,9 @@ the list and leaves the CLI's own picker as the fallback.
   process was stopped by its PID afterwards.
 - The full gate ran again on the release tree (version 4.0.0, changelog,
   README and these notes): exit 0, "Manual CI passed.", pytest 1254 passed,
-  18 skipped in 81.23 s, ruff clean, `node --test` 397/397 pass.
+  18 skipped in 81.23 s, ruff clean, `node --test` 397/397 pass. After the
+  second review's fixes it ran once more: exit 0, pytest 1254 passed, 18
+  skipped in 74.65 s, ruff clean, `node --test` 397/397 pass.
 - No leftover processes. Nothing was pushed or tagged. The installer,
   portable ZIP, Python distributions and SHA256SUMS were not built for this
   verification; that is the release step.
