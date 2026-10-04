@@ -1504,6 +1504,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - `focus.js` decides who owns the keyboard. A pane re-asserts `term.focus()`
   immediately, on a frame, and on a timeout, so an overlay that focuses its own
   control must claim first and release before handing back.
+  `WorkspaceViews.focusView(view)` asks it too: while any shell owner holds
+  the keyboard it only activates the view and keeps it as `pendingFocus`,
+  and the overlay's own hand-back focuses it. In the shell any claim stands
+  the plain Alt actions down (`paletteOpen: () => focusOwners().length > 0`),
+  and the palette and panel toggles (shell and view) first close an open
+  `menu.js` menu and confirmation box (`"replaced"`).
 - `document.title = "QuickTerm"` (hotkey summon matches on this).
 - Layout tree in JS mirrors the workspace JSON schema exactly.
 - Panes: each pane = one xterm.js + one WS. Debounce resize ~50 ms. Use
@@ -1585,7 +1591,11 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   "Kill <name>? This stops its whole process tree.", buttons **Kill** (danger)
   and **Cancel**. A pointer focuses Cancel; the keyboard path (Delete on a
   focused row, the context menu opened from the keyboard) focuses Kill, and
-  Enter completes. Escape cancels. While open, the trigger stays visible and
+  Enter or Alt+W completes (the box opens with `acceptsAltW`, and the shell's
+  key layer calls `acceptConfirm()` before it stands down for an overlay; a
+  Dashboard delete or kill-all box never takes Alt+W). Escape cancels; Tab
+  stays between Kill and Cancel. In rail mode the row's actions have no box,
+  so the row itself is the trigger. While open, the trigger stays visible and
   disabled, the popover is clamped inside the viewport and follows its row
   while the list scrolls, and it claims `focus.js` owner `"sidebar-confirm"`,
   handing focus back to the active view's terminal on close. Only verified
@@ -1902,7 +1912,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   the user did not expect can never complete a destructive action; a keyboard
   path (Alt+W, Delete on a sidebar row, the palette) asked for it and focuses
   the destructive button; Escape and the Cancel button also cancel, and
-  Escape inside a panel cancels the confirmation before it closes the panel. A
+  Escape inside a panel cancels the confirmation before it closes the panel,
+  except while its action runs (`closeConfirm(reason)` refuses a busy box;
+  `{force: true}` is only for a surface that is going away). Panels ask
+  `confirmIsOpen()` instead of tracking a copy of the box. A
   short-lived pane notice never hides an open confirmation, and an inline
   popover follows its trigger while the panel body scrolls (dismissing itself if
   the trigger leaves the viewport). Application code does not use browser

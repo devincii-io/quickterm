@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-async function captureHandler({ paletteOpen = false } = {}) {
+async function captureHandler({ paletteOpen = false, acceptKill = undefined } = {}) {
   let handler = null;
   globalThis.window = {
     addEventListener(type, fn, capture) {
@@ -16,6 +16,7 @@ async function captureHandler({ paletteOpen = false } = {}) {
   initKeys({
     togglePalette: () => calls.push("togglePalette"),
     paletteOpen: () => paletteOpen,
+    acceptKill: acceptKill && (() => { calls.push("acceptKill?"); return acceptKill(); }),
     toggleDashboard: () => calls.push("toggleDashboard"),
     toggleSettings: () => calls.push("toggleSettings"),
     toggleHelp: () => calls.push("toggleHelp"),
@@ -132,6 +133,25 @@ test("a panel key still closes its own panel", async () => {
   handler(keyEvent({ key: "n", altKey: true })); // new terminal must stay blocked
 
   assert.deepEqual(calls, ["toggleSettings"]);
+});
+
+test("Alt+W completes an open kill box and never arms a pane's kill under an overlay", async () => {
+  // The sidebar's kill box is open: Alt+W accepts it.
+  let open = true;
+  const accepting = await captureHandler({ paletteOpen: true, acceptKill: () => open });
+  const press = keyEvent({ key: "w", altKey: true });
+  accepting.handler(press);
+  assert.equal(press.defaultPrevented, true);
+  assert.deepEqual(accepting.calls, ["acceptKill?"]);
+  // Another overlay (a menu, a Dashboard delete box): nothing happens at all.
+  open = false;
+  accepting.calls.length = 0;
+  accepting.handler(keyEvent({ key: "w", altKey: true }));
+  assert.deepEqual(accepting.calls, ["acceptKill?"]);
+  // No overlay: the pane's kill as before.
+  const plain = await captureHandler({ acceptKill: () => false });
+  plain.handler(keyEvent({ key: "w", altKey: true }));
+  assert.deepEqual(plain.calls, ["acceptKill?", "killSession"]);
 });
 
 test("Alt+Shift+S cycles the sidebar; plain Alt+S is still Settings and Alt+B is the shell's", async () => {

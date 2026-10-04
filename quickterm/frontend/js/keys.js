@@ -119,6 +119,9 @@ export function initKeys(actions) {
     if (!e.shiftKey && key === "g") return done(actions.toggleDashboard);
     if (!e.shiftKey && key === "s") return done(actions.toggleSettings);
     if (!e.shiftKey && key === "i") return done(actions.toggleHelp);
+    // A kill confirmation that takes Alt+W completes on it (the sidebar's,
+    // like a pane's kill bar); it is checked before the overlay stand-down.
+    if (!e.shiftKey && key === "w" && actions.acceptKill?.()) return done(() => {});
     if (actions.paletteOpen()) return; // palette/panel input owns the keyboard
 
     if (!e.shiftKey) {

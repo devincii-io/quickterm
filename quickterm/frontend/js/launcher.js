@@ -804,12 +804,17 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const killConfirm = (entry, keyboard) => {
     const item = itemFor(entry);
     if (!item?.session || item.session.alive === false) return;
-    const { kill } = parts.get(entry);
+    const { kill, row } = parts.get(entry);
     const name = item.session.name || item.session.id;
-    openConfirm(`session:${item.session.id}`, entry, kill, {
+    // In rail mode the row's actions are display:none, and a trigger without
+    // a box drops the confirmation in the corner and closes it on the first
+    // scroll as "gone". The row itself is the visible trigger then.
+    const trigger = kill.getClientRects().length ? kill : row;
+    openConfirm(`session:${item.session.id}`, entry, trigger, {
       message: `Kill ${name}? This stops its whole process tree.`,
       confirmLabel: "Kill",
       keyboard,
+      acceptsAltW: true,
       // Read at confirm time: the row may have been patched since it opened.
       action: () => actions.killTerminal?.(itemFor(entry)?.session || item.session),
     });

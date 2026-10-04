@@ -677,3 +677,22 @@ def test_an_exited_pane_restarts_in_place_with_its_own_launch():
     )
     assert "this.term.write(this._restartSeparator());" in replay
     assert "[restarted]" in pane
+
+
+def test_shell_overlays_stand_the_alt_layer_down_and_close_before_a_panel():
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    keys = shell[shell.index("initKeys({"):]
+    # Every claim (menu, sidebar confirm or rename, capture) counts, not
+    # only the palette and the panels.
+    assert "paletteOpen: () => focusOwners().length > 0," in keys
+    assert "acceptKill: () => acceptConfirm()," in keys
+    for toggle in ("togglePalette", "toggleDashboard", "toggleSettings", "toggleHelp"):
+        line = keys[keys.index(f"{toggle}: () =>"):].splitlines()[0]
+        assert "dropSidebarOverlays();" in line, toggle
+
+
+def test_a_rail_row_anchors_its_kill_box_to_the_row():
+    launcher = (FRONTEND_JS / "launcher.js").read_text(encoding="utf-8")
+    kill = launcher[launcher.index("const killConfirm = "):launcher.index("const detach = ")]
+    assert "const trigger = kill.getClientRects().length ? kill : row;" in kill
+    assert "acceptsAltW: true," in kill

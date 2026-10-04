@@ -4,6 +4,8 @@ import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
 import { claimFocus, releaseFocus } from "./focus.js";
+import { closeMenu } from "./menu.js";
+import { closeConfirm } from "./confirm_popover.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import { createAutosave } from "./autosave.js";
@@ -348,8 +350,14 @@ async function bootView() {
   app.appliedTheme = appliedTheme;
   app.version = state.cfg.version || "";
 
+  // Opening the palette or a panel first closes a menu or confirmation still
+  // drawn here, so its keyboard claim does not outlive it.
+  const dropOverlays = () => {
+    closeMenu("replaced");
+    closeConfirm("replaced");
+  };
   initKeys({
-    togglePalette: () => { panels.close(); palette.toggle(); },
+    togglePalette: () => { dropOverlays(); panels.close(); palette.toggle(); },
     // Quick Settings is intentionally non-modal: its view shortcuts keep
     // working while the drawer is open. Full panels and the command palette
     // still own the keyboard while they are active.
@@ -362,9 +370,9 @@ async function bootView() {
     closePane: app.closePane,
     killSession: () => app.killFocusedSession({ keyboard: true }),
     focusDir: (direction) => layout.focusDir(direction),
-    toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
-    toggleSettings: () => { palette.close(); panels.toggle("settings"); },
-    toggleHelp: () => { palette.close(); panels.toggle("help"); },
+    toggleDashboard: () => { dropOverlays(); palette.close(); panels.toggle("dashboard"); },
+    toggleSettings: () => { dropOverlays(); palette.close(); panels.toggle("settings"); },
+    toggleHelp: () => { dropOverlays(); palette.close(); panels.toggle("help"); },
     toggleSidebar: () => state.launcherView?.cycleMode(),
     openExplorer: app.openExplorer,
     openEditor: app.openEditor,

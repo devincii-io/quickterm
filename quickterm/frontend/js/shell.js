@@ -18,6 +18,8 @@ import { Panels } from "./panels.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme } from "./themes.js";
 import { focusOwners } from "./focus.js";
+import { closeMenu } from "./menu.js";
+import { acceptConfirm, closeConfirm } from "./confirm_popover.js";
 import { setupNeeded } from "./setup.js";
 import { watchGlobalSettings } from "./global_settings.js";
 import { WorkspaceViews, viewArrangementStore } from "./workspace_views.js";
@@ -440,9 +442,20 @@ export async function bootShell() {
   sidebar.init();
 
   // ---- the keyboard, while the shell itself has it (sidebar, panels) ----
+  // Any overlay holding the keyboard here (palette, panel, menu, a sidebar
+  // confirmation or rename, a shortcut capture) stands the plain Alt actions
+  // down, and opening the palette or a panel first closes a menu or box
+  // still drawn, so its claim does not outlive it.
+  const dropSidebarOverlays = () => {
+    closeMenu("replaced");
+    closeConfirm("replaced");
+  };
   initKeys({
-    togglePalette: () => { panels.close(); palette.toggle(); },
-    paletteOpen: () => palette.open || panels.open !== null,
+    togglePalette: () => { dropSidebarOverlays(); panels.close(); palette.toggle(); },
+    paletteOpen: () => focusOwners().length > 0,
+    // Alt+W in the sidebar's kill box completes it, like a second Alt+W in a
+    // pane's kill bar. Nothing else takes it while an overlay is up.
+    acceptKill: () => acceptConfirm(),
     splitH: () => chromeApp.splitH(),
     splitV: () => chromeApp.splitV(),
     // Alt+N with no view open is a new scratch view, whose first terminal is
@@ -453,9 +466,9 @@ export async function bootShell() {
     closePane: () => chromeApp.closePane(),
     killSession: () => chromeApp.killFocusedSession({ keyboard: true }),
     focusDir: (direction) => chromeApp.focusDir(direction),
-    toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
-    toggleSettings: () => { palette.close(); panels.toggle("settings"); },
-    toggleHelp: () => { palette.close(); panels.toggle("help"); },
+    toggleDashboard: () => { dropSidebarOverlays(); palette.close(); panels.toggle("dashboard"); },
+    toggleSettings: () => { dropSidebarOverlays(); palette.close(); panels.toggle("settings"); },
+    toggleHelp: () => { dropSidebarOverlays(); palette.close(); panels.toggle("help"); },
     toggleSidebar: () => state.launcherView?.cycleMode(),
     openExplorer: () => chromeApp.openExplorer(),
     openEditor: () => chromeApp.openEditor(),

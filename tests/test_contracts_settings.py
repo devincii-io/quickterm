@@ -35,7 +35,11 @@ def test_destructive_confirmation_keeps_trigger_visible_and_clamps_to_viewport()
     end = source.index("\n  _field(", start)
     implementation = source[start:end]
     # Settings, the dashboard and the sidebar share one confirmation box.
-    assert 'import { confirmNear } from "./confirm_popover.js";' in source
+    assert 'import { closeConfirm, confirmIsOpen, confirmNear } from "./confirm_popover.js";' in source
+    # The sheet asks confirm_popover for the one open box instead of a copy,
+    # and its Escape leaves a box whose action is running alone.
+    assert "_inlineConfirmation" not in source
+    assert 'closeConfirm("escape")' in source
     assert "{ keyboard = false } = {}" in implementation
     assert "confirmNear(button, {" in implementation
     assert "keyboard, owner: \"confirm\"" in implementation

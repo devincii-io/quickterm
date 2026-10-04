@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  FAILED_TEXT, closeConfirm, confirmIsOpen, confirmNear, confirmPlacement, initialFocus, triggerGone,
+  FAILED_TEXT, acceptConfirm, closeConfirm, confirmIsOpen, confirmNear, confirmPlacement, initialFocus, triggerGone,
 } from "../../quickterm/frontend/js/confirm_popover.js";
 import { focusOwners, resetFocusOwners } from "../../quickterm/frontend/js/focus.js";
 
@@ -138,10 +138,10 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function setup(t) {
   resetFocusOwners();
-  closeConfirm("test");
+  closeConfirm("test", { force: true });
   const dom = installDom();
   t.after(() => {
-    closeConfirm("test");
+    closeConfirm("test", { force: true });
     resetFocusOwners();
     delete globalThis.document;
     delete globalThis.window;
@@ -149,7 +149,7 @@ function setup(t) {
   return dom;
 }
 
-function openKill(dom, { keyboard = false, action = async () => {}, onClose } = {}) {
+function openKill(dom, { keyboard = false, action = async () => {}, onClose, acceptsAltW = false } = {}) {
   const trigger = killButton(dom.doc);
   const closes = [];
   const handle = confirmNear(trigger, {
@@ -158,6 +158,7 @@ function openKill(dom, { keyboard = false, action = async () => {}, onClose } = 
     action,
     keyboard,
     owner: "sidebar-confirm",
+    acceptsAltW,
     onClose: (reason) => { closes.push({ reason, owners: focusOwners() }); onClose?.(reason); },
   });
   return { trigger, handle, box: handle.box, closes, kill: findButton(handle.box, "Kill"), cancel: findButton(handle.box, "Cancel") };
@@ -359,6 +360,51 @@ test("a click into a view's frame (the window losing focus) cancels and frees th
   finish();
   await settle();
   assert.deepEqual(running.closes.map((item) => item.reason), ["done"]);
+});
+
+test("closeConfirm leaves a running action's box open; force closes it", async (t) => {
+  // The sheet's Escape went around the box's own busy rule, so a 500 after
+  // Escape showed neither its detail nor Retry.
+  const dom = setup(t);
+  let fail;
+  const opened = openKill(dom, { action: () => new Promise((_, reject) => { fail = reject; }) });
+  opened.kill.click();
+  assert.equal(closeConfirm("escape"), false);
+  assert.equal(opened.box.isConnected, true);
+  fail({ status: 500, detail: "Could not stop every process" });
+  await settle();
+  assert.equal(opened.box.children[0].textContent, "Could not stop every process");
+  assert.equal(opened.kill.textContent, "Retry");
+  assert.equal(closeConfirm("escape"), true);
+  assert.deepEqual(opened.closes.map((item) => item.reason), ["escape"]);
+
+  const again = openKill(dom, { action: () => new Promise(() => {}) });
+  again.kill.click();
+  assert.equal(closeConfirm("close", { force: true }), true);
+  assert.equal(again.box.isConnected, false);
+});
+
+test("Tab stays between Kill and Cancel", (t) => {
+  // The box is on document.body, outside a modal sheet's own Tab trap.
+  const dom = setup(t);
+  const opened = openKill(dom, { keyboard: true });
+  const tab = opened.kill.dispatch("keydown", { key: "Tab" });
+  assert.equal(tab.defaultPrevented, true);
+  assert.equal(dom.doc.activeElement, opened.cancel);
+  opened.cancel.dispatch("keydown", { key: "Tab", shiftKey: true });
+  assert.equal(dom.doc.activeElement, opened.kill);
+});
+
+test("Alt+W accepts only a box opened for it", async (t) => {
+  const dom = setup(t);
+  let ran = 0;
+  openKill(dom, { action: async () => { ran += 1; } });
+  assert.equal(acceptConfirm(), false, "a Dashboard delete never takes Alt+W");
+  openKill(dom, { acceptsAltW: true, action: async () => { ran += 1; } });
+  assert.equal(acceptConfirm(), true);
+  await settle();
+  assert.equal(ran, 1);
+  assert.equal(confirmIsOpen(), false);
 });
 
 test("opening a second confirmation replaces the first", (t) => {

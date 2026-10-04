@@ -1,4 +1,4 @@
-import { confirmNear } from "./confirm_popover.js";
+import { closeConfirm, confirmIsOpen, confirmNear } from "./confirm_popover.js";
 import * as api from "./api.js";
 import { DASHBOARD_REFRESH_MS, TERMINAL_TYPES, make } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
@@ -87,10 +87,13 @@ export class Panels {
       menuOpen: menuIsOpen(),
       inMenu: Boolean(event.target?.closest?.(".qt-menu")),
       capturing: captureActive(),
-      confirming: Boolean(this._inlineConfirmation),
+      confirming: confirmIsOpen(),
       searchActive: Boolean(filter || settings?.search.value),
     });
     if (route === "none" || route === "menu") return;
+    // Escape inside the box is the box's own: it refuses to close while its
+    // action runs, so a failure can still show its detail and Retry.
+    if (route === "confirm" && event.target?.closest?.(".confirm-popover")) return;
     if (event.key === "Tab" && route === "sheet") {
       this._trapTab(event);
       return;
@@ -98,7 +101,7 @@ export class Panels {
     event.preventDefault();
     event.stopPropagation();
     if (route === "close-menu") closeMenu("escape");
-    else if (route === "confirm") this._clearInlineConfirmation();
+    else if (route === "confirm") closeConfirm("escape");
     else if (route === "search" && filter) {
       filter.value = "";
       filter.dispatchEvent(new Event("input", { bubbles: true }));
@@ -131,7 +134,8 @@ export class Panels {
     this.open = null;
     this._settingsView = null;
     this._configList = null;
-    this._clearInlineConfirmation();
+    // The sheet is going away, so its box goes too, even mid-action.
+    closeConfirm("close", { force: true });
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
     if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
@@ -199,7 +203,7 @@ export class Panels {
       if (this.open !== "dashboard" || this._dashLoading) return;
       // A destructive confirmation is a fixed box anchored to its trigger. A
       // refresh that moved or removed the trigger would strand it.
-      if (this._inlineConfirmation) return;
+      if (confirmIsOpen()) return;
       // Somebody is holding the dashboard still across an await (the folder
       // picker disables Browse before awaiting, which drops focus to <body>).
       if (this._dashBusy > 0) return;
@@ -248,30 +252,20 @@ export class Panels {
     return button;
   }
 
-  _clearInlineConfirmation(restoreButton = true) {
-    const entry = this._inlineConfirmation;
-    if (!entry) return;
-    this._inlineConfirmation = null;
-    entry.handle.close("close");
-    if (restoreButton && entry.button.isConnected) entry.button.focus();
-  }
-
   // One confirmation box for the whole app: confirm_popover.js measures the
   // trigger before disabling it, clamps the box to the viewport, follows the
   // trigger while the body scrolls and claims the keyboard in focus.js.
   // `keyboard`: the keyboard asked for this (Delete on a row), so the
   // destructive button takes the focus and Enter completes it. A pointer
   // gets Cancel first (AGENTS.md).
+  // confirm_popover.js tracks the one open box; the sheet asks it.
   _confirmNear(button, message, confirmLabel, action, { keyboard = false } = {}) {
-    this._clearInlineConfirmation(false);
-    const handle = confirmNear(button, {
+    return confirmNear(button, {
       message, confirmLabel, action, keyboard, owner: "confirm",
       onClose: (reason) => {
-        if (this._inlineConfirmation?.handle === handle) this._inlineConfirmation = null;
         if ((reason === "cancel" || reason === "escape") && button.isConnected) button.focus();
       },
     });
-    this._inlineConfirmation = { handle, button };
   }
 
   // `id` stamps data-setting, which settings search reveals and focuses.

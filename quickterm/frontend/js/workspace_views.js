@@ -18,6 +18,7 @@
 
 import * as api from "./api.js";
 import { isScratchWorkspace } from "./boot_context.js";
+import { focusOwners } from "./focus.js";
 import { icon } from "./icons.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
 import { dwindleDir, findLeaf, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
@@ -442,9 +443,19 @@ export class WorkspaceViews {
     window.quicktermChrome?.refreshSoon?.();
   }
 
+  // While a shell overlay (palette, panel, menu, sidebar confirm or rename)
+  // owns the keyboard, the view only becomes active and waits as
+  // pendingFocus: contentWindow.focus() would pull the keyboard out of the
+  // overlay into the terminal behind it. The overlay's own hand-back focuses
+  // the active view once it releases.
   focusView(view) {
     if (!view) return;
     this.activate(view);
+    if (focusOwners().length) {
+      this.pendingFocus = view;
+      return;
+    }
+    if (this.pendingFocus === view) this.pendingFocus = null;
     try {
       view.frame.contentWindow.focus();
       view.frame.contentWindow.quicktermView?.app.refocusTerm();

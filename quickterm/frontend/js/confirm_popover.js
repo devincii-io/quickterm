@@ -55,12 +55,27 @@ function viewport() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
-export function closeConfirm(reason = "close") {
-  current?.close(reason);
+// Closes the open box unless its action is still running: its answer (a
+// failure detail and Retry) has to land somewhere. `force` closes it anyway,
+// for a caller whose whole surface is going away.
+export function closeConfirm(reason = "close", { force = false } = {}) {
+  if (!current || (!force && current.busy())) return false;
+  current.close(reason);
+  return true;
 }
 
 export function confirmIsOpen() {
   return Boolean(current);
+}
+
+// Presses the open box's action when it was opened with `acceptsAltW` (a
+// terminal kill) and is not already running. Alt+W in the sidebar's kill box
+// completes it, as a second Alt+W does in a pane's kill bar; a Dashboard
+// delete or kill-all never takes it. Returns whether it pressed.
+export function acceptConfirm() {
+  if (!current || !current.acceptsAltW || current.busy()) return false;
+  current.accept();
+  return true;
 }
 
 // Opens the box and returns { close, box }. `action` may return a promise: a
@@ -69,9 +84,9 @@ export function confirmIsOpen() {
 // is released; reason is "done", "cancel", "escape", "outside", "gone",
 // "replaced" or "close".
 export function confirmNear(trigger, {
-  message, confirmLabel, action, keyboard = false, owner = "confirm", onClose,
+  message, confirmLabel, action, keyboard = false, owner = "confirm", onClose, acceptsAltW = false,
 } = {}) {
-  closeConfirm("replaced");
+  current?.close("replaced");
   const triggerRect = trigger.getBoundingClientRect();
   const wasDisabled = Boolean(trigger.disabled);
   trigger.disabled = true;
@@ -162,6 +177,16 @@ export function confirmNear(trigger, {
   confirm.addEventListener("click", run);
   cancel.addEventListener("click", () => close("cancel"));
   box.addEventListener("keydown", (event) => {
+    // The box sits on document.body, outside any modal sheet's Tab trap, so
+    // it keeps Tab between its own two buttons.
+    if (event.key === "Tab") {
+      event.preventDefault();
+      event.stopPropagation();
+      const order = event.shiftKey ? [cancel, confirm] : [confirm, cancel];
+      const next = order.find((button) => button !== document.activeElement && !button.disabled);
+      next?.focus();
+      return;
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -181,7 +206,7 @@ export function confirmNear(trigger, {
   window.addEventListener("blur", onBlur);
   document.addEventListener("pointerdown", onOutside, true);
 
-  const handle = { close, box };
+  const handle = { close, box, acceptsAltW, busy: () => busy, accept: () => { if (!confirm.disabled) run(); } };
   current = handle;
   claimFocus(owner);
   (initialFocus(keyboard) === "confirm" ? confirm : cancel).focus();

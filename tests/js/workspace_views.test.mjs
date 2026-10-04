@@ -4,6 +4,7 @@ import {
   EMPTY_STAGE_TEXT, VIEW_COLORS, VIEW_MIN_PX, WorkspaceViews, clampViewRatio, companionUrl, nextScratchLabel,
   pickViewColor, ratioBounds, viewColorFor,
 } from "../../quickterm/frontend/js/workspace_views.js";
+import { claimFocus, releaseFocus } from "../../quickterm/frontend/js/focus.js";
 
 test("a companion has a distinct explicit identity and carries auth only in the fragment", () => {
   const url = new URL(companionUrl("/", "API & UI", "side-123", "secret/+"), "http://localhost");
@@ -306,6 +307,30 @@ test("a view that says it is ready learns whether it is active and takes the key
   assert.deepEqual(focused, ["docs"]);
   assert.equal(suspended.get("api"), true, "the view it left is suspended");
   assert.equal(suspended.get("docs"), false);
+});
+
+test("a shell overlay keeps the keyboard: focusView only activates and waits", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs");
+  views.ready(api.frame.contentWindow);
+  const focused = [];
+  for (const view of [api, docs]) view.frame.contentWindow.focus = () => focused.push(view.label);
+  claimFocus("panel");
+  try {
+    // The ready() hand-over and a sidebar hand-back while the Dashboard is up.
+    views.ready(docs.frame.contentWindow);
+    views.focusView(api);
+    assert.deepEqual(focused, [], "no contentWindow.focus() under an overlay");
+    assert.equal(views.active, api);
+    assert.equal(views.pendingFocus, api);
+  } finally {
+    releaseFocus("panel");
+  }
+  views.focusView(views.active);
+  assert.deepEqual(focused, ["api"]);
+  assert.equal(views.pendingFocus, null);
 });
 
 test("a view whose document refuses to close stays open", async () => {
