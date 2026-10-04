@@ -182,6 +182,9 @@ def test_resolve_asks_ssh_without_a_console_window(monkeypatch, tmp_path):
         calls.append((argv, kwargs))
         return types.SimpleNamespace(returncode=0, stdout=b"user me\nhostname 1.2.3.4\nport 22\n")
 
+    config = tmp_path / "config"
+    config.write_text("Host devbox\n  HostName 10.0.0.5\n")
+    monkeypatch.setattr(ssh_config, "config_path", lambda: config)
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: tmp_path / "ssh.exe")
     monkeypatch.setattr(ssh_config.subprocess, "run", run)
     assert ssh_config.resolve("devbox") == {
@@ -213,6 +216,18 @@ def test_resolve_falls_back_to_the_parser(monkeypatch, tmp_path, failure):
     }
     with pytest.raises(KeyError):
         ssh_config.resolve("unknown")
+
+
+def test_a_typo_is_unknown_although_ssh_would_print_defaults(monkeypatch, tmp_path):
+    """`ssh -G` exits 0 for any name; a typo must not fill the Host fields
+    with ssh's defaults."""
+    config = tmp_path / "config"
+    config.write_text("Host devbox\n  HostName 10.0.0.5\n")
+    monkeypatch.setattr(ssh_config, "config_path", lambda: config)
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: tmp_path / "ssh.exe")
+    monkeypatch.setattr(ssh_config.subprocess, "run", lambda *a, **k: pytest.fail("ssh must not run"))
+    with pytest.raises(KeyError):
+        ssh_config.resolve("devbxo")
 
 
 def test_resolve_refuses_an_alias_that_reads_as_an_option(monkeypatch):

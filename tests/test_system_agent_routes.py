@@ -97,6 +97,9 @@ def test_ssh_hosts_lists_the_parsed_config(client, tmp_path, monkeypatch):
 
 
 def test_ssh_host_resolves_through_ssh(client, monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    config.write_text("Host devbox\n")
+    monkeypatch.setattr(ssh_config, "config_path", lambda: config)
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: tmp_path / "ssh.exe")
     monkeypatch.setattr(ssh_config.subprocess, "run", lambda argv, **kw: types.SimpleNamespace(
         returncode=0, stdout=b"hostname 10.0.0.5\nuser deploy\nport 22\nidentityfile ~/.ssh/k\nproxyjump bastion\n",
@@ -119,6 +122,13 @@ def test_ssh_host_unknown_to_both_ssh_and_the_parser_is_404(client, monkeypatch,
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
     monkeypatch.setattr(ssh_config, "config_path", lambda: tmp_path / "config")
     assert client.get("/api/system/ssh-hosts/nowhere").status_code == 404
+
+
+def test_ssh_host_not_in_the_config_is_404_even_with_ssh_present(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: tmp_path / "ssh.exe")
+    monkeypatch.setattr(ssh_config, "config_path", lambda: tmp_path / "config")
+    monkeypatch.setattr(ssh_config.subprocess, "run", lambda *a, **k: pytest.fail("ssh must not run"))
+    assert client.get("/api/system/ssh-hosts/nosuchhostxyz").status_code == 404
 
 
 # --- GET /api/agent-sessions ------------------------------------------------------

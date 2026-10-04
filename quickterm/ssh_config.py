@@ -237,10 +237,16 @@ def resolve(alias: str, *, timeout: float = 3.0) -> dict:
     """`{alias, hostname, user, port, identity_files, proxy_jump}` for one alias.
 
     Blocking (runs ssh). ValueError for an alias that could pass as an
-    option, KeyError when neither ssh nor the parser knows it.
+    option, KeyError when the user's ssh_config has no literal `Host` entry
+    for it. `ssh -G` exits 0 for any well-formed name and prints defaults, so
+    it cannot tell a typo from a host; it runs only for a known alias, where
+    it still resolves Include and Match.
     """
     if not valid_alias(alias):
         raise ValueError("invalid host alias")
+    known = next((entry for entry in hosts() if entry["alias"] == alias), None)
+    if known is None:
+        raise KeyError(alias)
     ssh = openssh_path("ssh")
     if ssh is not None:
         try:
@@ -257,15 +263,12 @@ def resolve(alias: str, *, timeout: float = 3.0) -> dict:
                 return {"alias": alias, **dump}
         except (OSError, subprocess.SubprocessError):
             pass
-    for entry in hosts():
-        if entry["alias"] == alias:
-            identity = entry["identity_file"]
-            return {
-                "alias": alias,
-                "hostname": entry["hostname"],
-                "user": entry["user"],
-                "port": entry["port"],
-                "identity_files": [identity] if identity else [],
-                "proxy_jump": entry["proxy_jump"],
-            }
-    raise KeyError(alias)
+    identity = known["identity_file"]
+    return {
+        "alias": alias,
+        "hostname": known["hostname"],
+        "user": known["user"],
+        "port": known["port"],
+        "identity_files": [identity] if identity else [],
+        "proxy_jump": known["proxy_jump"],
+    }
