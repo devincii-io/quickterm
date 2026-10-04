@@ -14,7 +14,7 @@ full path `~/.local/bin/uv.exe`. Never run `uv sync/add/lock` to "fix" the test 
 ```
 uv run quickterm                  # run the app (native window; --port N to override)
 uv run quickterm ls|new|open|send # drive the running app (quickterm/cli.py)
-uv run --no-sync pytest -q        # tests (~90 s on Windows, Windows + Linux parametrized)
+uv run --no-sync pytest -q        # tests (~85 s on Windows, Windows + Linux parametrized)
 uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
@@ -271,10 +271,17 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
   style); server tests use TestClient + complete-interface fakes; frontend
-  protocol tests use Node's built-in test runner. The Python suite takes about
-  90 s on Windows, almost all of it the real-PTY tests at about 3 s each, so a
-  new PTY test needs a reason; anything else patches its timers (as
-  `test_overlay.py` does) instead of sleeping, and stays under a second.
+  protocol tests use Node's built-in test runner. The Python suite took 81 to
+  84 s on Windows for 4.0 (1254 tests; the 3.13 suite took 99 s on the same
+  busy machine the same day). About 15 s of that is the real-PTY tests, now
+  about 1 s each: ConPTY asks its terminal for the device attributes
+  (`ESC [ c`) and holds the client up to 3 s for the answer, which
+  `tests/conftest.py` gives for every `PtySession` as xterm.js does in the app.
+  Do not block the event loop in a PTY test (a synchronous
+  `WaitForSingleObject` keeps that answer from being delivered). Most of the
+  rest is about 0.1 s of FastAPI route building per `create_app`. A new PTY
+  test needs a reason; anything else patches its timers (as `test_overlay.py`
+  does) instead of sleeping, and stays under a second.
 - CI is intentionally manual: run `uv run --no-sync python scripts/check.py`.
   After building release files, add `--artifacts` to enforce the three-way
   version invariant, JavaScript checks, exact asset names, and SHA-256 manifest.
