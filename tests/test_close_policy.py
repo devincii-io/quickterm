@@ -362,13 +362,30 @@ def test_tray_open_shows_the_primary_normally_when_the_overlay_cannot(viewers, m
     assert first.hidden is False
 
 
-def test_a_second_window_opens_at_the_configured_size_beside_the_primary(viewers):
+def test_a_second_window_opens_at_the_configured_size_beside_the_primary(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod, "_screen_list", lambda: [{"x": 0, "y": 0, "width": 1920, "height": 1080}]
+    )
     viewers._cfg.window = SimpleNamespace(width=1440, height=900, remember_bounds=True)
     first = _open(viewers, "master", "w1")
     assert viewers._secondary_geometry() == {"width": 1440, "height": 900}
 
     first.x, first.y = 200, 120
     assert viewers._secondary_geometry() == {"width": 1440, "height": 900, "x": 232, "y": 152}
+
+
+def test_a_minimized_primary_does_not_send_the_new_window_off_screen(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod, "_screen_list", lambda: [{"x": 0, "y": 0, "width": 1920, "height": 1080}]
+    )
+    viewers._cfg.window = SimpleNamespace(width=1440, height=900, remember_bounds=True)
+    first = _open(viewers, "master", "w1")
+    first.x, first.y = -32000, -32000
+    assert viewers._secondary_geometry() == {"width": 1440, "height": 900}
 
 
 def test_window_url_carries_the_window_identity(monkeypatch):

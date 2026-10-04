@@ -621,8 +621,18 @@ class _ViewerWindows:
             x, y = int(primary.x), int(primary.y)
         except Exception:
             return geometry
-        geometry.update(x=x + SECONDARY_OFFSET, y=y + SECONDARY_OFFSET)
-        return geometry
+        candidate = {**geometry, "x": x + SECONDARY_OFFSET, "y": y + SECONDARY_OFFSET}
+        # A minimized primary reports about -32000/-32000. Offsetting from that
+        # would open the new window off every monitor, so only a position that
+        # still meets a screen is used.
+        from quickterm import window_state
+
+        try:
+            on_screen = window_state.clamp_to_screens(candidate, _screen_list())
+        except Exception:
+            log.debug("screens unavailable for the new window", exc_info=True)
+            on_screen = None
+        return candidate if on_screen is not None else geometry
 
     def show_all(self) -> None:
         """Tray Open. The primary drops down as the overlay when that is on;
@@ -805,7 +815,7 @@ def _run_desktop(
     # window shares %APPDATA%, so it neither restores them nor records its own.
     geometry = (
         {"width": _window_cfg(cfg).width, "height": _window_cfg(cfg).height}
-        if elevated else _initial_geometry(cfg, webview.screens)
+        if elevated else _initial_geometry(cfg, _screen_list)
     )
     window = webview.create_window(
         title,
@@ -912,6 +922,22 @@ def _window_cfg(cfg: Any) -> Any:
     return types.SimpleNamespace(
         **{name: getattr(window, name, default) for name, default in _WINDOW_DEFAULTS.items()}
     )
+
+
+def _screen_list() -> list[Any]:
+    """pywebview's monitors as a plain list.
+
+    In pywebview 6 `webview.screens` is a module property: the value is a
+    proxy around a list, and calling it raises TypeError. Older releases had a
+    function. Iterate first and call only what cannot be iterated.
+    """
+    import webview
+
+    screens = webview.screens
+    try:
+        return list(screens)
+    except TypeError:
+        return list(screens())
 
 
 def _initial_geometry(cfg: Any, screens: Callable[[], Any]) -> dict[str, Any]:

@@ -131,6 +131,32 @@ def test_a_config_without_window_settings_uses_the_spec_defaults(monkeypatch):
     assert app._initial_geometry(SimpleNamespace(), lambda: []) == {"width": 1280, "height": 800}
 
 
+def test_screen_list_reads_pywebviews_module_property(monkeypatch):
+    """pywebview 6 serves `screens` as a proxy around a list; calling it
+    raised TypeError and the remembered bounds were never restored."""
+    import sys
+
+    from proxy_tools import Proxy
+
+    from quickterm import app
+
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(screens=Proxy(lambda: [SCREEN])))
+    assert app._screen_list() == [SCREEN]
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(screens=lambda: [SCREEN]))
+    assert app._screen_list() == [SCREEN]
+
+
+def test_the_primary_window_restores_through_the_screen_list(monkeypatch):
+    """Pin the call site: the desktop path hands _initial_geometry a callable."""
+    import inspect
+
+    from quickterm import app
+
+    source = inspect.getsource(app._run_desktop)
+    assert "_initial_geometry(cfg, _screen_list)" in source
+    assert "webview.screens)" not in source
+
+
 def test_remembered_bounds_never_open_below_the_minimum_size(monkeypatch):
     from quickterm import app
 
