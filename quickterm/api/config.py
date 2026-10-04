@@ -110,10 +110,13 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(500, "could not read that settings version") from exc
         # The same path as a Settings save: validation, a new history entry
         # for the version this replaces, and the live apply.
-        await save_and_apply(stored)
+        # Its shortcuts were accepted when it was saved. The rule that new
+        # shortcuts need Ctrl, Alt or Win must not refuse a recovery, or a 3.x
+        # "f12" kept profiles that were deleted since out of reach.
+        await save_and_apply(stored, check_new_bindings=False)
         return Response(status_code=204)
 
-    async def save_and_apply(body: dict[str, Any]) -> None:
+    async def save_and_apply(body: dict[str, Any], *, check_new_bindings: bool = True) -> None:
         config_mod = importlib.import_module("quickterm.config")
         # load_config and save_config fsync, and DPAPI runs once per protected
         # env value: all of it off the loop.
@@ -139,7 +142,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             for name in sorted(getattr(cfg, "runtime_overrides", None) or ()):
                 if getattr(new_cfg, name, None) == getattr(cfg, name, None):
                     setattr(new_cfg, name, getattr(on_disk, name))
-            config_mod.validate_new_bindings(new_cfg, on_disk)
+            if check_new_bindings:
+                config_mod.validate_new_bindings(new_cfg, on_disk)
             await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc

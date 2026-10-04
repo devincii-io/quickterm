@@ -157,6 +157,22 @@ def test_restoring_goes_through_the_save_path_and_applies_live(client, fake_appd
     assert entries[0]["summary"] == "font_size, theme"
 
 
+def test_restoring_a_version_with_a_3x_plain_key_is_not_refused(client, fake_appdata):
+    """A 3.x summon key without Ctrl, Alt or Win was accepted then; the 4.0
+    rule for new shortcuts must not lock a recovery out."""
+    from quickterm.config import Profile
+
+    save_config(AppConfig(summon_hotkey="f12", profiles=[Profile(name="kept", cmd="cmd.exe")]))
+    save_config(AppConfig(summon_hotkey="ctrl+grave", profiles=[]))
+    entry_id = client.get("/api/config/history").json()[0]["id"]
+
+    response = client.post(f"/api/config/history/{entry_id}/restore")
+    assert response.status_code == 204, response.text
+    restored = cfgmod.load_config()
+    assert restored.summon_hotkey == "f12"
+    assert [p.name for p in restored.profiles] == ["kept"]
+
+
 def test_restoring_an_unknown_version_is_404(client):
     assert client.post("/api/config/history/00000000000000000001/restore").status_code == 404
     assert client.post("/api/config/history/nonsense/restore").status_code == 404
