@@ -76,17 +76,20 @@ export function renderThemePicker(cfg) {
   button.addEventListener("click", () => {
     const current = selectedId();
     const items = [];
-    const swatches = [];
     for (const [heading, ids] of [...themeGroups(), ["Custom", [CUSTOM_THEME]]]) {
       items.push({ heading });
       for (const id of ids) {
         const def = definition(id);
-        swatches.push([items.length, def]);
-        // The hint slot is where the swatch goes once the menu is drawn.
-        items.push({ label: def.label, detail: def.note, hint: " ", selected: id === current, run: () => choose(id) });
+        items.push({
+          label: def.label,
+          detail: def.note,
+          trailing: () => themeSwatch(def),
+          selected: id === current,
+          run: () => choose(id),
+        });
       }
     }
-    const menu = panelMenu({
+    panelMenu({
       anchor: button,
       label: "Color theme",
       items,
@@ -95,14 +98,6 @@ export function renderThemePicker(cfg) {
         if (reason === "run" || reason === "escape") button.focus();
       },
     });
-    if (!menu) return;
-    for (const [index, def] of swatches) {
-      const hint = menu.root.querySelector(`#qt-menu-item-${index} > .qt-menu-hint`);
-      if (!hint) continue;
-      hint.textContent = "";
-      hint.classList.add("theme-swatch-slot");
-      hint.append(themeSwatch(def));
-    }
   });
 
   for (const [key, fallback] of Object.entries(CUSTOM_THEME_DEFAULTS)) {

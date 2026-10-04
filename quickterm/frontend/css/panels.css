@@ -567,7 +567,6 @@
 .theme-choice > .theme-swatch { height: 24px; gap: 4px; padding: 0 8px 0 7px; }
 .theme-choice > .theme-swatch > i { width: 8px; height: 8px; }
 .theme-choice > .theme-swatch > .theme-swatch-accent { width: 11px; height: 11px; }
-.qt-menu-hint.theme-swatch-slot { max-width: none; overflow: visible; }
 
 .custom-theme-editor {
   gap: 7px;
