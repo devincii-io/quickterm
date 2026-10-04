@@ -145,6 +145,26 @@ Released 2026-10-04.
 - Sidebar and Settings text keeps at least 4.5:1 contrast on every surface,
   and the sidebar marks focus and state in Windows high contrast mode.
 
+### Themes
+
+- The built-in themes are replaced by 20 schemes taken from their upstream
+  sources: Graphite (the house theme, still the default), Catppuccin Mocha
+  and Latte, Tokyo Night, Storm and Day, Rosé Pine and Rosé Pine Dawn,
+  Kanagawa Wave, Dragon and Lotus, Gruvbox Dark and Light, Everforest and
+  Everforest Light, Nord, Dracula, GitHub Dark and Light, and Carbonfox.
+  Seven of them are light.
+- The sidebar, Settings and menus take their colors from each theme's own
+  editor palette, not only from the terminal. Status colors and the colors
+  of workspace views come from the theme's ANSI hues.
+- The theme chooser in Settings > General is a menu grouped into Dark, Light
+  and Custom. Every row shows the theme's accent and eight ANSI colors on
+  its background.
+- Graphite keeps its sidebar colors. Its terminal colors were rebuilt so
+  each row of the ANSI palette has one even lightness.
+- Every color in the stylesheets comes from a theme token. Tests check text
+  contrast in every theme and fail on a color literal outside the theme
+  definitions.
+
 ### Upgrading from 3.x
 
 - `config.json` upgrades in place. `claude_mode` becomes `agent_mode`.
@@ -162,19 +182,25 @@ Released 2026-10-04.
 - The stored view arrangement is converted once. The 3.x main workspace
   comes back as an ordinary view. Scratch views are not restored after a
   restart, as before.
+- A config that names a removed theme opens with the closest new one, for
+  example One Dark as Tokyo Night Storm and Monokai as Dracula. The stored
+  name is kept until you pick another theme.
 - `window_state.json` in `%APPDATA%\quickterm` is new and optional. QuickTerm
   ignores it when it is damaged.
 
 ### Verification limits
 
-- The release checks do not start real Claude Code, Codex or ssh processes
-  and connect to no SSH host. Argument lists, `~/.ssh/config` parsing and
-  the session lists are covered by tests on sample files.
+- Real Claude Code and Codex processes were started from Settings and
+  killed from the sidebar. No SSH connection was opened: `~/.ssh/config`
+  aliases were read and resolved with `ssh -G`, and the argument lists are
+  covered by tests.
 - The recent conversation lists read files that Claude Code and Codex keep
   for themselves. A CLI update can change their format; the list is then
   empty, and the CLI's own session picker still works.
-- The overlay's Win32 calls are covered by tests with stubs. The packaged
-  build was checked through its HTTP API, not by summoning the overlay.
+- The overlay was summoned, hidden on focus loss and turned off on one
+  Windows 11 desktop with one 1920x1080 monitor, from the source build.
+  The packaged build was checked through its HTTP API. Several monitors
+  and high-DPI scaling were not tested.
 - Windows release binaries remain unsigned and can trigger SmartScreen.
 
 ## QuickTerm 3.13.0

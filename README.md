@@ -333,10 +333,11 @@ Workspace folders, logos, layouts and terminal ownership live in workspace
 files. Sidebar mode, width, selected launch configuration and focus belong to
 the native window. Text zoom is temporary and belongs to a pane.
 The full validated 64 KB to 64 MB in-memory scrollback range is available in
-the normal settings UI and applies to live sessions immediately. Settings shows
-four featured color themes and groups the full catalog into Dark, Neon, Soft,
-Warm, Light, and Custom sections. The expanded dark catalog includes low-glare,
-pastel, blue-black, and true-black palettes. Theme previews update the whole
+the normal settings UI and applies to live sessions immediately. Settings offers 20
+themes from their upstream palettes, 13 dark and 7 light, among them
+Catppuccin, Tokyo Night, Rosé Pine, Kanagawa, Gruvbox, Everforest, Nord,
+Dracula and GitHub, plus a Custom theme built from six colors. The sidebar
+and Settings follow the theme's own palette. Theme previews update the whole
 window and its terminals immediately, then revert on Cancel. Saving updates
 other native windows. Settings sends only changed fields and reports conflicting
 edits from another window instead of silently overwriting them. Changing an
