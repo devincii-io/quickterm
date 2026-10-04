@@ -9,9 +9,10 @@ import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
   clampSidebarWidth, isWideSidebar, sessionFolder, sessionTooltip, sidebarGroups, groupSummary,
   folderName, terminalChoices, canLaunch, choiceKey, loadMode, saveMode, loadWidth, saveWidth,
-  loadClosedGroups, saveClosedGroups, foldId, visibleGroups, loadView, saveView, normalizeView,
-  isDefaultView, SIDEBAR_VIEW_DEFAULTS,
+  loadClosedGroups, saveClosedGroups, foldId, visibleGroups,
 } from "./sidebar_model.js";
+import { createViewControls } from "./sidebar_view_menu.js";
+import { iconButton, make, setLabel } from "./sidebar_dom.js";
 
 // The pure half lives in sidebar_model.js; its public names stay importable
 // from here.
@@ -28,28 +29,6 @@ export {
 //   rail    30px of dots, so the state of every terminal is still in view
 //   hidden  nothing at all; a small floating "+" sits at the terminal's top
 //           left corner
-
-function make(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function iconButton(className, iconName, title, onClick) {
-  const button = make("button", className);
-  button.type = "button";
-  button.title = title;
-  button.setAttribute("aria-label", title);
-  button.append(icon(iconName, 14));
-  if (onClick) button.addEventListener("click", onClick);
-  return button;
-}
-
-function setLabel(button, title) {
-  setAttrs(button, { title, "aria-label": title });
-}
-
 
 // The floating "+" that stands in for the sidebar while it is hidden. It is
 // static in index.html and pinned by CSS at the top left; it does not move.
@@ -235,54 +214,12 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       onClose: (reason) => { if (reason !== "run") handBack(); },
     });
   }, { signal });
-  // Search hands over to the palette, already narrowed to workspaces and
-  // terminals: one finder, not a second one squeezed into the sidebar.
-  const search = iconButton("sidebar-section-add sidebar-section-search", "search",
-    "Find a workspace or terminal (Alt+K, then @)", () => actions.search?.());
-  // The view menu: what the list shows and how. Per window, like the mode.
-  let view = loadView();
-  const viewButton = iconButton("sidebar-section-add sidebar-section-view", "filter", "View options");
-  viewButton.setAttribute("aria-haspopup", "menu");
-  viewButton.setAttribute("aria-expanded", "false");
-  const paintViewButton = () => {
-    const custom = !isDefaultView(view);
-    setClass(viewButton, "custom", custom);
-    setLabel(viewButton, custom ? "View options (changed)" : "View options");
-  };
-  const setView = (patch) => {
-    view = normalizeView({ ...view, ...patch });
-    saveView(view);
-    paintViewButton();
-    patchGroups();
-  };
-  viewButton.addEventListener("click", () => {
-    const choose = (label, detail, selected, patch) => ({ label, detail, selected, run: () => setView(patch) });
-    toggleMenu({
-      anchor: section,
-      trigger: viewButton,
-      label: "View options",
-      align: "end",
-      items: [
-        { heading: "Show" },
-        choose("Empty workspaces", "no terminals, not open", view.empty, { empty: !view.empty }),
-        choose("Finished terminals", "kept for their last output", view.finished, { finished: !view.finished }),
-        { heading: "Group by" },
-        choose("Workspace", "", view.group === "workspace", { group: "workspace" }),
-        choose("Nothing", "one list of terminals", view.group === "none", { group: "none" }),
-        { heading: "Sort by" },
-        choose("Name", "rows stay where they are", view.sort === "name", { sort: "name" }),
-        choose("Recent activity", "busy and new output first", view.sort === "activity", { sort: "activity" }),
-        { separator: true },
-        {
-          label: "Reset view", icon: "x", disabled: isDefaultView(view),
-          run: () => setView({ ...SIDEBAR_VIEW_DEFAULTS }),
-        },
-      ],
-      onClose: (reason) => { if (reason !== "run") handBack(); },
-    });
-  }, { signal });
-  paintViewButton();
-  section.append(make("span", "sidebar-section-label", "Workspaces"), search, viewButton, add);
+  const viewControls = createViewControls({
+    anchor: section, handBack, signal,
+    onSearch: () => actions.search?.(),
+    onChange: () => patchGroups(),
+  });
+  section.append(make("span", "sidebar-section-label", "Workspaces"), viewControls.search, viewControls.button, add);
   el.append(section);
 
   // The active workspace's second line: its folder, the "workspace here"
@@ -365,7 +302,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const hiddenNote = make("button", "sidebar-hidden-note");
   hiddenNote.type = "button";
   hiddenNote.hidden = true;
-  hiddenNote.addEventListener("click", () => setView({ empty: true }), { signal });
+  hiddenNote.addEventListener("click", () => viewControls.set({ empty: true }), { signal });
   sessionList.append(groupList, emptyNote, hiddenNote);
   el.append(sessionList, parking);
 
@@ -731,6 +668,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
 
   const patchGroups = () => {
     const focused = sessionList.contains(document.activeElement) ? document.activeElement : null;
+    const view = viewControls.view();
     const everything = sidebarGroups(model.sessions, { ...model, view });
     const { groups, hidden } = visibleGroups(everything, view);
     const nodes = patchList(groupList, groups, {
