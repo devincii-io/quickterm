@@ -1550,14 +1550,19 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
      configured profiles only; detecting a shell never makes it a default or
      adds it to the launch menu. With no saved terminals, the launch action
      opens setup.
-  2. A **Workspaces** label with a `+` menu (`menu.js`): **New scratch view**,
-     **Workspace here: <name>** when the active view offers it, **Open in new
-     window…**.
-  3. One group per saved workspace, empty ones included, in case-insensitive
-     alphabetical order; scratch groups next, ordered by label; then
-     **Unassigned**. A group head is a button with the fold chevron (hidden
-     without rows), a colour dot (the view colour when open, hollow when
-     closed), the label and the count pill; its title is the folder path, with
+  2. A **Workspaces** label with three buttons: search (`actions.search`,
+     opens the palette on `@`), the view menu (`menu.js`, see below) and a
+     `+` menu: **New scratch view**, **Workspace here: <name>** when the
+     active view offers it, **Open in new window…**.
+  3. One group per saved workspace in case-insensitive alphabetical order;
+     scratch groups next, ordered by label; then **Unassigned**. By default
+     a workspace with no listed terminal that is not open in this window is
+     hidden (`visibleGroups(groups, view)`), and a **Show N empty workspaces**
+     line under the list turns the view's `empty` option on. A group head is
+     a button with the fold chevron (always drawn: down while its rows show,
+     right when folded or empty), a colour dot (the view colour when open,
+     hollow when closed), the label and the count pill (hidden at 0); its
+     rows hang under it on a guide line. Its title is the folder path, with
      `.warning` when the folder is missing. A click opens or focuses the view;
      Left and Right fold. Hover and focus-within actions: **Close view** (`x`,
      only when open; saves and retains) and a kebab menu with Open in new
@@ -1571,8 +1576,18 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
      `feedback.js`).
   4. The footer: new window, dashboard, settings, help, collapse chevron.
 
-  Order is stable: groups as above, rows by name, then id (`localeCompare`
-  with `numeric: true`). State never reorders anything: "needs you" is a chip,
+  The view menu (per window, `quickterm.sidebarView`, normalised by
+  `normalizeView`): **Show** empty workspaces (default off) and finished
+  terminals (default on; a finished terminal with an open attention always
+  shows), **Group by** workspace (default) or nothing (one `flat` group named
+  Terminals whose rows name their workspace), **Sort by** name (default) or
+  recent activity, and **Reset view**. A non-default view tints the button.
+
+  With the default sort, order is stable: groups as above, rows by name,
+  then id (`localeCompare` with `numeric: true`). Recent activity is opt-in
+  and orders rows, then groups, by `activity.idle_seconds` (busy and
+  attention count as now, finished last). Under the default sort, state
+  never reorders anything: "needs you" is a chip,
   `.needs-you` on the row and `.has-attention` on the group, plus the rail
   dots. A session's owner is `attached[id] ?? owned[id] ?? session.workspace
   ?? null` (pure `sidebarGroups(sessions, {workspaces, views, attached,
