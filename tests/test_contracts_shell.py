@@ -691,6 +691,13 @@ def test_shell_overlays_stand_the_alt_layer_down_and_close_before_a_panel():
         assert "dropSidebarOverlays();" in line, toggle
 
 
+def test_a_failed_workspace_list_at_boot_never_reads_as_every_workspace_gone():
+    shell = SHELL_JS.read_text(encoding="utf-8")
+    assert "api.listWorkspaces().catch(() => null)," in shell
+    assert "const listKnown = loadedWorkspaces !== null;" in shell
+    assert "const exists = (name) => !listKnown || state.workspaceNames.includes(name);" in shell
+
+
 def test_a_rail_row_anchors_its_kill_box_to_the_row():
     launcher = (FRONTEND_JS / "launcher.js").read_text(encoding="utf-8")
     kill = launcher[launcher.index("const killConfirm = "):launcher.index("const detach = ")]

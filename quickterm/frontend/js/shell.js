@@ -75,7 +75,8 @@ export async function bootShell() {
   const [loadedConfig, loadedProfiles, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
     api.getProfiles().catch(() => null),
-    api.listWorkspaces().catch(() => []),
+    // null, not []: an empty list would read as "every workspace is gone".
+    api.listWorkspaces().catch(() => null),
     cachedInventory
       ? Promise.resolve(cachedInventory)
       : api.getTerminalOptions().then(saveInventoryCache).catch(() => ({ types: [], wsl_distributions: [] })),
@@ -516,7 +517,12 @@ export async function bootShell() {
   });
 
   // ---- what the window opens on ----
-  const exists = (name) => state.workspaceNames.includes(name);
+  // A failed GET /api/workspaces at boot (a backend still starting, one 500)
+  // says nothing about which workspaces exist. Reporting every stored view as
+  // missing persisted an empty arrangement over the real one; with the list
+  // unknown each view's own claim and restore decide instead.
+  const listKnown = loadedWorkspaces !== null;
+  const exists = (name) => !listKnown || state.workspaceNames.includes(name);
   let restored = null;
   if (identity.workspace !== undefined) {
     // A second window, asked for one workspace or for scratch.

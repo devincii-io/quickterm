@@ -1425,7 +1425,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
     leaf becomes `{workspace: <remembered workspace>}`, or is dropped for
     scratch or a missing name.
   - Shell boot: restore the stored arrangement (release each stored registry
-    id, claim again, drop scratch, missing and refused views). With `?cwd=`
+    id, claim again, drop scratch, missing and refused views). "Missing"
+    needs a workspace list: when `GET /api/workspaces` failed at boot every
+    stored view counts as existing and its own claim and restore decide, so
+    one failed request never persists an empty arrangement. With `?cwd=`
     (Explorer "Open QuickTerm here") also open a scratch view there and focus
     it. If nothing was restored, open `quickterm.activeWorkspace` when it still
     exists (read once, for migration), else one scratch view flagged `first=1`.
