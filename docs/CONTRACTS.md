@@ -147,6 +147,13 @@ Migration and validation added in 4.0:
   when `agent_mode` is absent. `claude_mode` is no longer a field, so the next
   save drops it, except that claude-code profiles keep writing `claude_mode`
   next to `agent_mode` so an older build still reads the mode.
+- A shortcut that 3.x's `parse_binding` cannot parse (`minus`, `left`,
+  `numpad1`, `pagedown`, ...; `config.legacy_binding_ok`) is written as
+  `summon_hotkey_v4` or a profile's `keybinding_v4`, with `summon_hotkey: ""`
+  or `keybinding: null` in the legacy field. 3.x raised on such a name and
+  replaced the whole config with the defaults; now a downgrade only loses that
+  shortcut. `config_from_dict` prefers the `_v4` value when it is a non-empty
+  string.
 - `window` and `overlay` are parsed with `_parse`, like `voice`. Messages follow
   the existing style: `Window width must be between 760 and 16384`,
   `Overlay edge must be top or bottom`.

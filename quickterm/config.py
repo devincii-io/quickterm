@@ -265,13 +265,48 @@ def _decode_environment(raw: object) -> dict[str, str]:
     return validate_environment(decoded)
 
 
+# Key names a build before 4.0 can parse. 4.0 captures shortcuts by name
+# ("minus", "left", "numpad1", ...); 3.x raised on those, moved config.json
+# aside as invalid and started from the defaults. Such a binding is stored
+# under a 4.0-only key, with the legacy field left empty, so a downgrade only
+# loses that shortcut.
+_LEGACY_MODIFIERS = frozenset({"ctrl", "control", "alt", "shift", "win"})
+_LEGACY_NAMED_KEYS = frozenset(
+    {"grave", "backtick", "space", "tab", "esc", "escape", "enter", "return"}
+)
+_LEGACY_F_KEY = re.compile(r"^f([1-9]|1[0-9]|2[0-4])$")
+_SUMMON_V4 = "summon_hotkey_v4"
+_KEYBINDING_V4 = "keybinding_v4"
+
+
+def legacy_binding_ok(binding: str | None) -> bool:
+    """Whether a 3.x build's `parse_binding` accepts `binding` (empty counts:
+    3.x treats it as no shortcut)."""
+    if not binding or not binding.strip():
+        return True
+    tokens = [token.strip().lower() for token in binding.split("+")]
+    if any(not token for token in tokens):
+        return False
+    *modifiers, key = tokens
+    if any(token not in _LEGACY_MODIFIERS for token in modifiers) or key in _LEGACY_MODIFIERS:
+        return False
+    # A single printable character: 3.x maps it through the keyboard layout.
+    return key in _LEGACY_NAMED_KEYS or bool(_LEGACY_F_KEY.match(key)) or len(key) == 1
+
+
 def _storage_dict(cfg: AppConfig) -> dict:
     stored = dataclasses.asdict(cfg)
+    if not legacy_binding_ok(stored.get("summon_hotkey")):
+        stored[_SUMMON_V4] = stored["summon_hotkey"]
+        stored["summon_hotkey"] = ""
     for profile in stored["profiles"]:
         # A build before 4.0 reads only `claude_mode`; without it a downgrade
         # silently turns every Claude profile into "continue".
         if profile.get("terminal_type") == "claude-code":
             profile["claude_mode"] = profile.get("agent_mode")
+        if not legacy_binding_ok(profile.get("keybinding")):
+            profile[_KEYBINDING_V4] = profile["keybinding"]
+            profile["keybinding"] = None
     if not secret_store.protection_available():
         return stored
     for profile in stored["profiles"]:
@@ -316,6 +351,8 @@ def config_from_dict(raw: dict) -> AppConfig:
     if not isinstance(raw, dict):
         raise TypeError("config must be a JSON object")
     kwargs = _known(AppConfig, raw)
+    if isinstance(raw.get(_SUMMON_V4), str) and raw[_SUMMON_V4]:
+        kwargs["summon_hotkey"] = raw[_SUMMON_V4]
     if "profiles" in kwargs:
         if not isinstance(kwargs["profiles"], list):
             raise TypeError("profiles must be a list")
@@ -326,6 +363,8 @@ def config_from_dict(raw: dict) -> AppConfig:
             parsed = dict(profile)
             if parsed.get("agent_mode") is None and parsed.get("claude_mode") is not None:
                 parsed["agent_mode"] = parsed["claude_mode"]
+            if isinstance(parsed.get(_KEYBINDING_V4), str) and parsed[_KEYBINDING_V4]:
+                parsed["keybinding"] = parsed[_KEYBINDING_V4]
             if "env" in parsed:
                 parsed["env"] = _decode_environment(parsed["env"])
             profiles.append(_parse(Profile, parsed))

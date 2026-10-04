@@ -115,6 +115,66 @@ def test_a_pre_4_0_claude_mode_becomes_agent_mode_and_is_still_written(fake_appd
     assert [(p["agent_mode"], p["claude_mode"]) for p in stored] == [("agents", "agents"), ("new", "new")]
 
 
+def _parse_3x(binding):
+    """3.13's hotkeys.parse_binding grammar, frozen here: a downgrade runs it
+    on every stored shortcut and discards the whole config on a ValueError."""
+    tokens = [t.strip().lower() for t in binding.split("+")]
+    if not tokens or any(not t for t in tokens):
+        raise ValueError(binding)
+    *mods, key = tokens
+    modifiers = {"ctrl", "control", "alt", "shift", "win"}
+    if any(m not in modifiers for m in mods) or key in modifiers:
+        raise ValueError(binding)
+    named = {"grave", "backtick", "space", "tab", "esc", "escape", "enter", "return"}
+    if key in named or (key[0] == "f" and key[1:].isdigit() and 1 <= int(key[1:]) <= 24):
+        return
+    if len(key) == 1:
+        return
+    raise ValueError(f"unknown key: {key!r}")
+
+
+_V4_ONLY_KEYS = [
+    "minus", "equal", "comma", "period", "slash", "semicolon", "quote", "bracketleft",
+    "bracketright", "backslash", "left", "up", "right", "down", "home", "end", "pageup",
+    "pagedown", "insert", "delete", "numpad0", "numpad9",
+]
+
+
+@pytest.mark.parametrize("key", _V4_ONLY_KEYS)
+def test_a_4_0_shortcut_never_makes_the_config_unreadable_for_3_x(fake_appdata, key):
+    with pytest.raises(ValueError):
+        _parse_3x(f"ctrl+alt+{key}")
+    save_config(AppConfig(
+        summon_hotkey=f"ctrl+alt+{key}",
+        profiles=[Profile(name="a", cmd="cmd.exe", keybinding=f"ctrl+shift+{key}"),
+                  Profile(name="b", cmd="cmd.exe", keybinding="ctrl+alt+1")],
+    ))
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+
+    # What 3.x reads parses: the legacy fields are empty or legacy keys.
+    if stored["summon_hotkey"].strip():
+        _parse_3x(stored["summon_hotkey"])
+    for profile in stored["profiles"]:
+        if profile["keybinding"]:
+            _parse_3x(profile["keybinding"])
+    assert stored["summon_hotkey"] == "" and stored["summon_hotkey_v4"] == f"ctrl+alt+{key}"
+    assert stored["profiles"][0]["keybinding"] is None
+    assert stored["profiles"][1]["keybinding"] == "ctrl+alt+1"
+    assert "keybinding_v4" not in stored["profiles"][1]
+
+    # 4.0 reads its own key back.
+    loaded = load_config()
+    assert loaded.summon_hotkey == f"ctrl+alt+{key}"
+    assert [p.keybinding for p in loaded.profiles] == [f"ctrl+shift+{key}", "ctrl+alt+1"]
+
+
+def test_a_legacy_shortcut_is_stored_where_3_x_reads_it(fake_appdata):
+    save_config(AppConfig(summon_hotkey="ctrl+alt+grave"))
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+    assert stored["summon_hotkey"] == "ctrl+alt+grave"
+    assert "summon_hotkey_v4" not in stored
+
+
 def test_only_claude_profiles_carry_the_legacy_key(fake_appdata):
     save_config(AppConfig(profiles=[
         Profile(name="cx", cmd="codex", terminal_type="codex", agent_mode="fork"),
