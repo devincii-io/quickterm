@@ -2,6 +2,22 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.1.1
+
+Released 2026-10-04.
+
+### Sidebar
+
+- A workspace with one terminal takes two rows instead of four. The active
+  workspace's folder name and save dot sit on its row, and the Explorer and
+  VS Code buttons appear there on hover next to **Close view** and the
+  menu. The line under a workspace is used only for the **workspace here**
+  offer, while it is offered.
+- A terminal row is a single line. Its folder follows the name, and under a
+  workspace only when the terminal has left the workspace's folder (in
+  scratch, the folder it started in).
+- The footer icons are centred; the collapse arrow stays on the right.
+
 ## QuickTerm 4.1.0
 
 Released 2026-10-04.
