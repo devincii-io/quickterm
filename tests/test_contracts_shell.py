@@ -608,7 +608,8 @@ def test_the_window_restores_its_views_and_falls_back_to_one_scratch_view():
     """
     shell = SHELL_JS.read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
-    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
+    # The arrangement half lives in view_arrangement.js; read them as one.
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8") + (FRONTEND_JS / "view_arrangement.js").read_text(encoding="utf-8")
 
     assert (
         "const keepsViewArrangement = identity.workspace === undefined && state.windowIsPrimary;"

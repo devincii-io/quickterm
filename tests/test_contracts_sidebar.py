@@ -11,13 +11,29 @@ APP_CSS = FRONTEND / "css" / "app.css"
 INDEX_HTML = FRONTEND / "index.html"
 
 
+SIDEBAR_MODEL_JS = FRONTEND_JS / "sidebar_model.js"
+
+
+def _launcher() -> str:
+    """launcher.js and the pure model it re-exports, read as one module."""
+    return LAUNCHER_JS.read_text(encoding="utf-8") + "\n" + SIDEBAR_MODEL_JS.read_text(encoding="utf-8")
+
+
+def test_the_sidebar_model_stays_split_from_its_dom():
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    model = SIDEBAR_MODEL_JS.read_text(encoding="utf-8")
+    assert len(launcher.splitlines()) < 900
+    assert "document." not in model
+    assert 'from "./sidebar_model.js";' in launcher
+
+
 def _block(source: str, start: str, end: str) -> str:
     begin = source.index(start)
     return source[begin : source.index(end, begin)]
 
 
 def test_sidebar_collapse_returns_input_focus_to_the_terminal():
-    source = LAUNCHER_JS.read_text(encoding="utf-8")
+    source = _launcher()
     assert "const handBack = () => requestAnimationFrame(() => actions.handBack?.());" in source
     # Menus and confirmations hand the keyboard back when they close.
     assert "onClose: handBack" in source
@@ -33,7 +49,7 @@ def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
     A row click activates the terminal wherever it lives; there is no foreign
     row and no armed choice strip any more.
     """
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    launcher = _launcher()
     groups = _block(launcher, "export function sidebarGroups(", "\nexport function groupSummary")
 
     assert "groupSessionsByWorkspace" not in launcher
@@ -63,7 +79,7 @@ def test_sidebar_list_patches_and_never_clears_itself_on_update():
     `group:<key>` and `session:<id>`. A rename marks its row as being edited so
     patchList leaves it alone, and a confirmation whose row has gone closes.
     """
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    launcher = _launcher()
     assert 'import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";' in launcher
     assert "key: (group) => `group:${group.key}`," in launcher
     assert "key: (entry) => `session:${entry.session.id}`," in launcher
@@ -87,7 +103,7 @@ def test_kill_is_a_danger_control_behind_a_confirmation():
     same confirmation. A pointer focuses Cancel, the keyboard focuses Kill.
     Detach is its own control and never kills.
     """
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    launcher = _launcher()
     confirm = CONFIRM_JS.read_text(encoding="utf-8")
 
     assert 'import { confirmNear } from "./confirm_popover.js";' in launcher
@@ -153,7 +169,7 @@ def test_the_chrome_is_the_sidebar_and_nothing_else():
     html = INDEX_HTML.read_text(encoding="utf-8")
     app_css = APP_CSS.read_text(encoding="utf-8")
     keys = KEYS_JS.read_text(encoding="utf-8")
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    launcher = _launcher()
     sidebar_css = SIDEBAR_CSS.read_text(encoding="utf-8")
 
     assert "statusbar" not in html and "quick-settings" not in html
@@ -188,7 +204,7 @@ def test_the_sidebar_has_menus_not_native_selects():
     row. Menus own the keyboard while open and hand it back on close, and a
     trigger toggles rather than reopening on the press that closed it.
     """
-    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    launcher = _launcher()
     menu = (FRONTEND_JS / "menu.js").read_text(encoding="utf-8")
     html = INDEX_HTML.read_text(encoding="utf-8")
     sidebar_css = SIDEBAR_CSS.read_text(encoding="utf-8")

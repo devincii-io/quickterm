@@ -1383,7 +1383,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   included, is a same-origin iframe view running the app on one workspace,
   with its own registry id, claim, LayoutManager, autosave, focus ownership
   and heartbeat. There is no primary view.
-  - `workspace_views.js` (`window.quicktermViews` in the shell) tiles the
+  - `workspace_views.js` (`window.quicktermViews` in the shell; the stored
+    arrangement, its parsing and restore plan live in `view_arrangement.js`
+    and are re-exported) tiles the
     views. `open(name|null, {anchorWindow?, cwd?, first?}) -> Promise<view|false>`
     resolves once the view's `window.quicktermView` exists; `focusWorkspace`,
     `close`, `viewForWorkspace`, `viewForSession`, `appFor`, `views`,
@@ -1534,7 +1536,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   palette row reads "show all panes", and the terminal keeps the keyboard.
   Focusing a pane the zoom hides unzooms first. Alt+Z on a lone pane only
   flashes "[only one pane]".
-- Sidebar (`launcher.js`). The shell calls `initLauncher(el, {actions, chrome,
+- Sidebar (`launcher.js` builds the DOM; `sidebar_model.js` holds its pure
+  model: modes, width, groups, row states, terminal choices and their
+  storage, re-exported from `launcher.js`). The shell calls `initLauncher(el, {actions, chrome,
   elevated})` once and gets `{update(partialModel), updateHere(here),
   cycleTerminal, mode, setMode, cycleMode}`; every data change goes through
   `update`, which patches groups keyed `group:<key>` and rows keyed
