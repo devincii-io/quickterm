@@ -2,6 +2,181 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.0.0
+
+Released 2026-10-04.
+
+### Workspaces and sidebar
+
+- A window no longer has a main workspace. Every workspace, scratch
+  included, opens as its own view with its own layout, autosave and close
+  button. Closing any view saves it and keeps its terminals running. Closing
+  the last one leaves an empty area with a **New scratch** button.
+- Opening a workspace that is already on screen focuses its view. Otherwise
+  the new view takes half of the active one. The sidebar, the palette, the
+  Dashboard, `quickterm open` and Explorer's **Open QuickTerm here** open or
+  focus a view and never swap the workspace inside one. **Open QuickTerm
+  here** opens a new scratch view in that folder.
+- The sidebar is one list in a fixed order: every saved workspace in
+  alphabetical order, empty ones included, then scratch views, then
+  Unassigned. Terminals are sorted by name. A terminal that needs you gets a
+  chip and keeps its place.
+- Click a workspace to open or focus it. On hover it offers **Close view**
+  and a menu with Open in new window, Workspace settings and Delete
+  workspace. The active workspace shows its folder, the Explorer and VS Code
+  buttons and the save dot on a second line.
+- Every live terminal row has **Detach** and **Kill** on hover or keyboard
+  focus. Kill asks in a small box beside the row. After a click, Cancel has
+  the focus; after the Delete key, Kill has it and Enter confirms. A failed
+  kill keeps the row, shows the reason and offers Retry.
+- Right-click, Shift+F10 or the menu key on a row offers Open, Move to the
+  active workspace, Detach, Rename and Kill. Double-click or F2 renames.
+- Clicking a terminal focuses it where it is shown, opens its workspace when
+  that is closed, or moves an Unassigned terminal into the active view.
+- Removed: the "Main window" row, the colored view navigation, the
+  "workspace beside" footer button and the strip of terminal choices. The
+  floating **+** in hidden mode no longer drags; it sits 12 px from the top.
+- A view keeps its color across restarts. Closing a scratch view keeps only
+  the terminals that are busy or that you typed into. Idle untouched shells
+  are left to the idle cleanup, so they no longer keep QuickTerm in the tray.
+- **Kill all terminals** in the Dashboard closes the killed panes in every
+  view of every native window.
+
+### Agents: Claude Code and Codex
+
+- Codex is a terminal type next to Claude Code, under Agents in
+  Settings > Terminals > Add. Both use one launch mode setting: new
+  conversation, continue latest, choose session and agent manager. Codex
+  also has fork a session. Claude Code profiles keep their 3.x mode.
+- Agent profiles have typed options. Claude Code: model, permission mode,
+  effort, session name and extra folders, and under Advanced an extra system
+  prompt, agent, MCP config, settings file, fork when resuming, verbose and
+  connect IDE. Codex: model (suggested from Codex's model cache), approval,
+  sandbox, approve for me, bypass approvals and sandbox, reasoning effort,
+  web search, config profile and extra folders, and under Advanced worktree,
+  inline mode, local model and local provider.
+- The palette lists the workspace folder's recent conversations as "resume
+  Claude session: <title>" and "resume Codex session: <title>". Restarting
+  such a pane resumes the same conversation. Scratch views list the
+  conversations of their own folder. Codex subagent and background threads
+  are left out, and a Claude session renamed with /rename shows that name.
+- The palette has a row for every mode of every agent profile, plus "split
+  agent view". Splitting an agent manager pane starts a normal conversation
+  in the workspace folder. A restored agent pane whose process is gone
+  offers Continue latest and Choose session for both agents.
+- When Codex is installed through npm, QuickTerm starts its native
+  `codex.exe` instead of the `.cmd` shim. For an agent started through a
+  `.cmd` or `.bat` file, QuickTerm refuses arguments that cmd.exe would
+  reinterpret.
+
+### SSH
+
+- SSH and SFTP profiles can use the Windows OpenSSH client next to the
+  bundled PuTTY tools. New profiles pick OpenSSH when it is installed.
+  Existing profiles keep PuTTY.
+- QuickTerm reads host aliases from `~/.ssh/config`. It follows Include and
+  skips Match blocks and wildcard hosts. Settings > Terminals > Add has a
+  "From ~/.ssh/config" heading with one entry per alias, and the Host field
+  suggests aliases. Picking one shows the resolved user, port, key and
+  ProxyJump as placeholders. **Fill from ~/.ssh/config** copies them into
+  the fields.
+- OpenSSH profiles take a ProxyJump. QuickTerm refuses a `.ppk` key with
+  OpenSSH, a ProxyJump with PuTTY, and a host or user that starts with "-".
+  Without an OpenSSH client the error names the Windows optional feature to
+  install. A PuTTY profile whose key is not a `.ppk` offers **Switch to
+  OpenSSH**.
+
+### Settings
+
+- Settings has seven tabs: General, Window, Shortcuts, Terminals, Snippets,
+  Advanced and About. The update notification switch moved to Advanced.
+- Terminals and Snippets show a filterable list with the editor beside it.
+  Rows mark problems and unsaved changes. **Add** is a menu grouped into
+  Shells, Agents, Remote, From ~/.ssh/config, Devices, Containers and
+  Desktop. In a window narrower than 820 px the editor replaces the list and
+  has a Back button.
+- One Save stores everything. The footer button, Ctrl+S in Settings and the
+  Save button in each editor do the same thing. "Save connection" is gone,
+  and Open stays disabled until a terminal is saved.
+- The terminal editor shows name, description and command first, then the
+  fields of its type, then launch mode, shortcut and autostart. Arguments,
+  environment and the start command are under Advanced.
+- No native drop-down list is left. Every choice opens a QuickTerm menu.
+
+### Shortcuts and search
+
+- Shortcut fields record the keys you press. Esc cancels, Backspace clears.
+  Global hotkeys pause while a field records, so a key QuickTerm already
+  uses is recorded instead of fired. Letters follow your keyboard layout.
+- A changed summon key or terminal shortcut works as soon as you save, with
+  no restart. A key that another program holds is reported beside the field
+  and in the Save message. Only host and port still need a restart.
+- A new global shortcut needs Ctrl, Alt or Win. QuickTerm warns about Alt
+  keys it uses itself and about the Alt keys shells and agents use.
+- The Shortcuts tab lists the summon key, every terminal's shortcut and the
+  in-app keys. Help shows the same key list.
+- A search box at the top of Settings (press `/` to reach it) finds any
+  setting, terminal or snippet, opens its tab and highlights the field.
+  Escape clears the box before it closes Settings.
+- The palette (Alt+K) adds "open workspace", "close workspace view", "new
+  scratch view", "go to terminal", "setting", "edit terminal", "edit
+  snippet" and "kill terminal" rows. "kill terminal" lists the live
+  terminals; Enter on one asks once more, Escape goes back.
+- Palette prefixes narrow the list: `>` actions, `@` workspaces and
+  terminals, `#` settings and terminal configs, `!` snippets.
+- "load workspace" and "show workspace beside" became "open workspace".
+  "attach from another workspace" is now "move terminal here".
+
+### Window and overlay
+
+- Settings > Window sets the default window size, from presets or custom,
+  or from **Use this window's size**. QuickTerm remembers the last size and
+  position unless you turn that off, and restores them only when they still
+  fit on a monitor. New windows open at the configured size, offset from
+  the first one.
+- An optional drop-down overlay turns the summon key into a toggle. The
+  window slides in from the top or bottom edge of the monitor under the
+  cursor, or of the primary monitor, at the width and height you set. It
+  stays on top and hides when another program takes the focus; both are
+  settings. Turning the overlay off restores the normal window at the next
+  summon.
+- The overlay stays open while QuickTerm opens a link, a folder or an
+  elevated terminal. Tray **Open** shows the overlay when it is on.
+- Sidebar and Settings text keeps at least 4.5:1 contrast on every surface,
+  and the sidebar marks focus and state in Windows high contrast mode.
+
+### Upgrading from 3.x
+
+- `config.json` upgrades in place. `claude_mode` becomes `agent_mode`.
+  Claude Code profiles also keep writing `claude_mode`, so 3.x still knows
+  their mode after a downgrade.
+- 3.x cannot read some shortcuts 4.0 records, for example Ctrl+Alt+Minus or
+  Ctrl+Alt+Left. 4.0 saves such a key under a field only 4.0 reads and
+  leaves the old field empty. After a downgrade 3.x loses that one shortcut
+  instead of resetting the whole configuration.
+- A 3.x shortcut without Ctrl, Alt or Win still loads and works. The
+  settings history in Settings > About can still restore a version that
+  holds one. Only new shortcuts need a modifier.
+- SSH profiles from 3.x keep PuTTY. PuTTY hosts and user names with spaces
+  still load; the rule against whitespace applies to OpenSSH profiles only.
+- The stored view arrangement is converted once. The 3.x main workspace
+  comes back as an ordinary view. Scratch views are not restored after a
+  restart, as before.
+- `window_state.json` in `%APPDATA%\quickterm` is new and optional. QuickTerm
+  ignores it when it is damaged.
+
+### Verification limits
+
+- The release checks do not start real Claude Code, Codex or ssh processes
+  and connect to no SSH host. Argument lists, `~/.ssh/config` parsing and
+  the session lists are covered by tests on sample files.
+- The recent conversation lists read files that Claude Code and Codex keep
+  for themselves. A CLI update can change their format; the list is then
+  empty, and the CLI's own session picker still works.
+- The overlay's Win32 calls are covered by tests with stubs. The packaged
+  build was checked through its HTTP API, not by summoning the overlay.
+- Windows release binaries remain unsigned and can trigger SmartScreen.
+
 ## QuickTerm 3.13.0
 
 Released 2026-10-03.
