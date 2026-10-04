@@ -1490,7 +1490,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `keepalive`, then releases the claim. Unload delivery is best-effort because
   the browser may destroy the document before queued work finishes; explicit
   view close awaits saving before removing its document. Scratch is
-  left to the backend idle reaper instead of being unconditionally killed.
+  left to the backend idle reaper instead of being unconditionally killed:
+  closing a scratch view (`lifecycle.closeView`) retains and keeps in its
+  file only the terminals that are busy, `touched`, retained, typed into in
+  this view (`pane.userWrote`) or unknown (also when `GET /api/sessions`
+  fails); an idle untouched shell loses its leaf and its id there, is not
+  retained, and `reap_idle` collects it after `idle_timeout_s`. A named
+  workspace's view retains every terminal it owns.
 - The sidebar footer is built from the `chrome` array the shell passes to
   `initLauncher`, each entry `[label, onClick, shortcut?]`, with the labels
   "new window", "dashboard", "settings" and "help". `launcher.js` maps

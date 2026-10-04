@@ -481,6 +481,59 @@ test("deleting a workspace open in a view spares the terminals on screen, whatev
   assert.deepEqual([...state.workspaceNames], []);
 });
 
+test("closing a scratch view retains only the terminals that hold work", async () => {
+  const { createLifecycle } = await load("lifecycle.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: [], terminalInventory: null, windowIsPrimary: true,
+  });
+  state.transitioning = false;
+  const tree = { type: "split", dir: "h", ratio: 0.5, children: [
+    { type: "split", dir: "v", ratio: 0.5, children: [{ type: "pane", session_id: "idle" }, { type: "pane", session_id: "typed" }] },
+    { type: "split", dir: "v", ratio: 0.5, children: [{ type: "pane", session_id: "busy" }, { type: "pane", session_id: "local" }] },
+  ] };
+  const saved = [];
+  const retained = [];
+  const make = (workspaceName) => {
+    state.currentWorkspace = workspaceName;
+    state.transitioning = false;
+    return createLifecycle({
+      api: {
+        getSessions: async () => [
+          { id: "idle", busy: false, touched: false },
+          { id: "typed", busy: false, touched: true },
+          { id: "busy", busy: true, touched: false },
+          { id: "local", busy: false, touched: false },
+        ],
+        retainSession: async (id) => { retained.push(id); },
+        unregisterWindow: async () => {},
+      },
+      workspace: { save: async (name, layout, logo, ids) => { saved.push({ name, layout, ids }); } },
+      state,
+      layout: {
+        serialize: () => structuredClone(tree),
+        // A keystroke this view saw that no poll has reported yet.
+        panes: () => [{ session: { id: "local" }, userWrote: true }],
+      },
+      ownedSessionIds: () => ["idle", "typed", "busy", "local", "gone"],
+      stopWindowHeartbeat() {}, stopLaunchLoop() {}, cancelWorkspaceSave() {}, cancelWorkspaceRetry() {},
+      scheduleWorkspaceSave() {},
+    });
+  };
+
+  assert.equal(await make("scratch-view-view-00000001").closeView(), true);
+  // Unknown ("gone") counts as at risk; the idle shell leaves file and leaf.
+  assert.deepEqual(retained, ["typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[0].ids, ["typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[0].layout.children[0], { type: "pane", session_id: "typed" });
+
+  // A named workspace still keeps everything.
+  retained.length = 0;
+  assert.equal(await make("alpha").closeView(), true);
+  assert.deepEqual(retained, ["idle", "typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[1].layout, tree);
+});
+
 test("a failed release of the on-screen terminals stops the workspace delete", async () => {
   const { createWorkspaceActions } = await load("workspace_actions.js");
   const { createAppState } = await load("app_state.js");

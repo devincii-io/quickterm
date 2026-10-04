@@ -173,7 +173,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   LayoutManager and autosave; there is no primary view. A view stays on one
   workspace for its whole life: the sidebar, palette, dashboard and launch
   loop open or focus a view, never switch one in place. Closing any view
-  saves, retains its terminals and releases its claim; nothing is killed.
+  saves, retains its terminals and releases its claim; nothing is killed. A
+  scratch view retains only what holds work (busy, touched or unknown) and
+  drops its idle untouched shells from its file, so the idle reaper collects
+  them; retaining every new scratch's starter shell pinned it forever and kept
+  the app resident in the tray.
 - The sidebar is the whole chrome. No status bar, no top bar, no drawer: the
   workspaces, the terminals and the panel icons all live in `launcher.js`, one
   flat list in a stable order (alphabetical groups, rows by name; state never
