@@ -129,9 +129,41 @@ def test_codex_joins_the_index_with_rollouts_of_the_folder(codex_home):
     assert by_id[IDS[0]]["title"] == "Refactor parser"
     assert by_id[IDS[0]]["updated_at"] == "2026-10-03T12:00:00Z"
     assert by_id[IDS[2]]["updated_at"] == "2026-10-03T04:00:00Z"  # from epoch milliseconds
-    assert by_id[IDS[3]]["title"] == f"session {IDS[3][:8]}"
+    assert by_id[IDS[3]]["title"] == f"session {IDS[3][-12:]}"
     assert by_id[IDS[3]]["updated_at"] == "2026-10-03T10:00:00Z"
     assert [s["updated_at"] for s in sessions] == sorted((s["updated_at"] for s in sessions), reverse=True)
+
+
+def test_an_untitled_codex_session_is_named_by_what_the_user_typed(codex_home):
+    """UUIDv7 ids start with a timestamp: five sessions of one evening all
+    read "session 01a02ac6" and could not be told apart."""
+    def user(text):
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}],
+        }}
+
+    ids = [f"01a02ac6-6c06-7000-8000-00000000000{i}" for i in range(3)]
+    meta = {"type": "session_meta", "payload": {"id": ids[0], "cwd": PROJECT, "source": "vscode"}}
+    path = _rollout(codex_home, "06", "01-00-00", ids[0], PROJECT)
+    path.write_text(_jsonl(
+        meta,
+        user("# AGENTS.md instructions for C:\\x\n\nbe brief"),
+        user("<environment_context>\n<cwd>C:\\x</cwd></environment_context>"),
+        user("  Fix   the resume picker\nplease "),
+        user("second message"),
+    ))
+    older = _rollout(codex_home, "06", "00-00-00", ids[1], PROJECT)
+    older.write_text(_jsonl(
+        {"type": "session_meta", "payload": {"id": ids[1], "cwd": PROJECT}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Older format question"}},
+    ))
+    _rollout(codex_home, "05", "23-00-00", ids[2], PROJECT)  # nothing typed
+
+    titles = {s["id"]: s["title"] for s in agent_sessions.codex_sessions(PROJECT, 5)}
+    assert titles[ids[0]] == "Fix the resume picker please"
+    assert titles[ids[1]] == "Older format question"
+    assert titles[ids[2]] == f"session {ids[2][-12:]}"
+    assert len(set(titles.values())) == 3
 
 
 def test_codex_reads_id_and_cwd_from_a_first_line_longer_than_the_cap(codex_home):

@@ -42,6 +42,19 @@ test("the palette distinguishes external windows and uses the workspace folder",
   assert.ok(items.some((item) => item.label === "split agent view: Assistant"));
 });
 
+test("an agent profile's open row names its type and mode once", () => {
+  const app = {
+    profiles: [
+      { name: "Codex", terminal_type: "codex", cmd: "", agent_mode: "new" },
+      { name: "Box", terminal_type: "ssh", ssh_host: "devbox", ssh_user: "me" },
+    ],
+    snippets: [], workspacePath: () => "C:/project",
+  };
+  const items = Palette.prototype._staticItems.call({ app });
+  assert.equal(items.find((item) => item.label === "open terminal: Codex").hint, "Codex · new conversation");
+  assert.equal(items.find((item) => item.label === "open terminal: Box").hint, "SSH · PuTTY · me@devbox");
+});
+
 test("workspaces are opened from enumerated rows, never loaded in place", () => {
   const calls = [];
   const palette = fakePalette({

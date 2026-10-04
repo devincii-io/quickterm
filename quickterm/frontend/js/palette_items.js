@@ -122,16 +122,40 @@ function terminalPlace(entry) {
   return entry?.workspace ? workspaceLabel(entry.workspace) : "Unassigned";
 }
 
+function idTail(entry) {
+  return String(entry?.session?.id || "").slice(-6);
+}
+
+// Rows that would read the same (two cmd terminals in alpha) get the id's
+// tail in the hint, so the list never shows two identical lines.
+function disambiguate(rows) {
+  const seen = new Map();
+  for (const row of rows) {
+    const key = `${row.label}\u0000${row.hint}`;
+    seen.set(key, (seen.get(key) || 0) + 1);
+  }
+  return rows.map((row) => (seen.get(`${row.label}\u0000${row.hint}`) > 1
+    ? { ...row, hint: `${row.hint} · ${idTail(row.terminal)}` }
+    : row));
+}
+
+// The text a terminal row matches: its name, where it is, its state and its
+// id, so typing a workspace name or an id finds it, not only the name.
+function terminalSearch(label, entry) {
+  return [label, terminalPlace(entry), terminalState(entry), entry?.session?.id].filter(Boolean).join(" ");
+}
+
 // Every terminal the backend lists, across all views and workspaces.
 export function terminalRows(app) {
-  return list(app?.liveTerminals?.()).filter((entry) => entry?.session?.id).map((entry) => ({
+  return disambiguate(list(app?.liveTerminals?.()).filter((entry) => entry?.session?.id).map((entry) => ({
     kind: "terminal",
     group: "place",
     label: `go to terminal: ${terminalName(entry)}`,
     hint: `${terminalPlace(entry)} · ${terminalState(entry)}`,
-    search: `go to terminal: ${terminalName(entry)} ${terminalPlace(entry)}`,
+    search: terminalSearch(`go to terminal: ${terminalName(entry)}`, entry),
+    terminal: entry,
     run: () => app?.activateTerminal?.(entry.session),
-  }));
+  })));
 }
 
 export function settingRows(app) {
@@ -206,8 +230,13 @@ export function agentSessionRows(profile, sessions, app) {
   return list(sessions).filter((session) => session?.id).map((session) => ({
     kind: "agent",
     label: `resume ${agent} session: ${session.title || session.id}`,
-    hint: [profile.name, session.updated_at ? String(session.updated_at).slice(0, 16).replace("T", " ") : ""]
-      .filter(Boolean).join(" · "),
+    // The id's tail keeps two conversations with the same first prompt apart.
+    hint: [
+      profile.name,
+      session.updated_at ? String(session.updated_at).slice(0, 16).replace("T", " ") : "",
+      String(session.id).slice(-6),
+    ].filter(Boolean).join(" · "),
+    search: `resume ${agent} session: ${session.title || ""} ${session.id}`,
     run: () => app?.resumeAgentSession?.(profile, session.id),
   }));
 }
@@ -215,14 +244,15 @@ export function agentSessionRows(profile, sessions, app) {
 // The kill sub-mode's list. The palette adds what choosing a row does: a
 // confirmation, never the kill itself.
 export function killRows(app) {
-  return list(app?.liveTerminals?.())
+  return disambiguate(list(app?.liveTerminals?.())
     .filter((entry) => entry?.session?.id && entry.session.alive !== false)
     .map((entry) => ({
       kind: "kill",
       label: `kill ${terminalName(entry)}…`,
       hint: `${terminalPlace(entry)} · ${terminalState(entry)}`,
+      search: terminalSearch(`kill ${terminalName(entry)}…`, entry),
       terminal: entry,
-    }));
+    })));
 }
 
 export function killName(entry) {

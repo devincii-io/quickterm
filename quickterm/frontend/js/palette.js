@@ -333,10 +333,14 @@ export class Palette {
     ];
     for (const p of a.profiles || []) {
       const desktop = ["rdp", "vnc"].includes(p.terminal_type);
+      // An agent profile has no target of its own; connectionTarget then
+      // falls back to the same type and mode label, which read twice.
+      const typeLabel = connectionLabel(p);
+      const target = connectionTarget(p);
       items.push({
         kind: desktop ? "window" : "terminal",
         label: `open ${desktop ? "window" : "terminal"}: ${p.name}`,
-        hint: `${connectionLabel(p)} · ${connectionTarget(p)}`,
+        hint: target && target !== typeLabel ? `${typeLabel} · ${target}` : typeLabel,
         run: () => a.runProfile?.(p),
       });
       items.push(...agentRows(p, a));

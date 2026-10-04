@@ -197,7 +197,9 @@ test("resume rows name the agent and the conversation", () => {
     { id: "", title: "no id" },
   ], app);
   assert.deepEqual(rows.map((row) => row.label), ["resume Claude session: Fix the reaper"]);
-  assert.equal(rows[0].hint, "Claude · 2026-10-03 21:14");
+  // The id's tail keeps two conversations with the same first prompt apart.
+  assert.equal(rows[0].hint, "Claude · 2026-10-03 21:14 · 3f4a5b");
+  assert.ok(fuzzyScore("3f4a5b", rows[0].search) >= 0);
   rows[0].run();
   assert.deepEqual(calls, [["resumeAgentSession", claude, SESSION]]);
   assert.deepEqual(agentSessionRows({ name: "x", terminal_type: "bash" }, [{ id: SESSION }], app), []);
@@ -233,4 +235,22 @@ test("kill rows list only running terminals and carry the entry, not a kill", ()
   assert.equal(rows[0].terminal, live);
   assert.equal(rows[0].run, undefined);
   assert.deepEqual(killRows({}), []);
+});
+
+test("terminal rows match their workspace and id, and twins get the id's tail", () => {
+  const cmd = (id, workspace) => ({ session: { id, name: "cmd", alive: true }, workspace, label: workspace });
+  const app = {
+    liveTerminals: () => [
+      cmd("aaaa-cd8c01", "alpha"), cmd("bbbb-cd8c02", "alpha"), cmd("cccc-000003", "beta"),
+    ],
+  };
+  for (const rows of [killRows(app), terminalRows(app)]) {
+    assert.deepEqual(rows.map((row) => row.hint), [
+      "alpha · background · cd8c01", "alpha · background · cd8c02", "beta · background",
+    ]);
+    const beta = rows.filter((row) => fuzzyScore("beta", row.search) >= 0);
+    assert.deepEqual(beta.map((row) => row.terminal.session.id), ["cccc-000003"]);
+    const byId = rows.filter((row) => fuzzyScore("cd8c02", row.search) >= 0);
+    assert.deepEqual(byId.map((row) => row.terminal.session.id), ["bbbb-cd8c02"]);
+  }
 });

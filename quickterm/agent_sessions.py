@@ -38,6 +38,12 @@ def _fallback_title(session_id: str) -> str:
     return f"session {session_id[:8]}"
 
 
+def _codex_fallback_title(session_id: str) -> str:
+    # Codex ids are UUIDv7: the first 8 hex digits are a timestamp, so
+    # sessions started close together shared them. The last group is random.
+    return f"session {session_id[-12:]}"
+
+
 def claude_root() -> Path:
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(configured) if configured else Path.home() / ".claude"
@@ -266,6 +272,46 @@ def _session_meta(path: Path) -> dict | None:
 _INTERACTIVE_SOURCES = {"cli", "vscode"}
 
 
+# Codex stores the AGENTS.md text and its context blocks as user messages too.
+_CODEX_INJECTED = ("<", "# AGENTS.md instructions")
+
+
+def _codex_user_text(record: dict) -> str | None:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    text = None
+    if record.get("type") == "event_msg" and payload.get("type") == "user_message":
+        text = payload.get("message") if isinstance(payload.get("message"), str) else None
+    elif record.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+        content = payload.get("content")
+        if isinstance(content, list):
+            text = " ".join(
+                part["text"] for part in content
+                if isinstance(part, dict) and part.get("type") == "input_text" and isinstance(part.get("text"), str)
+            )
+    if not text:
+        return None
+    text = text.strip()
+    if not text or text.startswith(_CODEX_INJECTED):
+        return None
+    return text
+
+
+def _codex_title(path: Path) -> str | None:
+    """The first thing the user typed, like the Claude fallback."""
+    for line in _read_bounded(path).splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(record, dict):
+            text = _codex_user_text(record)
+            if text:
+                return _title(text)
+    return None
+
+
 def _interactive(meta: dict) -> bool:
     if meta.get("parent_thread_id"):
         return False
@@ -301,9 +347,16 @@ def codex_sessions(cwd: str, limit: int = 20) -> list[dict]:
                     updated = _iso(path.stat().st_mtime)
                 except OSError:
                     updated = ""
+            if isinstance(name, str) and name.strip():
+                title = _title(name)
+            else:
+                try:
+                    title = _codex_title(path) or _codex_fallback_title(session_id)
+                except OSError:
+                    title = _codex_fallback_title(session_id)
             sessions.append({
                 "id": session_id,
-                "title": _title(name) if isinstance(name, str) and name.strip() else _fallback_title(session_id),
+                "title": title,
                 "updated_at": updated,
                 "cwd": folder,
             })
