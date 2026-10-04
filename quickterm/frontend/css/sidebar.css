@@ -98,7 +98,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   border: 0;
   border-radius: 3px;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
   font: 10.5px var(--mono);
   text-align: left;
   cursor: pointer;
@@ -205,7 +205,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   border: 0;
   border-radius: 3px;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
   font: 9.5px var(--mono);
   text-align: left;
   cursor: pointer;
@@ -351,7 +351,7 @@ body.sidebar-wide .session-where { display: block; }
   text-transform: uppercase;
   white-space: nowrap;
 }
-.chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent-text); }
 .chip-unread { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
 .chip-elsewhere { background: var(--surface); color: var(--muted); }
 .chip-attention { background: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -481,7 +481,7 @@ body.sidebar-wide .session-where { display: block; }
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: 9px var(--mono);
   cursor: pointer;
 }
@@ -563,7 +563,7 @@ body.sidebar-collapsed .update-pill { width: 24px; }
   border: 0;
   padding: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: 15px var(--mono);
   cursor: pointer;
 }

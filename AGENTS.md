@@ -159,7 +159,11 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   terminal theme at runtime, so the `:root` block in `app.css` is only the
   pre-boot default and must stay numerically identical to what that function
   computes for `graphite`, or the window flashes a different palette at boot.
-  Changing the default palette means changing both.
+  Changing the default palette means changing both
+  (`tests/js/chrome_theme.test.mjs` checks it). Every text token is lifted to
+  4.5:1 on `--bg`, `--surface`, `--field` and `--surface-raised` in every
+  theme; text in the accent colour uses `--accent-text`, the raw `--accent`
+  is for fills, borders and dots.
 - No destructive action may be reachable without consent or feedback. `×` on a
   pane detaches, never kills; kill is a separate labelled `.danger` control in
   the pane header and on the sidebar row. Clicking an open workspace focuses

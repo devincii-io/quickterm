@@ -127,4 +127,6 @@ body.pane-dragging .workspace-view-heading { cursor: grabbing; }
 .workspace-views [hidden] { display: none; }
 @media (forced-colors: active) {
   .multiple > .workspace-view, .workspace-view-heading { border-color: CanvasText; }
+  /* Forced colours paint the focus background away; the outline stays. */
+  .workspace-views-empty button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
 }

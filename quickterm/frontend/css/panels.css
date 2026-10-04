@@ -226,7 +226,7 @@
 .card-open-button:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .ui-input {
@@ -316,7 +316,7 @@
   letter-spacing: 0;
   text-transform: none;
 }
-.palette-item.sel .kind { color: var(--accent); }
+.palette-item.sel .kind { color: var(--accent-text); }
 .palette-item .label { font-size: 12.5px; }
 .palette-item .hint {
   color: var(--muted);
@@ -819,12 +819,12 @@
   border: 1px solid var(--fg-faint);
   border-radius: 4px;
   background: var(--well);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--mono);
   font-size: 10.5px;
 }
 .shortcut-empty, .shortcut-prompt { color: var(--muted); }
-.shortcut-prompt { color: var(--accent); }
+.shortcut-prompt { color: var(--accent-text); }
 .shortcut-warnings > p { margin: 3px 0 0; font-size: 10.5px; line-height: 1.45; }
 .shortcut-error { color: var(--danger); }
 .shortcut-warning { color: var(--text-soft); }
@@ -962,7 +962,7 @@
 .about-link:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .about-update {
@@ -1044,7 +1044,7 @@
   border: 1px solid var(--fg-faint);
   border-radius: 4px;
   background: var(--well);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--mono);
   font-size: 10px;
   text-align: left;
@@ -1128,4 +1128,13 @@
   .panel-subtitle { display: none; }
   .panel[data-view="dashboard"] .panel-body,
   .panel[data-view="help"] .panel-body { padding: 12px 13px 22px; }
+}
+
+/* Forced colours replace backgrounds with Canvas and every border with
+   CanvasText, so a state carried only by those vanishes. Focus gets an
+   outline, and the unsaved dot keeps its own colour. */
+@media (forced-colors: active) {
+  .settings-search-result:focus-visible,
+  .shortcut-input:focus-visible { outline: 2px solid Highlight; outline-offset: 1px; }
+  .config-row-dirty { forced-color-adjust: none; background: Highlight; }
 }

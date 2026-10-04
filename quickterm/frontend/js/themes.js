@@ -401,23 +401,34 @@ export function applyChromeTheme(id, custom = {}) {
   // Light themes tint surfaces toward black; dark themes toward white.
   const lift = light ? "#000000" : "#FFFFFF";
   const field = mix(background, surface, 0.4);
+  const raised = mix(surface, lift, 0.04);
   const contrastEndpoint = light ? "#000000" : "#FFFFFF";
-  const text = readableColor(rawText, contrastEndpoint, [background, surface, field]);
-  const textSoft = readableColor(mix(text, background, 0.16), text, [background, surface, field]);
+  // Every text token is held to 4.5:1 on each surface it sits on, the raised
+  // one included: secondary buttons (Kill in a confirmation) and selected
+  // config rows are drawn on it.
+  const surfaces = [background, surface, field, raised];
+  const text = readableColor(rawText, contrastEndpoint, surfaces);
+  const textSoft = readableColor(mix(text, background, 0.16), text, surfaces);
   const muted = readableColor(
     normalizeHex(colors.muted, CUSTOM_THEME_DEFAULTS.muted),
     text,
-    [background, surface, field],
+    surfaces,
   );
   const darkAccentText = "#111318";
   const onAccent = contrast(accent, "#FFFFFF") >= contrast(accent, darkAccentText)
     ? "#FFFFFF"
     : darkAccentText;
-  const danger = readableColor(rawDanger, contrastEndpoint, [background, surface, field]);
+  const danger = readableColor(rawDanger, contrastEndpoint, surfaces);
+  // The accent as a text colour (kbd chips, active tabs, links). The raw
+  // accent stays for fills, borders and dots, which owe no text contrast.
+  const accentText = readableColor(accent, text, surfaces);
+  // .text-button's colour (Cancel, Open). A fixed green mix read 2.8:1 on
+  // the light themes.
+  const sage = readableColor(mix(muted, "#A7D5B3", 0.36), text, surfaces);
   const values = {
     "--bg": background,
     "--surface": surface,
-    "--surface-raised": mix(surface, lift, 0.04),
+    "--surface-raised": raised,
     "--surface-soft": mix(surface, lift, 0.075),
     // semantic surfaces that used to be hardcoded graphite hexes
     "--well": background,
@@ -433,7 +444,8 @@ export function applyChromeTheme(id, custom = {}) {
     "--accent-border": mix(background, accent, 0.5),
     "--accent-ring": rgba(accent, 0.14),
     "--on-accent": onAccent,
-    "--sage": mix(muted, "#A7D5B3", 0.36),
+    "--accent-text": accentText,
+    "--sage": sage,
     "--danger": danger,
     "--danger-soft": rgba(danger, 0.1),
     "--line": mix(surface, text, 0.09),

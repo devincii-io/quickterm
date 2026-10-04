@@ -48,7 +48,7 @@
 .qt-menu-item.disabled { color: var(--muted); cursor: default; }
 .qt-menu-item.danger { color: var(--danger); }
 .qt-menu-item.danger.active { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
-.qt-menu-mark { flex: none; width: 12px; display: grid; place-items: center; color: var(--accent); }
+.qt-menu-mark { flex: none; width: 12px; display: grid; place-items: center; color: var(--accent-text); }
 .qt-menu-item.disabled .qt-menu-mark { color: var(--muted); }
 .qt-menu-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--menu-color, var(--accent)); }
 .qt-menu-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
