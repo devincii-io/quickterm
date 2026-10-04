@@ -1,14 +1,19 @@
-// The sidebar is the whole chrome. This wires launcher.js to the rest of the
-// app and keeps its terminal list fresh: a full rebuild when the workspace,
-// the profiles or the inventory change, a patch on every status poll.
+// The sidebar is the whole chrome, and only the shell draws it. This builds
+// launcher.js once and keeps it fresh: every 10 s and whenever a view says
+// something changed (`quicktermChrome.refreshSoon()`), it reads the live
+// terminals, asks every view what it shows and owns, and patches the result
+// in through `launcherView.update(model)`. Nothing here rebuilds the list.
 //
 // It also answers "needs you": when the terminal a person is looking at has
 // attention on the server, it tells the server that terminal was seen.
 
 import { initLauncher } from "./launcher.js";
-import { embedded, isScratchWorkspace } from "./boot_context.js";
+import { isScratchWorkspace } from "./boot_context.js";
+
+export { finishedAttachRecord } from "./shell_routing.js";
 
 const $ = (id) => document.getElementById(id);
+const SIDEBAR_POLL_MS = 10000;
 
 // Which session, if any, the user is plainly looking at and the server still
 // flags. "Looking at" is the focused pane while the document is visible, and
@@ -22,33 +27,72 @@ export function sessionToMarkSeen({ sessions, focusedId, focusChanged, visible, 
   return session?.attention ? focusedId : null;
 }
 
-// Whether this document itself has the keyboard. document.hasFocus() is also
-// true while a tiled workspace view (an iframe inside this document) has it,
-// and then the primary's own focused pane is not what the user is looking at:
-// a bell there was cleared as "seen" while they typed in the other view.
+// Whether a document that hosts terminals itself has the keyboard.
+// document.hasFocus() is also true while an iframe inside it has the
+// keyboard. The shell hosts no terminal, so it asks document.hasFocus()
+// directly; this stays for a document that has panes of its own.
 export function documentHasKeyboard(doc = globalThis.document) {
   if (!doc || !doc.hasFocus()) return false;
   return doc.activeElement?.tagName !== "IFRAME";
 }
 
-// The record attachSession is handed for a finished row. It refuses an
-// exited record on purpose (a stale card must not open a dead pane), but a
-// finished row is an explicit request to read one: the pane attaches, the
-// server serves the ring replay-only, and that replay acknowledges it.
-export function finishedAttachRecord(session) {
-  const { alive: _alive, ...rest } = session || {};
-  return rest;
+// What every open view shows and owns right now, keyed by session id. A
+// pane on a terminal (`attached`) is the strongest fact; a view's in-memory
+// claim (`owned`) comes next; the backend's tag is left to the reader.
+export function collectViewContext(views) {
+  const attached = {};
+  const owned = {};
+  const openWorkspaces = [];
+  let activeWorkspace = null;
+  for (const view of views?.views() || []) {
+    const workspace = views.workspaceOf(view);
+    openWorkspaces.push(workspace);
+    if (view === views.active) activeWorkspace = workspace;
+    const app = views.appFor(view);
+    if (!app) continue;
+    for (const id of app.attachedSessionIds?.() || []) attached[id] ??= workspace;
+    for (const id of app.ownedSessionIds?.() || []) owned[id] ??= workspace;
+  }
+  return { attached, owned, openWorkspaces, activeWorkspace };
 }
 
-export function createSidebar({
-  api, state, layout, app, panels, palette, viewHost, initialSessions,
-  runProfile, runSystemTerminal, runInstaller, elevateProfile, elevateSystemTerminal, attachSession,
-  switchWorkspace, newScratchWorkspace, hereState, createWorkspaceHere, openHere,
+// The SidebarModel launcher.js draws (spec 4.2). Pure: the shell hands it
+// the facts and patches the answer in.
+export function sidebarModel({
+  state, sessions = [], views = [], context = {}, folders = new Map(), here = null, logoUrl = null,
 }) {
-  let lastSessions = initialSessions;
+  return {
+    profiles: state.profiles,
+    inventory: state.terminalInventory,
+    defaultProfile: state.cfg?.default_profile,
+    selectedTerminal: state.selectedTerminal || null,
+    logoUrl,
+    workspaces: (state.workspaceNames || [])
+      .filter((name) => !isScratchWorkspace(name))
+      .map((name) => ({
+        name,
+        path: folders.get(name)?.path ?? null,
+        pathExists: folders.get(name)?.pathExists ?? null,
+      })),
+    views: views.map(({ workspace, label, color, active }) => ({ workspace, label, color, active })),
+    sessions,
+    attached: { ...(context.attached || {}) },
+    owned: { ...(context.owned || {}) },
+    here,
+  };
+}
+
+export function createSidebar({ api, state, views, actions, panels, palette, folders }) {
+  let lastSessions = [];
   let statusTimer = null;
   let lastFocusedId = null;
-  let watchingWindowFocus = false;
+  // Terminals killed from this window. The backend lists a killed session as
+  // exited for a grace period, and once its owner is gone that row would sit
+  // under "Unassigned" until the next poll; a verified kill removes it now.
+  const killed = new Set();
+  const visible = (list) => (list || []).filter((session) => !(killed.has(session?.id) && session.alive !== true));
+
+  const activeApp = () => views.appFor(views.active);
 
   // Optimistic: the row stops saying "needs you" at once. A failed POST only
   // means the next poll shows it again, which is the honest outcome.
@@ -59,105 +103,33 @@ export function createSidebar({
     api.markSessionSeen(sessionId).catch(() => {});
   }
 
-  function renderSessions() {
-    if (viewHost()?.active !== viewHost()?.viewFor(window)) return;
-    state.launcherView?.updateSessions(lastSessions, [...app.attachedSessionIds()], [...app.ownedSessionIds()]);
+  function model() {
+    const app = activeApp();
+    return sidebarModel({
+      state,
+      sessions: lastSessions,
+      views: views.list(),
+      context: collectViewContext(views),
+      folders,
+      here: app?.hereState?.() || null,
+      logoUrl: api.assetUrl(app?.workspaceLogo?.() || state.cfg.logo),
+    });
   }
 
-  function buildLauncher() {
-    if (!watchingWindowFocus) {
-      // Coming back to the window is looking at its focused terminal again.
-      // Wired on the first build rather than in the factory, which must not
-      // touch the page.
-      watchingWindowFocus = true;
-      window.addEventListener("focus", refreshStatusSoon);
-    }
-    viewHost()?.update();
-    const host = viewHost();
-    if (host && host.active !== host.viewFor(window)) {
-      (embedded ? window.parent : window).quicktermChrome?.refresh();
-      return;
-    }
-    const render = (embedded ? window.parent : window).quicktermChrome?.render
-      || ((options) => initLauncher($("launcher"), options));
-    state.launcherView = render({
-      profiles: state.profiles,
-      inventory: state.terminalInventory,
-      workspaces: state.workspaceNames.filter((name) => !isScratchWorkspace(name) || name === state.currentWorkspace),
-      currentWorkspace: state.currentWorkspace,
-      workspaceLabel: host?.nameOf(host.viewFor(window)),
-      workspacePath: state.workspacePath,
-      workspacePathExists: state.workspacePathExists,
-      selectedTerminal: state.selectedTerminal,
-      defaultProfile: state.cfg.default_profile,
-      configuredOnly: true,
-      onSetup: () => app.setupTerminals(),
-      windowLabel: (embedded ? window.parent : window).quicktermChrome?.windowLabel || "QuickTerm window",
-      onTour: () => app.setupTour(),
-      onNewWindow: () => { panels.close(); palette.newWindowMode(); },
-      onPickView: () => { panels.close(); palette.newWindowMode(true); },
-      onSelectTerminal: (choice) => { state.selectedTerminal = choice; },
-      logoUrl: api.assetUrl(state.workspaceLogo || state.cfg.logo),
-      onRunProfile: runProfile,
-      onRunSystem: runSystemTerminal,
-      onInstall: runInstaller,
-      onLaunchComplete: () => layout.focused?.focusSoon(),
-      onElevateProfile: elevateProfile,
-      onElevateSystem: elevateSystemTerminal,
-      onWorkspace: (name) => host?.focusWorkspace(name || "scratch") || switchWorkspace(name),
-      onNewScratch: () => host?.open(null, { anchorWindow: window }) || newScratchWorkspace(),
-      onNewTerminal: app.newTerminal,
-      onRenameSession: (session, name) => app.renameSession(session.id, name),
-      onFocusSession: (sessionId) => {
-        markSeen(sessionId);
-        if (host?.focusSession(sessionId)) return;
-        const pane = layout.panes().find((item) => item.session?.id === sessionId);
-        if (pane) layout.focusPane(pane);
-      },
-      onAttachSession: (session) => {
-        markSeen(session?.id);
-        if (host?.focusSession(session?.id)) return;
-        return attachSession(session);
-      },
-      onOpenFinished: (session) => {
-        markSeen(session?.id);
-        return attachSession(finishedAttachRecord(session));
-      },
-      // A terminal another workspace owns is never attached by a click alone.
-      // The sidebar arms a choice first; this is the explicit half of it, and
-      // moveSessionHere re-checks the session is alive and takes it out of the
-      // old workspace's saved ownership before attaching.
-      onMoveSession: (session, fromWorkspace) => app.moveSessionHere(session, fromWorkspace),
-      // Tiling: which workspaces the window already shows (with their view
-      // colours), how to add one beside this view, and the "workspace here"
-      // offer for the focused terminal's folder.
-      shownViews: () => app.shownViews(),
-      canOpenBeside: () => app.canShowWorkspaceBeside(),
-      onOpenBeside: (name) => app.openWorkspaceBeside(name),
-      onFocusView: (name) => app.focusShownWorkspace(name),
-      workspaceRoots: () => state.workspaceRoots,
-      here: hereState(),
-      onWorkspaceHere: () => createWorkspaceHere(),
-      onSidebarResize: () => setTimeout(() => layout.fitAll(), 160),
-      onFocusShownSession: (id) => Boolean(host?.focusSession(id)),
-      visibleSessionIds: () => (host?.views() || []).flatMap((view) =>
-        (view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow)?.quicktermView?.app.attachedSessionIds() || []),
-      onOpenFolder: openHere,
-      sessions: lastSessions,
-      attachedSessionIds: app.attachedSessionIds(),
-      ownedSessionIds: app.ownedSessionIds(),
+  function render() {
+    views.update();
+    state.launcherView?.update(model());
+  }
+
+  // Built once per shell document. Every later change is a patch.
+  function init() {
+    state.launcherView = initLauncher($("launcher"), {
+      actions,
       elevated: Boolean(state.cfg.elevated),
-      // One entry point each. The palette already has a permanent trigger in
-      // the status bar (#sb-shortcuts) plus Alt+K, and the Dashboard used to
-      // sit here AND directly above as "Manage workspaces", pixel-identical
-      // once the sidebar is collapsed.
+      // One entry point each. The palette already has Alt+K, and the
+      // Dashboard used to sit here and directly above as "Manage
+      // workspaces", pixel-identical once the sidebar is collapsed.
       chrome: [
-        // Tile another workspace into this window. From inside a view this
-        // still works, because the parent window does the tiling.
-        ["workspace beside", () => {
-          panels.close();
-          palette.newWindowMode(true);
-        }],
         // The discoverable half of the palette's "new window…" row. Both land
         // in the same picker, because which workspace a second window opens on
         // is a choice and the free/taken list only exists in one place. No
@@ -172,36 +144,54 @@ export function createSidebar({
         ["help", () => panels.toggle("help"), "alt+i"],
       ],
     });
+    // Coming back to the window is looking at its focused terminal again.
+    window.addEventListener("focus", refreshSoon);
+    setInterval(refreshStatus, SIDEBAR_POLL_MS);
+    render();
   }
 
   function refreshStatus() {
     if (document.hidden) return;
-    // The focused terminal's folder changes with every cd and focus change,
-    // so the "workspace here" offer is patched here, not rebuilt with the
-    // sidebar.
-    if (viewHost()?.active === viewHost()?.viewFor(window)) state.launcherView?.updateHere(hereState());
     api.getSessions({ metrics: false }).then((list) => {
-      lastSessions = list;
-      // layout.js calls refreshStatusSoon on every focus change, so this
-      // poll is also the moment a pane that needs you gains focus.
-      const focusedId = layout.focused?.session?.id || null;
+      const listed = new Set((list || []).map((session) => session?.id));
+      for (const id of [...killed]) if (!listed.has(id)) killed.delete(id);
+      lastSessions = visible(list);
+      // Views call refreshSoon on every focus change, so this poll is also
+      // the moment a pane that needs you gains focus.
+      const focusedId = activeApp()?.focusedSessionId?.() || null;
       const seen = sessionToMarkSeen({
-        sessions: list,
+        sessions: lastSessions,
         focusedId,
         focusChanged: focusedId !== lastFocusedId,
         visible: !document.hidden,
-        windowFocused: documentHasKeyboard(),
+        windowFocused: document.hasFocus(),
       });
       lastFocusedId = focusedId;
       if (seen) markSeen(seen);
-      renderSessions();
+      render();
     }).catch(() => {});
   }
 
-  function refreshStatusSoon() {
+  // What changed locally (a view opened, a pane moved) is drawn at once from
+  // the last answer; the live terminals follow a moment later.
+  function refreshSoon() {
+    render();
     clearTimeout(statusTimer);
     statusTimer = setTimeout(refreshStatus, 250);
   }
 
-  return { buildLauncher, refreshStatus, refreshStatusSoon };
+  // A verified kill: the row goes at once instead of turning into a finished
+  // row for the backend's grace period.
+  function forget(sessionId) {
+    if (!sessionId) return;
+    killed.add(sessionId);
+    lastSessions = visible(lastSessions);
+    render();
+  }
+
+  return {
+    init, render, refreshStatus, refreshSoon, markSeen, forget,
+    sessions: () => lastSessions,
+    context: () => collectViewContext(views),
+  };
 }

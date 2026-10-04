@@ -3,27 +3,33 @@ import assert from "node:assert/strict";
 
 // main.js is the composition root and cannot be imported here (it boots on
 // import and pulls in xterm through layout.js). Every module it composes can,
-// and importing them all is what catches a module that fails at load time.
+// the shell (shell.js) included, and importing them all is what catches a
+// module that fails at load time.
 const JS = "../../quickterm/frontend/js/";
 const MODULES = {
   "app_state.js": ["createAppState"],
   "autosave.js": ["createAutosave"],
   "boot_context.js": [
     "SCRATCH_WS", "embedded", "storedWorkspace", "storedScratchActive", "rememberWorkspace",
-    "captureToken", "captureOpenDir", "captureWindowIdentity", "rememberedWindowId",
+    "captureToken", "captureOpenDir", "captureWindowIdentity", "captureFirstView", "rememberedWindowId",
     "rememberWindowId", "loadInventoryCache", "saveInventoryCache",
   ],
   "config_sync.js": ["createConfigSync"],
   "feedback.js": ["setWorkspaceSaveState", "showError", "clearError"],
   "fonts.js": ["DEFAULT_FONT", "clampFont", "createFontSize"],
   "here.js": ["pathKey", "samePath", "insidePath", "baseName", "createHere"],
-  "launch_loop.js": ["createLaunchLoop"],
-  "layout_sessions.js": ["sessionIdsInLayout", "removeSessionFromLayout", "layoutWith"],
+  "launch_loop.js": ["createLaunchLoop", "createLaunchTarget"],
+  "layout_sessions.js": ["sessionIdsInLayout", "removeSessionFromLayout", "withoutSessionLeaf", "layoutWith"],
   "lifecycle.js": ["createLifecycle"],
   "pane_commands.js": ["createPaneCommands"],
   "scratch.js": ["discardScratchWarning", "createScratch"],
   "session_ownership.js": ["createSessionOwnership"],
-  "sidebar.js": ["createSidebar"],
+  "shell.js": ["bootShell", "shellApp", "SHELL_MEMBERS"],
+  "shell_routing.js": ["rowAction", "killRoute", "sessionOwner", "finishedAttachRecord", "createTerminalRouting"],
+  "sidebar.js": [
+    "createSidebar", "sidebarModel", "collectViewContext", "sessionToMarkSeen", "documentHasKeyboard",
+    "finishedAttachRecord",
+  ],
   "terminal_actions.js": ["createTerminalActions", "resultLabel"],
   "spawner.js": [
     "defaultSystemSpec", "serializableSpec", "commandTerminalType", "claudeProfileForPane", "createSpawner",
@@ -69,6 +75,7 @@ test("a factory builds without touching its dependencies", async () => {
     ["spawner.js", "createSpawner"], ["window_registry.js", "createWindowRegistry"],
     ["workspace_actions.js", "createWorkspaceActions"], ["workspace_switch.js", "createWorkspaceSwitch"],
     ["fonts.js", "createFontSize"], ["terminal_actions.js", "createTerminalActions"],
+    ["launch_loop.js", "createLaunchTarget"], ["shell_routing.js", "createTerminalRouting"],
   ];
   for (const [file, name] of factories) {
     const factory = (await load(file))[name];
@@ -130,6 +137,23 @@ test("saved layouts are read and edited without a layout manager", async () => {
   assert.equal(removeSessionFromLayout(tree, "b"), true);
   assert.equal(removeSessionFromLayout(tree, "b"), false);
   assert.deepEqual([...sessionIdsInLayout(tree)], ["a"]);
+
+  const { withoutSessionLeaf } = await load("layout_sessions.js");
+  const three = {
+    type: "split", dir: "h", ratio: 0.3, children: [
+      { type: "pane", session_id: "a" },
+      { type: "split", dir: "v", ratio: 0.6, children: [{ type: "pane", session_id: "b" }, { type: "pane", session_id: "c" }] },
+    ],
+  };
+  const before = structuredClone(three);
+  assert.deepEqual(withoutSessionLeaf(three, "b"), {
+    changed: true,
+    layout: { type: "split", dir: "h", ratio: 0.3, children: [{ type: "pane", session_id: "a" }, { type: "pane", session_id: "c" }] },
+  });
+  assert.deepEqual(three, before, "the input tree is not modified");
+  assert.deepEqual(withoutSessionLeaf(three, "zz"), { changed: false, layout: three });
+  assert.deepEqual(withoutSessionLeaf({ type: "pane", session_id: "a" }, "a"), { changed: true, layout: null });
+  assert.deepEqual(withoutSessionLeaf(null, "a"), { changed: false, layout: null });
 
   const leaf = { type: "pane", session_id: "c" };
   assert.deepEqual(layoutWith(null, null), { type: "pane" });
@@ -382,4 +406,233 @@ test("autosave waits out a switch and never saves an unnamed scratch", async () 
   assert.deepEqual(saves, [["Alpha", { type: "pane" }, undefined, ["a"], undefined]], "layout autosaves preserve separately edited metadata");
   autosave.cancelWorkspaceSave();
   autosave.cancelWorkspaceRetry();
+});
+
+test("the shell answers window-wide members itself and everything else from the active view", async () => {
+  const { shellApp, SHELL_MEMBERS } = await load("shell.js");
+  for (const name of [
+    "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
+    "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal",
+    "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals",
+  ]) assert.ok(SHELL_MEMBERS.includes(name), name);
+  const shell = { openWorkspace: () => "shell", killTerminal: () => "shell" };
+  const facade = { splitH: () => "facade", profiles: ["fallback"] };
+  let active = null;
+  const app = shellApp({ shell, facade, activeApp: () => active });
+  assert.equal(app.openWorkspace(), "shell");
+  assert.equal(app.splitH(), "facade", "with no view the facade answers");
+  assert.deepEqual(app.profiles, ["fallback"]);
+  active = { splitH: () => "view", openWorkspace: () => "view", killTerminal: () => "view", profiles: ["view"] };
+  assert.equal(app.splitH(), "view");
+  assert.deepEqual(app.profiles, ["view"]);
+  assert.equal(app.openWorkspace(), "shell", "a view never answers a window-wide member");
+  assert.equal(app.killTerminal(), "shell");
+  assert.equal(app.runAgentMode, undefined, "a member nobody has is undefined, not an error");
+});
+
+test("a scratch view boots with its own identity, and only the first one is marked", async () => {
+  const { captureFirstView } = await load("boot_context.js");
+  const previous = globalThis.location;
+  try {
+    globalThis.location = { search: "?workspace=&window=view-12345678&embedded=1&first=1" };
+    assert.equal(captureFirstView(), true);
+    globalThis.location = { search: "?workspace=&window=view-12345678&embedded=1" };
+    assert.equal(captureFirstView(), false);
+  } finally {
+    globalThis.location = previous;
+  }
+});
+
+test("deleting a workspace open in a view spares the terminals on screen, whatever the timing", async () => {
+  // Closing the view retains its terminals, but its iframe and every pane
+  // socket go only after the slide; the server reaps each owned terminal no
+  // one is attached to when the DELETE arrives. The file must not list them.
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const order = [];
+  let file = {
+    layout: { type: "split", dir: "h", ratio: 0.5, children: [{ type: "pane", session_id: "a" }, { type: "pane", session_id: "b" }] },
+    session_ids: ["a", "b", "background"],
+    logo: null,
+  };
+  const actions = createWorkspaceActions({
+    api: {
+      deleteWorkspace: async (name) => { order.push(["delete", name, [...file.session_ids]]); },
+    },
+    workspace: {
+      details: async () => structuredClone(file),
+      save: async (name, layout, logo, ids) => { file = { layout, logo, session_ids: ids }; },
+    },
+    state,
+    layout: null,
+    listWindowsSafe: async () => [],
+    closeWorkspaceView: async (name) => { order.push(["close", name]); return true; },
+    viewSessionIds: () => ["a", "b"],
+    showError: (text) => { throw new Error(text); },
+    buildLauncher() {},
+    refreshStatusSoon() {},
+    scheduleWorkspaceSave() {},
+  });
+  assert.equal(await actions.deleteWorkspace("alpha"), true);
+  assert.deepEqual(order, [["close", "alpha"], ["delete", "alpha", ["background"]]]);
+  assert.deepEqual([...state.workspaceNames], []);
+});
+
+test("closing a scratch view retains only the terminals that hold work", async () => {
+  const { createLifecycle } = await load("lifecycle.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: [], terminalInventory: null, windowIsPrimary: true,
+  });
+  state.transitioning = false;
+  const tree = { type: "split", dir: "h", ratio: 0.5, children: [
+    { type: "split", dir: "v", ratio: 0.5, children: [{ type: "pane", session_id: "idle" }, { type: "pane", session_id: "typed" }] },
+    { type: "split", dir: "v", ratio: 0.5, children: [{ type: "pane", session_id: "busy" }, { type: "pane", session_id: "local" }] },
+  ] };
+  const saved = [];
+  const retained = [];
+  const make = (workspaceName) => {
+    state.currentWorkspace = workspaceName;
+    state.transitioning = false;
+    return createLifecycle({
+      api: {
+        getSessions: async () => [
+          { id: "idle", busy: false, touched: false },
+          { id: "typed", busy: false, touched: true },
+          { id: "busy", busy: true, touched: false },
+          { id: "local", busy: false, touched: false },
+        ],
+        retainSession: async (id) => { retained.push(id); },
+        unregisterWindow: async () => {},
+      },
+      workspace: { save: async (name, layout, logo, ids) => { saved.push({ name, layout, ids }); } },
+      state,
+      layout: {
+        serialize: () => structuredClone(tree),
+        // A keystroke this view saw that no poll has reported yet.
+        panes: () => [{ session: { id: "local" }, userWrote: true }],
+      },
+      ownedSessionIds: () => ["idle", "typed", "busy", "local", "gone"],
+      stopWindowHeartbeat() {}, stopLaunchLoop() {}, cancelWorkspaceSave() {}, cancelWorkspaceRetry() {},
+      scheduleWorkspaceSave() {},
+    });
+  };
+
+  assert.equal(await make("scratch-view-view-00000001").closeView(), true);
+  // Unknown ("gone") counts as at risk; the idle shell leaves file and leaf.
+  assert.deepEqual(retained, ["typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[0].ids, ["typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[0].layout.children[0], { type: "pane", session_id: "typed" });
+
+  // A named workspace still keeps everything.
+  retained.length = 0;
+  assert.equal(await make("alpha").closeView(), true);
+  assert.deepEqual(retained, ["idle", "typed", "busy", "local", "gone"]);
+  assert.deepEqual(saved[1].layout, tree);
+});
+
+test("a failed release of the on-screen terminals stops the workspace delete", async () => {
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const errors = [];
+  let deleted = false;
+  const actions = createWorkspaceActions({
+    api: { deleteWorkspace: async () => { deleted = true; } },
+    workspace: {
+      details: async () => ({ layout: { type: "pane", session_id: "a" }, session_ids: ["a"], logo: null }),
+      save: async () => { throw Object.assign(new Error("PUT -> 500"), { status: 500 }); },
+    },
+    state,
+    layout: null,
+    listWindowsSafe: async () => [],
+    closeWorkspaceView: async () => true,
+    viewSessionIds: () => ["a"],
+    showError: (text) => errors.push(text),
+    buildLauncher() {},
+    refreshStatusSoon() {},
+    scheduleWorkspaceSave() {},
+  });
+  assert.equal(await actions.deleteWorkspace("alpha"), false);
+  assert.equal(deleted, false);
+  assert.match(errors[0], /Could not release the terminals that were open in "alpha"; nothing was deleted/);
+});
+
+test("a kill takes the leaf out of a closed workspace, so reopening spawns nothing", async () => {
+  const { createWorkspaceActions } = await load("workspace_actions.js");
+  const { sessionIdsInLayout } = await load("layout_sessions.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha", "beta"], terminalInventory: null, windowIsPrimary: true,
+  });
+  const files = {
+    alpha: {
+      layout: { type: "split", dir: "h", ratio: 0.5, children: [
+        { type: "pane", profile: "cmd", session_id: "dead" },
+        { type: "pane", profile: "Codex", session_id: "live" },
+      ] },
+      session_ids: ["dead", "live"], logo: null,
+    },
+    beta: { layout: { type: "pane", profile: "cmd", session_id: "dead" }, session_ids: ["dead"], logo: null },
+  };
+  const errors = [];
+  let failBeta = 0;
+  const actions = createWorkspaceActions({
+    api: { listWorkspaces: async () => ["alpha", "beta"] },
+    workspace: {
+      details: async (name) => structuredClone(files[name]),
+      save: async (name, layout, logo, ids) => {
+        if (name === "beta" && failBeta-- > 0) throw new Error("PUT -> 500");
+        files[name] = { layout, logo, session_ids: ids };
+      },
+    },
+    state,
+    layout: null,
+    showError: (text) => errors.push(text),
+  });
+
+  failBeta = 1; // one transient failure is retried
+  assert.equal(await actions.removeSessionsFromSavedWorkspaces(new Set(["dead"])), true);
+  assert.deepEqual(files.alpha.layout, { type: "pane", profile: "Codex", session_id: "live" });
+  assert.deepEqual(files.alpha.session_ids, ["live"]);
+  // No leaf without a session id is left behind to be spawned as a template.
+  assert.equal(files.beta.layout, null);
+  assert.deepEqual([...sessionIdsInLayout(files.alpha.layout)], ["live"]);
+  assert.deepEqual(errors, []);
+
+  files.beta = { layout: { type: "pane", session_id: "x" }, session_ids: ["x"], logo: null };
+  failBeta = 2; // the retry fails too: said out loud, never swallowed
+  assert.equal(await actions.removeSessionsFromSavedWorkspaces(new Set(["x"])), false);
+  assert.match(errors[0], /"beta" could not be updated/);
+});
+
+test("a workspace saved with a folder and no layout opens as itself, in its folder", async () => {
+  const { createWorkspaceSwitch } = await load("workspace_switch.js");
+  const { createAppState } = await load("app_state.js");
+  const state = createAppState({
+    cfg: {}, profiles: [], snippets: [], workspaceNames: ["alpha"], terminalInventory: null, windowIsPrimary: true,
+  });
+  state.currentWorkspace = "alpha";
+  const spawned = [];
+  const restoredWith = [];
+  const pane = { id: "p1" };
+  const workspaceSwitch = createWorkspaceSwitch({
+    api: { getSessions: async () => [] },
+    workspace: { details: async (name) => (name === "alpha" ? { layout: null, path: "C:/work/alpha", path_exists: true } : null) },
+    state,
+    layout: { restore: (layout) => { restoredWith.push(layout); return [pane]; }, focusPane() {} },
+    spawnDefaultInto: async (into) => { spawned.push([into.id, state.workspacePath]); return true; },
+    profileTerminalType: () => null,
+    showError: (text) => { throw new Error(text); },
+  });
+  assert.equal(await workspaceSwitch.restoreWorkspace("alpha"), true);
+  assert.deepEqual(restoredWith, [null]);
+  assert.deepEqual(spawned, [["p1", "C:/work/alpha"]]);
+  assert.equal(state.currentWorkspace, "alpha");
+  assert.equal(await workspaceSwitch.restoreWorkspace("missing"), false);
 });

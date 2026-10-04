@@ -4,7 +4,7 @@
 
 import { SCRATCH_WS, rememberWorkspace } from "./boot_context.js";
 import { launchOptionsToNode } from "./launch_options.js";
-import { layoutWith, removeSessionFromLayout } from "./layout_sessions.js";
+import { layoutWith, removeSessionFromLayout, withoutSessionLeaf } from "./layout_sessions.js";
 import { sessionAlreadyGone } from "./panel_shared.js";
 import { describeHolder, windowChoiceMessage, workspaceHolder } from "./windows.js";
 
@@ -26,16 +26,18 @@ export function validateWorkspaceName(name) {
 
 export function createWorkspaceActions({
   api, workspace, state, layout,
-  claimWorkspaceFor, listWindowsSafe, switchWorkspace, ensureScratchWorkspace, attachSession, hereState,
-  persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
+  claimWorkspaceFor, listWindowsSafe, ensureScratchWorkspace, attachSession, hereState,
+  openWorkspaceView, closeWorkspaceView, persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
   ownedSessionIds, attachedSessionIds, forgetSession,
   refreshWorkspaceRoots, buildLauncher, refreshStatusSoon, showError, clearError,
+  viewSessionIds = () => [],
 }) {
   // Make the focused terminal's folder a workspace (or open the one it already
   // belongs to) and take the terminal along. The terminal is what the user
   // was looking at when they asked, so it leads: it is written into the
-  // target's layout first, then detached here, then the window switches and
-  // the restore attaches it again. Nothing is killed at any step.
+  // target's layout first, then detached here, then the target's own view
+  // opens (or is focused) and its restore attaches it again. This view stays
+  // on its workspace. Nothing is killed at any step.
   async function createWorkspaceHere() {
     const here = hereState();
     if (!here || state.transitioning) return false;
@@ -103,41 +105,88 @@ export function createWorkspaceActions({
       state.workspaceNames.sort((a, b) => a.localeCompare(b));
     }
     state.workspaceRoots.set(name, saved ? saved.path || null : folder);
-    return switchWorkspace(name);
+    return Boolean(await openWorkspaceView(name));
   }
 
-  async function removeWorkspaceOwnership(name, sessionId) {
-    if (name === state.currentWorkspace) {
-      state.workspaceSessionIds.delete(sessionId);
-      await persistCurrentWorkspace();
-      return;
+  // Edits one saved workspace file that no view of this window shows: drops
+  // `sessionIds` from its ownership and its layout. A kill (`dropLeaf`) takes
+  // the whole leaf out, as closing the pane in an open view would; a move
+  // only strips the id. Resolves true when the file is right (saved, nothing
+  // to change, or no such workspace) and false when it could not be read or
+  // written, so the caller can say so instead of trusting a silent failure.
+  async function editSavedWorkspace(name, sessionIds, { dropLeaf = false } = {}) {
+    let saved;
+    try {
+      saved = await workspace.details(name);
+    } catch (error) {
+      if (error?.status === 404) return true;
+      console.debug(`reading workspace "${name}" failed`, error);
+      return false;
     }
-    const saved = await workspace.details(name).catch(() => null);
-    if (!saved) return;
+    if (!saved) return true;
     const ids = new Set(saved.session_ids || []);
-    const removedOwnership = ids.delete(sessionId);
-    const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
-    const changed = removedOwnership || removedLayoutReference;
-    // No path argument: the folder of a workspace we are only fixing up
-    // ownership for must survive untouched.
-    if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+    let tree = saved.layout ?? null;
+    let changed = false;
+    for (const sessionId of sessionIds) {
+      changed = ids.delete(sessionId) || changed;
+      if (dropLeaf) {
+        const result = withoutSessionLeaf(tree, sessionId);
+        tree = result.layout;
+        changed = result.changed || changed;
+      } else {
+        changed = removeSessionFromLayout(tree, sessionId) || changed;
+      }
+    }
+    if (!changed) return true;
+    try {
+      // No path argument: the folder of a workspace we are only fixing up
+      // ownership for must survive untouched.
+      await workspace.save(name, tree, saved.logo || null, [...ids]);
+      return true;
+    } catch (error) {
+      console.debug(`saving workspace "${name}" failed`, error);
+      return false;
+    }
   }
 
-  async function removeSessionsFromSavedWorkspaces(sessionIds) {
-    if (!sessionIds.size) return;
-    const names = await api.listWorkspaces().catch(() => []);
-    await Promise.all(names.map(async (name) => {
-      const saved = await workspace.details(name).catch(() => null);
-      if (!saved) return;
-      const ids = new Set(saved.session_ids || []);
-      let changed = false;
-      for (const sessionId of sessionIds) {
-        const removedOwnership = ids.delete(sessionId);
-        const removedLayoutReference = removeSessionFromLayout(saved.layout, sessionId);
-        changed = removedOwnership || removedLayoutReference || changed;
+  async function removeWorkspaceOwnership(name, sessionIds, options = {}) {
+    const list = typeof sessionIds === "string" ? [sessionIds] : [...sessionIds];
+    if (name === state.currentWorkspace) {
+      for (const id of list) state.workspaceSessionIds.delete(id);
+      try {
+        await persistCurrentWorkspace();
+        return true;
+      } catch (error) {
+        console.debug(`saving workspace "${name}" failed`, error);
+        return false;
       }
-      if (changed) await workspace.save(name, saved.layout, saved.logo || null, [...ids]).catch(() => {});
+    }
+    return editSavedWorkspace(name, list, options);
+  }
+
+  // After a verified kill: the terminal leaves every saved workspace, leaf
+  // and all. A file that cannot be edited is retried once and then named in
+  // the error banner; it would otherwise list a terminal that no longer runs.
+  async function removeSessionsFromSavedWorkspaces(sessionIds) {
+    if (!sessionIds.size) return true;
+    let names;
+    try {
+      names = await api.listWorkspaces();
+    } catch (error) {
+      console.debug("listing workspaces failed", error);
+      showError("The terminal was stopped, but the saved workspaces could not be read to remove it.");
+      return false;
+    }
+    const failed = [];
+    await Promise.all(names.map(async (name) => {
+      const edit = () => editSavedWorkspace(name, sessionIds, { dropLeaf: true });
+      if (!(await edit()) && !(await edit())) failed.push(name);
     }));
+    if (failed.length) {
+      showError(`The terminal was stopped, but ${failed.map((name) => `"${name}"`).join(", ")} could not be updated. It may list it as not running.`);
+      return false;
+    }
+    return true;
   }
 
   async function moveSessionHere(info, fromWorkspace) {
@@ -157,7 +206,10 @@ export function createWorkspaceActions({
     }
     state.workspaceSessionIds.add(info.id);
     await persistCurrentWorkspace();
-    return attachSession(fresh);
+    // `fresh` was read before the old workspace let go, so it still carries
+    // that workspace's tag, which attachSession would refuse. The ownership
+    // moved above; the tag follows it with the next save.
+    return attachSession({ ...fresh, workspace: state.currentWorkspace || null });
   }
 
   async function killWorkspaceSession(info, workspaceName) {
@@ -173,7 +225,9 @@ export function createWorkspaceActions({
       }
     }
     forgetSession(info.id);
-    if (workspaceName) await removeWorkspaceOwnership(workspaceName, info.id);
+    if (workspaceName && !(await removeWorkspaceOwnership(workspaceName, info.id, { dropLeaf: true }))) {
+      showError(`The terminal was stopped, but "${workspaceName}" could not be updated. It may list it as not running.`);
+    }
     refreshStatusSoon();
     return true;
   }
@@ -255,12 +309,29 @@ export function createWorkspaceActions({
   // kills sessions nobody is attached to, and deleting the workspace you're
   // in simply turns the live layout into a scratch layout in place.
   async function deleteWorkspace(name) {
+    // The terminals on screen in a view of it are spared, whatever the timing.
+    // Closing the view retains them, but its iframe (and every pane socket)
+    // goes only after the slide, and the server reaps each owned terminal
+    // nobody is attached to at the moment the DELETE arrives.
+    const onScreen = name !== state.currentWorkspace ? [...(viewSessionIds(name) || [])] : [];
+    // A view of this window showing it is closed first (saved, its terminals
+    // retained, its claim released), or it would autosave the file back.
+    if (name !== state.currentWorkspace && closeWorkspaceView && !(await closeWorkspaceView(name))) return false;
     // Deleting a workspace another window has open pulls the file out from
     // under a live layout that is still autosaving into it.
     const holder = workspaceHolder(await listWindowsSafe(), state.windowId, name);
     if (holder) {
       showError(windowChoiceMessage({ name, taken: true, mine: false, holder })
         + " Close it there first.");
+      return false;
+    }
+    // Out of the file before the DELETE reads it: the server reaps only what
+    // the file lists, so these become unassigned and keep running.
+    // One save for all of them, and a failed one stops the delete: the
+    // server would otherwise reap the terminals the confirmation promised to
+    // keep, because the file still lists them.
+    if (onScreen.length && !(await removeWorkspaceOwnership(name, onScreen))) {
+      showError(`Could not release the terminals that were open in "${name}"; nothing was deleted.`);
       return false;
     }
     try {

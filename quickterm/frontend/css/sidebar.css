@@ -1,5 +1,5 @@
 /* The sidebar is the whole chrome, so this file owns everything in it: the
-   new-terminal row, the workspace row, the terminal list, the icon footer,
+   new-terminal row, the workspace groups and their terminals, the icon footer,
    the resize grip, the 30px rail, and the floating "+" that replaces the
    sidebar while it is hidden. app.css only provides the grid column and the
    base `.launcher.sidebar` box. Everything reads the theme variables; no
@@ -98,7 +98,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   border: 0;
   border-radius: 3px;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
   font: 10.5px var(--mono);
   text-align: left;
   cursor: pointer;
@@ -128,7 +128,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 }
 .sidebar-terminal-pick:hover, .sidebar-terminal-pick[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
 .sidebar-terminal-pick:disabled { opacity: .4; cursor: default; }
-.sidebar-admin {
+.sidebar-admin, .launcher.sidebar .sidebar-setup {
   flex: none;
   width: 22px;
   height: 26px;
@@ -140,47 +140,63 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   color: var(--muted);
   cursor: pointer;
 }
-.sidebar-admin:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-admin:hover, .sidebar-setup:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-setup:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .sidebar-admin:disabled { opacity: .5; cursor: default; }
 
-/* ---------- workspace ---------- */
+/* ---------- workspaces label ---------- */
 
-.sidebar-where {
+.sidebar-section {
   flex: none;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 5px 6px 7px;
-  border-bottom: 1px solid var(--line);
+  padding: 4px 5px 2px 9px;
+  border-top: 1px solid var(--line);
 }
-.sidebar-where-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: stretch; }
-/* The workspace name is the menu's trigger: plain text with a chevron, the
-   same weight the select had, so the row does not read as a form. */
-.sidebar-workspace-button {
-  width: 100%;
+.sidebar-section-label {
+  flex: 1 1 auto;
   min-width: 0;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 1px 0 0;
+  color: var(--muted);
+  font-size: 8.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.sidebar-section-add {
+  flex: none;
+  width: 20px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--text);
-  font: 600 11px var(--mono);
-  text-align: left;
+  color: var(--muted);
   cursor: pointer;
 }
-.sidebar-workspace-button .sidebar-label { flex: 1 1 auto; min-width: 0; }
-.sidebar-workspace-button .icon { color: var(--muted); }
-.sidebar-workspace-button:hover, .sidebar-workspace-button[aria-expanded="true"] { color: var(--accent); }
-.sidebar-workspace-button:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.sidebar-section-add:hover, .sidebar-section-add[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
+.sidebar-section-add:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- the active workspace's second line ---------- */
+
+/* Folder, "workspace here", Explorer and VS Code, and the save dot. One node
+   that launcher.js moves under the active group's head. */
+.sidebar-active-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 16px;
+  padding: 0 4px 2px 20px;
+}
+.sidebar-active-line .sidebar-folder { flex: 1 1 auto; min-width: 0; }
+.session-group-detail:empty { display: none; }
 /* "workspace here": shown only while the focused terminal sits outside this
    workspace's folder. Same fill as "+" above, because it also opens
    something, and gone the moment the terminal is back home. */
 .sidebar-here {
-  margin-top: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
   min-height: 18px;
   display: flex;
   align-items: center;
@@ -189,7 +205,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   border: 0;
   border-radius: 3px;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
   font: 9.5px var(--mono);
   text-align: left;
   cursor: pointer;
@@ -205,13 +221,15 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   white-space: nowrap;
 }
 .sidebar-folder.warning { color: var(--danger); }
-/* Explorer and VS Code for the folder named above. Same weight as the footer
-   icons: this row is about where the terminal is, and these are the two ways
-   out of it. */
-.sidebar-folder-tools { flex: none; display: flex; gap: 1px; }
+/* Explorer and VS Code for the folder named above, drawn on hover and focus:
+   this line is about where the terminal is, and these are the two ways out
+   of it. */
+.sidebar-folder-tools { flex: none; display: flex; gap: 1px; margin-left: auto; visibility: hidden; }
+.session-group.active:hover .sidebar-folder-tools,
+.session-group.active:focus-within .sidebar-folder-tools { visibility: visible; }
 .sidebar-folder-open {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   display: grid;
   place-items: center;
   border: 0;
@@ -333,67 +351,98 @@ body.sidebar-wide .session-where { display: block; }
   text-transform: uppercase;
   white-space: nowrap;
 }
-.chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.chip-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent-text); }
 .chip-unread { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
 .chip-elsewhere { background: var(--surface); color: var(--muted); }
 .chip-attention { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
-/* Other workspaces fold under a small head. Yours has no head at all when it
-   is the only one: a list of one thing needs no label. */
-.session-group + .session-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line-hover); }
+/* Every saved workspace has a head, in name order, open or not. The head is
+   the way to open or focus its view; the chevron folds its rows. */
+.session-group { padding: 1px 0; }
+.session-group-headline { position: relative; }
 .session-group-head {
   width: 100%;
-  min-height: 20px;
+  min-height: 22px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   padding: 1px 6px 1px 4px;
   border: 0;
   border-radius: 3px;
   background: transparent;
   color: var(--muted);
-  font: 9px var(--mono);
-  letter-spacing: .06em;
-  text-transform: uppercase;
+  font: 9.5px var(--mono);
+  letter-spacing: .04em;
   text-align: left;
   cursor: pointer;
 }
 .session-group-head:hover { background: var(--surface-raised); color: var(--text); }
 .session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.session-group.current > .session-group-head { color: var(--text-soft); }
+.session-group.open > .session-group-headline > .session-group-head { color: var(--text-soft); }
+.session-group.active > .session-group-headline > .session-group-head { color: var(--text); font-weight: 600; }
+.session-group-head.warning .session-group-name { text-decoration: underline dotted var(--danger); }
+.session-group.unassigned > .session-group-headline > .session-group-head { text-transform: uppercase; letter-spacing: .06em; font-size: 8.5px; }
 .session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-group-chevron { width: 10px; flex: none; display: grid; place-items: center; }
-.session-group-rows { display: flex; flex-direction: column; gap: 1px; }
-
-/* Acting on a terminal another workspace owns is a decision, so the row opens
-   the choices instead of making one. The strip is tied to its row by the accent
-   rule down its left edge. */
-.session-choices {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 1px 0 3px 12px;
-  padding: 2px 0 2px 5px;
-  border-left: 1px solid var(--accent);
+.session-group-chevron.empty { visibility: hidden; }
+.session-group.folded > .session-group-rows { display: none; }
+/* The view's colour when it is open in this window, a hollow ring when not. */
+.session-group-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--group-color, var(--accent));
+  border-radius: 2px;
+  background: var(--group-color, var(--accent));
 }
-.session-choice {
-  min-height: 20px;
+.session-group-dot.hollow { border-color: var(--muted); background: transparent; }
+.session-group.unassigned .session-group-dot { display: none; }
+.session-group-rows { display: flex; flex-direction: column; gap: 1px; padding-left: 8px; }
+
+/* Hover and focus-within actions. They sit over the right end of the head or
+   row (the count, the chips) and stay drawn while their confirmation is open,
+   because the disabled trigger is what the box points at. */
+.group-actions, .session-actions {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  bottom: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 6px;
+  gap: 1px;
+  padding-left: 4px;
+  background: var(--surface-raised);
+  visibility: hidden;
+}
+.session-group-headline:hover > .group-actions,
+.session-group-headline:focus-within > .group-actions,
+.session-group.armed > .session-group-headline > .group-actions,
+.session-entry:hover > .session-actions,
+.session-entry:focus-within > .session-actions,
+.session-entry.armed > .session-actions { visibility: visible; }
+.group-action, .session-action {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--text-soft);
-  font: 9.5px var(--mono);
-  text-align: left;
+  color: var(--muted);
   cursor: pointer;
 }
-.session-choice:hover { background: var(--surface-raised); color: var(--accent); }
-.session-choice:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.session-choice-note { margin: 0; padding: 2px 6px; color: var(--muted); font-size: 8.5px; line-height: 1.35; }
-.session-entry.armed > .session-row { background: var(--surface-raised); }
+.group-action:hover, .session-action:hover, .group-action[aria-expanded="true"] { background: var(--surface-soft, var(--surface)); color: var(--text); }
+.group-action:focus-visible, .session-action:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-action.danger:hover, .session-action.danger[aria-expanded="true"] { color: var(--danger); }
+.group-action:disabled, .session-action:disabled { cursor: default; }
+.session-entry { position: relative; }
+.session-entry.armed > .session-row,
+.session-group.armed > .session-group-headline > .session-group-head { background: var(--surface-raised); }
+
+/* The sidebar confirmation is the dashboard's inline confirmation, placed by
+   confirm_popover.js. */
+.confirm-popover { z-index: 130; }
 
 /* ---------- footer ---------- */
 
@@ -432,7 +481,7 @@ body.sidebar-wide .session-where { display: block; }
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: 9px var(--mono);
   cursor: pointer;
 }
@@ -450,36 +499,39 @@ body.sidebar-wide .session-where { display: block; }
 
 /* ---------- rail ---------- */
 
-/* Thirty pixels: the "+", one dot per terminal, the gear, the chevron. Text,
-   chips and choice strips have no room, and a choice you cannot read is not a
-   choice, so foreign groups are not offered at all here. */
+/* Thirty pixels: the "+", one dot per listed terminal across every group
+   (folded ones included), the gear, the chevron. Heads, names, chips and the
+   hover actions have no room. A dot is the same button as its row, so a click
+   activates that terminal wherever it lives. */
 body.sidebar-collapsed .sidebar-launch { padding: 4px 2px 2px; }
 body.sidebar-collapsed .sidebar-new { height: 26px; padding: 0; justify-content: center; gap: 0; }
 body.sidebar-collapsed .sidebar-new .sidebar-label,
 body.sidebar-collapsed .sidebar-terminal-pick,
 body.sidebar-collapsed .sidebar-admin,
-body.sidebar-collapsed .sidebar-where,
+body.sidebar-collapsed .sidebar-setup,
+body.sidebar-collapsed .sidebar-section,
 body.sidebar-collapsed .session-name,
 body.sidebar-collapsed .session-where,
 body.sidebar-collapsed .session-chip,
-body.sidebar-collapsed .session-group-head,
-body.sidebar-collapsed .session-group:not(.current),
-body.sidebar-collapsed .session-choices,
+body.sidebar-collapsed .session-group-headline,
+body.sidebar-collapsed .session-group-detail,
+body.sidebar-collapsed .session-actions,
 body.sidebar-collapsed .sidebar-empty,
 body.sidebar-collapsed .sidebar-nav-button:not([data-nav="settings"]),
 body.sidebar-collapsed .sidebar-admin-badge { display: none; }
 body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
-body.sidebar-collapsed .session-group + .session-group { margin: 0; padding: 0; border: 0; }
+body.sidebar-collapsed .session-group { padding: 0; }
+body.sidebar-collapsed .session-group > .session-group-rows,
+body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; padding: 0; }
 body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
 body.sidebar-collapsed .session-state { width: 8px; height: 8px; }
-/* The one exception to "foreign groups are not offered here": a terminal
-   that needs you keeps its dot in the rail wherever it lives, folded group
-   included. Nothing else from those groups shows. Clicking it widens the
-   sidebar so its choices can be read. */
-body.sidebar-collapsed .session-group.has-attention { display: block; }
-body.sidebar-collapsed .session-group.has-attention .session-group-rows[hidden] { display: block; }
-body.sidebar-collapsed .session-group:not(.current) .session-entry:not(.needs-you),
-body.sidebar-collapsed .session-group-rows[hidden] .session-entry:not(.needs-you) { display: none; }
+/* The active view's terminals keep an accent edge, so the rail still says
+   which dots belong to the workspace in front. */
+body.sidebar-collapsed .session-group.active .session-row { border-radius: 0; box-shadow: inset 2px 0 0 var(--accent); }
+/* `.launcher.sidebar .x` outweighs `body.sidebar-collapsed .x`, so the rail
+   has to match that weight to hide these two. */
+body.sidebar-collapsed .launcher.sidebar .sidebar-terminal-pick,
+body.sidebar-collapsed .launcher.sidebar .sidebar-setup { display: none; }
 body.sidebar-collapsed .sidebar-footer { flex-direction: column; padding: 3px 0; }
 body.sidebar-collapsed .sidebar-collapse { margin: 0; }
 body.sidebar-collapsed .sidebar-collapse svg { transform: none; }
@@ -499,23 +551,19 @@ body.sidebar-collapsed .update-pill { width: 24px; }
   border-left: 0;
   border-radius: 0 4px 4px 0;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+  box-shadow: var(--shadow-sm);
   opacity: .55;
   transition: opacity .12s ease;
 }
-.float-launch:hover, .float-launch.dragging { opacity: 1; }
+.float-launch:hover, .float-launch:focus-within { opacity: 1; }
 .float-launch[hidden] { display: none; }
-.float-handle {
-  width: 8px;
-  cursor: ns-resize;
-  background:
-    radial-gradient(circle, var(--muted) 1px, transparent 1.2px) 3px 4px / 3px 4px repeat-y;
-}
+/* The float is pinned at the top; its old drag handle is no longer a control. */
+.float-launch > .float-handle { display: none; }
 .float-launch button {
   border: 0;
   padding: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: 15px var(--mono);
   cursor: pointer;
 }
@@ -523,3 +571,26 @@ body.sidebar-collapsed .update-pill { width: 24px; }
 .float-show { width: 16px; color: var(--muted); }
 .float-launch button:hover { background: var(--surface-raised); }
 .float-launch button:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- reduced motion and forced colours ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  #app, .sidebar-grip, .sidebar-collapse svg, .float-launch { transition: none; }
+  .session-row.state-busy .session-state { animation: none; }
+}
+
+/* High contrast draws every surface in system colours, which erases the dots,
+   the hover tray and the save dot. Give them system colours of their own. */
+@media (forced-colors: active) {
+  .session-state, .session-group-dot, .sidebar-save { forced-color-adjust: none; border-color: CanvasText; }
+  .session-row.attached .session-state,
+  .session-row.state-attention .session-state,
+  .session-group-dot:not(.hollow) { border-color: Highlight; background: Highlight; }
+  .sidebar-save[data-state] { background: CanvasText; }
+  .sidebar-save[data-state="error"] { background: Mark; }
+  .group-actions, .session-actions { background: Canvas; }
+  .session-entry.armed > .session-row,
+  .session-group.armed > .session-group-headline > .session-group-head { outline: 1px solid Highlight; }
+  .session-row:focus-visible, .session-group-head:focus-visible,
+  .group-action:focus-visible, .session-action:focus-visible { outline: 2px solid Highlight; }
+}

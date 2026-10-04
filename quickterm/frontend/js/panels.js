@@ -1,37 +1,42 @@
+import { closeConfirm, confirmIsOpen, confirmNear } from "./confirm_popover.js";
 import * as api from "./api.js";
-import {
-  DASHBOARD_REFRESH_MS, TERMINAL_TYPES, environmentError, inferTerminalType, make,
-} from "./panel_shared.js";
+import { DASHBOARD_REFRESH_MS, TERMINAL_TYPES, make } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { closeMenu, menuIsOpen } from "./menu.js";
 import { renderGeneralSettings } from "./panel_settings_general.js";
 import { renderThemePicker, renderLogoPicker } from "./panel_settings_appearance.js";
-import { renderTerminalSettings } from "./panel_settings_terminals.js";
+import { renderWindowSettings } from "./panel_settings_window.js";
+import { renderShortcutSettings } from "./panel_settings_shortcuts.js";
 import { renderSnippetSettings } from "./panel_settings_snippets.js";
-import { renderAboutSettings, renderVoiceSettings, renderAdvancedSettings } from "./panel_settings_about.js";
+import { renderAboutSettings, renderAdvancedSettings } from "./panel_settings_about.js";
+import { settingsSearchResults } from "./panel_settings_kit.js";
 import { renderHelp } from "./panel_help.js";
-import { renderConnections, connectionProblems, connectionLabel } from "./panel_connections.js";
+import { renderConnections, connectionProblems, profileTypeLabel } from "./panel_connections.js";
 import { renderSetup } from "./setup.js";
-import { settingsPatch } from "./global_settings.js";
+import { settingsPatch, settingsProblems } from "./global_settings.js";
+import { snapshotItems } from "./config_list.js";
+import { captureActive } from "./shortcut_input.js";
+import { SETTINGS_INDEX, SETTINGS_TABS, searchSettings } from "./settings_index.js";
 
-export function terminalTypeLabel(type) {
-  const known = TERMINAL_TYPES.find((item) => item.id === type);
-  if (known) return known.label;
-  return connectionLabel({ terminal_type: type });
-}
+export { terminalTypeLabel } from "./panel_connections.js";
 
-// Who gets Escape or Tab while the sheet is open. A menu opened from the
-// sheet (a Settings chooser) owns both while it is up, so Escape closes the
-// menu, never the sheet under it. The sheet listens in the capture phase,
-// before the menu's own listener, so it steps aside for a key headed into the
-// menu ("menu") and closes the menu itself when focus has left it
-// ("close-menu").
-export function sheetKeyRoute(key, { menuOpen, inMenu }) {
+// Who gets Escape or Tab while the sheet is open, in order: a shortcut field
+// that is recording, a menu opened from the sheet, a destructive
+// confirmation, a search or filter box with text in it, and only then the
+// sheet itself. The sheet listens in the capture phase on document, before
+// any of those see the key, so it has to step aside for them by name.
+export function sheetKeyRoute(key, { menuOpen, inMenu, capturing = false, confirming = false, searchActive = false }) {
   if (key !== "Escape" && key !== "Tab") return "none";
-  if (!menuOpen) return "sheet";
-  return inMenu ? "menu" : "close-menu";
+  if (capturing) return "none";
+  if (menuOpen) return inMenu ? "menu" : "close-menu";
+  if (key === "Escape" && confirming) return "confirm";
+  if (key === "Escape" && searchActive) return "search";
+  return "sheet";
 }
+
+const editable = (node) => Boolean(node?.closest?.("input, textarea, [contenteditable='true']"));
+const filterBox = (node) => (node?.matches?.(".config-filter-input") && node.value ? node : null);
 
 export class Panels {
   constructor(app) {
@@ -60,64 +65,83 @@ export class Panels {
       if (event.target === overlay) this.close();
     });
     overlay.querySelector(".panel-close").addEventListener("click", () => this.close());
-    document.addEventListener("keydown", (event) => {
-      const route = this.open ? sheetKeyRoute(event.key, {
-        menuOpen: menuIsOpen(),
-        inMenu: Boolean(event.target?.closest?.(".qt-menu")),
-      }) : "none";
-      if (route === "menu") return;
-      if (route === "close-menu") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeMenu("escape");
-        return;
-      }
-      if (this.open && event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        // Escape cancels the destructive confirmation first. This listener runs
-        // in the capture phase, so the box's own Escape handler never sees the
-        // event. Without this, "are you sure?" closed the whole panel.
-        if (this._inlineConfirmation) {
-          this._clearInlineConfirmation();
-          return;
-        }
-        this.close();
-      } else if (this.open && event.key === "Tab") {
-        const focusable = [...this.panelEl.querySelectorAll(
-          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        )].filter((node) => !node.hidden && node.offsetParent !== null);
-        if (!focusable.length) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      }
-    }, true);
+    document.addEventListener("keydown", (event) => this._sheetKey(event), true);
+  }
+
+  _sheetKey(event) {
+    if (!this.open) return;
+    const settings = this.open === "settings" ? this._settingsView : null;
+    if (settings && event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      event.stopPropagation();
+      this._saveSettings();
+      return;
+    }
+    if (settings && event.key === "/" && !event.ctrlKey && !event.altKey && !event.metaKey && !editable(event.target)) {
+      event.preventDefault();
+      settings.search.focus();
+      return;
+    }
+    const filter = filterBox(event.target);
+    const route = sheetKeyRoute(event.key, {
+      menuOpen: menuIsOpen(),
+      inMenu: Boolean(event.target?.closest?.(".qt-menu")),
+      capturing: captureActive(),
+      confirming: confirmIsOpen(),
+      searchActive: Boolean(filter || settings?.search.value),
+    });
+    if (route === "none" || route === "menu") return;
+    // Escape inside the box is the box's own: it refuses to close while its
+    // action runs, so a failure can still show its detail and Retry.
+    if (route === "confirm" && event.target?.closest?.(".confirm-popover")) return;
+    if (event.key === "Tab" && route === "sheet") {
+      this._trapTab(event);
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (route === "close-menu") closeMenu("escape");
+    else if (route === "confirm") closeConfirm("escape");
+    else if (route === "search" && filter) {
+      filter.value = "";
+      filter.dispatchEvent(new Event("input", { bubbles: true }));
+    } else if (route === "search") settings.clearSearch();
+    else this.close();
+  }
+
+  _trapTab(event) {
+    const focusable = [...this.panelEl.querySelectorAll(
+      'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )].filter((node) => !node.hidden && node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   close() {
-    this.connectionEditor = null;
     // If the user previewed a theme in Settings without saving, put the
     // committed theme back so closing = cancel.
     const revert = this._themePreviewDirty ? this.app.appliedTheme() : null;
     this._themePreviewDirty = false;
     if (this.open) releaseFocus("panel");
     this.open = null;
-    this._clearInlineConfirmation();
+    this._settingsView = null;
+    this._configList = null;
+    // The sheet is going away, so its box goes too, even mid-action.
+    closeConfirm("close", { force: true });
     this.overlay.hidden = true;
     this._stopDashboardRefresh();
     if (revert) this.app.previewTheme(revert.theme, revert.custom_theme);
-    // QuickTerm is a terminal-first workbench: closing a full-screen panel must
-    // make the focused pane immediately typeable again. Returning focus to a
-    // sidebar trigger leaves the next paste/keystroke outside xterm and feels
-    // like the terminal lost focus. Keep the trigger only as a no-pane
-    // accessibility fallback.
+    // QuickTerm is a terminal-first workbench: closing a panel must make the
+    // focused pane immediately typeable again. The trigger is only the
+    // no-pane accessibility fallback.
     if (!this.app.refocusTerm()
         && this.returnFocus && this.returnFocus.isConnected) this.returnFocus.focus();
   }
@@ -137,6 +161,7 @@ export class Panels {
     this.overlay.hidden = false;
     this.panelEl.dataset.view = name;
     if (name !== "dashboard") this._stopDashboardRefresh();
+    if (name !== "settings") this._settingsView = null;
     const titles = {
       dashboard: ["Your workspaces", "Pick up where you left off, or start something new."],
       settings: ["Settings", "Make QuickTerm feel right for the way you work."],
@@ -157,36 +182,38 @@ export class Panels {
       this.bodyEl.textContent = "";
       this._help();
     }
-    if (!refreshing) requestAnimationFrame(() => this.closeButton.focus());
+    // showSetting may already have revealed and focused a field by the next
+    // frame; Close is only the landing spot when nothing in the sheet has it.
+    if (!refreshing) {
+      requestAnimationFrame(() => {
+        if (!this.panelEl.contains(document.activeElement)) this.closeButton.focus();
+      });
+    }
   }
 
-  // Live data on the dashboard (session list, pane counts) keeps itself
-  // fresh. A refresh patches the existing DOM in place (see render.js), so it
-  // no longer replaces the node under the pointer, the input under the caret,
-  // or the field the folder picker is holding a reference to.
+  // Live data on the dashboard keeps itself fresh. A refresh patches the
+  // existing DOM in place (see render.js), so it no longer replaces the node
+  // under the pointer, the input under the caret, or the field the folder
+  // picker is holding a reference to.
   _startDashboardRefresh() {
     this._stopDashboardRefresh();
     this._dashTimer = setInterval(() => {
-      // A hidden window (trayed, minimized, other virtual desktop) must not
-      // keep issuing 2+N requests every 5 s.
+      // A hidden window must not keep issuing 2+N requests every 5 s.
       if (document.hidden) return;
       if (this.open !== "dashboard" || this._dashLoading) return;
       // A destructive confirmation is a fixed box anchored to its trigger. A
       // refresh that moved or removed the trigger would strand it.
-      if (this._inlineConfirmation) return;
-      // Somebody is holding the dashboard still across an await. This used to
-      // be inferred from "is anything in the panel body focused?", which is
-      // exactly the wrong test for the folder picker: it disables its Browse
-      // button before awaiting the chooser, a disabled button drops focus to
-      // <body>, and the refresh ran straight through the folder choice.
+      if (confirmIsOpen()) return;
+      // Somebody is holding the dashboard still across an await (the folder
+      // picker disables Browse before awaiting, which drops focus to <body>).
       if (this._dashBusy > 0) return;
       this._dashboard();
     }, DASHBOARD_REFRESH_MS);
   }
 
-  // Counted, because two folder fields can be busy at once (the save form and
-  // an open card editor). The returned release is idempotent so a caller can
-  // wire it to both a completion signal and a timeout ceiling.
+  // Counted, because two folder fields can be busy at once. The returned
+  // release is idempotent so a caller can wire it to both a completion signal
+  // and a timeout ceiling.
   holdDashboardRefresh() {
     this._dashBusy = (this._dashBusy || 0) + 1;
     let released = false;
@@ -225,110 +252,30 @@ export class Panels {
     return button;
   }
 
-  _clearInlineConfirmation(restoreButton = true) {
-    if (!this._inlineConfirmation) return;
-    const { box, button, wasDisabled, reposition } = this._inlineConfirmation;
-    this._inlineConfirmation = null;
-    if (reposition) {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
-    }
-    box.remove();
-    if (button.isConnected) {
-      button.disabled = wasDisabled;
-      button.setAttribute("aria-expanded", "false");
-      if (restoreButton) button.focus();
-    }
-  }
-
-  _confirmNear(button, message, confirmLabel, action) {
-    this._clearInlineConfirmation(false);
-    // Measure before changing the trigger. The previous implementation hid it
-    // first, making getBoundingClientRect() return a zero rectangle and placing
-    // confirmations at the top-right of the window (usually outside the
-    // scrolled dashboard view). Keep the sole destructive control visible and
-    // disabled while its confirmation is open.
-    const rect = button.getBoundingClientRect();
-    const wasDisabled = button.disabled;
-    button.disabled = true;
-    button.setAttribute("aria-expanded", "true");
-    const box = make("div", "inline-confirmation");
-    box.setAttribute("role", "group");
-    box.setAttribute("aria-label", "Confirm destructive action");
-    const copy = make("span", "inline-confirmation-copy", message);
-    const actions = make("span", "inline-confirmation-actions");
-    const confirm = this._button(confirmLabel, "secondary-button danger-text compact");
-    const cancel = this._button("Cancel", "text-button compact");
-    actions.append(confirm, cancel);
-    box.append(copy, actions);
-    document.body.append(box);
-    // The box is position:fixed but the panel body scrolls underneath it, so a
-    // one-time placement detaches from its trigger and ends up floating over
-    // unrelated rows. Follow the trigger, and give up if it scrolls away.
-    const place = (triggerRect = button.getBoundingClientRect()) => {
-      const boxRect = box.getBoundingClientRect();
-      const margin = 12;
-      const gap = 6;
-      const maxLeft = Math.max(margin, window.innerWidth - boxRect.width - margin);
-      const left = Math.max(margin, Math.min(maxLeft, triggerRect.right - boxRect.width));
-      let top = triggerRect.bottom + gap;
-      if (top + boxRect.height > window.innerHeight - margin) top = triggerRect.top - boxRect.height - gap;
-      top = Math.max(margin, Math.min(window.innerHeight - boxRect.height - margin, top));
-      box.style.left = `${left}px`;
-      box.style.top = `${top}px`;
-    };
-    place(rect);
-    const reposition = () => {
-      if (!this._inlineConfirmation || !button.isConnected) return;
-      const triggerRect = button.getBoundingClientRect();
-      const offscreen = triggerRect.bottom < 0 || triggerRect.top > window.innerHeight
-        || (triggerRect.width === 0 && triggerRect.height === 0);
-      if (offscreen) { this._clearInlineConfirmation(false); return; }
-      place(triggerRect);
-    };
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    this._inlineConfirmation = { box, button, wasDisabled, reposition };
-
-    const run = async () => {
-      confirm.disabled = true;
-      cancel.disabled = true;
-      try {
-        await action();
-        this._clearInlineConfirmation(false);
-      } catch (error) {
-        copy.textContent = error?.detail || "Action failed. Try again.";
-        confirm.textContent = "Retry";
-        confirm.disabled = false;
-        cancel.disabled = false;
-        confirm.focus();
-      }
-    };
-    confirm.addEventListener("click", run);
-    cancel.addEventListener("click", () => this._clearInlineConfirmation());
-    box.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        this._clearInlineConfirmation();
-      }
+  // One confirmation box for the whole app: confirm_popover.js measures the
+  // trigger before disabling it, clamps the box to the viewport, follows the
+  // trigger while the body scrolls and claims the keyboard in focus.js.
+  // `keyboard`: the keyboard asked for this (Delete on a row), so the
+  // destructive button takes the focus and Enter completes it. A pointer
+  // gets Cancel first (AGENTS.md).
+  // confirm_popover.js tracks the one open box; the sheet asks it.
+  _confirmNear(button, message, confirmLabel, action, { keyboard = false } = {}) {
+    return confirmNear(button, {
+      message, confirmLabel, action, keyboard, owner: "confirm",
+      onClose: (reason) => {
+        if ((reason === "cancel" || reason === "escape") && button.isConnected) button.focus();
+      },
     });
-    requestAnimationFrame(() => confirm.focus());
   }
 
-  _field(label, control, hint) {
+  // `id` stamps data-setting, which settings search reveals and focuses.
+  _field(label, control, hint, { id = "", keywords = "" } = {}) {
     const field = make("label", "settings-field");
+    if (id) field.dataset.setting = id;
+    if (keywords) field.dataset.keywords = keywords;
     field.append(make("span", "field-label", label), control);
     if (hint) field.append(make("span", "field-hint", hint));
     return field;
-  }
-
-  // A standing explanation with no control of its own, for a setting that was
-  // removed rather than moved: the reader still needs to know where it went.
-  _note(text) {
-    const note = make("p", "settings-note");
-    note.textContent = text;
-    return note;
   }
 
   _textInput(value = "", placeholder = "") {
@@ -340,115 +287,113 @@ export class Panels {
     return input;
   }
 
-  _select(options, value) {
-    const select = make("select", "ui-select");
-    for (const item of options) {
-      const option = make("option", "", item.label);
-      option.value = item.value;
-      option.selected = item.value === value;
-      option.disabled = Boolean(item.disabled);
-      select.append(option);
-    }
-    return select;
-  }
-
-  _layoutPreview(layout) {
-    const build = (node) => {
-      if (!node || node.type !== "split") {
-        const pane = make("span", "workspace-preview-pane");
-        const profile = make("i", "", node && node.profile ? node.profile : "terminal");
-        pane.append(profile);
-        return pane;
-      }
-      const split = make("span", `workspace-preview-split ${node.dir === "v" ? "vertical" : "horizontal"}`);
-      const ratio = Math.max(20, Math.min(80, Math.round((node.ratio || 0.5) * 100)));
-      const children = node.children || [];
-      const first = build(children[0]);
-      const second = build(children[1]);
-      first.style.flex = `${ratio} 1 0`;
-      second.style.flex = `${100 - ratio} 1 0`;
-      split.append(first, second);
-      return split;
-    };
-    const preview = make("div", "workspace-preview");
-    preview.append(build(layout));
-    return preview;
-  }
-
-  // No "refreshing" flag any more: every render is a patch of the same DOM,
-  // and the first one builds it.
+  // Every render is a patch of the same DOM, and the first one builds it.
   async _dashboard() {
     return renderDashboard.call(this);
   }
-  _terminalLabel(profile) {
-    const type = inferTerminalType(profile);
-    if (type === "claude-code") {
-      const mode = profile.claude_mode === "resume" ? "choose session"
-        : profile.claude_mode === "agents" ? "agent manager"
-          : profile.claude_mode === "new" ? "new conversation" : "continue latest";
-      return `Claude Code · ${mode}`;
-    }
-    if (type === "wsl" && profile.wsl_distro) return `WSL · ${profile.wsl_distro}`;
-    if ((type === "ssh" || type === "sftp") && profile.ssh_host) {
-      const target = profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host;
-      return `${type.toUpperCase()} · ${target}`;
-    }
-    return terminalTypeLabel(type);
-  }
+
+  _terminalLabel(profile) { return profileTypeLabel(profile); }
 
   async _settings() {
     this._themePreviewDirty = false;
+    let ready;
+    this._settingsReady = new Promise((resolve) => { ready = resolve; });
     this.bodyEl.append(make("div", "panel-loading", "Loading your preferences…"));
     const [cfg, inventory] = await Promise.all([
       api.getFullConfig().catch(() => null),
       api.getTerminalOptions().catch(() => ({ types: TERMINAL_TYPES, wsl_distributions: [] })),
     ]);
-    if (this.open !== "settings") return;
+    if (this.open !== "settings") { ready(); return; }
     this.bodyEl.textContent = "";
     if (!cfg) {
       this.bodyEl.append(make("div", "settings-error", "Settings could not be loaded. Is QuickTerm still running?"));
+      ready();
       return;
     }
     this.settingsDraft = JSON.parse(JSON.stringify(cfg));
     this.settingsBaseline = structuredClone(cfg);
     this.terminalInventory = inventory;
+    // Read once per opening of the sheet; Settings never waits for them.
+    this.sshHostsLoad = null;
+    this.sshHostList = undefined;
+    this.agentCatalogLoad = null;
+    this._snapshot();
     // No type is stamped here. A hand-edited profile without one launches as
-    // a plain command, and stamping the inferred type at load saved it with
-    // that type on the next Save, which changes how it starts (a bare `bash`
-    // becomes a login shell). The cards infer the type for display and set it
-    // only when the user picks a type or types a different command.
+    // a plain command, and stamping the inferred type at load would save it
+    // with that type, which changes how it starts (bash becomes a login
+    // shell). The editor sets it only once a type-bound field is edited.
 
     const shell = make("div", "settings-shell");
     const nav = make("nav", "settings-tabs");
     const content = make("div", "settings-content");
-    const tabs = [
-      ["general", "General", "Appearance and behavior"],
-      ["connections", "Terminals and connections", "Saved launch configurations"],
-      ["snippets", "Snippets", "Palette commands"],
-      // Voice is parked until it has a real capture overlay; the backend
-      // hotkey wiring is disabled in app.py for the same reason.
-      ["advanced", "Advanced", "Server and voice settings"],
-      ["about", "About", "Version, updates and links"],
-    ];
+    const searchBox = make("div", "settings-search-box");
+    const search = make("input", "ui-input settings-search");
+    search.type = "search";
+    search.placeholder = "Search settings";
+    search.spellcheck = false;
+    search.setAttribute("aria-label", "Search settings");
+    search.title = "Search settings (/)";
+    searchBox.append(search, make("kbd", "settings-search-key", "/"));
+    nav.append(searchBox);
+    let results = [];
+    let resultButtons = [];
+    let shownResults = [];
+
     const render = () => {
-      for (const button of nav.querySelectorAll("button")) button.classList.toggle("active", button.dataset.tab === this.settingsTab);
+      if (this.settingsTab === "terminals") this.settingsTab = "connections";
+      for (const button of nav.querySelectorAll(".settings-tab")) {
+        const current = button.dataset.tab === this.settingsTab;
+        button.classList.toggle("active", current);
+        if (current) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      }
       content.textContent = "";
-      if (this.settingsTab === "general") this._settingsGeneral(content);
-      else if (this.settingsTab === "terminals") this._settingsTerminals(content, render);
-      else if (this.settingsTab === "connections") renderConnections.call(this, content, render);
-      else if (this.settingsTab === "snippets") this._settingsSnippets(content, render);
-      else if (this.settingsTab === "about") this._settingsAbout(content);
-      else this._settingsAdvanced(content);
+      this._configList = null;
+      const query = search.value.trim();
+      if (query) {
+        results = searchSettings(query, this.settingsDraft);
+        const list = settingsSearchResults({ results, tabs: SETTINGS_TABS, query, onPick: pick, onLeave: () => search.focus() });
+        resultButtons = list.buttons;
+        shownResults = list.shown || results;
+        content.append(list.el);
+        return;
+      }
+      const tab = this.settingsTab;
+      if (tab === "general") renderGeneralSettings.call(this, content);
+      else if (tab === "window") renderWindowSettings.call(this, content);
+      else if (tab === "shortcuts") renderShortcutSettings.call(this, content);
+      else if (tab === "connections") renderConnections.call(this, content);
+      else if (tab === "snippets") renderSnippetSettings.call(this, content);
+      else if (tab === "about") renderAboutSettings.call(this, content);
+      else renderAdvancedSettings.call(this, content);
     };
-    for (const [id, title, note] of tabs) {
+    const go = (tab) => {
+      search.value = "";
+      this.settingsTab = tab;
+      render();
+    };
+    const pick = (result) => {
+      if (result.kind === "terminal" || result.kind === "snippet") this.configFocus = { kind: result.kind, name: result.name };
+      go(result.tab);
+      if (result.kind === "setting") this._revealSetting(result.id);
+    };
+    search.addEventListener("input", render);
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && shownResults.length) {
+        event.preventDefault();
+        pick(shownResults[0]);
+      } else if (event.key === "ArrowDown" && resultButtons.length) {
+        event.preventDefault();
+        resultButtons[0].focus();
+      }
+    });
+
+    for (const [id, title, note] of SETTINGS_TABS) {
       const button = make("button", "settings-tab");
       button.type = "button";
       button.dataset.tab = id;
       button.append(make("strong", "", title), make("small", "", note));
-      button.addEventListener("click", () => {
-        this.settingsTab = id;
-        render();
-      });
+      button.addEventListener("click", () => go(id));
       nav.append(button);
     }
     const main = make("div", "settings-main");
@@ -459,80 +404,132 @@ export class Panels {
     const cancel = this._button("Cancel", "secondary-button");
     cancel.addEventListener("click", () => this.close());
     const save = this._button("Save changes", "primary-button");
-    save.addEventListener("click", async () => {
-      const profiles = this.settingsDraft.profiles || [];
-      if (this.connectionEditor?.draft) {
-        message.textContent = "Save or cancel the connection being edited first.";
-        message.classList.add("error");
-        return;
-      }
-      const connectionError = profiles.flatMap((profile) => connectionProblems(profile, profiles))[0];
-      if (connectionError) { message.textContent = connectionError; message.classList.add("error"); return; }
-      if (profiles.some((profile) => !(profile.name || "").trim())) {
-        message.textContent = "Every terminal profile needs a name.";
-        message.classList.add("error");
-        return;
-      }
-      const names = profiles.map((profile) => profile.name.trim().toLowerCase());
-      if (new Set(names).size !== names.length) {
-        message.textContent = "Terminal profile names must be unique.";
-        message.classList.add("error");
-        return;
-      }
-      const badEnvironment = profiles
-        .map((profile) => environmentError(profile.env))
-        .find(Boolean);
-      if (badEnvironment) {
-        message.textContent = badEnvironment;
-        message.classList.add("error");
-        return;
-      }
-      const snippets = this.settingsDraft.snippets || [];
-      if (snippets.some((snippet) => !(snippet.name || "").trim() || !(snippet.text || "").trim())) {
-        message.textContent = "Every snippet needs a name and command.";
-        message.classList.add("error");
-        return;
-      }
-      const snippetNames = snippets.map((snippet) => snippet.name.trim().toLowerCase());
-      if (new Set(snippetNames).size !== snippetNames.length) {
-        message.textContent = "Snippet names must be unique.";
-        message.classList.add("error");
-        return;
-      }
-      save.disabled = true;
-      message.classList.remove("error");
-      message.textContent = "Saving…";
-      try {
-        const fresh = await api.getFullConfig();
-        const patch = settingsPatch(this.settingsDraft, this.settingsBaseline, fresh);
-        await api.putConfig(patch);
-        Object.assign(this.settingsDraft, fresh, patch);
-        this.settingsBaseline = structuredClone(this.settingsDraft);
-        await this.app.onConfigSaved();
-        this._themePreviewDirty = false; // committed, so nothing to revert on close
-        message.textContent = "Saved. New terminals will use these settings.";
-        render();
-      } catch (error) {
-        message.textContent = error.detail || error.message || `Could not save (${error.status || "connection error"}).`;
-        message.title = message.textContent;
-        message.classList.add("error");
-      } finally {
-        save.disabled = false;
-      }
-    });
+    save.title = "Save changes (Ctrl+S)";
+    save.addEventListener("click", () => this._saveSettings());
     footer.append(message, make("span", "footer-spacer"), cancel, save);
     shell.append(main, footer);
     this.bodyEl.append(shell);
+    this._settingsView = {
+      render, go, content, search, message, save,
+      clearSearch: () => {
+        search.value = "";
+        render();
+        search.focus();
+      },
+    };
     render();
+    ready();
   }
 
-  _settingsGeneral(host) { return renderGeneralSettings.call(this, host); }
+  // What "unsaved" is measured against: every profile and snippet as it was
+  // when Settings opened or last saved.
+  _snapshot() {
+    this.savedSnapshots = new WeakMap();
+    snapshotItems(this.savedSnapshots, this.settingsDraft?.profiles);
+    snapshotItems(this.savedSnapshots, this.settingsDraft?.snippets);
+  }
+
+  // The one way Settings persists: the footer Save, Ctrl+S in the sheet, and
+  // the Save button beside a terminal or snippet editor all land here.
+  async _saveSettings() {
+    const view = this._settingsView;
+    if (!view || this._saving) return;
+    const { message, save } = view;
+    const fail = (text) => {
+      message.textContent = text;
+      message.title = text;
+      message.classList.add("error");
+    };
+    const problem = settingsProblems(this.settingsDraft, { profileProblem: connectionProblems, baseline: this.settingsBaseline });
+    if (problem) { fail(problem); return; }
+    this._saving = true;
+    save.disabled = true;
+    message.classList.remove("error");
+    message.textContent = "Saving…";
+    try {
+      const fresh = await api.getFullConfig();
+      const patch = settingsPatch(this.settingsDraft, this.settingsBaseline, fresh);
+      await api.putConfig(patch);
+      // Keys this save did not touch take what another window saved. Arrays
+      // that did not change keep their objects, so the open editor stays.
+      let outside = false;
+      for (const [key, value] of Object.entries(fresh)) {
+        if (key in patch || JSON.stringify(value) === JSON.stringify(this.settingsDraft[key])) continue;
+        this.settingsDraft[key] = value;
+        outside = true;
+      }
+      this.settingsBaseline = structuredClone(this.settingsDraft);
+      this._snapshot();
+      await this.app.onConfigSaved();
+      this._themePreviewDirty = false; // committed, so nothing to revert on close
+      // Windows can refuse a binding another program holds; the save stands,
+      // but the shortcut does nothing, so the footer says which one.
+      const hotkeyError = this.app.hotkeyError?.() || "";
+      message.textContent = hotkeyError ? `Saved, but ${hotkeyError}.` : "Saved. New terminals use these settings.";
+      message.title = hotkeyError;
+      message.classList.toggle("error", Boolean(hotkeyError));
+      if (this._settingsView !== view) return;
+      // The summon field reads hotkeyError when it is drawn.
+      if (outside || ["shortcuts", "window"].includes(this.settingsTab)) view.render();
+      else this._configList?.refresh();
+    } catch (error) {
+      fail(error.detail || error.message || `Could not save (${error.status || "connection error"}).`);
+    } finally {
+      this._saving = false;
+      save.disabled = false;
+    }
+  }
+
+  async _openSettingsTab(tab) {
+    this.settingsTab = tab;
+    if (this.open !== "settings") this.show("settings");
+    else if (this._settingsView) this._settingsView.go(tab);
+    await this._settingsReady;
+  }
+
+  _revealSetting(id) {
+    const content = this._settingsView?.content;
+    const node = [...(content?.querySelectorAll("[data-setting]") || [])].find((item) => item.dataset.setting === id);
+    if (!node) return false;
+    node.scrollIntoView?.({ block: "center" });
+    const control = node.matches("input, button, textarea") ? node
+      : node.querySelector("input, textarea, button:not([disabled]), [tabindex]:not([tabindex='-1'])");
+    control?.focus({ preventScroll: true });
+    node.classList.remove("setting-flash");
+    void node.offsetWidth; // restart the animation for a second reveal
+    node.classList.add("setting-flash");
+    setTimeout(() => node.classList.remove("setting-flash"), 1600);
+    return true;
+  }
+
+  /** Open Settings on the tab holding `id` and reveal that field. */
+  async showSetting(id) {
+    const text = String(id || "");
+    if (text.startsWith("terminal:")) return this.showConfig("terminal", text.slice(9));
+    if (text.startsWith("snippet:")) return this.showConfig("snippet", text.slice(8));
+    const entry = SETTINGS_INDEX.find((item) => item.id === text);
+    await this._openSettingsTab(entry?.tab || "general");
+    return entry ? this._revealSetting(text) : false;
+  }
+
+  /** Open Terminals or Snippets with `name` selected; null opens Add. */
+  async showConfig(kind, name = null) {
+    this.configFocus = { kind: kind === "snippet" ? "snippet" : "terminal", name: name || null };
+    await this._openSettingsTab(kind === "snippet" ? "snippets" : "connections");
+  }
+
+  /** Open the Dashboard with the editor of workspace `name` open. */
+  showWorkspace(name) {
+    this._revealWorkspace = name || null;
+    this.show("dashboard");
+  }
+
+  /** Every settings field for the palette's "setting:" rows. */
+  settingEntries() {
+    return SETTINGS_INDEX.map(({ id, label, tab, hint, keywords }) => ({ id, label, tab, hint, keywords }));
+  }
+
   _themePicker(cfg) { return renderThemePicker.call(this, cfg); }
   _logoPicker(options) { return renderLogoPicker.call(this, options); }
-  _settingsTerminals(host, rerender) { return renderTerminalSettings.call(this, host, rerender); }
-  _settingsSnippets(host, rerender) { return renderSnippetSettings.call(this, host, rerender); }
-  _settingsAbout(host) { return renderAboutSettings.call(this, host); }
-  _settingsVoice(host) { return renderVoiceSettings.call(this, host); }
-  _settingsAdvanced(host) { return renderAdvancedSettings.call(this, host); }
   _help() { return renderHelp.call(this); }
 }

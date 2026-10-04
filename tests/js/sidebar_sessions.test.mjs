@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  SIDEBAR_WIDE_AT, UNASSIGNED_GROUP, groupSessionsByWorkspace, groupSummary,
-  isWideSidebar, sessionState, sessionSummary,
+  SIDEBAR_WIDE_AT, UNASSIGNED_GROUP, groupSummary,
+  isWideSidebar, sessionState, sessionSummary, sidebarGroups,
 } from "../../quickterm/frontend/js/launcher.js";
 
 function session(id, extra = {}) {
@@ -19,67 +19,76 @@ function session(id, extra = {}) {
   };
 }
 
-test("every live terminal is grouped, with the current workspace first", () => {
-  const groups = groupSessionsByWorkspace([
+const named = (...names) => names.map((name) => ({ name, path: null, pathExists: null }));
+
+test("every live terminal is grouped by its workspace, in name order, unassigned last", () => {
+  const groups = sidebarGroups([
     session("a", { workspace: "quickterm" }),
     session("b", { workspace: "acme" }),
     session("c", { workspace: null }),
     session("d", { workspace: "quickterm" }),
     session("dead", { workspace: "acme", alive: false }),
-  ], { currentWorkspace: "quickterm", ownedIds: ["a"], attachedIds: ["a"] });
+  ], {
+    workspaces: named("quickterm", "acme"),
+    views: [{ workspace: "quickterm", label: "quickterm", color: "#f80", active: true }],
+    attached: { a: "quickterm" },
+  });
 
-  assert.deepEqual(groups.map((group) => group.name), ["quickterm", "acme", UNASSIGNED_GROUP]);
-  assert.deepEqual(groups.map((group) => group.kind), ["current", "workspace", "unassigned"]);
+  // The active workspace does not jump to the top: the list is alphabetical.
+  assert.deepEqual(groups.map((group) => group.label), ["acme", "quickterm", UNASSIGNED_GROUP]);
+  assert.deepEqual(groups.map((group) => group.kind), ["workspace", "workspace", "unassigned"]);
   // Nothing is dropped but the exited session: five records, four rows.
   assert.equal(groups.reduce((sum, group) => sum + group.sessions.length, 0), 4);
-  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["a", "d"]);
-  assert.equal(groups[0].sessions[0].isAttached, true);
-  assert.equal(groups[1].sessions[0].isHere, false);
+  assert.deepEqual(groups[1].sessions.map((entry) => entry.session.id), ["a", "d"]);
+  assert.equal(groups[1].sessions[0].attachedIn, "quickterm");
+  assert.equal(groups[0].sessions[0].attachedIn, null);
+  assert.equal(groups[1].active, true);
 });
 
-test("a session this window claimed before the next autosave counts as ours", () => {
+test("a session a view claimed before the next autosave counts as that view's", () => {
   // The backend only learns ownership on the workspace PUT, so a terminal
   // spawned a moment ago still carries the old workspace, or none at all.
-  const groups = groupSessionsByWorkspace([
+  const groups = sidebarGroups([
     session("fresh", { workspace: null }),
     session("theirs", { workspace: "acme" }),
-  ], { currentWorkspace: "quickterm", ownedIds: ["fresh"], attachedIds: [] });
+  ], { workspaces: named("quickterm", "acme"), owned: { fresh: "quickterm" } });
 
-  assert.deepEqual(groups.map((group) => group.name), ["quickterm", "acme"]);
-  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["fresh"]);
+  assert.deepEqual(groups.map((group) => group.name), ["acme", "quickterm"]);
+  assert.deepEqual(groups[1].sessions.map((entry) => entry.session.id), ["fresh"]);
 });
 
-test("scratch is the current group when no workspace is named", () => {
-  const groups = groupSessionsByWorkspace([
+test("a legacy scratch owner is a scratch group after the named workspaces", () => {
+  const groups = sidebarGroups([
     session("a", { workspace: "scratch" }),
     session("b", { workspace: null }),
-  ], { currentWorkspace: null, ownedIds: [], attachedIds: [] });
+  ], { workspaces: named("acme") });
 
-  assert.deepEqual(groups.map((group) => group.name), ["scratch", UNASSIGNED_GROUP]);
+  assert.deepEqual(groups.map((group) => [group.kind, group.label]),
+    [["workspace", "acme"], ["scratch", "scratch"], ["unassigned", UNASSIGNED_GROUP]]);
 });
 
-test("the current workspace keeps its heading even with nothing running in it", () => {
-  const groups = groupSessionsByWorkspace([session("a", { workspace: "acme" })], {
-    currentWorkspace: "quickterm", ownedIds: [], attachedIds: [],
-  });
-  assert.equal(groups[0].name, "quickterm");
-  assert.equal(groups[0].sessions.length, 0);
-  assert.equal(groupSummary(groups[0]), "nothing running");
-  // No live terminal at all is the caller's empty state, not an empty group.
-  assert.deepEqual(groupSessionsByWorkspace([], { currentWorkspace: "quickterm" }), []);
+test("a workspace keeps its group with nothing running in it", () => {
+  const groups = sidebarGroups([session("a", { workspace: "acme" })], { workspaces: named("quickterm", "acme") });
+  const quickterm = groups.find((group) => group.name === "quickterm");
+  assert.equal(quickterm.sessions.length, 0);
+  assert.equal(groupSummary(quickterm), "nothing running");
 });
 
-test("rows are ordered by how much they want you", () => {
-  const groups = groupSessionsByWorkspace([
+test("rows keep their name order whatever they are doing", () => {
+  const groups = sidebarGroups([
     session("zzz-quiet"),
     session("busy", { busy: true }),
     session("aaa-quiet"),
     session("unread", { activity: { background_output_bytes: 4096, idle_seconds: 9 } }),
     session("open"),
-  ], { currentWorkspace: "ws", ownedIds: ["zzz-quiet", "busy", "aaa-quiet", "unread", "open"], attachedIds: ["open"] });
+  ], {
+    workspaces: named("ws"),
+    owned: { "zzz-quiet": "ws", busy: "ws", "aaa-quiet": "ws", unread: "ws" },
+    attached: { open: "ws" },
+  });
 
   assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id),
-    ["open", "unread", "busy", "aaa-quiet", "zzz-quiet"]);
+    ["aaa-quiet", "busy", "open", "unread", "zzz-quiet"]);
   assert.equal(groupSummary(groups[0]), "1 open · 1 new output · 1 busy · 2 background");
 });
 
@@ -115,4 +124,19 @@ test("the extra row line unlocks only once the sidebar is wide enough for it", (
   assert.equal(isWideSidebar(SIDEBAR_WIDE_AT), true);
   assert.equal(isWideSidebar(SIDEBAR_WIDE_AT - 1), false);
   assert.equal(isWideSidebar(undefined), false);
+});
+
+test("a terminal shown in another workspace remains in its group and counts as open", () => {
+  const groups = sidebarGroups([{ id: "other", alive: true, workspace: "Operations" }], {
+    workspaces: named("Project", "Operations"),
+    views: [
+      { workspace: "Project", label: "Project", color: "#111", active: true },
+      { workspace: "Operations", label: "Operations", color: "#222", active: false },
+    ],
+    attached: { other: "Operations" },
+  });
+  const group = groups.find((item) => item.name === "Operations");
+  assert.equal(group.sessions[0].attachedIn, "Operations");
+  assert.equal(group.sessions[0].state.key, "open");
+  assert.equal(group.counts.open, 1);
 });

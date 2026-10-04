@@ -1,53 +1,54 @@
 import * as api from "./api.js";
 import { LayoutManager } from "./layout.js";
-import { Palette } from "./palette.js";
-import { Panels } from "./panels.js";
 import { initKeys } from "./keys.js";
 import { applyChromeTheme, getTheme } from "./themes.js";
 import * as workspace from "./workspace.js";
-import { claimFocus, releaseFocus, focusOwners } from "./focus.js";
-import { initLauncher } from "./launcher.js";
-import { setupNeeded } from "./setup.js";
-import { watchGlobalSettings } from "./global_settings.js";
-import { WorkspaceViews, viewArrangementStore } from "./workspace_views.js";
+import { claimFocus, releaseFocus } from "./focus.js";
+import { closeMenu } from "./menu.js";
+import { closeConfirm } from "./confirm_popover.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import { createAutosave } from "./autosave.js";
 import {
-  SCRATCH_WS, isScratchWorkspace, captureOpenDir, captureToken, captureWindowIdentity, embedded, loadInventoryCache,
-  rememberWorkspace, saveInventoryCache, storedScratchActive, storedWorkspace,
+  isScratchWorkspace, captureFirstView, captureOpenDir, captureToken, captureWindowIdentity, embedded,
+  loadInventoryCache, saveInventoryCache,
 } from "./boot_context.js";
 import { createConfigSync } from "./config_sync.js";
-import { clearError, setWorkspaceSaveState, showError } from "./feedback.js";
+import { setWorkspaceSaveState, showError, clearError } from "./feedback.js";
 import { DEFAULT_FONT, clampFont, createFontSize } from "./fonts.js";
 import { createHere } from "./here.js";
-import { createLaunchLoop } from "./launch_loop.js";
+import { createLaunchTarget } from "./launch_loop.js";
 import { createLifecycle } from "./lifecycle.js";
 import { createPaneCommands } from "./pane_commands.js";
 import { createScratch } from "./scratch.js";
 import { createSessionOwnership } from "./session_ownership.js";
-import { createSidebar } from "./sidebar.js";
+import { bootShell } from "./shell.js";
 import { createSpawner } from "./spawner.js";
 import { createTerminalActions } from "./terminal_actions.js";
-import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
 import { createWorkspaceSwitch } from "./workspace_switch.js";
 
-document.title = "QuickTerm";
-document.body.classList.toggle("embedded", embedded);
-
 const $ = (id) => document.getElementById(id);
 
-// The composition root. Each module is a factory that is handed what it uses;
-// the state several of them share is one object (app_state.js). Where a module
-// built early calls one built later (almost everything rebuilds the sidebar,
-// which is built last from almost everything), it is handed an arrow that
-// resolves the later name when it runs. Everything from the layout to the
-// sidebar is composed synchronously, before the first restore awaits, so no
-// such arrow can run early.
-async function boot() {
+// One workspace view: an iframe in the shell's stage (shell.js) running the
+// app on one workspace. The composition root. Each module is a factory that
+// is handed what it uses; the state several of them share is one object
+// (app_state.js). Where a module built early calls one built later, it is
+// handed an arrow that resolves the later name when it runs. Everything from
+// the layout to the app object is composed synchronously, before the first
+// restore awaits, so no such arrow can run early.
+//
+// The view draws no chrome. The sidebar, the palette, the panels and the
+// error banner belong to the shell, reached through window.parent; after
+// anything the sidebar shows changes, the view says so with
+// `quicktermChrome.refreshSoon()`.
+async function bootView() {
+  document.body.classList.add("embedded");
+  const chrome = window.parent.quicktermChrome;
+  const viewHost = () => window.parent?.quicktermViews || null;
   const openDir = captureOpenDir();
+  const firstView = captureFirstView();
   const identity = captureWindowIdentity();
   const requestedWorkspace = identity.workspace;
   captureToken();
@@ -73,28 +74,32 @@ async function boot() {
     snippets: cfg.snippets || [],
     workspaceNames: loadedWorkspaces || [],
     terminalInventory: loadedInventory,
-    windowIsPrimary: identity.primary,
+    windowIsPrimary: false,
   });
   state.requireConfiguredTerminals = true;
+  // The shell's sidebar and its terminal choice, seen from this view.
+  Object.defineProperty(state, "selectedTerminal", {
+    get: () => chrome.selectedTerminal || null,
+    set: (choice) => { chrome.selectedTerminal = choice; },
+  });
+  Object.defineProperty(state, "launcherView", {
+    get: () => ({
+      cycleTerminal: (delta) => chrome.launcherView?.cycleTerminal(delta) || null,
+      cycleMode: () => chrome.launcherView?.cycleMode(),
+      updateHere: () => chrome.refreshSoon(),
+    }),
+  });
 
-  const remembered = storedWorkspace();
-  if (requestedWorkspace !== undefined) {
-    // Opened by another window: the URL is the instruction and shared
-    // localStorage is not consulted at all.
-    state.currentWorkspace = requestedWorkspace && state.workspaceNames.includes(requestedWorkspace)
-      ? requestedWorkspace
-      : null;
-  } else if (storedScratchActive() && state.workspaceNames.includes(SCRATCH_WS)) state.currentWorkspace = SCRATCH_WS;
-  else if (remembered && state.workspaceNames.includes(remembered)) state.currentWorkspace = remembered;
-  // Only a window that resolved its own workspace may rewrite the shared
-  // memory of which one that is. A second window landing on scratch must not
-  // erase the first window's last real workspace.
-  if (!state.currentWorkspace && requestedWorkspace === undefined) rememberWorkspace(null);
-  // "Open QuickTerm here" opens this window as a scratch window whose first
-  // terminal starts in the given folder, regardless of any remembered
-  // workspace. Decided here rather than just before the restore, so this window
-  // never claims a workspace it is not going to open.
+  // The shell opened this view for one workspace (or for scratch, empty) and
+  // claimed it for this view's registry id before the iframe existed.
+  state.currentWorkspace = requestedWorkspace && state.workspaceNames.includes(requestedWorkspace)
+    ? requestedWorkspace
+    : null;
+  // "Open QuickTerm here" opens a scratch view whose first terminal starts in
+  // the given folder. Decided here rather than just before the restore, so
+  // this view never claims a workspace it is not going to open.
   if (openDir) state.currentWorkspace = null;
+  state.scratchCwd = openDir || null;
 
   const registry = createWindowRegistry({
     api, state, identity, showError,
@@ -104,60 +109,41 @@ async function boot() {
   });
   const { acquireWindowId, listWindowsSafe, claimWorkspaceFor, openNewWindow } = registry;
 
-  // Claim before restoring, never after. This window autosaves the layout on
+  // Claim before restoring, never after. This view autosaves the layout on
   // every pane change, so restoring a workspace another window holds would
   // start overwriting its file within the first second, before anyone could
-  // read a warning. A refused claim drops this window into scratch and says so.
+  // read a warning. A refused claim drops this view into scratch and says so.
   await acquireWindowId();
   const refusal = await claimWorkspaceFor(state.currentWorkspace);
   if (refusal) {
-    // The remembered name is deliberately left alone: the workspace is not
-    // lost, it is busy, and it must come back the next time this window is the
-    // only one on it.
     state.currentWorkspace = null;
     showError(refusal);
   }
   registry.startWindowHeartbeat();
 
   const initialSessions = (loadedSessions || []).filter((session) => session.alive);
-  // Only the primary window's tiling outlives a restart. localStorage is
-  // shared by every window on this origin, so a second window (opened with a
-  // workspace of its own, or a second browser tab) must neither restore it
-  // nor write over it.
-  const keepsViewArrangement = !embedded && requestedWorkspace === undefined && state.windowIsPrimary;
-  const views = embedded ? null : new WorkspaceViews({
-    current: () => state.currentWorkspace,
-    focus: () => layout.focused?.focusSoon(),
-    fit: () => layout.fitAll(),
-    error: showError,
-    store: keepsViewArrangement ? viewArrangementStore() : null,
-  });
-  // The view manager this document talks to: its own when it is the window,
-  // the parent's when it is one view inside a window. A view names itself to
-  // the parent by its own `window`, which is the iframe's contentWindow.
-  const viewHost = () => (embedded ? window.parent?.quicktermViews || null : views);
   let suspended = false;
   function suspendView(value) {
     if (suspended === value) return;
     suspended = value;
     if (value) claimFocus("inactive-view"); else releaseFocus("inactive-view");
   }
-  if (embedded) {
-    suspendView(true);
-    document.addEventListener("pointerdown", () => {
-      viewHost()?.activate(window);
-      suspendView(false);
-    }, true);
-    window.addEventListener("focus", () => {
-      viewHost()?.activate(window);
-      suspendView(false);
-    });
-  } else {
-    window.quicktermViews = views;
-  }
+  suspendView(true);
+  document.addEventListener("pointerdown", () => {
+    viewHost()?.activate(window);
+    suspendView(false);
+  }, true);
+  window.addEventListener("focus", () => {
+    viewHost()?.activate(window);
+    suspendView(false);
+  });
 
   applyChromeTheme(state.cfg.theme, state.cfg.custom_theme);
   if (state.cfg.elevated) document.body.classList.add("elevated");
+
+  // Every change the shell's sidebar shows is announced, never drawn here.
+  const refreshStatusSoon = () => chrome.refreshSoon();
+  const buildLauncher = refreshStatusSoon;
 
   const layout = new LayoutManager($("grid"), $("zoom-host"), {
     fontFamily: state.cfg.font_family || "JetBrains Mono",
@@ -188,16 +174,17 @@ async function boot() {
   const {
     refreshWorkspaceRoots, usableWorkspacePath, hereFolder, openHere, suggestedWorkspaceFolder, hereState,
   } = createHere({ api, workspace, state, layout, showError });
-  const {
-    profileTerminalType, spawnInto, spawnSpecInto, spawnDefaultInto, spawnSplitInto,
-    runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal, runInstaller,
-    elevateProfile, elevateSystemTerminal, attachSession, restartSavedPane, resumeClaudePane,
-  } = createSpawner({
+  const spawner = createSpawner({
     api, state, layout, ownSession, scheduleWorkspaceSave, showError,
     refreshStatusSoon: () => refreshStatusSoon(),
     refreshInventory: (options) => refreshInventory(options),
   });
-  const { discardScratch, maybeAdoptScratch, ensureScratchWorkspace, newScratchWorkspace, openFolderInScratch } =
+  const {
+    profileTerminalType, spawnInto, spawnSpecInto, spawnDefaultInto, spawnSplitInto,
+    runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal, runInstaller,
+    elevateProfile, elevateSystemTerminal, attachSession, restartSavedPane, resumeClaudePane,
+  } = spawner;
+  const { discardScratch, maybeAdoptScratch, ensureScratchWorkspace } =
     createScratch({
       api, state, layout,
       claimWorkspaceFor, persistCurrentWorkspace, scheduleWorkspaceSave, attachedSessionIds, spawnDefaultInto,
@@ -213,9 +200,18 @@ async function boot() {
     buildLauncher: () => buildLauncher(),
     refreshStatusSoon: () => refreshStatusSoon(),
   });
+  // A view never switches to another workspace in place: it opens or
+  // focuses that workspace's own view in the shell.
+  const openWorkspaceView = (name) => viewHost()?.open(name, { anchorWindow: window }) ?? Promise.resolve(false);
   const actions = createWorkspaceActions({
     api, workspace, state, layout,
-    claimWorkspaceFor, listWindowsSafe, switchWorkspace, ensureScratchWorkspace, attachSession, hereState,
+    claimWorkspaceFor, listWindowsSafe, ensureScratchWorkspace, attachSession, hereState,
+    openWorkspaceView,
+    closeWorkspaceView: async (name) => {
+      const host = viewHost();
+      const view = host?.viewForWorkspace(name);
+      return view ? host.close(view) : true;
+    },
     persistCurrentWorkspace, scheduleWorkspaceSave, cancelWorkspaceSave,
     ownedSessionIds, attachedSessionIds, forgetSession, refreshWorkspaceRoots, showError, clearError,
     buildLauncher: () => buildLauncher(),
@@ -224,14 +220,15 @@ async function boot() {
   const paneCommands = createPaneCommands({
     api, state, layout,
     spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
-    removeSessionsFromSavedWorkspaces: actions.removeSessionsFromSavedWorkspaces,
-    scheduleWorkspaceSave, showError,
+    scheduleWorkspaceSave, persistCurrentWorkspace, showError,
     refreshStatusSoon: () => refreshStatusSoon(),
   });
   const { setFontSize, fontSize, scopedFontSize, setScopedFontSize, resetScopedFontSize } =
     createFontSize({ api, state, layout });
+  const { startLaunch } = createLaunchTarget({ state, layout, spawnInto, spawnDefaultInto, showError });
 
-  // The one object the palette, the panels and the pane header talk to.
+  // The one object the shell's palette, panels and sidebar reach for this
+  // view (through the shell's app proxy), and the pane header talks to.
   const app = {
     profiles: state.profiles,
     snippets: state.snippets,
@@ -240,25 +237,27 @@ async function boot() {
     runClaudeMode,
     splitClaudeAgentView,
     runSystemTerminal,
+    elevateProfile,
+    elevateSystemTerminal,
     attachSession,
     ...paneCommands,
     ...createTerminalActions({ api, layout, attachSession, restartSavedPane, showError }),
     moveSessionHere: actions.moveSessionHere,
     killWorkspaceSession: actions.killWorkspaceSession,
     hereFolder,
+    openHere,
     openExplorer: () => openHere("explorer"),
     openEditor: () => openHere("vscode"),
     validateWorkspaceName,
     saveWorkspace: actions.saveWorkspace,
-    loadWorkspace: (name) => switchWorkspace(name),
-    deleteWorkspace: actions.deleteWorkspace,
-    onWorkspacesChanged: actions.onWorkspacesChanged,
+    loadWorkspace: (name) => openWorkspaceView(name),
+    // The shell closes this workspace's view first when it is this one, which
+    // only a document that outlives the view can do.
+    deleteWorkspace: (name) => chrome.deleteWorkspace(name).catch(() => false),
     currentWorkspace: () => state.currentWorkspace,
-    // Second-window support. The picker offers scratch plus every named
-    // workspace, marking the ones another window already holds instead of
-    // hiding them: a missing row reads as "that workspace is gone". "scratch"
-    // itself is not offered by name, exactly as the sidebar does not list it;
-    // the disposable scratch row is the way to open one.
+    // Second-window support. The picker offers every named workspace,
+    // marking the ones another window already holds instead of hiding them:
+    // a missing row reads as "that workspace is gone".
     newWindowChoices: async () => windowChoices(
       state.workspaceNames.filter((item) => !isScratchWorkspace(item)),
       await listWindowsSafe(),
@@ -266,9 +265,8 @@ async function boot() {
       state.currentWorkspace,
     ),
     openNewWindow,
-    // Another workspace tiled into this window, beside the view that asked.
-    // Works from inside a view too: the parent window owns the tiling.
-    openWorkspaceBeside: (name) => viewHost()?.open(name, { anchorWindow: window }) ?? Promise.resolve(false),
+    // Another workspace tiled into this window, beside this view.
+    openWorkspaceBeside: (name) => openWorkspaceView(name),
     canShowWorkspaceBeside: () => Boolean(viewHost()),
     shownViews: () => viewHost()?.list() || [],
     focusShownWorkspace: (name) => Boolean(viewHost()?.focusWorkspace(name)),
@@ -290,41 +288,33 @@ async function boot() {
     setWorkspaceAppearance: actions.setWorkspaceAppearance,
     attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
+    focusedSessionId: () => layout.focused?.session?.id || null,
     focusSession: (id) => {
       const pane = layout.panes().find((item) => item.session?.id === id);
       if (pane) layout.focusPane(pane);
     },
-    setupTerminals: () => {
-      panels.settingsTab = "connections";
-      panels.show("settings");
-    },
-    setupTour: () => panels.show("setup"),
+    focusDir: (direction) => layout.focusDir(direction),
+    fitAll: () => layout.fitAll(),
+    startLaunch,
+    setupTour: () => chrome.panels.show("setup"),
+    // Settings and workspace changes reach every view and the shell's own
+    // copy, so they go through the shell.
+    onConfigSaved: () => chrome.onConfigSaved(),
+    onWorkspacesChanged: () => chrome.onWorkspacesChanged(),
   };
+  // The agent launches arrive with the 4.0 spawner; until then the view
+  // simply does not offer them.
+  for (const name of ["runAgentMode", "resumeAgentSession", "agentSessionFolder", "splitAgentView"]) {
+    if (typeof spawner[name] === "function") app[name] = spawner[name];
+  }
 
   const {
-    reportLaunchError, checkLaunchError, onConfigSaved, previewTheme, appliedTheme,
-    refreshInventory, refreshCachedInventory,
+    onConfigSaved, previewTheme, appliedTheme, refreshInventory, refreshCachedInventory,
   } = createConfigSync({
     api, state, app, layout, setFontSize, showError,
     buildLauncher: () => buildLauncher(),
   });
-  app.onConfigSaved = async () => {
-    await onConfigSaved();
-    for (const view of viewHost()?.views() || []) {
-      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
-      if (target !== window) await target?.quicktermView?.syncConfig();
-    }
-    (embedded ? window.parent : window).quicktermChrome?.settingsEvents.publish();
-  };
-  app.onWorkspacesChanged = async () => {
-    for (const view of viewHost()?.views() || []) {
-      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
-      if (target === window) await actions.onWorkspacesChanged();
-      else await target?.quicktermView?.syncWorkspaces();
-    }
-    (embedded ? window.parent : window).quicktermChrome?.settingsEvents.publish();
-  };
-  for (const name of ["saveWorkspace", "deleteWorkspace", "createWorkspaceHere", "setWorkspaceFolder", "setWorkspacePath", "setWorkspaceLogo", "setWorkspaceAppearance"]) {
+  for (const name of ["saveWorkspace", "createWorkspaceHere", "setWorkspaceFolder", "setWorkspacePath", "setWorkspaceLogo", "setWorkspaceAppearance"]) {
     const change = app[name];
     app[name] = async (...args) => {
       const result = await change(...args);
@@ -336,64 +326,18 @@ async function boot() {
   app.shellInstalls = () => state.terminalInventory?.installs || [];
   app.installShell = (install) => runInstaller(install);
 
-  const chromeApp = new Proxy(app, {
-    get(target, key) {
-      const active = views?.active;
-      const activeApp = active && !active.primary ? active.frame?.contentWindow?.quicktermView?.app : null;
-      return Reflect.get(activeApp || target, key);
-    },
-  });
-  const palette = embedded ? window.parent.quicktermChrome.palette : new Palette(chromeApp);
-  const panels = embedded ? window.parent.quicktermChrome.panels : new Panels(chromeApp);
-  if (!embedded) {
-    let refreshingChrome = false;
-    window.quicktermChrome = {
-      palette, panels,
-      saveState: (text, status) => setWorkspaceSaveState(text, status, true),
-      showError, clearError,
-      get windowLabel() { return `${state.windowIsPrimary ? "Main window" : `Window ${String(state.windowId || "").slice(0, 4)}`}${state.cfg.elevated ? " (admin)" : ""}`; },
-      scratchLabels: new Map(),
-      ownsKeyboard: () => focusOwners().some((owner) => owner !== "companion"),
-      render: (options) => initLauncher($("launcher"), options),
-      refresh: () => {
-        if (refreshingChrome) return;
-        const activeWindow = views.active.primary ? window : views.active.frame?.contentWindow;
-        if (!activeWindow?.quicktermView) return;
-        refreshingChrome = true;
-        try { activeWindow.quicktermView.sidebar.buildLauncher(); }
-        finally { refreshingChrome = false; }
-      },
-    };
-    window.quicktermChrome.settingsEvents = watchGlobalSettings({
-      refresh: async () => {
-        if (!window.quicktermView) return;
-        for (const view of views.views()) {
-          const target = view.primary ? window : view.frame?.contentWindow;
-          await target?.quicktermView?.syncConfig();
-          await target?.quicktermView?.syncWorkspaces();
-        }
-        if (panels._themePreviewDirty) {
-          app.previewTheme(panels.settingsDraft.theme, panels.settingsDraft.custom_theme);
-        }
-      },
-    });
-    window.addEventListener("pagehide", () => window.quicktermChrome.settingsEvents.dispose(), { once: true });
-  }
-  const chrome = (embedded ? window.parent : window).quicktermChrome;
-  Object.defineProperty(state, "selectedTerminal", {
-    get: () => chrome.selectedTerminal || null,
-    set: (choice) => { chrome.selectedTerminal = choice; },
-  });
+  const palette = chrome.palette;
+  const panels = chrome.panels;
   app.openPanel = (name) => panels.show(name);
+  app.setupTerminals = () => {
+    panels.settingsTab = "connections";
+    panels.show("settings");
+  };
   const newConfiguredTerminal = app.newTerminal;
   app.newTerminal = () => {
     if (!state.profiles.some((profile) => !["rdp", "vnc"].includes(profile.terminal_type))) return app.setupTerminals();
     return newConfiguredTerminal();
   };
-  $("app-error-close").addEventListener("click", () => {
-    clearError();
-    app.refocusTerm();
-  });
 
   app.setFontSize = setFontSize;
   app.fontSize = fontSize;
@@ -402,20 +346,18 @@ async function boot() {
   app.fontReset = resetScopedFontSize;
   app.resizeFocused = (axis, amount) => layout.adjustFocusedSize(axis, amount);
   app.balanceFocused = () => layout.balanceFocusedSplit();
-  app.previewTheme = (id, custom) => {
-    previewTheme(id, custom);
-    for (const view of viewHost()?.views() || []) {
-      const target = view.primary ? (embedded ? window.parent : window) : view.frame?.contentWindow;
-      if (target !== window) target?.quicktermView?.previewTheme(id, custom);
-    }
-  };
+  app.previewTheme = previewTheme;
   app.appliedTheme = appliedTheme;
   app.version = state.cfg.version || "";
 
-  watchUpdates({ api, state, panels });
-
+  // Opening the palette or a panel first closes a menu or confirmation still
+  // drawn here, so its keyboard claim does not outlive it.
+  const dropOverlays = () => {
+    closeMenu("replaced");
+    closeConfirm("replaced");
+  };
   initKeys({
-    togglePalette: () => { panels.close(); palette.toggle(); },
+    togglePalette: () => { dropOverlays(); panels.close(); palette.toggle(); },
     // Quick Settings is intentionally non-modal: its view shortcuts keep
     // working while the drawer is open. Full panels and the command palette
     // still own the keyboard while they are active.
@@ -428,9 +370,9 @@ async function boot() {
     closePane: app.closePane,
     killSession: () => app.killFocusedSession({ keyboard: true }),
     focusDir: (direction) => layout.focusDir(direction),
-    toggleDashboard: () => { palette.close(); panels.toggle("dashboard"); },
-    toggleSettings: () => { palette.close(); panels.toggle("settings"); },
-    toggleHelp: () => { palette.close(); panels.toggle("help"); },
+    toggleDashboard: () => { dropOverlays(); palette.close(); panels.toggle("dashboard"); },
+    toggleSettings: () => { dropOverlays(); palette.close(); panels.toggle("settings"); },
+    toggleHelp: () => { dropOverlays(); palette.close(); panels.toggle("help"); },
     toggleSidebar: () => state.launcherView?.cycleMode(),
     openExplorer: app.openExplorer,
     openEditor: app.openEditor,
@@ -439,33 +381,15 @@ async function boot() {
     fontReset: resetScopedFontSize,
   });
 
-  const sidebar = createSidebar({
-    api, state, layout, app, panels, palette, viewHost, initialSessions,
-    runProfile, runSystemTerminal, runInstaller, elevateProfile, elevateSystemTerminal, attachSession,
-    switchWorkspace, newScratchWorkspace, hereState, openHere,
-    createWorkspaceHere: actions.createWorkspaceHere,
-  });
-  const { buildLauncher, refreshStatus, refreshStatusSoon } = sidebar;
-  const { claimLaunchLoop, stopLaunchLoop } = createLaunchLoop({
-    api, state, layout, openFolderInScratch, spawnInto, spawnDefaultInto, switchWorkspace,
-    focusShownWorkspace: (name) => app.focusShownWorkspace(name), showError,
-  });
   const { persistOnExit, closeView } = createLifecycle({
     api, workspace, state, layout, ownedSessionIds,
     stopWindowHeartbeat: registry.stopWindowHeartbeat,
-    stopLaunchLoop, cancelWorkspaceSave, cancelWorkspaceRetry, scheduleWorkspaceSave,
+    stopLaunchLoop: () => {}, cancelWorkspaceSave, cancelWorkspaceRetry, scheduleWorkspaceSave,
   });
 
   window.addEventListener("pagehide", persistOnExit);
-  window.addEventListener("focus", checkLaunchError);
-
-  setInterval(refreshStatus, 10000);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      refreshStatus();
-      layout.fitAll();
-      checkLaunchError();
-    }
+    if (!document.hidden) layout.fitAll();
   });
 
   if (state.currentWorkspace) {
@@ -473,12 +397,14 @@ async function boot() {
     if (!restored) await startScratch();
   } else {
     // Boot straight into scratch without going through startScratch(): adopt
-    // the scratch folder here too, or the sidebar and status bar would claim
-    // scratch has no folder while its terminals open in one.
+    // the scratch folder here too, or the sidebar would claim scratch has no
+    // folder while its terminals open in one.
     state.workspacePath = state.scratchRoot || null;
     state.workspacePathExists = true;
     const pane = layout.init();
-    const administratorSession = !openDir && initialSessions.find((session) =>
+    // The elevated first terminal: only the scratch view a fresh window opens
+    // on its own takes it over, as the window's own document did before.
+    const administratorSession = firstView && !openDir && initialSessions.find((session) =>
       (session.name || "").startsWith("Administrator - "));
     if (administratorSession) {
       pane.attach(administratorSession);
@@ -489,7 +415,7 @@ async function boot() {
     }
   }
   // Do not sweep unknown sessions here: backend autostart profiles exist
-  // before this window and intentionally have no saved workspace yet. The
+  // before this view and intentionally have no saved workspace yet. The
   // backend idle reaper already removes only safe, untouched, non-busy shells.
   state.transitioning = false;
   if (!state.currentWorkspace) await ensureScratchWorkspace();
@@ -498,26 +424,17 @@ async function boot() {
     suspend: suspendView,
     close: closeView,
     app,
-    sidebar,
     syncConfig: onConfigSaved,
     syncWorkspaces: actions.onWorkspacesChanged,
     previewTheme,
+    whenRestored: Promise.resolve(true),
   };
+  viewHost()?.ready(window);
   buildLauncher();
-  refreshStatus();
-  // After the restore, so nothing the boot itself reports replaces it.
-  reportLaunchError(state.cfg.launch_error);
-  if (!embedded) claimLaunchLoop();
   scheduleWorkspaceSave();
-  // The tiled views come back around this window's own workspace, which is
-  // restored and claimed by now, so a stored view of the same name is
-  // skipped instead of fighting it for the claim. Not awaited: each view is
-  // a whole document booting on its own.
-  views?.restoreSaved({ exists: (name) => state.workspaceNames.includes(name) });
   // Off the boot path: one small request per saved workspace.
   setTimeout(() => refreshWorkspaceRoots(), 1200);
   if (cachedInventory) refreshCachedInventory();
-  if (!embedded && setupNeeded(state.profiles)) panels.show("setup");
 }
 
-boot();
+if (embedded) bootView(); else bootShell();

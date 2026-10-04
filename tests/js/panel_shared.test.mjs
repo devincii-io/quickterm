@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   countPanes, displaySnippet, environmentError, formatBytes, inferTerminalType,
-  layoutSessionIds, nativeFolderPickerAvailable, parseEnvLines, pickNativeFolder,
-  runnableSnippet, sessionAlreadyGone,
+  layoutSessionIds, nativeFolderPickerAvailable, pickNativeFolder,
+  runnableSnippet, sessionAlreadyGone, TERMINAL_TYPES,
 } from "../../quickterm/frontend/js/panel_shared.js";
 
 test("a forgotten session is told apart from a kill that failed", () => {
@@ -32,10 +32,7 @@ test("layout helpers count panes and collect bound sessions", () => {
   assert.deepEqual([...layoutSessionIds(layout)], ["one", "two"]);
 });
 
-test("environment editor parses comments and rejects unsafe values", () => {
-  assert.deepEqual(parseEnvLines("# note\nA=one\nB=two=three\n"), {
-    A: "one", B: "two=three",
-  });
+test("the environment rule rejects unsafe values", () => {
   assert.equal(environmentError({ Path: "a", PATH: "b" }).includes("unique"), true);
   assert.equal(environmentError({ GOOD: "value" }), "");
 });
@@ -67,6 +64,21 @@ test("the terminal type is inferred for every shell the launcher knows", () => {
   assert.equal(inferTerminalType({ cmd: "wsl.exe", args: ["-d", "Ubuntu"] }), "custom");
   assert.equal(inferTerminalType({ cmd: "nu", args: ["--no-config"] }), "nushell");
   assert.equal(inferTerminalType({ cmd: "pwsh", args: ["-NoLogo"] }), "powershell-core");
+});
+
+test("codex is inferred from its native exe and from the npm shim", () => {
+  for (const cmd of [
+    "codex", "codex.exe", "codex.cmd", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd",
+    "C:\\tools\\Codex.EXE",
+  ]) {
+    assert.equal(inferTerminalType({ cmd }), "codex", cmd);
+  }
+  // Codex builds its own mode arguments ahead of the profile's, so extra
+  // arguments do not make it a custom command.
+  assert.equal(inferTerminalType({ cmd: "codex", args: ["--search"] }), "codex");
+  assert.equal(inferTerminalType({ cmd: "codex-helper.exe" }), "custom");
+  assert.equal(inferTerminalType({ cmd: "pwsh.cmd" }), "custom");
+  assert.ok(TERMINAL_TYPES.some((type) => type.id === "codex" && type.label === "Codex"));
 });
 
 test("native folder picker distinguishes selection, cancel, and browser fallback", async () => {

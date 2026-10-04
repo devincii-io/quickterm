@@ -2,7 +2,7 @@
 
 Both are timing rules that no unit test can observe from Python, and both were
 regressions the user hit in the running app, so they are pinned here the way
-tests/test_frontend_contracts.py pins the rest of the frontend.
+tests/test_contracts_*.py pin the rest of the frontend.
 """
 
 from pathlib import Path
@@ -10,54 +10,6 @@ from pathlib import Path
 FRONTEND_JS = Path(__file__).parents[1] / "quickterm" / "frontend" / "js"
 SCRATCH_JS = FRONTEND_JS / "scratch.js"
 WORKSPACE_SWITCH_JS = FRONTEND_JS / "workspace_switch.js"
-PANE_JS = FRONTEND_JS / "pane.js"
-PALETTE_JS = FRONTEND_JS / "palette.js"
-PANELS_JS = FRONTEND_JS / "panels.js"
-FOCUS_JS = FRONTEND_JS / "focus.js"
-
-
-def test_every_overlay_claims_the_keyboard_before_focusing_its_own_control():
-    # A pane re-asserts term.focus() on a frame and on a timeout, so an overlay
-    # that only focuses its input loses it again one frame later. Alt+K opened a
-    # palette you could not type into for exactly this reason.
-    # main.js used to own an overlay of its own (the quick-settings drawer);
-    # it no longer has one, so only the palette and the panels are checked.
-    assert FOCUS_JS.exists()
-    for source in (PALETTE_JS, PANELS_JS):
-        text = source.read_text(encoding="utf-8")
-        assert 'from "./focus.js"' in text, source.name
-        assert "claimFocus(" in text, source.name
-        assert "releaseFocus(" in text, source.name
-
-
-def test_the_deferred_terminal_refocus_stands_down_for_an_overlay():
-    pane = PANE_JS.read_text(encoding="utf-8")
-    start = pane.index("  focusSoon() {")
-    end = pane.index("\n  setTheme(", start)
-    implementation = pane[start:end]
-    # The guard has to sit inside the deferred closure, not at the call site:
-    # the rAF and the timeout run long after focusSoon() returned.
-    assert "if (!terminalMayFocus()) return;" in implementation
-    assert implementation.index("if (!terminalMayFocus()) return;") < implementation.index(
-        "this.term.focus()"
-    )
-    assert "requestAnimationFrame(focus)" in implementation
-    assert "setTimeout(focus, 0)" in implementation
-
-
-def test_palette_focuses_its_input_on_open_and_returns_the_terminal_on_close():
-    palette = PALETTE_JS.read_text(encoding="utf-8")
-    open_start = palette.index("  async openPalette() {")
-    open_impl = palette[open_start:palette.index("\n  close() {", open_start)]
-    assert open_impl.index('claimFocus("palette")') < open_impl.index("this.focusInput()")
-
-    close_start = palette.index("  close() {")
-    close_impl = palette[close_start:palette.index("\n  focusInput() {", close_start)]
-    # Release first: the guard this palette installed would otherwise refuse its
-    # own hand-off back to the terminal.
-    assert close_impl.index('releaseFocus("palette")') < close_impl.index(
-        "this.app.refocusTerm()"
-    )
 
 
 def test_new_scratch_only_destroys_terminals_that_are_idle_and_untouched():
@@ -140,3 +92,28 @@ def test_going_to_scratch_restores_it_and_only_new_scratch_replaces_it():
         new_scratch_start:scratch.index("\n  async function openFolderInScratch", new_scratch_start)
     ]
     assert "switchWorkspace(null, null, { replaceScratch: true })" in new_scratch
+
+
+def test_new_scratch_opens_its_own_view_and_replaces_nothing():
+    # Every scratch is a view of its own now. "New scratch" opens another
+    # one beside what is open, so the confirmed replace path above is never
+    # reached from the UI and no terminal is put at risk by asking for one.
+    shell = (FRONTEND_JS / "shell.js").read_text(encoding="utf-8")
+    main = (FRONTEND_JS / "main.js").read_text(encoding="utf-8")
+    start = shell.index("  async function newScratchView()")
+    new_scratch = shell[start:shell.index("\n  }\n", start)]
+    assert "return Boolean(await views.open(null));" in new_scratch
+    assert "newScratchWorkspace" not in shell and "newScratchWorkspace" not in main
+    assert "discardScratch" not in shell
+    assert "newScratch: reported(newScratchView)," in shell
+
+
+def test_closing_a_scratch_view_kills_nothing():
+    # Closing a view is leaving its workspace, scratch included, and leaving
+    # was never confirmed by anyone: every owned terminal is retained.
+    lifecycle = (FRONTEND_JS / "lifecycle.js").read_text(encoding="utf-8")
+    start = lifecycle.index("  async function closeView()")
+    close = lifecycle[start:lifecycle.index("\n  return {", start)]
+    assert "await api.retainSession(id)" in close
+    assert "killSession" not in close and "cleanupSessions" not in close
+    assert "discardScratch" not in close

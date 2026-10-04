@@ -306,6 +306,88 @@ def test_opening_a_workspace_another_window_owns_is_refused(viewers):
     assert isinstance(failures[0], WorkspaceClaimed)
 
 
+# --- the quake-style overlay is still just the primary window ---------------
+
+
+def _overlay_on(viewers):
+    viewers._cfg.overlay = SimpleNamespace(enabled=True)
+
+
+def test_a_hidden_overlay_primary_still_hides_to_tray_on_close(viewers):
+    _overlay_on(viewers)
+    first = _open(viewers, "master", "w1")
+    viewers.tray = _FakeTray()
+    first.hidden = True  # the overlay was dismissed with the summon key
+
+    assert _close(first) is False  # live work: the tray rules decide, as always
+    assert len(viewers.tray.balloons) == 1
+    assert viewers.quitting.is_set() is False
+
+
+def test_a_hidden_overlay_primary_quits_when_nothing_is_worth_keeping(viewers):
+    _overlay_on(viewers)
+    first = _open(viewers, "master", "w1")
+    viewers.tray = _FakeTray()
+    viewers._state["manager"] = _Manager([_Info(alive=True, touched=False)])
+    first.hidden = True
+    assert _close(first) is True
+
+
+def test_tray_open_drops_the_primary_down_as_the_overlay(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    summoned = []
+    monkeypatch.setattr(
+        app_mod, "_summon_overlay", lambda title, cfg: summoned.append(title) or True
+    )
+    _overlay_on(viewers)
+    first = _open(viewers, "master", "w1")
+    second = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
+    first.hidden = second.hidden = True
+
+    viewers.show_all()
+
+    assert summoned == ["QuickTerm"]
+    assert first.hidden is True  # shown by the overlay, not by pywebview
+    assert second.hidden is False
+
+
+def test_tray_open_shows_the_primary_normally_when_the_overlay_cannot(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_summon_overlay", lambda title, cfg: False)
+    first = _open(viewers, "master", "w1")
+    first.hidden = True
+    viewers.show_all()
+    assert first.hidden is False
+
+
+def test_a_second_window_opens_at_the_configured_size_beside_the_primary(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod, "_screen_list", lambda: [{"x": 0, "y": 0, "width": 1920, "height": 1080}]
+    )
+    viewers._cfg.window = SimpleNamespace(width=1440, height=900, remember_bounds=True)
+    first = _open(viewers, "master", "w1")
+    assert viewers._secondary_geometry() == {"width": 1440, "height": 900}
+
+    first.x, first.y = 200, 120
+    assert viewers._secondary_geometry() == {"width": 1440, "height": 900, "x": 232, "y": 152}
+
+
+def test_a_minimized_primary_does_not_send_the_new_window_off_screen(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod, "_screen_list", lambda: [{"x": 0, "y": 0, "width": 1920, "height": 1080}]
+    )
+    viewers._cfg.window = SimpleNamespace(width=1440, height=900, remember_bounds=True)
+    first = _open(viewers, "master", "w1")
+    first.x, first.y = -32000, -32000
+    assert viewers._secondary_geometry() == {"width": 1440, "height": 900}
+
+
 def test_window_url_carries_the_window_identity(monkeypatch):
     from quickterm import app as app_mod
     from quickterm import auth

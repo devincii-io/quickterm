@@ -109,6 +109,27 @@ export const restoreConfigVersion = (id) =>
 // `fresh` skips the server's one-minute cache: a shell was just installed.
 export const getTerminalOptions = (fresh = false) =>
   req("GET", `/api/system/terminals${fresh ? "?fresh=true" : ""}`);
+// Agent types (Claude Code, Codex) with their modes and the option schema the
+// Settings editor is generated from. Cached for a minute like the terminals.
+export const getAgentCatalog = (fresh = false) =>
+  req("GET", `/api/system/agents${fresh ? "?fresh=true" : ""}`);
+// A folder's recent agent conversations, newest first: a saved workspace's
+// folder by name ({workspace}), or a plain folder ({cwd}), which is how a
+// scratch view asks.
+export const listAgentSessions = (type, { workspace = null, cwd = null } = {}, limit = 20) => {
+  const query = new URLSearchParams({ type, limit: String(limit) });
+  if (workspace) query.set("workspace", workspace);
+  else if (cwd) query.set("cwd", cwd);
+  return req("GET", `/api/agent-sessions?${query}`);
+};
+// Host aliases from ~/.ssh/config, and one alias resolved through `ssh -G`.
+export const getSshHosts = () => req("GET", "/api/system/ssh-hosts");
+export const resolveSshHost = (alias) =>
+  req("GET", `/api/system/ssh-hosts/${encodeURIComponent(alias)}`);
+// While a shortcut is being captured, the global hotkeys are unregistered so
+// a combination QuickTerm already owns is recorded instead of fired. The
+// server resumes them on its own after 20 s.
+export const suspendHotkeys = (suspended) => req("POST", "/api/hotkeys/suspend", { suspended: Boolean(suspended) });
 export const elevateTerminal = (spec) => req("POST", "/api/elevate", spec);
 export const checkUpdate = (force) => req("GET", `/api/update${force ? "?force=true" : ""}`);
 export const openTarget = (target) => req("POST", "/api/open", { target });

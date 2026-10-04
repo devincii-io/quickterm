@@ -14,8 +14,11 @@ export const embedded = typeof window !== "undefined"
   && window.parent !== window
   && new URLSearchParams(location.search).get("embedded") === "1";
 const launchParams = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
-const scratchId = launchParams.get("scratch") || (launchParams.get("primary") !== "1" && launchParams.get("window")
-  ? `scratch-view-${launchParams.get("window")}` : null);
+// Every workspace lives in a view with its own registry id, so every scratch
+// is `scratch-view-<id>`. The bare "scratch" is what 3.x primaries used; it
+// still counts as scratch because app.py deletes those files at startup.
+const scratchId = launchParams.get("scratch")
+  || (launchParams.get("window") ? `scratch-view-${launchParams.get("window")}` : null);
 export const SCRATCH_WS = /^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(scratchId || "") ? scratchId : "scratch";
 export const isScratchWorkspace = (name) => name === "scratch" || /^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(name || "");
 export function workspaceLabel(name) {
@@ -24,6 +27,9 @@ export function workspaceLabel(name) {
   return host?.quicktermChrome?.scratchLabels?.get(name) || (name === "scratch" ? "scratch" : `scratch ${name.slice(-4)}`);
 }
 
+// The workspace a 3.x primary window remembered, and whether it was on
+// scratch. Only the shell's first boot reads them, to migrate; nothing writes
+// them any more.
 export function storedWorkspace() {
   try { return localStorage.getItem(ACTIVE_WORKSPACE_KEY); } catch (_) { return null; }
 }
@@ -32,24 +38,10 @@ export function storedScratchActive() {
   try { return localStorage.getItem(SCRATCH_ACTIVE_KEY) === "1"; } catch (_) { return false; }
 }
 
-// The remembered workspace and "scratch is the current one" are two different
-// facts. Writing "scratch" into the durable key erased the user's real last
-// workspace, and the backend deletes the scratch file at startup, so nothing
-// was auto-restored on the next launch. Scratch gets its own flag; within a
-// run (tray close and reopen) the scratch file still exists and wins, and on
-// a fresh start it is gone and the named workspace comes back.
-export function rememberWorkspace(name) {
-  if (embedded || (launchParams.has("window") && launchParams.get("primary") !== "1")) return;
-  try {
-    if (name === SCRATCH_WS) {
-      localStorage.setItem(SCRATCH_ACTIVE_KEY, "1");
-      return;
-    }
-    localStorage.removeItem(SCRATCH_ACTIVE_KEY);
-    if (name) localStorage.setItem(ACTIVE_WORKSPACE_KEY, name);
-    else localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
-  } catch (_) { /* storage may be disabled */ }
-}
+// The shell's view arrangement (workspace_views.js) replaced what 3.x
+// remembered here. Views still call this on every switch and promotion; it
+// is a no-op so those call sites need no branch.
+export function rememberWorkspace(_name) {}
 
 // The window is launched at .../#t=<token>. Capture it before any API call,
 // stash it in sessionStorage so a reload (which loses the fragment) still works,
@@ -103,6 +95,12 @@ export function captureWindowIdentity() {
       : (raw || null);
     return { id, primary, workspace };
   } catch (_) { return { id: null, primary: false, workspace: undefined }; }
+}
+
+// The one scratch view a fresh window opens on its own carries ?first=1. Only
+// that view adopts the elevated first terminal ("Administrator - ...").
+export function captureFirstView() {
+  try { return new URLSearchParams(location.search).get("first") === "1"; } catch (_) { return false; }
 }
 
 // sessionStorage is per window and survives a reload, so a reloaded window asks

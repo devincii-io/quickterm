@@ -331,6 +331,9 @@ async def test_kill_reports_a_descendant_that_survives_and_a_retry_verifies_it(m
         assert sess.alive is False
         assert sess.kill() is False  # the grandchild is not
         monkeypatch.undo()
+        # The real terminate path, without first waiting the full 2 s for a
+        # process nothing has asked to stop (the root is dead, so no taskkill).
+        monkeypatch.setattr(pty_module, "_KILL_WAIT_S", 0.3)
         assert sess.kill() is True
         assert grandchild not in {pid for pid, _parent in process_usage.process_identities()}
     finally:
@@ -353,7 +356,10 @@ async def test_kill_never_addresses_a_root_known_to_be_dead(monkeypatch):
     cmd, args = _short("exit 0")
     sess, _, _, _ = await _spawn(cmd, args)
     try:
-        assert pty_module._k32.WaitForSingleObject(sess._hproc, int(_SLOW_S * 1000)) == 0
+        # Off the loop: the loop delivers the output, and with it the device
+        # attributes answer the console host waits for before cmd can exit.
+        waited = await asyncio.to_thread(pty_module._k32.WaitForSingleObject, sess._hproc, int(_SLOW_S * 1000))
+        assert waited == 0
         assert sess.alive is True  # nobody has told the session yet
         assert sess.kill() is True
         assert calls == []

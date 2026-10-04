@@ -110,10 +110,13 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(500, "could not read that settings version") from exc
         # The same path as a Settings save: validation, a new history entry
         # for the version this replaces, and the live apply.
-        await save_and_apply(stored)
+        # Its shortcuts were accepted when it was saved. The rule that new
+        # shortcuts need Ctrl, Alt or Win must not refuse a recovery, or a 3.x
+        # "f12" kept profiles that were deleted since out of reach.
+        await save_and_apply(stored, check_new_bindings=False)
         return Response(status_code=204)
 
-    async def save_and_apply(body: dict[str, Any]) -> None:
+    async def save_and_apply(body: dict[str, Any], *, check_new_bindings: bool = True) -> None:
         config_mod = importlib.import_module("quickterm.config")
         # load_config and save_config fsync, and DPAPI runs once per protected
         # env value: all of it off the loop.
@@ -139,14 +142,19 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             for name in sorted(getattr(cfg, "runtime_overrides", None) or ()):
                 if getattr(new_cfg, name, None) == getattr(cfg, name, None):
                     setattr(new_cfg, name, getattr(on_disk, name))
+            if check_new_bindings:
+                config_mod.validate_new_bindings(new_cfg, on_disk)
             await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
-        # Apply live-updatable fields in place; port and global hotkeys need a restart.
+        before = _hotkey_bindings(cfg)
+        # Apply in place. Only port and host need a restart: the server is
+        # already bound. Window size applies to the next window, the overlay
+        # to the next summon, the hotkeys through the rebind below.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
             "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice",
-            "update_check", "scratch_dir",
+            "update_check", "scratch_dir", "window", "overlay", "summon_hotkey",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
@@ -156,3 +164,26 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         set_scrollback = getattr(manager, "set_scrollback_bytes", None)
         if set_scrollback:
             set_scrollback(cfg.scrollback_bytes)
+        if ctx.rebind_hotkeys is not None and _hotkey_bindings(cfg) != before:
+            # Waits for the hotkey thread, which may wait for the GUI thread.
+            await asyncio.to_thread(ctx.rebind_hotkeys, cfg)
+
+    @app.post("/api/hotkeys/suspend")
+    async def suspend_hotkeys(request: Request) -> Response:
+        body = await read_json(request)
+        suspended = body.get("suspended") if isinstance(body, dict) else None
+        if not isinstance(suspended, bool):
+            raise HTTPException(400, "suspended must be true or false")
+        if ctx.suspend_hotkeys is not None:
+            await asyncio.to_thread(ctx.suspend_hotkeys, suspended)
+        return Response(status_code=204)
+
+
+def _hotkey_bindings(cfg: Any) -> tuple[Any, list[str]]:
+    """What the global hotkeys depend on: the summon key and the profile keys."""
+    keys = sorted(
+        str(binding)
+        for binding in (getattr(p, "keybinding", None) for p in getattr(cfg, "profiles", []))
+        if binding
+    )
+    return getattr(cfg, "summon_hotkey", None), keys

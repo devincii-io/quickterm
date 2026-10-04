@@ -1,7 +1,8 @@
 // Launches handed to this window from outside: Explorer's "Open QuickTerm
-// here" and the `quickterm new` / `quickterm open` command line. The long poll
-// on GET /api/launches/next turns each queued item into a terminal or a
-// workspace shown in this window. The backend has already checked every field.
+// here" and the `quickterm new` / `quickterm open` command line. The shell
+// runs the long poll on GET /api/launches/next and turns each queued item into
+// a view opened or focused in this window, or a terminal started in one. The
+// backend has already checked every field.
 
 import { SCRATCH_WS } from "./boot_context.js";
 
@@ -20,7 +21,7 @@ export function launchBackoff(failures) {
 
 // What a launch asks for: `workspace` alone shows that workspace, a
 // `profile` starts that profile, anything else with a folder starts the
-// default terminal there (in scratch when no workspace is named).
+// default terminal there (in a new scratch view when no workspace is named).
 export function launchKind(launch) {
   if (!launch || typeof launch !== "object") return null;
   if (launch.profile) return "profile";
@@ -29,18 +30,48 @@ export function launchKind(launch) {
   return null;
 }
 
+// The view half: start one launched terminal in this view's layout, in the
+// focused pane when it can be replaced, else beside it. A view still busy
+// restoring gets a few seconds before the launch is dropped.
+export function createLaunchTarget({
+  state, layout, spawnInto, spawnDefaultInto, showError,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const LAUNCH_MAX_WAITS = 100; // 10 s of "transitioning" before giving up
+
+  async function startLaunch(launch) {
+    let waits = 0;
+    while (state.transitioning && waits++ < LAUNCH_MAX_WAITS) await sleep(100);
+    if (state.transitioning) {
+      showError("Could not start the terminal: this view is still busy. The request was dropped.");
+      return false;
+    }
+    let pane = layout.focused || layout.init();
+    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
+    if (!pane) return false;
+    layout.focusPane(pane);
+    if (!launch.profile) return Boolean(await spawnDefaultInto(pane, launch.cwd));
+    // Without a folder a profile starts where every profile does: the
+    // workspace root, which the backend resolves; scratch has its own.
+    const onScratch = !state.currentWorkspace || state.currentWorkspace === SCRATCH_WS;
+    const cwd = launch.cwd || (onScratch ? state.scratchRoot || null : null);
+    return Boolean(await spawnInto(pane, launch.profile, cwd));
+  }
+
+  return { startLaunch };
+}
+
+// The shell half. `openView(name, {cwd})` focuses the view that shows `name`
+// or opens one (null opens a scratch view) and resolves with it once its
+// document is up, or false; `appFor(view)` is that document's app,
+// `activeView()` the view the keyboard is in and `whenReady(view)` resolves
+// once that view's document has booted (false when it never did).
 export function createLaunchLoop({
-  api, state, layout, openFolderInScratch, spawnInto, spawnDefaultInto, switchWorkspace,
-  focusShownWorkspace, showError,
+  api, state, openView, appFor, activeView, showError, whenReady = async () => true,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now(),
 }) {
   let launchLoopStopped = false;
-  // A folder handoff that cannot be satisfied (max_sessions reached, no shell
-  // configured) used to retry twice a second forever, which also meant no
-  // later "Open QuickTerm here" was ever claimed again.
-  const LAUNCH_MAX_ATTEMPTS = 5;
-  const LAUNCH_MAX_WAITS = 100; // 10 s of "transitioning" before giving up
 
   // One claim. `error` is set when the backend could not be asked or said
   // no; `launch` is null when nothing was queued.
@@ -56,85 +87,41 @@ export function createLaunchLoop({
     }
   }
 
-  async function waitForSettledWindow() {
-    let waits = 0;
-    while (state.transitioning && !launchLoopStopped && waits++ < LAUNCH_MAX_WAITS) await sleep(100);
-    return !state.transitioning;
-  }
-
+  // A folder alone opens a new scratch view whose first terminal starts there.
   async function openFolder(cwd) {
-    let opened = false;
-    let attempts = 0;
-    let waited = 0;
-    while (!opened && !launchLoopStopped && attempts < LAUNCH_MAX_ATTEMPTS) {
-      if (state.transitioning) {
-        if (waited++ >= LAUNCH_MAX_WAITS) break;
-        await sleep(100);
-        continue;
-      }
-      attempts += 1;
-      opened = await openFolderInScratch(cwd);
-      if (!opened && attempts < LAUNCH_MAX_ATTEMPTS) await sleep(Math.min(500 * attempts, 4000));
-    }
+    const opened = Boolean(await openView(null, { cwd }));
     if (!opened && !launchLoopStopped) {
       showError(`Could not open "${cwd}" in a terminal. The request was dropped.`);
     }
     return opened;
   }
 
-  // Focus the workspace where it already is (this window, or a view tiled
-  // beside it), else move this window there. A refused claim is explained by
-  // switchWorkspace itself, in the error banner.
+  // The view that shows the workspace, focused, or a new one for it. A
+  // refused claim is explained by the view manager, in the error banner.
   async function showWorkspace(name) {
-    if (focusShownWorkspace?.(name)) return true;
-    if (state.currentWorkspace === name) {
-      layout?.focused?.focusSoon?.();
-      return true;
-    }
-    if (!(await waitForSettledWindow())) {
-      showError(`Could not show "${name}": this window is still busy. The request was dropped.`);
-      return false;
-    }
-    return Boolean(await switchWorkspace(name)) && state.currentWorkspace === name;
+    return Boolean(await openView(name));
   }
 
-  // A terminal in the named workspace (moving this window there first), or
-  // in the current one when none is named.
+  // A terminal in the named workspace's view (opened first when needed), or
+  // in the active view when none is named, or in a new scratch view when no
+  // view is open.
   async function startTerminal(launch) {
-    const target = launch.workspace || null;
-    if (target && state.currentWorkspace !== target) {
-      if (!(await showWorkspace(target))) return false;
-      if (state.currentWorkspace !== target) {
-        // Shown in a view tiled beside this one: that document owns its
-        // layout, and nothing reaches into it from here.
-        const what = launch.profile ? `"${launch.profile}"` : "a terminal";
-        showError(`"${target}" is shown beside this workspace, so ${what} was not started there. Open it from that view.`);
-        return false;
-      }
-    }
-    if (!(await waitForSettledWindow())) {
-      showError("Could not start the terminal: this window is still busy. The request was dropped.");
+    const view = launch.workspace
+      ? await openView(launch.workspace)
+      : activeView() || await openView(null);
+    // A boot that restored a stored arrangement claims launches while the
+    // restored views are still loading; wait for the one this goes to.
+    const app = view && await whenReady(view) ? appFor(view) : null;
+    if (!app?.startLaunch) {
+      if (view) showError("That view cannot start command-line launches. The request was dropped.");
       return false;
     }
-    let pane = layout.focused || layout.init();
-    if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-    if (!pane) return false;
-    layout.focusPane(pane);
-    if (!launch.profile) return Boolean(await spawnDefaultInto(pane, launch.cwd));
-    // Without a folder a profile starts where every profile does: the
-    // workspace root, which the backend resolves; scratch has its own.
-    const onScratch = !state.currentWorkspace || state.currentWorkspace === SCRATCH_WS;
-    const cwd = launch.cwd || (onScratch ? state.scratchRoot || null : null);
-    return Boolean(await spawnInto(pane, launch.profile, cwd));
+    return Boolean(await app.startLaunch(launch));
   }
 
   async function handleLaunch(launch) {
     const kind = launchKind(launch);
     if (!kind) return false;
-    if (kind !== "folder" && (!switchWorkspace || !spawnInto || !spawnDefaultInto || !layout)) {
-      showError("This window cannot open command-line launches. The request was dropped.");
-      return false;
-    }
     try {
       if (kind === "folder") return await openFolder(launch.cwd);
       if (kind === "workspace") return await showWorkspace(launch.workspace);
@@ -160,7 +147,6 @@ export function createLaunchLoop({
         await sleep(1000);
         continue;
       }
-      await waitForSettledWindow();
       const started = now();
       const { launch, error } = await claimOnce();
       if (launchLoopStopped) break;

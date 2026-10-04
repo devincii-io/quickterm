@@ -1,12 +1,14 @@
-// Several workspaces in one window, tiled like the panes inside them.
+// Workspaces in one window, tiled like the panes inside them.
 //
-// The primary view is this document (#app). Every other view is a same-origin
-// iframe running the same app on another workspace, with its own layout,
-// autosave, registry claim and heartbeat. The views are leaves of the same
-// split tree the panes use (split_tree.js), so a new one takes half of the
-// active view along its longer side, a header drag docks it beside another
-// view or swaps the two (pane_move.js), and a divider drag or its arrow keys
-// change one ratio.
+// The window's own document is the shell: it hosts no workspace. Every
+// workspace, scratch included, is a same-origin iframe view running the app on
+// that one workspace, with its own layout, autosave, registry claim and
+// heartbeat. No view is special: each one has a close button, and closing the
+// last one leaves an empty stage. The views are leaves of the same split tree
+// the panes use (split_tree.js), so a new one takes half of the active view
+// along its longer side, a header drag docks it beside another view or swaps
+// the two (pane_move.js), and a divider drag or its arrow keys change one
+// ratio.
 //
 // One rule shapes the DOM here: an iframe that moves in the DOM reloads its
 // document, terminals and all. So views are never re-parented. Every view
@@ -15,36 +17,65 @@
 // properties is what makes a split, a move or a close slide into place.
 
 import * as api from "./api.js";
-import { SCRATCH_WS, isScratchWorkspace } from "./boot_context.js";
-import { claimFocus, releaseFocus } from "./focus.js";
+import { isScratchWorkspace } from "./boot_context.js";
+import { focusOwners } from "./focus.js";
 import { icon } from "./icons.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
-import { dwindleDir, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
+import { dwindleDir, findLeaf, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf } from "./split_tree.js";
+import {
+  VIEW_RATIO_MAX, VIEW_RATIO_MIN, clampViewRatio, describeArrangement, restoreFailureMessage, restorePlan,
+  viewArrangementStore,
+} from "./view_arrangement.js";
 
-export const VIEW_COLORS = ["#d4ad63", "#6daedb", "#8fcf8a", "#c78fd6", "#e0907a", "#6fc7c2"];
-export const VIEW_RATIO_MIN = 15;
-export const VIEW_RATIO_MAX = 85;
+// The arrangement helpers stay importable from here.
+export {
+  VIEW_ARRANGEMENT_KEY, VIEW_ARRANGEMENT_VERSION, VIEW_RATIO_MAX, VIEW_RATIO_MIN, clampViewRatio,
+  describeArrangement, parseArrangement, restoreFailureMessage, restorePlan, viewArrangementStore,
+} from "./view_arrangement.js";
+
+// Theme tokens, not literals: applyChromeTheme() sets --view-1..6 from the
+// theme's ANSI hues, so a view frame follows the theme, light ones included.
+export const VIEW_COLORS = ["--view-1", "--view-2", "--view-3", "--view-4", "--view-5", "--view-6"]
+  .map((token) => `var(${token})`);
 // The narrowest a divider drag may make a view, when the window has the room.
 export const VIEW_MIN_PX = 160;
+export const EMPTY_STAGE_TEXT = "No workspace open. Open one from the sidebar.";
 const DIVIDER_PX = 10;
 const STAGE_INSET = 6;
 const SLIDE_MS = 240;
 const DRAG_START_PX = 6;
+// A view whose document never says it is ready (a crashed boot) must not
+// leave a caller waiting forever.
+const READY_TIMEOUT_MS = 30000;
 
-export function companionUrl(path, workspace, id, token) {
+// `cwd` is the Explorer "Open QuickTerm here" folder for a scratch view;
+// `first` marks the one scratch view a fresh window opens on its own, the
+// only view that may adopt the elevated first terminal.
+export function companionUrl(path, workspace, id, token, { cwd = null, first = false } = {}) {
   const query = new URLSearchParams({ workspace: workspace || "", window: id, embedded: "1" });
   if (!workspace) query.set("scratch", `scratch-view-${id}`);
+  if (cwd) query.set("cwd", cwd);
+  if (first) query.set("first", "1");
   return `${path || "/"}?${query}#t=${encodeURIComponent(token || "")}`;
 }
 
-export function clampViewRatio(value) {
-  return Math.max(VIEW_RATIO_MIN, Math.min(VIEW_RATIO_MAX, Number.isFinite(value) ? value : 50));
+
+// A workspace's own colour, the same on every open and after a restart: a
+// stable hash of its name into the palette.
+export function viewColorFor(name) {
+  let hash = 0;
+  for (const char of String(name || "")) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return VIEW_COLORS[hash % VIEW_COLORS.length];
 }
 
-// The first palette colour no open view uses; past six views they repeat.
-export function pickViewColor(used = []) {
+// A named workspace keeps its own colour unless an open view already shows
+// it; otherwise (and for scratch) the first palette colour no open view
+// uses. Past six views they repeat.
+export function pickViewColor(used = [], name = null) {
   const taken = new Set(used);
-  return VIEW_COLORS.find((color) => !taken.has(color)) || VIEW_COLORS[used.length % VIEW_COLORS.length];
+  const own = name ? viewColorFor(name) : null;
+  if (own && !taken.has(own)) return own;
+  return VIEW_COLORS.find((color) => !taken.has(color)) || own || VIEW_COLORS[used.length % VIEW_COLORS.length];
 }
 
 export function nextScratchLabel(names) {
@@ -65,166 +96,6 @@ export function ratioBounds(total) {
   return { min, max };
 }
 
-// ---- the arrangement across restarts ----
-//
-// Stored in localStorage under VIEW_ARRANGEMENT_KEY, written by the primary
-// window whenever the tiling changes and read once when it boots:
-//
-//   {"version": 1,
-//    "tree": <node>,
-//    "active": <view>,           the view the keyboard was in
-//    "zoomed": <view> | null}
-//   <node> = {"type":"split","dir":"h"|"v","ratio":r,"children":[<node>,<node>]}
-//          | {"type":"pane","pane":<view>}
-//   <view> = {"primary":true} | {"workspace":"<name>"}
-//
-// The same split tree the views live in, with each view reduced to what
-// brings it back. The primary is a position, not a name: this document
-// restores its own workspace before the others are rebuilt around it.
-
-export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";
-export const VIEW_ARRANGEMENT_VERSION = 1;
-// Past this a stored tree is not something a person tiled by hand.
-const MAX_STORED_VIEWS = 16;
-const MAX_STORED_DEPTH = 16;
-
-const PRIMARY = Object.freeze({ primary: true });
-
-function viewKey(descriptor) {
-  return descriptor?.primary ? "" : `w:${descriptor?.workspace}`;
-}
-
-// The arrangement for `root`, or null when there is nothing to bring back:
-// the primary alone is what every boot shows anyway.
-export function describeArrangement({ root, nameOf, active = null, zoomed = null }) {
-  // The registry id travels with a view so a restore can release the claim
-  // the previous page's iframe still holds (see rebuild()).
-  const describe = (view) => (view.primary
-    ? PRIMARY
-    : { workspace: nameOf(view), ...(view.id ? { window: String(view.id) } : {}) });
-  const tree = mapLeaves(root, describe);
-  if (!tree || tree.type !== "split") return null;
-  return {
-    version: VIEW_ARRANGEMENT_VERSION,
-    tree,
-    active: active ? describe(active) : PRIMARY,
-    zoomed: zoomed ? describe(zoomed) : null,
-  };
-}
-
-function parseDescriptor(value) {
-  if (!value || typeof value !== "object") return null;
-  if (value.primary === true) return PRIMARY;
-  if (typeof value.workspace !== "string" || !value.workspace.trim()) return null;
-  const window = typeof value.window === "string" && value.window && value.window.length <= 64
-    ? { window: value.window }
-    : {};
-  return { workspace: value.workspace, ...window };
-}
-
-function parseNode(node, depth, counts) {
-  if (!node || typeof node !== "object" || depth > MAX_STORED_DEPTH) return null;
-  if (node.type === "pane") {
-    const view = parseDescriptor(node.pane);
-    if (!view) return null;
-    counts.views += 1;
-    if (view.primary) counts.primary += 1;
-    return { type: "pane", pane: view };
-  }
-  if (node.type !== "split" || !Array.isArray(node.children) || node.children.length !== 2) return null;
-  if (node.dir !== "h" && node.dir !== "v") return null;
-  const first = parseNode(node.children[0], depth + 1, counts);
-  const second = first && parseNode(node.children[1], depth + 1, counts);
-  if (!second) return null;
-  const ratio = clampViewRatio(Number(node.ratio) * 100) / 100;
-  return { type: "split", dir: node.dir, ratio, children: [first, second] };
-}
-
-// A stored arrangement, checked all the way down. Anything malformed, from
-// another version, or without exactly one primary is null: a half-trusted
-// tree would be rebuilt into a layout nobody made.
-export function parseArrangement(raw) {
-  let value = raw;
-  if (typeof raw === "string") {
-    try { value = JSON.parse(raw); } catch (_) { return null; }
-  }
-  if (!value || typeof value !== "object" || value.version !== VIEW_ARRANGEMENT_VERSION) return null;
-  const counts = { views: 0, primary: 0 };
-  const tree = parseNode(value.tree, 0, counts);
-  if (!tree || counts.primary !== 1 || counts.views > MAX_STORED_VIEWS) return null;
-  return {
-    version: VIEW_ARRANGEMENT_VERSION,
-    tree,
-    active: parseDescriptor(value.active) || PRIMARY,
-    zoomed: parseDescriptor(value.zoomed),
-  };
-}
-
-// What can come back after a restart. Scratch views are dropped because the
-// backend deletes the scratch file at startup; a workspace that no longer
-// exists, the one the primary itself restored, and a second copy of a name
-// are dropped too. The splits they leave collapse into their siblings. An
-// active or zoomed view that did not survive falls back to the primary and
-// to no zoom. `skipped` lists every dropped view with its reason.
-export function restorePlan(arrangement, { exists = () => true, primaryName = null } = {}) {
-  const parsed = parseArrangement(arrangement);
-  if (!parsed) return null;
-  const skipped = [];
-  const seen = new Set();
-  const tree = mapLeaves(parsed.tree, (view) => {
-    if (view.primary) return view;
-    const name = view.workspace;
-    let reason = null;
-    if (isScratchWorkspace(name)) reason = "scratch";
-    else if (name === primaryName) reason = "primary";
-    else if (seen.has(name)) reason = "duplicate";
-    else if (!exists(name)) reason = "missing";
-    if (reason) {
-      skipped.push({ workspace: name, reason });
-      return null;
-    }
-    seen.add(name);
-    return view;
-  });
-  const kept = new Set(leaves(tree).map(viewKey));
-  return {
-    tree,
-    active: kept.has(viewKey(parsed.active)) ? parsed.active : PRIMARY,
-    zoomed: parsed.zoomed && kept.has(viewKey(parsed.zoomed)) ? parsed.zoomed : null,
-    skipped,
-  };
-}
-
-// localStorage behind a load/save pair. Every access can throw (storage
-// disabled, quota, a private window), and none of that may reach the view
-// manager: losing the arrangement is fine, losing the window is not.
-export function viewArrangementStore(storage = null) {
-  const backing = () => storage || globalThis.localStorage;
-  return {
-    load() {
-      try { return backing().getItem(VIEW_ARRANGEMENT_KEY); } catch (_) { return null; }
-    },
-    save(text) {
-      try {
-        if (text) backing().setItem(VIEW_ARRANGEMENT_KEY, text);
-        else backing().removeItem(VIEW_ARRANGEMENT_KEY);
-      } catch (_) { /* storage may be disabled */ }
-    },
-  };
-}
-
-// One sentence for a restore that brought nothing back, or null when at
-// least one view returned or nothing but scratch was ever there to return.
-// A view that is missing on its own is not worth a word: the others are the
-// answer.
-export function restoreFailureMessage(restored, failed) {
-  if (restored.length || !failed.length) return null;
-  const names = failed.map((name) => `"${name}"`).join(", ");
-  return failed.length === 1
-    ? `The tiled view of ${names} did not come back: it is open in another window or no longer saved.`
-    : `The tiled views of ${names} did not come back: they are open in another window or no longer saved.`;
-}
-
 function reducedMotion() {
   try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_) { return false; }
 }
@@ -239,36 +110,45 @@ function applyRect(el, rect) {
 export class WorkspaceViews {
   // `store` (viewArrangementStore) is given only to the window whose
   // arrangement outlives a restart. It stays silent until restoreSaved() has
-  // read it, so the lone primary of an early boot cannot erase what it is
-  // about to restore.
-  constructor({ current, focus, fit, error, store = null }) {
-    this.current = current;
-    this.focus = focus;
+  // read it, so an early boot cannot erase what it is about to restore.
+  // `fit` re-fits the terminals after the boxes moved; `newScratch` is the
+  // empty stage's button.
+  // `parentId` is this shell window's registry id: every view registers
+  // under it, so closing the native window frees the views' claims at once.
+  // `reservedNames()` are the saved workspaces: a scratch label never takes
+  // one, so a label can never be mistaken for a workspace.
+  constructor({
+    fit = () => {}, error, store = null, newScratch = null, parentId = () => null, reservedNames = () => [],
+  }) {
     this.fit = fit;
+    this.parentId = parentId;
+    this.reservedNames = reservedNames;
+    // Opens, closes and rebuilds run one after another. Refusing while one
+    // was running dropped a sidebar click or an Explorer handoff silently.
+    this.queue = Promise.resolve();
     this.error = error;
     this.store = store;
     this.persisting = false;
     this.lastStored = undefined;
-    this.busy = false;
+    // No busy flag: open, close and rebuild all run through _serial(), so
+    // one never sees another half done.
     this.zoomed = null;
-    this.companionClaimed = false;
+    this.root = null;
+    this.active = null;
     this.stage = document.createElement("div");
     this.stage.className = "workspace-views";
-    const app = document.querySelector("#app > .workspace-shell");
-    app.before(this.stage);
-    this.primary = this._makeView({ primary: true, color: VIEW_COLORS[0], label: current() || "scratch" });
-    this.primary.el.append(app);
-    this.stage.append(this.primary.el);
-    this.root = { type: "pane", pane: this.primary };
-    this.active = this.primary;
-    this.primary.el.addEventListener("pointerdown", () => this.activate(this.primary), true);
-    this.primary.el.addEventListener("focusin", () => this.activate(this.primary));
+    // The shell document hosts no workspace: its own terminal grid gives its
+    // place in the window to the stage.
+    const shell = document.querySelector("#app > .workspace-shell");
+    shell.before(this.stage);
+    shell.remove();
+    this.empty = this._emptyState(newScratch || (() => this.open(null)));
+    this.stage.append(this.empty);
     window.addEventListener("resize", () => this.layout({ animate: false }));
     if (typeof ResizeObserver === "function") {
       new ResizeObserver(() => this.layout({ animate: false })).observe(this.stage);
     }
-    this.layout({ animate: false });
-    this.update();
+    this.layout({ animate: false, persist: false });
   }
 
   // ---- what is open ----
@@ -277,16 +157,29 @@ export class WorkspaceViews {
     return leaves(this.root);
   }
 
+  // `target` is a view or a child window (the iframe's contentWindow, which
+  // is how an embedded document names itself).
   viewFor(target) {
-    if (!target || target === window || target === this.primary) return this.primary;
+    if (!target) return null;
     if (target.el) return this.views().includes(target) ? target : null;
     return this.views().find((view) => view.frame?.contentWindow === target) || null;
   }
 
+  appFor(view) {
+    try { return view?.frame?.contentWindow?.quicktermView?.app || null; } catch (_) { return null; }
+  }
+
+  // The workspace a view is on: what its document says once it has booted,
+  // else the one it was opened for (`scratch-view-<id>` for scratch).
+  workspaceOf(view) {
+    let live = null;
+    try { live = view.frame?.contentWindow?.quicktermView?.workspace() || null; } catch (_) { /* gone */ }
+    return live || view.workspace;
+  }
+
+  // What a person calls the view: the workspace name, or the scratch label.
   nameOf(view) {
-    if (view.primary) return isScratchWorkspace(this.current()) ? "scratch" : this.current() || "scratch";
-    const child = view.frame?.contentWindow?.quicktermView;
-    const name = child?.workspace();
+    const name = this.workspaceOf(view);
     return name && !isScratchWorkspace(name) ? name : view.label || "scratch";
   }
 
@@ -294,15 +187,25 @@ export class WorkspaceViews {
     return this.views().map((view) => this.nameOf(view));
   }
 
-  // For the sidebar's workspace menu: which workspace each view shows, its
-  // colour, and whether it is the one the keyboard is in.
+  viewForWorkspace(name) {
+    if (!name) return null;
+    return this.views().find((view) => this.workspaceOf(view) === name) || null;
+  }
+
+  viewForSession(id) {
+    if (!id) return null;
+    return this.views().find((view) => (this.appFor(view)?.attachedSessionIds?.() || []).includes(id)) || null;
+  }
+
+  // For the sidebar and the palette: which workspace each view shows, its
+  // label and colour, whether the keyboard is in it, and its child window.
   list() {
     return this.views().map((view) => ({
-      name: this.nameOf(view),
-      workspace: view.primary ? this.current() : view.frame?.contentWindow?.quicktermView?.workspace() ?? view.label,
+      workspace: this.workspaceOf(view),
+      label: this.nameOf(view),
       color: view.color,
-      primary: view.primary,
       active: view === this.active,
+      window: view.frame?.contentWindow || null,
     }));
   }
 
@@ -313,8 +216,8 @@ export class WorkspaceViews {
       view.el.setAttribute("aria-label", `Workspace view: ${name}`);
       if (view.frame) view.frame.title = `Workspace: ${name}`;
     }
-    // A view switching its own workspace calls this through the sidebar, and
-    // the stored arrangement has to follow the name.
+    // A scratch view promoted to a named workspace renames itself in place,
+    // and the stored arrangement has to follow the name.
     this._persist();
   }
 
@@ -322,208 +225,256 @@ export class WorkspaceViews {
     if (!this.store || !this.persisting) return;
     const arrangement = describeArrangement({
       root: this.root,
-      nameOf: (view) => {
-        const name = view.frame?.contentWindow?.quicktermView?.workspace();
-        return isScratchWorkspace(name) ? name : view.label?.startsWith("scratch ") && !name ? "scratch" : this.nameOf(view);
-      },
+      nameOf: (view) => this.workspaceOf(view),
       active: this.active,
       zoomed: this.zoomed,
     });
-    const text = arrangement ? JSON.stringify(arrangement) : null;
+    const text = JSON.stringify(arrangement);
     if (text === this.lastStored) return;
     this.lastStored = text;
     this.store.save(text);
   }
 
+  // A view's document calls this once its quicktermView exists. Its iframe
+  // fired "load" long before (the boot awaits the backend), so only now can
+  // it be told whether it is the active view, and take the keyboard if it
+  // was the one waiting for it.
+  ready(target) {
+    const view = this.viewFor(target);
+    if (!view) return;
+    view.markReady(true);
+    try { view.frame.contentWindow.quicktermView.suspend(view !== this.active); } catch (_) { /* gone */ }
+    if (this.pendingFocus === view) {
+      this.pendingFocus = null;
+      this.focusView(view);
+    }
+    window.quicktermChrome?.refreshSoon?.();
+  }
+
+  // Resolves true once the view's document has booted, false when the view
+  // went away first or never answered.
+  whenReady(view) {
+    if (!view?.ready || !this.views().includes(view)) return Promise.resolve(false);
+    if (this.appFor(view)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), READY_TIMEOUT_MS);
+      view.ready.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+    });
+  }
+
   // ---- focus ----
 
-  // `target` is a view, a child window (the iframe's contentWindow, which is
-  // how an embedded document names itself) or null for the primary.
   activate(target) {
-    const view = this.viewFor(target) || this.primary;
-    if (this.active === view) return;
+    const view = this.viewFor(target);
+    if (!view || this.active === view) return;
     this.active = view;
-    const secondary = !view.primary;
-    if (secondary && !this.companionClaimed) claimFocus("companion");
-    if (!secondary && this.companionClaimed) releaseFocus("companion");
-    this.companionClaimed = secondary;
     for (const each of this.views()) {
       each.el.classList.toggle("active", each === view);
-      each.frame?.contentWindow?.quicktermView?.suspend(each !== view);
+      try { each.frame?.contentWindow?.quicktermView?.suspend(each !== view); } catch (_) { /* loading */ }
     }
     this._persist();
-    window.quicktermChrome?.refresh();
+    window.quicktermChrome?.refreshSoon?.();
   }
 
+  // While a shell overlay (palette, panel, menu, sidebar confirm or rename)
+  // owns the keyboard, the view only becomes active and waits as
+  // pendingFocus: contentWindow.focus() would pull the keyboard out of the
+  // overlay into the terminal behind it. The overlay's own hand-back focuses
+  // the active view once it releases.
   focusView(view) {
+    if (!view) return;
     this.activate(view);
-    if (view.primary) this.focus();
-    else {
-      try {
-        view.frame.contentWindow.focus();
-        view.frame.contentWindow.quicktermView?.app.refocusTerm();
-      } catch (_) { /* not loaded yet */ }
+    if (focusOwners().length) {
+      this.pendingFocus = view;
+      return;
     }
+    if (this.pendingFocus === view) this.pendingFocus = null;
+    try {
+      view.frame.contentWindow.focus();
+      view.frame.contentWindow.quicktermView?.app.refocusTerm();
+    } catch (_) { /* not loaded yet */ }
   }
 
-  // The view showing `name`, brought back from zoom if needed. False when
-  // no view shows it.
-  focusWorkspace(name) {
-    const view = this.views().find((each) => this.nameOf(each) === name);
-    if (!view) return false;
+  _unzoomFor(view) {
     if (this.zoomed && this.zoomed !== view) {
       this.zoomed = null;
       this.layout();
     }
+  }
+
+  // The view showing `name`, brought back from zoom if needed. False when
+  // no view shows it. A scratch view also answers to its label.
+  focusWorkspace(name) {
+    const view = this.viewForWorkspace(name) || this.scratchViewLabelled(name);
+    if (!view) return false;
+    this._unzoomFor(view);
     this.focusView(view);
     return true;
   }
 
+  // The view whose pane shows session `id`, focused on that pane.
+  focusSession(id) {
+    const view = this.viewForSession(id);
+    if (!view) return false;
+    this._unzoomFor(view);
+    this.focusView(view);
+    this.appFor(view)?.focusSession(id);
+    return true;
+  }
+
+  // The scratch view a person calls `label`, or null. Only scratch views:
+  // a saved workspace is found by its name, never by a label.
+  scratchViewLabelled(label) {
+    if (!label) return null;
+    return this.views().find((each) => isScratchWorkspace(this.workspaceOf(each)) && this.nameOf(each) === label) || null;
+  }
+
   // ---- open / close / zoom ----
 
-  async open(name, { anchorWindow = null, anchor = null } = {}) {
-    if (this.busy) return false;
-    const shown = name && this.views().find((view) => this.nameOf(view) === name);
-    if (shown) {
-      this.zoomed = null;
-      this.layout();
-      this.focusView(shown);
-      this.error(`"${name}" is already shown in this window.`);
-      return false;
-    }
-    const beside = this.viewFor(anchor || anchorWindow) || this.active || this.primary;
-    this.busy = true;
+  // One operation at a time, in the order asked; a failure does not stop
+  // the ones queued behind it.
+  _serial(task) {
+    const run = this.queue.then(task, task);
+    this.queue = run.then(() => {}, () => {});
+    return run;
+  }
+
+  // Opens `name` (null for a new scratch view) beside the active view, or
+  // focuses the view that already shows it. Resolves with the view once its
+  // document has booted, or false when nothing was opened.
+  async open(name, options = {}) {
+    const shown = name && this.viewForWorkspace(name);
+    const view = shown ? this._focusShown(shown) : await this._serial(() => this._open(name, options));
+    if (!view) return false;
+    await this.whenReady(view);
+    return view;
+  }
+
+  _focusShown(view) {
+    this._unzoomFor(view);
+    this.focusView(view);
+    return view;
+  }
+
+  async _open(name, { anchorWindow = null, anchor = null, cwd = null, first = false } = {}) {
+    // Another open of the same workspace may have finished while this waited.
+    const shown = name && this.viewForWorkspace(name);
+    if (shown) return this._focusShown(shown);
+    const beside = this.viewFor(anchor || anchorWindow) || this.active;
+    let view = null;
     try {
-      const view = await this._claimView(name, this.views().map((each) => each.color));
-      const from = this.zoomed && this.zoomed !== beside
-        ? this._rectOf(this.zoomed)
-        : this._rectOf(beside);
+      view = await this._claimView(name, this.views().map((each) => each.color), { cwd, first });
+      const from = !beside ? this._stageRect()
+        : this.zoomed && this.zoomed !== beside ? this._rectOf(this.zoomed) : this._rectOf(beside);
       this.zoomed = null;
       this.root = insertBeside(this.root, beside, view, dwindleDir(from));
       this.stage.append(view.el);
       this.pendingFocus = view;
-      this.layout({ entering: view, from });
-      this.activate(beside);
-      return true;
+      this.layout({ entering: beside ? view : null, from });
+      // The keyboard stays where it is until the new document can take it;
+      // ready() hands it over.
+      this.activate(beside || view);
     } catch (error) {
-      this.error(error?.detail || `Could not open "${name}" here. It may already be open elsewhere.`);
+      this.error(error?.detail || (name
+        ? `Could not open "${name}" here. It may already be open elsewhere.`
+        : "Could not open a scratch view here."));
       return false;
-    } finally {
-      this.busy = false;
     }
+    return view;
   }
 
   // Claim `name` for a new view and build it, iframe included, without
   // placing it: the caller decides where it goes in the tree and appends it
   // to the stage exactly once. Throws when the registry refuses the claim.
-  async _claimView(name, usedColors) {
+  async _claimView(name, usedColors, { cwd = null, first = false } = {}) {
     // Reserve first: a failed registry must never create two layout writers.
-    const info = await api.registerWindow({ workspace: name || null, title: `Side view: ${name || "scratch"}` });
+    const parent = this.parentId() || undefined;
+    const info = await api.registerWindow({ workspace: name || null, title: `View: ${name || "scratch"}`, parent });
     if (!info?.id) throw new Error("Missing workspace view identity");
+    const id = String(info.id);
+    const scratchLabels = window.quicktermChrome?.scratchLabels;
     const view = this._makeView({
-      primary: false,
-      color: pickViewColor(usedColors),
-      label: name || nextScratchLabel([...this.names(), ...(window.quicktermChrome?.scratchLabels?.values() || [])]),
-      id: String(info.id),
+      color: pickViewColor(usedColors, name),
+      label: name || nextScratchLabel([
+        ...this.names(), ...(scratchLabels?.values() || []), ...(this.reservedNames() || []),
+      ]),
+      id,
+      workspace: name || `scratch-view-${id}`,
     });
-    if (!name) window.quicktermChrome?.scratchLabels?.set(`scratch-view-${info.id}`, view.label);
+    if (!name) scratchLabels?.set(view.workspace, view.label);
     view.frame = document.createElement("iframe");
     view.frame.title = `Workspace: ${view.label}`;
-    view.frame.src = companionUrl(location.pathname, name, info.id, api.token());
-    view.frame.addEventListener("load", () => {
-      this.update();
-      // The newest view is where the work is about to happen, so it gets
-      // the keyboard, exactly as a tiling window manager focuses the window
-      // it just opened.
-      if (this.pendingFocus === view) {
-        this.pendingFocus = null;
-        this.focusView(view);
-      }
-    });
+    view.frame.src = companionUrl(location.pathname, name, id, api.token(), { cwd, first });
+    // The newest view is where the work is about to happen, so it gets the
+    // keyboard once its document is ready (see ready()), exactly as a tiling
+    // window manager focuses the window it just opened.
+    view.frame.addEventListener("load", () => this.update());
     view.el.append(view.frame);
     return view;
   }
 
-  focusSession(id) {
-    for (const view of this.views()) {
-      const app = (view.primary ? window : view.frame?.contentWindow)?.quicktermView?.app;
-      if (!app?.attachedSessionIds().includes(id)) continue;
-      if (this.zoomed && this.zoomed !== view) {
-        this.zoomed = null;
-        this.layout();
-      }
-      this.focusView(view);
-      app.focusSession(id);
-      return true;
-    }
-    return false;
+  // Rebuild a whole arrangement in one step, where open() would only place
+  // one view by dwindle. `tree` is a split tree of {workspace} leaves, as
+  // restorePlan() returns it. Each workspace is claimed through the same
+  // registry path open() uses, one after another; a refused claim drops that
+  // leaf and its split collapses. Views are built where they will stay: each
+  // element is appended to the stage once and only its box is written
+  // afterwards.
+  rebuild(tree, options = {}) {
+    return this._serial(() => this._rebuild(tree, options));
   }
 
-  // Rebuild a whole arrangement around the primary in one step, where open()
-  // would only place one view by dwindle. `tree` is a split tree whose leaves
-  // are {primary:true} or {workspace}, as restorePlan() returns it. Each
-  // workspace is claimed through the same registry path open() uses, one
-  // after another; a refused claim drops that leaf and its split collapses.
-  // Views are built where they will stay: each element is appended to the
-  // stage once and only its box is written afterwards.
-  async rebuild(tree, { active = null, zoomed = null } = {}) {
+  async _rebuild(tree, { active = null, zoomed = null } = {}) {
     const result = { restored: [], failed: [] };
-    if (this.busy || this.views().length !== 1 || !tree) return result;
-    this.busy = true;
-    try {
-      const claimed = new Map();
-      for (const descriptor of leaves(tree)) {
-        if (descriptor.primary) continue;
-        const name = descriptor.workspace;
-        try {
-          // The iframe this view had before a reload is gone, but its claim
-          // outlives it: its goodbye on pagehide rarely leaves in time, and
-          // the registry keeps an entry for its whole TTL, so the claim below
-          // was refused as "open in another window". The id was minted for
-          // that view alone and nothing else holds it (a rebuild only runs
-          // while the primary is the only view), so releasing it is safe;
-          // after a real restart the registry is empty and this is a no-op.
-          if (descriptor.window) await api.unregisterWindow(descriptor.window).catch(() => {});
-          const used = [this.primary.color, ...[...claimed.values()].map((view) => view.color)];
-          claimed.set(name, await this._claimView(name, used));
-          result.restored.push(name);
-        } catch (_) {
-          result.failed.push(name);
-        }
+    if (this.views().length || !tree) return result;
+    const claimed = new Map();
+    for (const descriptor of leaves(tree)) {
+      const name = descriptor.workspace;
+      try {
+        // The iframe this view had before a reload is gone, but its claim
+        // outlives it: its goodbye on pagehide rarely leaves in time, and
+        // the registry keeps an entry for its whole TTL, so the claim below
+        // was refused as "open in another window". The id was minted for
+        // that view alone and nothing else holds it (a rebuild only runs
+        // while no view is open), so releasing it is safe; after a real
+        // restart the registry is empty and this is a no-op.
+        if (descriptor.window) await api.unregisterWindow(descriptor.window).catch(() => {});
+        const used = [...claimed.values()].map((view) => view.color);
+        claimed.set(name, await this._claimView(name, used));
+        result.restored.push(name);
+      } catch (_) {
+        result.failed.push(name);
       }
-      if (!claimed.size) return result;
-      const root = mapLeaves(tree, (descriptor) =>
-        (descriptor.primary ? this.primary : claimed.get(descriptor.workspace) || null));
-      if (!root || !leaves(root).includes(this.primary)) return result;
-      this.root = root;
-      for (const view of claimed.values()) this.stage.append(view.el);
-      const find = (descriptor) => (descriptor?.primary ? this.primary : claimed.get(descriptor?.workspace) || null);
-      this.zoomed = find(zoomed);
-      const focused = find(active) || this.primary;
-      this.layout({ animate: false });
-      this.activate(focused);
-      // An iframe cannot take the keyboard before its document exists; its
-      // load handler hands it over. The primary already holds it.
-      if (!focused.primary) this.pendingFocus = focused;
-      return result;
-    } finally {
-      this.busy = false;
     }
+    if (!claimed.size) return result;
+    this.root = mapLeaves(tree, (descriptor) => claimed.get(descriptor.workspace) || null);
+    for (const view of claimed.values()) this.stage.append(view.el);
+    const find = (descriptor) => claimed.get(descriptor?.workspace) || null;
+    this.zoomed = find(zoomed);
+    const focused = find(active) || leaves(this.root)[0];
+    this.layout({ animate: false });
+    this.activate(focused);
+    // An iframe cannot take the keyboard before its document exists;
+    // ready() hands it over.
+    this.pendingFocus = focused;
+    return result;
   }
 
   // Once per boot: read the stored arrangement, rebuild what can come back,
   // and from then on keep the store current. Nothing is said about a view
-  // that stayed away unless every one of them did.
-  async restoreSaved({ exists = () => true } = {}) {
+  // that stayed away unless every one of them did. `stored` is true when a
+  // version 2 record was there, which means the window was already migrated.
+  async restoreSaved({ exists = () => true, rememberedWorkspace = null } = {}) {
     if (!this.store) return null;
-    let result = null;
+    let result = { restored: [], failed: [], stored: false };
     try {
-      const plan = restorePlan(this.store.load(), { exists, primaryName: this.current() });
-      // Something was tiled by hand before the restore got here; that wins.
-      if (!plan || this.views().length !== 1) return null;
-      result = plan.tree?.type === "split"
-        ? await this.rebuild(plan.tree, plan)
-        : { restored: [], failed: [] };
+      const plan = restorePlan(this.store.load(), { exists, rememberedWorkspace });
+      // Something was opened by hand before the restore got here; that wins.
+      if (!plan || this.views().length) return result;
+      result = { ...await this.rebuild(plan.tree, plan), stored: !plan.migrated };
       const gone = plan.skipped.filter((item) => item.reason === "missing").map((item) => item.workspace);
       const message = restoreFailureMessage(result.restored, [...gone, ...result.failed]);
       if (message) this.error(message);
@@ -534,31 +485,42 @@ export class WorkspaceViews {
     return result;
   }
 
-  async close(view) {
-    if (!view || view.primary || this.busy || !this.views().includes(view)) return false;
+  // Any view closes the same way: its document saves, retains its terminals
+  // (a scratch view only those holding work, lifecycle.closeView) and
+  // releases its claim, then the iframe goes. Nothing is killed.
+  close(view) {
+    return this._serial(() => this._close(view));
+  }
+
+  async _close(view) {
+    if (!view || !this.views().includes(view)) return false;
     const child = view.frame?.contentWindow?.quicktermView;
     if (!child) {
       this.error("That workspace view is still loading. Try closing it again once it has loaded.");
       return false;
     }
-    this.busy = true;
     view.closeButton.disabled = true;
     try {
       if (!await child.close()) {
         this.error("That workspace is switching. Wait for it to finish before closing its view.");
         return false;
       }
+      // The view that inherits the space inherits the keyboard.
+      const parent = findLeaf(this.root, view)?.parent;
+      const heir = parent ? leaves(parent.children.find((node) => node.pane !== view))[0] : null;
       this.root = removeLeaf(this.root, view);
       if (this.zoomed === view) this.zoomed = null;
-      if (this.active === view) this.activate(this.primary);
+      view.markReady(false);
+      const wasActive = this.active === view;
+      if (wasActive) this.active = null;
       this.layout({ leaving: view });
-      this.focus();
+      if (wasActive && heir) this.focusView(heir);
+      window.quicktermChrome?.refreshSoon?.();
       return true;
     } catch (error) {
       this.error(error?.detail || "Could not save that workspace. Its view remains open.");
       return false;
     } finally {
-      this.busy = false;
       view.closeButton.disabled = false;
     }
   }
@@ -567,6 +529,7 @@ export class WorkspaceViews {
   // same gesture again brings them back. Opening a new view unzooms.
   zoom(view) {
     const target = this.viewFor(view) || this.active;
+    if (!target) return;
     this.zoomed = this.zoomed === target ? null : target;
     this.layout();
     this.focusView(target);
@@ -612,6 +575,8 @@ export class WorkspaceViews {
     this.stage.classList.toggle("multiple", multiple);
     this.stage.classList.toggle("zoomed", Boolean(this.zoomed));
     this.stage.classList.toggle("still", still);
+    this.stage.classList.toggle("empty", !views.length);
+    this.empty.hidden = views.length > 0;
     if (leaving) {
       leaving.el.classList.add("leaving");
       leaving.el.hidden = still;
@@ -737,10 +702,27 @@ export class WorkspaceViews {
 
   // ---- the view element ----
 
-  _makeView({ primary, color, label, id = null }) {
-    const view = { id, primary, color, label, frame: null };
+  // The one block an empty stage shows. It is content, not a chrome bar.
+  _emptyState(newScratch) {
+    const block = document.createElement("div");
+    block.className = "workspace-views-empty";
+    const text = document.createElement("p");
+    text.textContent = EMPTY_STAGE_TEXT;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "New scratch";
+    button.title = "Open a new scratch view";
+    button.setAttribute("aria-label", button.title);
+    button.addEventListener("click", () => newScratch());
+    block.append(text, button);
+    return block;
+  }
+
+  _makeView({ color, label, id = null, workspace = null }) {
+    const view = { id, color, label, workspace, frame: null };
+    view.ready = new Promise((resolve) => { view.markReady = resolve; });
     view.el = document.createElement("section");
-    view.el.className = `workspace-view${primary ? " workspace-view-primary active" : ""}`;
+    view.el.className = "workspace-view";
     view.el.style.setProperty("--workspace-color", color);
     view.header = document.createElement("header");
     view.header.className = "workspace-view-heading";
@@ -750,14 +732,9 @@ export class WorkspaceViews {
     view.nameEl = document.createElement("strong");
     view.nameEl.textContent = label;
     view.zoomButton = this._button("maximize", "Show only this workspace view", () => this.zoom(view));
-    view.header.append(dot, view.nameEl, view.zoomButton);
-    if (!primary) {
-      view.closeButton = this._button("x", "Save and close this view; its terminals keep running", () => this.close(view));
-      view.header.append(view.closeButton);
-      view.el.addEventListener("pointerdown", () => this.activate(view), true);
-    } else {
-      view.closeButton = null;
-    }
+    view.closeButton = this._button("x", "Save and close this view; its terminals keep running", () => this.close(view));
+    view.header.append(dot, view.nameEl, view.zoomButton, view.closeButton);
+    view.el.addEventListener("pointerdown", () => this.activate(view), true);
     view.el.append(view.header);
     this._wireDrag(view);
     return view;

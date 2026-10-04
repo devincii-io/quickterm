@@ -1,7 +1,8 @@
 // What the keyboard, the palette and the pane header do to the focused pane:
 // split, new terminal, zoom, rename, detach (retain, never kill), the
-// confirmed kill, kill-all, snippets, and handing the keyboard back. The
-// returned object is spread into the app facade under these same names.
+// confirmed kill, this view's share of the shell's kill-all, snippets, and
+// handing the keyboard back. The returned object is spread into the app
+// facade under these same names.
 
 import { broadcastNotice, broadcastTargets } from "./broadcast.js";
 import { terminalMayFocus } from "./focus.js";
@@ -10,8 +11,10 @@ import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
 export function createPaneCommands({
   api, state, layout,
   spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
-  removeSessionsFromSavedWorkspaces, scheduleWorkspaceSave, refreshStatusSoon, showError,
+  scheduleWorkspaceSave, persistCurrentWorkspace, refreshStatusSoon, showError,
 }) {
+  const paneFor = (id) => layout.panes().find((pane) => pane.session?.id === id) || null;
+
   return {
     splitH: () => {
       const source = layout.focused;
@@ -125,23 +128,65 @@ export function createPaneCommands({
         refreshStatusSoon();
       }, "Kill", { focusConfirm: keyboard });
     },
-    killAllSessions: async () => {
-      const result = await api.killAllSessions();
-      const killedIds = new Set(result?.killed_ids || []);
-      for (const pane of [...layout.panes()]) {
-        if (!pane.session || !killedIds.has(pane.session.id)) continue;
-        forgetSession(pane.session.id);
-        layout.closePane(pane);
+    // The shell's sidebar kill, routed here because this view holds or owns
+    // the terminal: its in-memory ownership drops the id before the next
+    // autosave could write it back. A real failure is thrown unchanged
+    // ({status, detail}) for the confirmation to show; a 404 means there is
+    // nothing left to stop, so it falls through like a verified kill.
+    killSessionById: async (id) => {
+      try {
+        await api.killSession(id);
+      } catch (error) {
+        if (!sessionAlreadyGone(error)) throw error;
       }
-      for (const sessionId of killedIds) forgetSession(sessionId);
-      await removeSessionsFromSavedWorkspaces(killedIds);
+      forgetSession(id);
+      const pane = paneFor(id);
+      if (pane) layout.closePane(pane);
       scheduleWorkspaceSave();
       refreshStatusSoon();
-      const failed = result?.failed_ids || [];
-      if (failed.length) {
-        showError(`${failed.length} terminal${failed.length === 1 ? "" : "s"} could not be stopped and ${failed.length === 1 ? "is" : "are"} still running.`);
+      return true;
+    },
+    // The sidebar's Detach: retain first, then close the pane that shows it.
+    // Never a kill. `forget` is the first half of moving the terminal to
+    // another view: this workspace lets go of it and says so on disk at once,
+    // so the backend drops its workspace tag before the other view attaches.
+    detachSessionById: async (id, { forget = false } = {}) => {
+      try {
+        await api.retainSession(id);
+      } catch (error) {
+        if (!sessionAlreadyGone(error)) throw error;
       }
-      return { killed: result?.killed || 0, failed: failed.length };
+      const pane = paneFor(id);
+      if (pane) layout.closePane(pane);
+      if (forget) {
+        forgetSession(id);
+        await persistCurrentWorkspace();
+      } else {
+        scheduleWorkspaceSave();
+      }
+      refreshStatusSoon();
+      return true;
+    },
+    // The shell's kill-all reaches every view with the ids the backend
+    // verified as stopped. Each view closes its panes on them and drops them
+    // from its in-memory ownership, so its next autosave cannot write them
+    // back. A terminal the backend could not stop is not in the list and
+    // stays where it is. Answers how many panes closed.
+    dropKilledSessions: (ids) => {
+      const killedIds = new Set(ids || []);
+      if (!killedIds.size) return 0;
+      // Forgotten before any pane closes, as in killSessionById, so a save
+      // the close sets off already leaves them out.
+      for (const sessionId of killedIds) forgetSession(sessionId);
+      let closed = 0;
+      for (const pane of [...layout.panes()]) {
+        if (!pane.session || !killedIds.has(pane.session.id)) continue;
+        layout.closePane(pane);
+        closed += 1;
+      }
+      scheduleWorkspaceSave();
+      refreshStatusSoon();
+      return closed;
     },
     focusedPaneName: () => layout.focused?.displayName() || null,
     // Snippets type straight into the focused terminal. Say where they went,

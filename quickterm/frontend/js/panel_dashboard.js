@@ -29,6 +29,29 @@ import {
 import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
 import { attentionText, sessionFolder } from "./launcher.js";
 
+// A miniature of a workspace's split layout for its card.
+export function layoutPreview(layout) {
+  const build = (node) => {
+    if (!node || node.type !== "split") {
+      const pane = make("span", "workspace-preview-pane");
+      pane.append(make("i", "", node && node.profile ? node.profile : "terminal"));
+      return pane;
+    }
+    const split = make("span", `workspace-preview-split ${node.dir === "v" ? "vertical" : "horizontal"}`);
+    const ratio = Math.max(20, Math.min(80, Math.round((node.ratio || 0.5) * 100)));
+    const children = node.children || [];
+    const first = build(children[0]);
+    const second = build(children[1]);
+    first.style.flex = `${ratio} 1 0`;
+    second.style.flex = `${100 - ratio} 1 0`;
+    split.append(first, second);
+    return split;
+  };
+  const preview = make("div", "workspace-preview");
+  preview.append(build(layout));
+  return preview;
+}
+
 // Sessions nobody claims are grouped under this label, which is also the signal
 // to the move/kill calls that there is no owning workspace to name.
 const UNASSIGNED = "Unassigned";
@@ -117,6 +140,18 @@ export async function renderDashboard() {
     this.bodyEl.append(this._dash.root);
   }
   applyDashboard.call(this, this._dash, data);
+  const reveal = this._revealWorkspace;
+  this._revealWorkspace = null;
+  if (reveal) revealWorkspaceCard(this, this._dash, reveal);
+}
+
+// The sidebar's "Workspace settings" lands here: the card of that workspace,
+// scrolled into view with its folder and logo editor open.
+function revealWorkspaceCard(panel, view, name) {
+  const card = [...view.grid.children].find((node) => itemFor(node)?.name === name);
+  if (!card) return;
+  card.scrollIntoView?.({ block: "center" });
+  openFolderEditor(panel, card, cardParts.get(card).editFolder);
 }
 
 function buildDashboard() {
@@ -495,11 +530,11 @@ function createWorkspaceCard(panel, index) {
   top.append(logo, title, badge);
 
   const folderLine = make("p", "workspace-card-folder");
-  const preview = panel._layoutPreview(null);
+  const preview = layoutPreview(null);
 
   const actions = make("div", "workspace-card-actions");
-  const load = panel._button("Open workspace", "card-open-button");
-  load.addEventListener("click", () => {
+  const open = panel._button("Open workspace", "card-open-button");
+  open.addEventListener("click", () => {
     panel.close();
     panel.app.loadWorkspace(itemFor(card).name);
   });
@@ -523,11 +558,11 @@ function createWorkspaceCard(panel, index) {
       if (panel.open === "dashboard") panel._dashboard();
     });
   });
-  actions.append(load, editFolder, remove);
+  actions.append(open, editFolder, remove);
 
   card.append(top, folderLine, preview, actions);
-  card.addEventListener("dblclick", () => load.click());
-  cardParts.set(card, { logo, title, badge, folderLine, preview, actions, layout: undefined });
+  card.addEventListener("dblclick", () => open.click());
+  cardParts.set(card, { logo, title, badge, folderLine, preview, actions, editFolder, layout: undefined });
   return card;
 }
 
@@ -539,8 +574,10 @@ function updateWorkspaceCard(panel, card, workspace, index) {
     && panel.app.currentWorkspace() === workspace.name;
   setClass(card, "current", isCurrent);
 
+  // Every view of this window counts, not only the active one.
+  const shown = (panel.app.openWorkspaces?.() || []).some((view) => (view?.workspace ?? view) === workspace.name);
   const panes = countPanes(layout);
-  setText(parts.badge, isCurrent ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
+  setText(parts.badge, isCurrent || shown ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
   setText(parts.title, workspaceLabel(workspace.name));
 
   const logo = workspace.data && workspace.data.logo;
@@ -566,7 +603,7 @@ function updateWorkspaceCard(panel, card, workspace, index) {
   const signature = JSON.stringify(layout ?? null);
   if (parts.layout !== signature) {
     parts.layout = signature;
-    const next = panel._layoutPreview(layout);
+    const next = layoutPreview(layout);
     card.replaceChild(next, parts.preview);
     parts.preview = next;
   }

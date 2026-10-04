@@ -1,8 +1,8 @@
-/* Workspace views (js/workspace_views.js): the primary document and any
-   number of iframes tiled in one window. Every view and divider is
-   absolutely positioned and only ever moved by writing its box, because an
-   iframe that changes parent reloads. The transition on the box is the
-   whole animation: a split, a drag or a close slides the neighbours over. */
+/* Workspace views (js/workspace_views.js): every workspace is an iframe
+   tiled in the shell document's stage. Every view and divider is absolutely
+   positioned and only ever moved by writing its box, because an iframe that
+   changes parent reloads. The transition on the box is the whole animation:
+   a split, a drag or a close slides the neighbours over. */
 
 .workspace-views { position: relative; grid-column: 2; min-width: 0; min-height: 0; height: 100%; overflow: hidden; background: var(--bg); }
 .workspace-view {
@@ -29,13 +29,42 @@
 .workspace-views.resizing .workspace-view-divider, .workspace-views.still .workspace-view-divider { transition: none; }
 .workspace-view.entering { opacity: 0; transform: scale(.985); }
 .workspace-view.leaving { opacity: 0; transform: scale(.97); pointer-events: none; }
-.workspace-view > #app { height: 100%; min-height: 0; flex: 1; }
-.workspace-view .launcher.sidebar { height: 100%; }
-.workspace-view > .workspace-shell { flex: 1; min-height: 0; width: 100%; }
 body.embedded #app, body.embedded.sidebar-collapsed #app, body.embedded.sidebar-hidden #app { grid-template-columns: minmax(0, 1fr); }
 body.embedded #app > .workspace-shell { grid-column: 1; }
 body.embedded .launcher.sidebar, body.embedded .float-launch { display: none; }
 .workspace-view iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--bg); }
+
+/* No view open: one centred block with the way back in. It is content on
+   the stage, not a bar. */
+.workspace-views-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  color: var(--muted);
+  font: 12px var(--mono);
+  text-align: center;
+}
+.workspace-views-empty p { margin: 0; }
+.workspace-views-empty button {
+  padding: 6px 14px;
+  border: 1px solid var(--line-hover);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.workspace-views-empty button:hover, .workspace-views-empty button:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+  outline: 0;
+}
 
 /* A lone view is the plain app: no border, no header. */
 .workspace-view-heading { display: none; }
@@ -52,7 +81,9 @@ body.embedded .launcher.sidebar, body.embedded .float-launch { display: none; }
   min-height: 27px;
   padding: 3px 4px 3px 9px;
   background: var(--surface);
-  color: var(--workspace-color);
+  /* Text owes 4.5:1; the view colour is held to 3:1, so it marks the border
+     and the dot, not the name. */
+  color: var(--text-soft);
   font: 11px var(--mono);
   border-bottom: 1px solid color-mix(in srgb, var(--workspace-color) 40%, var(--surface));
   cursor: grab;
@@ -98,4 +129,6 @@ body.pane-dragging .workspace-view-heading { cursor: grabbing; }
 .workspace-views [hidden] { display: none; }
 @media (forced-colors: active) {
   .multiple > .workspace-view, .workspace-view-heading { border-color: CanvasText; }
+  /* Forced colours paint the focus background away; the outline stays. */
+  .workspace-views-empty button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
 }

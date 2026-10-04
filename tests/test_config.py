@@ -74,23 +74,230 @@ def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
         name="project-agent",
         cmd="claude.exe",
         terminal_type="claude-code",
-        claude_mode="resume",
+        agent_mode="resume",
+        agent={"model": "opus", "permission_mode": "plan"},
     )])
     save_config(cfg)
 
     loaded = load_config().profiles[0]
     assert loaded.terminal_type == "claude-code"
-    assert loaded.claude_mode == "resume"
+    assert loaded.agent_mode == "resume"
+    assert loaded.agent == {"model": "opus", "permission_mode": "plan"}
+    assert not hasattr(loaded, "claude_mode")
 
-    loaded.claude_mode = "guess"
+    loaded.agent_mode = "guess"
+    with pytest.raises(ValueError, match="Claude launch mode"):
+        save_config(AppConfig(profiles=[loaded]))
+    loaded.agent_mode = "fork"  # a Codex mode
     with pytest.raises(ValueError, match="Claude launch mode"):
         save_config(AppConfig(profiles=[loaded]))
 
     # A Claude profile carries no folder at all. The workspace root supplies
     # one, and the spawn path refuses only when nothing resolves.
-    loaded.claude_mode = "continue"
+    loaded.agent_mode = "continue"
     save_config(AppConfig(profiles=[loaded]))
     assert not hasattr(load_config().profiles[0], "cwd")
+
+
+def test_a_pre_4_0_claude_mode_becomes_agent_mode_and_is_still_written(fake_appdata):
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text(json.dumps({"profiles": [
+        {"name": "agent", "cmd": "claude", "terminal_type": "claude-code", "claude_mode": "agents"},
+        {"name": "fresh", "cmd": "claude", "terminal_type": "claude-code",
+         "agent_mode": "new", "claude_mode": "resume"},
+    ]}), encoding="utf-8")
+    loaded = load_config()
+    assert [p.agent_mode for p in loaded.profiles] == ["agents", "new"]
+    save_config(loaded)
+    stored = json.loads((path / "config.json").read_text(encoding="utf-8"))["profiles"]
+    # An older build reads only claude_mode, so a downgrade keeps the mode.
+    assert [(p["agent_mode"], p["claude_mode"]) for p in stored] == [("agents", "agents"), ("new", "new")]
+
+
+def _parse_3x(binding):
+    """3.13's hotkeys.parse_binding grammar, frozen here: a downgrade runs it
+    on every stored shortcut and discards the whole config on a ValueError."""
+    tokens = [t.strip().lower() for t in binding.split("+")]
+    if not tokens or any(not t for t in tokens):
+        raise ValueError(binding)
+    *mods, key = tokens
+    modifiers = {"ctrl", "control", "alt", "shift", "win"}
+    if any(m not in modifiers for m in mods) or key in modifiers:
+        raise ValueError(binding)
+    named = {"grave", "backtick", "space", "tab", "esc", "escape", "enter", "return"}
+    if key in named or (key[0] == "f" and key[1:].isdigit() and 1 <= int(key[1:]) <= 24):
+        return
+    if len(key) == 1:
+        return
+    raise ValueError(f"unknown key: {key!r}")
+
+
+_V4_ONLY_KEYS = [
+    "minus", "equal", "comma", "period", "slash", "semicolon", "quote", "bracketleft",
+    "bracketright", "backslash", "left", "up", "right", "down", "home", "end", "pageup",
+    "pagedown", "insert", "delete", "numpad0", "numpad9",
+]
+
+
+@pytest.mark.parametrize("key", _V4_ONLY_KEYS)
+def test_a_4_0_shortcut_never_makes_the_config_unreadable_for_3_x(fake_appdata, key):
+    with pytest.raises(ValueError):
+        _parse_3x(f"ctrl+alt+{key}")
+    save_config(AppConfig(
+        summon_hotkey=f"ctrl+alt+{key}",
+        profiles=[Profile(name="a", cmd="cmd.exe", keybinding=f"ctrl+shift+{key}"),
+                  Profile(name="b", cmd="cmd.exe", keybinding="ctrl+alt+1")],
+    ))
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+
+    # What 3.x reads parses: the legacy fields are empty or legacy keys.
+    if stored["summon_hotkey"].strip():
+        _parse_3x(stored["summon_hotkey"])
+    for profile in stored["profiles"]:
+        if profile["keybinding"]:
+            _parse_3x(profile["keybinding"])
+    assert stored["summon_hotkey"] == "" and stored["summon_hotkey_v4"] == f"ctrl+alt+{key}"
+    assert stored["profiles"][0]["keybinding"] is None
+    assert stored["profiles"][1]["keybinding"] == "ctrl+alt+1"
+    assert "keybinding_v4" not in stored["profiles"][1]
+
+    # 4.0 reads its own key back.
+    loaded = load_config()
+    assert loaded.summon_hotkey == f"ctrl+alt+{key}"
+    assert [p.keybinding for p in loaded.profiles] == [f"ctrl+shift+{key}", "ctrl+alt+1"]
+
+
+def test_a_legacy_shortcut_is_stored_where_3_x_reads_it(fake_appdata):
+    save_config(AppConfig(summon_hotkey="ctrl+alt+grave"))
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+    assert stored["summon_hotkey"] == "ctrl+alt+grave"
+    assert "summon_hotkey_v4" not in stored
+
+
+def test_only_claude_profiles_carry_the_legacy_key(fake_appdata):
+    save_config(AppConfig(profiles=[
+        Profile(name="cx", cmd="codex", terminal_type="codex", agent_mode="fork"),
+        Profile(name="sh", cmd="cmd.exe"),
+    ]))
+    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
+    assert all("claude_mode" not in p for p in stored["profiles"])
+    assert stored["profiles"][0]["agent_mode"] == "fork"
+
+
+@pytest.mark.parametrize(("agent", "message"), [
+    ({"colour": "blue"}, "unknown agent option: colour"),
+    ({"model": "x y"}, "model"),
+    ({"effort": "huge"}, "effort"),
+    ({"bypass": "true", "sandbox": "read-only"}, "bypass replaces approval and sandbox"),
+])
+def test_agent_options_are_checked_on_save(fake_appdata, agent, message):
+    kind = "codex" if "bypass" in agent else "claude-code"
+    profile = Profile(name="a", cmd="", terminal_type=kind, agent=agent)
+    with pytest.raises(ValueError, match=f'Terminal profile "a": .*{message}'):
+        save_config(AppConfig(profiles=[profile]))
+
+
+def test_window_and_overlay_default_and_round_trip(fake_appdata):
+    cfg = load_config()
+    assert cfg.window == cfgmod.WindowConfig(width=1280, height=800, remember_bounds=True)
+    assert cfg.overlay == cfgmod.OverlayConfig(
+        enabled=False, edge="top", width_pct=100, height_pct=50, always_on_top=True,
+        hide_on_blur=True, monitor="cursor", animate=True,
+    )
+    cfg.window.width = 1600
+    cfg.overlay.enabled = True
+    cfg.overlay.edge = "bottom"
+    cfg.overlay.monitor = "primary"
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.window.width == 1600
+    assert (loaded.overlay.enabled, loaded.overlay.edge, loaded.overlay.monitor) == (True, "bottom", "primary")
+
+
+def test_a_config_from_before_window_settings_loads_with_defaults(fake_appdata):
+    path = fake_appdata / "quickterm"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text(json.dumps({"port": 7001, "voice": {"enabled": False}}), encoding="utf-8")
+    cfg = load_config()
+    assert cfg.port == 7001  # loaded, not quarantined
+    assert cfg.window == cfgmod.WindowConfig()
+    assert cfg.overlay == cfgmod.OverlayConfig()
+
+
+@pytest.mark.parametrize(("section", "field", "value", "message"), [
+    ("window", "width", 759, "Window width must be between 760 and 16384"),
+    ("window", "height", 16385, "Window height must be between 480 and 16384"),
+    ("window", "width", True, "Window width must be an integer"),
+    ("window", "remember_bounds", "yes", "Remember window size must be true or false"),
+    ("overlay", "width_pct", 29, "Overlay width must be between 30 and 100"),
+    ("overlay", "height_pct", 101, "Overlay height must be between 20 and 100"),
+    ("overlay", "edge", "left", "Overlay edge must be top or bottom"),
+    ("overlay", "monitor", "second", "Overlay monitor must be cursor or primary"),
+    ("overlay", "animate", 1, "Overlay animation must be true or false"),
+])
+def test_window_and_overlay_ranges(fake_appdata, section, field, value, message):
+    cfg = AppConfig()
+    setattr(getattr(cfg, section), field, value)
+    with pytest.raises(ValueError, match=message):
+        save_config(cfg)
+
+
+def test_window_bounds_are_inclusive(fake_appdata):
+    cfg = AppConfig()
+    cfg.window.width, cfg.window.height = 760, 16384
+    cfg.overlay.width_pct, cfg.overlay.height_pct = 30, 20
+    save_config(cfg)
+
+
+@pytest.mark.parametrize(("fields", "message"), [
+    ({"ssh_host": "-oProxyCommand=calc"}, "host must not start with -"),
+    ({"ssh_host": "two words", "ssh_client": "openssh"}, "host must not contain spaces"),
+    ({"ssh_user": "-l"}, "username must not start with -"),
+    ({"ssh_user": "-l", "ssh_client": "putty"}, "username must not start with -"),
+    ({"ssh_user": "a\tb", "ssh_client": "openssh"}, "username must not"),
+    ({"ssh_client": "dropbear"}, "SSH client must be openssh or putty"),
+    ({"ssh_proxy_jump": "jump"}, "ProxyJump needs the OpenSSH client"),
+    ({"ssh_proxy_jump": "jump", "ssh_client": "putty"}, "ProxyJump needs the OpenSSH client"),
+    ({"ssh_proxy_jump": "-J", "ssh_client": "openssh"}, "ProxyJump must be"),
+    ({"ssh_proxy_jump": "a b", "ssh_client": "openssh"}, "ProxyJump must be"),
+    ({"ssh_key": r"C:\k\id.PPK", "ssh_client": "openssh"}, "OpenSSH cannot read PuTTY .ppk keys"),
+])
+def test_ssh_fields_that_could_become_options_are_refused(fake_appdata, fields, message):
+    profile = Profile(name="box", cmd="", terminal_type="ssh", ssh_host="box")
+    for key, value in fields.items():
+        setattr(profile, key, value)
+    with pytest.raises(ValueError, match=f'Terminal profile "box": {message}'):
+        save_config(AppConfig(profiles=[profile]))
+
+
+def test_pre_40_putty_profile_with_spaces_still_loads(fake_appdata):
+    # plink loads a saved session whose name matches the host, and Windows
+    # account names may hold a space; 3.x accepted both, so loading must too.
+    path = cfgmod.config_dir() / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"profiles": [{
+        "name": "prod", "cmd": "", "terminal_type": "ssh",
+        "ssh_host": "Prod Server", "ssh_user": "John Smith",
+    }]}), encoding="utf-8")
+    loaded = load_config().profiles[0]
+    assert (loaded.ssh_host, loaded.ssh_user) == ("Prod Server", "John Smith")
+    assert not list(path.parent.glob("config.invalid-*.json"))
+
+
+def test_openssh_profile_with_jump_round_trips(fake_appdata):
+    save_config(AppConfig(profiles=[Profile(
+        name="box", cmd="", terminal_type="sftp", ssh_host="devbox", ssh_client="openssh",
+        ssh_proxy_jump="admin@bastion:2222,[fe80::1%eth0]", ssh_key="~/.ssh/id_ed25519",
+    )]))
+    loaded = load_config().profiles[0]
+    assert (loaded.ssh_client, loaded.ssh_proxy_jump) == ("openssh", "admin@bastion:2222,[fe80::1%eth0]")
+    # A pre-4.0 profile has no client and keeps PuTTY with its .ppk key.
+    legacy = cfgmod.config_from_dict({"profiles": [
+        {"name": "old", "cmd": "", "terminal_type": "ssh", "ssh_host": "h", "ssh_key": "k.ppk"},
+    ]})
+    assert legacy.profiles[0].ssh_client is None
+    cfgmod.validate_config(legacy)
 
 
 def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
@@ -478,6 +685,9 @@ def test_save_rejects_wrong_global_field_types(fake_appdata, field, value, messa
         ("terminal_type", [], "terminal type"),
         ("wsl_distro", 24, "WSL distribution"),
         ("start_command", ["echo", "ready"], "startup command"),
+        ("agent_mode", 3, "launch mode"),
+        ("agent", [], "agent options"),
+        ("ssh_client", 1, "SSH client"),
         ("autostart", "false", "autostart"),
         ("keybinding", 0, "shortcut"),
     ],

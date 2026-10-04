@@ -14,7 +14,7 @@
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--surface);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  box-shadow: var(--shadow-md);
   color: var(--text);
   font: 11px var(--mono);
   outline: 0;
@@ -48,13 +48,14 @@
 .qt-menu-item.disabled { color: var(--muted); cursor: default; }
 .qt-menu-item.danger { color: var(--danger); }
 .qt-menu-item.danger.active { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
-.qt-menu-mark { flex: none; width: 12px; display: grid; place-items: center; color: var(--accent); }
+.qt-menu-mark { flex: none; width: 12px; display: grid; place-items: center; color: var(--accent-text); }
 .qt-menu-item.disabled .qt-menu-mark { color: var(--muted); }
 .qt-menu-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--menu-color, var(--accent)); }
 .qt-menu-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .qt-menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qt-menu-detail { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .qt-menu-hint { flex: none; max-width: 45%; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.qt-menu-trailing { display: inline-flex; flex: none; align-items: center; }
 /* A second verb on the row, visible only while the row is the active one,
    so the list stays a list until the pointer or the keyboard lands on it. */
 .qt-menu-actions { flex: none; display: flex; gap: 1px; opacity: 0; transition: opacity .1s ease; }

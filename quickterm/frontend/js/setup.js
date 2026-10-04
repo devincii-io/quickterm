@@ -51,9 +51,7 @@ export function renderSetup(host) {
     next.addEventListener("click", () => {
       if (step < steps.length - 1) { step++; draw(); return; }
       finish();
-      this.settingsTab = "connections";
-      this.connectionEditor = { choosing: true };
-      this.show("settings");
+      this.showConfig("terminal", null);
     });
     footer.append(skip, make("span", "footer-spacer"), back, next);
     host.append(footer);

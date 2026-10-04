@@ -35,8 +35,10 @@ from uuid import uuid4
 # case.
 DEFAULT_TTL_S = 150.0
 # Windows are cheap but not free (one WebView2 each). A ceiling keeps a runaway
-# caller from opening them until the machine gives up.
-DEFAULT_MAX_WINDOWS = 12
+# caller from opening them until the machine gives up. Every native window's
+# shell document and each workspace view inside it register on their own, so
+# one window with a handful of views already takes several entries.
+DEFAULT_MAX_WINDOWS = 32
 MAX_ID_CHARS = 64
 MAX_TITLE_CHARS = 120
 MAX_WORKSPACE_CHARS = 200
@@ -80,6 +82,10 @@ class WindowInfo:
     primary: bool = False
     created: float = 0.0
     last_seen: float = 0.0
+    # The shell window an embedded workspace view lives in. A view dies with
+    # its native window, so forgetting the shell forgets its views, and a view
+    # is never the primary window.
+    parent: str | None = None
 
 
 def new_window_id() -> str:
@@ -94,6 +100,7 @@ def as_payload(info: WindowInfo) -> dict:
         "workspace": info.workspace,
         "title": info.title,
         "primary": info.primary,
+        "parent": info.parent,
     }
 
 
@@ -194,15 +201,20 @@ class WindowRegistry:
         workspace: Any = KEEP,
         title: object = "",
         primary: bool = False,
+        parent: object = None,
         now: float | None = None,
     ) -> WindowInfo:
         """Add a window, or refresh one that reloaded under the same id.
 
         Re-registering is deliberately idempotent: a page reload must not 409
         against its own claim, and must not be counted twice against the cap.
+        `parent` names the shell window of an embedded view; once set it stays.
         """
         name = KEEP if workspace is KEEP else normalize_workspace(workspace)
         clean_title = _clean(title, MAX_TITLE_CHARS)
+        if parent is not None and not isinstance(parent, str):
+            raise ValueError("parent must be a window id or null")
+        parent_id = _clean(parent, MAX_ID_CHARS) or None
         with self._lock:
             stamp = self._prune_locked(now)
             wid = _clean(window_id, MAX_ID_CHARS) or new_window_id()
@@ -218,8 +230,11 @@ class WindowRegistry:
                 info.workspace = name
             if clean_title:
                 info.title = clean_title
+            if parent_id and parent_id != wid:
+                info.parent = parent_id
+                info.primary = False
             info.last_seen = stamp
-            if primary:
+            if primary and info.parent is None:
                 self._set_primary_locked(wid)
             self._ensure_primary_locked()
             return replace(info)
@@ -249,10 +264,16 @@ class WindowRegistry:
 
     def forget(self, window_id: str, *, now: float | None = None) -> bool:
         """Drop a window that is definitely gone (its native shell closed, or
-        the page said goodbye). Frees the claim without waiting out the TTL."""
+        the page said goodbye). Frees the claim without waiting out the TTL,
+        its embedded views' claims included: their own goodbye on pagehide is
+        best effort, and they cannot outlive the window that hosts them."""
         with self._lock:
             self._prune_locked(now)
-            dropped = self._windows.pop(_clean(window_id, MAX_ID_CHARS), None) is not None
+            wid = _clean(window_id, MAX_ID_CHARS)
+            dropped = self._windows.pop(wid, None) is not None
+            for child_id, info in list(self._windows.items()):
+                if info.parent == wid:
+                    del self._windows[child_id]
             self._ensure_primary_locked()
             return dropped
 
@@ -263,6 +284,9 @@ class WindowRegistry:
         for wid, info in list(self._windows.items()):
             if stamp - info.last_seen > self._ttl:
                 del self._windows[wid]
+        # A view whose shell expired is not pruned with it: after a sleep the
+        # shell and its views each re-register on their own, in either order,
+        # and a dead view's own heartbeat stops anyway.
         self._ensure_primary_locked()
         return stamp
 
@@ -297,9 +321,11 @@ class WindowRegistry:
 
         The primary window is the one the Explorer handoff and the summon
         hotkey aim at, so losing it to a close would strand those paths; the
-        oldest survivor inherits the role.
+        oldest survivor inherits the role. Only a shell window can: an
+        embedded view runs no launch loop, so a primary view would leave
+        Explorer handoffs unclaimed.
         """
-        live = self._ordered_locked()
+        live = [info for info in self._ordered_locked() if info.parent is None]
         if not live:
             return
         if any(info.primary for info in live):

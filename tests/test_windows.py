@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from quickterm.windows import (
+    DEFAULT_MAX_WINDOWS,
     DEFAULT_TTL_S,
     KEEP,
     TooManyWindows,
@@ -204,6 +205,21 @@ def test_window_limit_is_enforced_but_not_against_a_reload(registry):
     assert registry.register(window_id="w0", title="again").id == "w0"
 
 
+def test_the_default_limit_fits_a_shell_and_its_views_in_a_few_windows(clock):
+    # The shell document of every native window and each workspace view in
+    # it register on their own: two windows with fourteen views each must fit.
+    assert DEFAULT_MAX_WINDOWS == 32
+    registry = WindowRegistry(clock=clock)
+    for window in range(2):
+        registry.register(window_id=f"shell-{window}", primary=window == 0)
+        for view in range(14):
+            registry.register(window_id=f"view-{window}-{view}", workspace=f"ws-{window}-{view}")
+    registry.register(window_id="spare-1")
+    registry.register(window_id="spare-2")
+    with pytest.raises(TooManyWindows):
+        registry.register(window_id="one-too-many")
+
+
 def test_one_live_window_is_always_primary(registry):
     first = registry.register(window_id="a", primary=True)
     registry.register(window_id="b")
@@ -246,7 +262,34 @@ def test_snapshot_reports_ages_oldest_first(registry, clock):
 def test_payload_carries_no_timestamps(registry):
     payload = as_payload(registry.register(window_id="a", workspace="dev"))
     # Monotonic clocks mean nothing on the far side of the wire.
-    assert set(payload) == {"id", "workspace", "title", "primary"}
+    assert set(payload) == {"id", "workspace", "title", "primary", "parent"}
+
+
+def test_closing_a_shell_window_frees_its_views_claims(registry):
+    registry.register(window_id="shell1", primary=True)
+    registry.register(window_id="shell2")
+    registry.register(window_id="v1", workspace="alpha", parent="shell1")
+    registry.register(window_id="v3", workspace="gamma", parent="shell2")
+    # A view's own re-registration (its document says hello) keeps the link.
+    registry.register(window_id="v1")
+    assert registry.forget("shell1")
+    assert registry.owner_of("alpha") is None
+    assert registry.owner_of("gamma").id == "v3"
+    # The surviving shell inherits primary, never one of the views.
+    rows = {row["id"]: row for row in registry.snapshot()}
+    assert rows["shell2"]["primary"] is True
+    assert rows["v3"]["primary"] is False
+
+
+def test_a_view_is_never_primary(registry):
+    # Registered before its shell (a re-registration after a sleep can come
+    # in that order), asking for primary: still not primary.
+    registry.register(window_id="v1", workspace="alpha", parent="shell", primary=True)
+    assert row(registry, "v1")["primary"] is False
+    registry.register(window_id="shell")
+    assert row(registry, "shell")["primary"] is True
+    assert row(registry, "v1")["primary"] is False
+    assert registry.owner_of("alpha").id == "v1"
 
 
 def test_generated_ids_are_unique(registry):

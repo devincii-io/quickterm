@@ -10,7 +10,7 @@ import subprocess
 import sys
 from typing import Any
 
-from quickterm import secret_store
+from quickterm import overlay, secret_store
 from quickterm.config import validate_environment
 
 
@@ -78,8 +78,12 @@ def launch(spec: dict[str, Any]) -> None:
         executable = sys.executable
         argv = ["-m", "quickterm.app", "--elevated-spec", token]
     params = subprocess.list2cmdline(argv)
+    overlay.hold_open()
     result = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", executable, params, os.getcwd(), 1
     )
     if result <= 32:
         raise OSError(f"Windows elevation failed ({result})")
+    # ShellExecuteW returns only once the consent dialog is answered, which
+    # can outlast the first hold; the admin window comes up after this.
+    overlay.hold_open()

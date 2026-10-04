@@ -32,13 +32,19 @@ Scratch is an intentionally disposable workspace. It is saved only for the
 current backend lifetime and removed on startup and clean shutdown. Named
 workspaces persist layouts and IDs, but terminal transcripts never go to disk.
 
+A native window shows workspaces as equal views, each an iframe with its own
+layout and autosave. A view never switches to another workspace: opening one
+adds or focuses a view, and closing a view only detaches its terminals.
+
 ## Operation semantics
 
 | Operation | Process | Workspace ownership | Pane |
 |---|---|---|---|
 | `D` / `Alt+D` detach | kept alive and marked retained | kept | removed |
 | `X` / `Alt+W` kill | verified process-tree termination | removed on success | removed on success |
-| Switch workspace | kept | unchanged | layout is replaced and live IDs reattach |
+| Sidebar row Kill | verified process-tree termination, after the confirm popover | removed on success, by the view that owns it or from the saved workspace | an attached pane closes in its view; a 500 keeps the row with the error |
+| Open workspace view | kept | unchanged | a new view restores the layout and live IDs reattach; an open view is only focused |
+| Close workspace view | kept and marked retained | saved before the view goes | the view's panes are removed |
 | Move here and attach | kept | moved through workspace saves | attached here |
 | Restore missing ID | already gone | metadata remains until replaced or cleaned | unavailable; no fake history |
 | Quit QuickTerm | all sessions end | named layout metadata remains | viewer closes |
@@ -53,14 +59,16 @@ again, or for 24 hours. The ring is the only copy, so the reaper waits for
 someone to have seen it. An exited terminal nobody attached to or typed into
 is cleaned up on the next reaper pass, as before.
 
-## Claude Code is an application session on top of a terminal session
+## An agent is an application session on top of a terminal session
 
-A Claude conversation and its PTY are different identities. QuickTerm profiles
-bind Claude Code to a project folder and expose Claude's native modes: new,
-continue latest, session picker, and background-agent manager. If the PTY dies,
-QuickTerm never claims it was resumed and never replays a disk transcript. The
-unavailable pane offers explicit `--continue` or `--resume` recovery, which
-starts a new PTY and asks Claude to recover its own conversation state.
+An agent conversation (Claude Code or Codex) and its PTY are different
+identities. QuickTerm profiles bind the agent to a project folder and expose
+its native modes: new, continue latest, choose a session, fork a session
+(Codex), and the agent manager. A specific session id can be resumed, and a
+restart repeats it. If the PTY dies, QuickTerm never claims it was resumed and
+never replays a disk transcript. The unavailable pane offers explicit recovery
+(`claude --continue`, `codex resume --last`), which starts a new PTY and asks
+the agent to recover its own conversation state.
 
 ## Focus and desktop ownership invariants
 
@@ -73,7 +81,7 @@ starts a new PTY and asks Claude to recover its own conversation state.
 - Sidebar actions and profile cycling return focus to the selected terminal.
 - Native `Ctrl+V` and `Ctrl+Shift+V` reach xterm unchanged. QuickTerm uses a
   small cold Alt layer for workspace actions and leaves documented shell and
-  Claude keys alone.
+  agent keys alone.
 
 ## tmux feature map
 

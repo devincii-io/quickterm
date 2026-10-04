@@ -14,6 +14,7 @@ import socket
 import sys
 import threading
 import time
+import types
 import urllib.parse
 import webbrowser
 from logging.handlers import RotatingFileHandler
@@ -39,6 +40,14 @@ if TYPE_CHECKING:
 
 MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
 REAP_INTERVAL_S = 30
+MIN_WINDOW_SIZE = (760, 480)
+# Painted before the page loads. Keep it equal to --bg in css/app.css :root
+# (the default theme's background), or the window flashes another colour.
+WINDOW_BACKGROUND = "#15140f"
+SECONDARY_OFFSET = 32
+BOUNDS_SAVE_DELAY_S = 0.5
+# Spec defaults, for a config.py that predates the window and overlay fields.
+_WINDOW_DEFAULTS = {"width": 1280, "height": 800, "remember_bounds": True}
 log = logging.getLogger("quickterm")
 
 # Set by the in-app updater immediately before it launches the installer. The
@@ -147,6 +156,18 @@ class _DesktopApi:
             log.warning("could not open a second window", exc_info=True)
             return {"opened": False, "error": "failed", "detail": str(exc)}
         return {"opened": True, "window_id": window_id, "workspace": name}
+
+    def window_bounds(self) -> dict | None:
+        """This window's size in pywebview logical units, for Settings'
+        "Use this window's size". None when it cannot be read."""
+        window = self._window
+        if window is None:
+            return None
+        try:
+            return {"width": int(window.width), "height": int(window.height)}
+        except Exception:
+            log.debug("window size unavailable", exc_info=True)
+            return None
 
     def pick_folder(self, initial_directory: str = "") -> str | None:
         window = self._window
@@ -408,15 +429,24 @@ async def _serve(
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(_quiet_connection_resets)
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
-    app = create_app(
-        manager,
-        cfg,
-        auth.get_or_create_token(),
-        elevated=elevated,
-        windows=windows,
-        open_window=open_window,
-        notify=notify,
-    )
+    # Started before the app so its routes can rebind and suspend them.
+    hotkeys = _start_hotkeys(loop, manager, cfg)
+    try:
+        app = create_app(
+            manager,
+            cfg,
+            auth.get_or_create_token(),
+            elevated=elevated,
+            windows=windows,
+            open_window=open_window,
+            notify=notify,
+            rebind_hotkeys=hotkeys.rebind if hotkeys is not None else None,
+            suspend_hotkeys=hotkeys.suspend if hotkeys is not None else None,
+        )
+    except BaseException:
+        if hotkeys is not None:
+            hotkeys.stop()
+        raise
     server = UvicornServer(
         UvicornConfig(
             app,
@@ -435,7 +465,6 @@ async def _serve(
     )
     if state is not None:
         state.update(server=server, loop=loop, manager=manager)
-    hotkeys = _start_hotkeys(loop, manager, cfg)
     boot = asyncio.ensure_future(
         _after_ready(
             server,
@@ -571,10 +600,9 @@ class _ViewerWindows:
             _window_url(
                 self._cfg.port, cwd, host=self._cfg.host, workspace=name, window_id=window_id
             ),
-            width=1280,
-            height=800,
-            min_size=(760, 480),
-            background_color="#171918",
+            **self._secondary_geometry(),
+            min_size=MIN_WINDOW_SIZE,
+            background_color=WINDOW_BACKGROUND,
             js_api=api,
             text_select=True,
         )
@@ -584,8 +612,41 @@ class _ViewerWindows:
         self.adopt(window, window_id)
         return window_id
 
+    def _secondary_geometry(self) -> dict[str, int]:
+        """The configured size, 32 px down and right of the primary when
+        its position is known, so the new window does not hide it exactly."""
+        settings = _window_cfg(self._cfg)
+        geometry = {"width": settings.width, "height": settings.height}
+        primary = next(
+            (w for w in self._snapshot() if getattr(w, "title", None) == self._base_title), None
+        )
+        try:
+            x, y = int(primary.x), int(primary.y)
+        except Exception:
+            return geometry
+        candidate = {**geometry, "x": x + SECONDARY_OFFSET, "y": y + SECONDARY_OFFSET}
+        # A minimized primary reports about -32000/-32000. Offsetting from that
+        # would open the new window off every monitor, so only a position that
+        # still meets a screen is used.
+        from quickterm import window_state
+
+        try:
+            on_screen = window_state.clamp_to_screens(candidate, _screen_list())
+        except Exception:
+            log.debug("screens unavailable for the new window", exc_info=True)
+            on_screen = None
+        return candidate if on_screen is not None else geometry
+
     def show_all(self) -> None:
+        """Tray Open. The primary drops down as the overlay when that is on;
+        a primary left in overlay style after it was turned off goes back to
+        normal. Runs on the tray thread, never on the event loop."""
+        overlay_cfg = getattr(self._cfg, "overlay", None)
         for window in self._snapshot():
+            if getattr(window, "title", None) == self._base_title and _summon_overlay(
+                self._base_title, overlay_cfg
+            ):
+                continue
             _show_window(window)
 
     def quit_all(self) -> None:
@@ -753,18 +814,25 @@ def _run_desktop(
 
     window_id = new_window_id()
     desktop_api = _DesktopApi(viewers)
+    # Remembered bounds belong to the normal primary window. The administrator
+    # window shares %APPDATA%, so it neither restores them nor records its own.
+    geometry = (
+        {"width": _window_cfg(cfg).width, "height": _window_cfg(cfg).height}
+        if elevated else _initial_geometry(cfg, _screen_list)
+    )
     window = webview.create_window(
         title,
         _window_url(cfg.port, cwd, host=cfg.host, window_id=window_id, primary=True),
-        width=1280,
-        height=800,
-        min_size=(760, 480),
-        background_color="#171918",
+        **geometry,
+        min_size=MIN_WINDOW_SIZE,
+        background_color=WINDOW_BACKGROUND,
         js_api=desktop_api,
         text_select=True,
     )
     desktop_api._bind_window(window)
     viewers.adopt(window, window_id)
+    if not elevated:
+        _BoundsRecorder(window, cfg, initial=geometry).wire()
 
     # Hide-to-tray: closing the LAST window keeps terminals alive in the
     # background when they hold real work; otherwise it quits. Closing any
@@ -823,6 +891,196 @@ def _show_window(window: Any) -> None:
         window.restore()
     except Exception:
         log.debug("tray show failed", exc_info=True)
+
+
+def _summon_overlay(title: str, overlay_cfg: Any) -> bool:
+    """Show this process's window titled `title` as the drop-down when the
+    overlay is on. With it off, put a window left in overlay style back.
+
+    Returns whether the window was shown here, so the caller skips its own
+    show. Win32 work: call it from the tray or hotkey thread.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        from quickterm import overlay, tray
+
+        if not overlay.enabled(overlay_cfg):
+            for hwnd in overlay.applied_windows():
+                overlay.restore_normal(hwnd)
+            return False
+        found = tray.own_window(title)
+        if found is None:
+            return False
+        overlay.show_overlay(found[0], overlay_cfg)
+        return True
+    except Exception:
+        log.debug("overlay show failed", exc_info=True)
+        return False
+
+
+def _window_cfg(cfg: Any) -> Any:
+    """`cfg.window` with every missing field at its spec default."""
+    window = getattr(cfg, "window", None)
+    return types.SimpleNamespace(
+        **{name: getattr(window, name, default) for name, default in _WINDOW_DEFAULTS.items()}
+    )
+
+
+def _screen_list() -> list[Any]:
+    """pywebview's monitors as a plain list.
+
+    In pywebview 6 `webview.screens` is a module property: the value is a
+    proxy around a list, and calling it raises TypeError. Older releases had a
+    function. Iterate first and call only what cannot be iterated.
+    """
+    import webview
+
+    screens = webview.screens
+    try:
+        return list(screens)
+    except TypeError:
+        return list(screens())
+
+
+def _initial_geometry(cfg: Any, screens: Callable[[], Any]) -> dict[str, Any]:
+    """create_window keywords for the primary window: the remembered bounds
+    when they still meet a monitor, else the configured size."""
+    from quickterm import window_state
+
+    settings = _window_cfg(cfg)
+    geometry: dict[str, Any] = {"width": settings.width, "height": settings.height}
+    if not settings.remember_bounds:
+        return geometry
+    try:
+        bounds = window_state.clamp_to_screens(window_state.load(), screens())
+    except Exception:
+        log.debug("remembered window bounds unavailable", exc_info=True)
+        return geometry
+    if bounds is None:
+        return geometry
+    return {
+        "x": bounds["x"],
+        "y": bounds["y"],
+        "width": max(MIN_WINDOW_SIZE[0], bounds["width"]),
+        "height": max(MIN_WINDOW_SIZE[1], bounds["height"]),
+        "maximized": bounds["maximized"],
+    }
+
+
+class _BoundsRecorder:
+    """Saves the primary window's bounds 500 ms after the last change.
+
+    pywebview fires each event on a short thread of its own, so a resize can
+    arrive before or after the maximize that caused it. The events therefore
+    only set flags and restart the timer; the geometry is read from the
+    window when the timer fires, once the burst has settled. The write runs on
+    that `threading.Timer`, never on the GUI thread or the event loop.
+
+    The saved size is the normal one: a maximized window keeps its last normal
+    bounds plus the flag. Nothing is recorded while minimized or while the
+    overlay owns the window.
+    """
+
+    _KEYS = ("x", "y", "width", "height")
+
+    def __init__(
+        self,
+        window: Any,
+        cfg: Any,
+        *,
+        initial: dict[str, Any] | None = None,
+        delay: float = BOUNDS_SAVE_DELAY_S,
+        save: Callable[[dict], None] | None = None,
+        overlay_applied: Callable[[], bool] | None = None,
+    ) -> None:
+        self._window = window
+        self._cfg = cfg
+        self._delay = delay
+        self._save = save
+        self._overlay_applied = overlay_applied
+        self._lock = threading.Lock()
+        start = initial or {}
+        self._normal = {key: start[key] for key in self._KEYS if isinstance(start.get(key), int)}
+        self._maximized = bool(start.get("maximized"))
+        self._minimized = False
+        self._timer: threading.Timer | None = None
+
+    def wire(self) -> None:
+        events = self._window.events
+        events.resized += self.changed
+        events.moved += self.changed
+        events.maximized += lambda: self._flags(maximized=True, minimized=False)
+        events.restored += lambda: self._flags(maximized=False, minimized=False)
+        if getattr(events, "minimized", None) is not None:
+            events.minimized += lambda: self._flags(minimized=True)
+
+    def changed(self, *_args: Any) -> None:
+        if not self._overlay_on():
+            self._schedule()
+
+    def _flags(self, **flags: bool) -> None:
+        with self._lock:
+            self._maximized = flags.get("maximized", self._maximized)
+            self._minimized = flags.get("minimized", self._minimized)
+        self.changed()
+
+    def _overlay_on(self) -> bool:
+        if self._overlay_applied is not None:
+            return self._overlay_applied()
+        if os.name != "nt":
+            return False
+        from quickterm import overlay
+
+        return overlay.is_applied()
+
+    def _schedule(self) -> None:
+        timer = threading.Timer(self._delay, self.flush)
+        timer.daemon = True
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = timer
+        timer.start()
+
+    def _read(self) -> dict[str, int] | None:
+        window = self._window
+        try:
+            return {
+                "x": int(window.x),
+                "y": int(window.y),
+                "width": int(window.width),
+                "height": int(window.height),
+            }
+        except Exception:
+            return None
+
+    def flush(self) -> None:
+        if self._overlay_on() or not _window_cfg(self._cfg).remember_bounds:
+            return
+        with self._lock:
+            minimized, maximized = self._minimized, self._maximized
+        if minimized:
+            return
+        if not maximized:
+            current = self._read()
+            if current is None:
+                return
+            with self._lock:
+                self._normal = current
+        with self._lock:
+            if len(self._normal) != len(self._KEYS):
+                return
+            bounds = {**self._normal, "maximized": maximized}
+        try:
+            if self._save is not None:
+                self._save(bounds)
+            else:
+                from quickterm import window_state
+
+                window_state.save(bounds)
+        except Exception:
+            log.debug("could not remember the window bounds", exc_info=True)
 
 
 def _native_drop_paths(event: Any) -> list[str]:
@@ -1059,43 +1317,114 @@ def _report_launch_failure(cfg: "AppConfig", message: str) -> None:
     log.warning("terminal launch failed: %s", message)
 
 
+def hotkey_error_text(failed: list[str]) -> str | None:
+    """`cfg.hotkey_error` for the bindings Windows refused, or None."""
+    if not failed:
+        return None
+    if len(failed) == 1:
+        return f"{failed[0]} is in use by another program"
+    return f"{', '.join(failed)} are in use by other programs"
+
+
+class _GlobalHotkeys:
+    """The summon key and every profile key, registered with Windows.
+
+    `rebind` and `suspend` are what PUT /api/config and
+    POST /api/hotkeys/suspend call, through `asyncio.to_thread`: both wait for
+    the hotkey thread.
+    """
+
+    def __init__(
+        self,
+        hotkeys_mod: Any,
+        hk: Any,
+        loop: asyncio.AbstractEventLoop,
+        manager: "SessionManager",
+        cfg: "AppConfig",
+    ) -> None:
+        self._mod = hotkeys_mod
+        self._hk = hk
+        self._loop = loop
+        self._manager = manager
+        self._cfg = cfg
+        self._lock = threading.Lock()
+
+    def _entries(self, cfg: "AppConfig") -> tuple[list[Any], list[str]]:
+        entry = self._mod.HotkeyEntry
+        entries: list[Any] = []
+        labels: list[str] = []
+        for prof in cfg.profiles:
+            if not prof.keybinding:
+                continue
+            entries.append(
+                entry(prof.keybinding, _profile_callback(self._loop, self._manager, prof, cfg))
+            )
+            labels.append(f"{prof.keybinding} ({prof.name})")
+        if cfg.summon_hotkey:
+            toggle = self._mod.toggle_window
+            # Reads the live overlay settings at press time, and runs on the
+            # hotkey thread: the Win32 window work never touches the loop.
+            entries.append(
+                entry(
+                    cfg.summon_hotkey,
+                    lambda: toggle("QuickTerm", getattr(cfg, "overlay", None)),
+                    True,
+                )
+            )
+            labels.append(cfg.summon_hotkey)
+        return entries, labels
+
+    def rebind(self, cfg: "AppConfig") -> None:
+        """Register exactly the bindings `cfg` names; record what failed."""
+        with self._lock:
+            entries, labels = self._entries(cfg)
+            results = self._hk.rebind(entries)
+            # Only Windows has RegisterHotKey; elsewhere every result is False
+            # and there is nothing worth reporting.
+            failed = (
+                [label for label, ok in zip(labels, results) if ok is False]
+                if os.name == "nt"
+                else []
+            )
+            cfg.hotkey_error = hotkey_error_text(failed)
+            if failed:
+                log.warning("global hotkey registration failed: %s", ", ".join(failed))
+
+    def suspend(self, suspended: bool) -> None:
+        if suspended:
+            self._hk.suspend()
+        else:
+            self._hk.resume()
+
+    def stop(self) -> None:
+        self._hk.stop()
+
+
 def _start_hotkeys(
     loop: asyncio.AbstractEventLoop, manager: "SessionManager", cfg: "AppConfig"
-) -> Any | None:
+) -> _GlobalHotkeys | None:
     # lazy + guarded: a missing or broken hotkeys module never blocks startup
     try:
         import quickterm.hotkeys as hotkeys_mod
 
         hk = hotkeys_mod.HotkeyManager(loop)
-        # register() returns False when the combination parses but Windows
-        # refuses it, almost always because another program already owns it.
-        # Discarding that made the documented escape hatch for a tray-hidden
-        # window fail silently; Settings renders cfg.hotkey_error next to the
-        # field instead.
-        # Only Windows has RegisterHotKey; elsewhere register() always returns
-        # False and there is nothing worth reporting.
-        report = os.name == "nt"
-        failed: list[str] = []
-        for prof in cfg.profiles:
-            if not prof.keybinding:
-                continue
-            ok = hk.register(prof.keybinding, _profile_callback(loop, manager, prof, cfg))
-            if report and ok is False:
-                failed.append(f"{prof.keybinding} ({prof.name})")
-        toggle = getattr(hotkeys_mod, "toggle_window", None) or getattr(
-            hotkeys_mod, "summon_window", None
-        )
-        if cfg.summon_hotkey and toggle is not None:
-            if hk.register(cfg.summon_hotkey, toggle) is False and report:
-                failed.append(cfg.summon_hotkey)
-        if failed:
-            detail = ", ".join(failed)
-            cfg.hotkey_error = f"already in use by another program: {detail}"
-            log.warning("global hotkey registration failed: %s", detail)
+        hotkeys = _GlobalHotkeys(hotkeys_mod, hk, loop, manager, cfg)
+        # Windows refuses a combination another program already owns. That
+        # used to fail silently and leave a tray-hidden window unreachable;
+        # Settings renders cfg.hotkey_error next to the field instead.
+        hotkeys.rebind(cfg)
         _wire_voice(hk, manager, cfg)
+        if os.name == "nt":
+            from quickterm import overlay
+
+            hk.run_on_thread(
+                lambda: overlay.install_foreground_watcher(lambda: getattr(cfg, "overlay", None)),
+                on_exit=overlay.remove_foreground_watcher,
+            )
         hk.start()
-        return hk
+        return hotkeys
     except Exception:
+        log.debug("global hotkeys unavailable", exc_info=True)
         return None
 
 
@@ -1104,8 +1433,13 @@ def _profile_callback(
 ) -> Callable[[], None]:
     # HotkeyManager runs callbacks on the loop thread; the launch itself
     # resolves off the loop, so the callback only schedules it.
+    binding = prof.keybinding
+
     def fire() -> None:
-        task = loop.create_task(_launch_profile(manager, prof, cfg))
+        # The profile as it is now: a save that edits the profile but keeps its
+        # key does not rebind, and must not leave the old command bound.
+        current = next((p for p in cfg.profiles if p.keybinding == binding), prof)
+        task = loop.create_task(_launch_profile(manager, current, cfg))
         _launch_tasks.add(task)
         task.add_done_callback(_launch_tasks.discard)
 

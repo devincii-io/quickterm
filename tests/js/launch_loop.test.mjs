@@ -1,14 +1,18 @@
 // The launch long poll (Explorer's "Open QuickTerm here" and the quickterm
 // command line). The pacing is tested with a fake api that answers at once,
-// because an instant error answer used to loop with no delay at all.
+// because an instant error answer used to loop with no delay at all. The
+// shell runs the poll and opens or focuses views; each view starts a
+// launched terminal in its own layout.
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  LAUNCH_MAX_BACKOFF_MS, LAUNCH_MIN_POLL_MS, createLaunchLoop, launchBackoff, launchKind,
+  LAUNCH_MAX_BACKOFF_MS, LAUNCH_MIN_POLL_MS, createLaunchLoop, createLaunchTarget, launchBackoff, launchKind,
 } from "../../quickterm/frontend/js/launch_loop.js";
 
-function harness({ answers = [], state = {}, ...deps } = {}) {
+// The shell side: views are opened or focused by name, each with an app that
+// starts a launched terminal in its own layout.
+function harness({ answers = [], state = {}, shown = [], active = null, refuse = [], ...deps } = {}) {
   const sleeps = [];
   const errors = [];
   const calls = [];
@@ -22,35 +26,26 @@ function harness({ answers = [], state = {}, ...deps } = {}) {
       return next;
     },
   };
-  const pane = { canReplace: true };
-  const layout = {
-    focused: pane,
-    init: () => pane,
-    splitPane: () => pane,
-    autoDir: () => "right",
-    focusPane: (each) => calls.push(["focusPane", each]),
-  };
-  const fullState = {
-    windowIsPrimary: true,
-    registryAvailable: true,
-    transitioning: false,
-    currentWorkspace: null,
-    scratchRoot: "/tmp/scratch",
-    ...state,
-  };
+  const open = new Map(shown.map((name) => [name, { name }]));
+  const fullState = { windowIsPrimary: true, registryAvailable: true, ...state };
   loop = createLaunchLoop({
     api,
     state: fullState,
-    layout,
-    openFolderInScratch: async (cwd) => { calls.push(["openFolderInScratch", cwd]); return true; },
-    spawnInto: async (_pane, profile, cwd) => { calls.push(["spawnInto", profile, cwd]); return { id: "s1" }; },
-    spawnDefaultInto: async (_pane, cwd) => { calls.push(["spawnDefaultInto", cwd]); return { id: "s2" }; },
-    switchWorkspace: async (name) => {
-      calls.push(["switchWorkspace", name]);
-      fullState.currentWorkspace = name;
-      return true;
+    openView: async (name, options = {}) => {
+      if (name && open.has(name)) {
+        calls.push(["focus", name]);
+        return open.get(name);
+      }
+      calls.push(["open", name, ...(options.cwd ? [options.cwd] : [])]);
+      if (refuse.includes(name)) return false;
+      const view = { name: name || "scratch" };
+      if (name) open.set(name, view);
+      return view;
     },
-    focusShownWorkspace: () => false,
+    appFor: (view) => ({
+      startLaunch: async (launch) => { calls.push(["startLaunch", view.name, launch]); return true; },
+    }),
+    activeView: () => (active ? open.get(active) || { name: active } : null),
     showError: (message) => errors.push(message),
     // Every poll answers "instantly": the clock never moves.
     now: () => 0,
@@ -97,6 +92,16 @@ test("an empty answer that came back early waits out the rest of a second", asyn
   assert.equal(sleeps[1], 850);
 });
 
+test("only the primary window claims while the registry can say which one that is", async () => {
+  const { loop, sleeps, polls } = harness({ state: { windowIsPrimary: false } });
+  await loop.claimLaunchLoop();
+  assert.equal(polls(), 0);
+  assert.deepEqual(sleeps, Array(8).fill(1000));
+  const lost = harness({ state: { windowIsPrimary: false, registryAvailable: false } });
+  await lost.loop.claimLaunchLoop();
+  assert.ok(lost.polls() > 0, "with no registry to ask, a lost handoff is worse than a double claim");
+});
+
 test("backoff is capped", () => {
   assert.equal(launchBackoff(1), 1000);
   assert.equal(launchBackoff(3), 4000);
@@ -113,88 +118,146 @@ test("each launch shape has one meaning", () => {
   assert.equal(launchKind(null), null);
 });
 
-test("a folder alone opens in scratch as before", async () => {
-  const { loop, calls } = harness();
+test("a folder alone opens a new scratch view whose terminal starts there", async () => {
+  const { loop, calls } = harness({ shown: ["dev"], active: "dev" });
   assert.equal(await loop.handleLaunch({ cwd: "/p" }), true);
-  assert.deepEqual(calls, [["openFolderInScratch", "/p"]]);
+  assert.deepEqual(calls, [["open", null, "/p"]]);
 });
 
 test("a folder that cannot open is reported in straight quotes", async () => {
-  const { loop, errors } = harness({ openFolderInScratch: async () => false });
+  const { loop, errors } = harness({ refuse: [null] });
   assert.equal(await loop.handleLaunch({ cwd: "/p" }), false);
   assert.deepEqual(errors, ['Could not open "/p" in a terminal. The request was dropped.']);
 });
 
-test("a workspace already shown is focused, not switched to", async () => {
-  const focused = [];
-  const { loop, calls } = harness({ focusShownWorkspace: (name) => { focused.push(name); return true; } });
+test("a workspace already shown is focused, not opened again", async () => {
+  const { loop, calls } = harness({ shown: ["dev"] });
   assert.equal(await loop.handleLaunch({ workspace: "dev" }), true);
-  assert.deepEqual(focused, ["dev"]);
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, [["focus", "dev"]]);
 });
 
-test("a workspace shown nowhere is switched to through the claim rules", async () => {
-  const { loop, calls } = harness();
+test("a workspace shown nowhere opens its own view", async () => {
+  const { loop, calls } = harness({ shown: ["ops"], active: "ops" });
   assert.equal(await loop.handleLaunch({ workspace: "dev" }), true);
-  assert.deepEqual(calls, [["switchWorkspace", "dev"]]);
+  assert.deepEqual(calls, [["open", "dev"]]);
 });
 
-test("a refused switch starts nothing; switchWorkspace explains the refusal", async () => {
-  const { loop, calls } = harness({
-    switchWorkspace: async (name) => { calls.push(["switchWorkspace", name]); return false; },
-  });
+test("a refused view starts nothing; the view manager explains the refusal", async () => {
+  const { loop, calls, errors } = harness({ refuse: ["dev"] });
   assert.equal(await loop.handleLaunch({ workspace: "dev", profile: "pwsh" }), false);
-  assert.deepEqual(calls, [["switchWorkspace", "dev"]]);
+  assert.deepEqual(calls, [["open", "dev"]]);
+  assert.deepEqual(errors, []);
 });
 
-test("a profile starts in the given folder in the current workspace", async () => {
-  const { loop, calls } = harness({ state: { currentWorkspace: "dev" } });
-  assert.equal(await loop.handleLaunch({ profile: "pwsh", cwd: "/p" }), true);
-  assert.deepEqual(calls.filter(([what]) => what !== "focusPane"), [["spawnInto", "pwsh", "/p"]]);
+test("a profile without a workspace starts in the active view", async () => {
+  const { loop, calls } = harness({ shown: ["dev"], active: "dev" });
+  const launch = { profile: "pwsh", cwd: "/p" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["startLaunch", "dev", launch]]);
 });
 
-test("a profile without a folder starts in the workspace root", async () => {
-  const named = harness({ state: { currentWorkspace: "dev" } });
-  await named.loop.handleLaunch({ profile: "pwsh" });
-  // null lets the backend resolve the workspace folder.
-  assert.deepEqual(named.calls.at(-1), ["spawnInto", "pwsh", null]);
-  const scratch = harness();
-  await scratch.loop.handleLaunch({ profile: "pwsh" });
-  assert.deepEqual(scratch.calls.at(-1), ["spawnInto", "pwsh", "/tmp/scratch"]);
-});
-
-test("a profile for another workspace moves this window there first", async () => {
-  const { loop, calls } = harness({ state: { currentWorkspace: "dev" } });
-  assert.equal(await loop.handleLaunch({ profile: "pwsh", workspace: "ops" }), true);
-  const steps = calls.filter(([what]) => what !== "focusPane");
-  assert.deepEqual(steps, [["switchWorkspace", "ops"], ["spawnInto", "pwsh", null]]);
-});
-
-test("a folder in a named workspace starts the default terminal there", async () => {
+test("a profile with no view open gets a new scratch view first", async () => {
   const { loop, calls } = harness();
-  assert.equal(await loop.handleLaunch({ workspace: "ops", cwd: "/p" }), true);
-  const steps = calls.filter(([what]) => what !== "focusPane");
-  assert.deepEqual(steps, [["switchWorkspace", "ops"], ["spawnDefaultInto", "/p"]]);
+  const launch = { profile: "pwsh" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["open", null], ["startLaunch", "scratch", launch]]);
 });
 
-test("a workspace tiled beside this one gets focus and an explanation, not a stray terminal", async () => {
-  const { loop, calls, errors } = harness({ focusShownWorkspace: () => true });
-  assert.equal(await loop.handleLaunch({ profile: "pwsh", workspace: "ops" }), false);
-  assert.deepEqual(calls, []);
-  assert.match(errors[0], /^"ops" is shown beside this workspace/);
+test("a profile for another workspace opens that view first and starts there", async () => {
+  const { loop, calls } = harness({ shown: ["dev"], active: "dev" });
+  const launch = { profile: "pwsh", workspace: "ops" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["open", "ops"], ["startLaunch", "ops", launch]]);
 });
 
-test("a window composed without the command-line hooks still opens folders", async () => {
-  const errors = [];
-  const opened = [];
-  const loop = createLaunchLoop({
-    api: {},
-    state: { transitioning: false },
-    openFolderInScratch: async (cwd) => { opened.push(cwd); return true; },
-    showError: (message) => errors.push(message),
+test("a profile for a workspace already shown starts in that view, not the active one", async () => {
+  const { loop, calls } = harness({ shown: ["dev", "ops"], active: "dev" });
+  const launch = { profile: "pwsh", workspace: "ops" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["focus", "ops"], ["startLaunch", "ops", launch]]);
+});
+
+test("a folder in a named workspace starts the default terminal in that view", async () => {
+  const { loop, calls } = harness();
+  const launch = { workspace: "ops", cwd: "/p" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["open", "ops"], ["startLaunch", "ops", launch]]);
+});
+
+test("a view without the launch hook says so instead of starting a stray terminal", async () => {
+  const { loop, errors } = harness({ shown: ["dev"], active: "dev", appFor: () => ({}) });
+  assert.equal(await loop.handleLaunch({ profile: "pwsh" }), false);
+  assert.match(errors[0], /cannot start command-line launches/);
+});
+
+test("a launch into a restored view that is still loading waits for it", async () => {
+  // The boot restores a stored arrangement and claims launches at once; the
+  // active view's document has no app until it is ready.
+  let ready = false;
+  const { loop, calls, errors } = harness({
+    shown: ["dev"],
+    active: "dev",
+    appFor: (view) => (ready ? { startLaunch: async (launch) => { calls.push(["startLaunch", view.name, launch]); return true; } } : null),
+    whenReady: async () => { ready = true; return true; },
   });
-  assert.equal(await loop.handleLaunch({ cwd: "/p" }), true);
-  assert.equal(await loop.handleLaunch({ workspace: "dev" }), false);
-  assert.deepEqual(opened, ["/p"]);
-  assert.equal(errors.length, 1);
+  const launch = { profile: "pwsh" };
+  assert.equal(await loop.handleLaunch(launch), true);
+  assert.deepEqual(calls, [["startLaunch", "dev", launch]]);
+  assert.deepEqual(errors, []);
+});
+
+test("a launch into a view that never finished loading is dropped quietly", async () => {
+  const { loop, calls } = harness({ shown: ["dev"], active: "dev", whenReady: async () => false });
+  assert.equal(await loop.handleLaunch({ profile: "pwsh" }), false);
+  assert.deepEqual(calls, []);
+});
+
+// ---- the view side ----
+
+function target({ state = {}, focused = { canReplace: true } } = {}) {
+  const calls = [];
+  const errors = [];
+  const fullState = { transitioning: false, currentWorkspace: null, scratchRoot: "/tmp/scratch", ...state };
+  const split = { canReplace: true, split: true };
+  const layout = {
+    focused,
+    init: () => ({ canReplace: true, fresh: true }),
+    splitPane: () => split,
+    autoDir: () => "h",
+    focusPane: (pane) => calls.push(["focusPane", pane]),
+  };
+  const { startLaunch } = createLaunchTarget({
+    state: fullState,
+    layout,
+    spawnInto: async (pane, profile, cwd) => { calls.push(["spawnInto", profile, cwd, pane]); return { id: "s1" }; },
+    spawnDefaultInto: async (pane, cwd) => { calls.push(["spawnDefaultInto", cwd, pane]); return { id: "s2" }; },
+    showError: (message) => errors.push(message),
+    sleep: async () => {},
+  });
+  return { startLaunch, calls, errors, split };
+}
+
+test("a launched profile starts in the given folder, else the workspace root, else the scratch root", async () => {
+  const named = target({ state: { currentWorkspace: "dev" } });
+  assert.equal(await named.startLaunch({ profile: "pwsh", cwd: "/p" }), true);
+  assert.deepEqual(named.calls.at(-1).slice(0, 3), ["spawnInto", "pwsh", "/p"]);
+  await named.startLaunch({ profile: "pwsh" });
+  // null lets the backend resolve the workspace folder.
+  assert.deepEqual(named.calls.at(-1).slice(0, 3), ["spawnInto", "pwsh", null]);
+  const scratch = target();
+  await scratch.startLaunch({ profile: "pwsh" });
+  assert.deepEqual(scratch.calls.at(-1).slice(0, 3), ["spawnInto", "pwsh", "/tmp/scratch"]);
+});
+
+test("a launched folder starts the default terminal, beside a pane that cannot be replaced", async () => {
+  const { startLaunch, calls, split } = target({ focused: { canReplace: false } });
+  assert.equal(await startLaunch({ workspace: "ops", cwd: "/p" }), true);
+  assert.deepEqual(calls.at(-1), ["spawnDefaultInto", "/p", split]);
+});
+
+test("a view still restoring gets a moment, then the launch is dropped with a word", async () => {
+  const { startLaunch, calls, errors } = target({ state: { transitioning: true } });
+  assert.equal(await startLaunch({ cwd: "/p" }), false);
+  assert.deepEqual(calls, []);
+  assert.match(errors[0], /still busy/);
 });

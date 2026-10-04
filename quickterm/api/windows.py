@@ -67,6 +67,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 workspace=body["workspace"] if "workspace" in body else KEEP,
                 title=body.get("title", ""),
                 primary=bool(body.get("primary")),
+                parent=body.get("parent"),
             )
         except WorkspaceClaimed as exc:
             return _claim_conflict(exc)

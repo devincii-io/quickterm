@@ -31,3 +31,36 @@ test("an open menu takes Escape and Tab from the sheet", () => {
   assert.equal(sheetKeyRoute("Tab", { menuOpen: false, inMenu: false }), "sheet");
   assert.equal(sheetKeyRoute("a", { menuOpen: true, inMenu: false }), "none");
 });
+
+test("a recording shortcut field keeps Escape and Tab from the sheet", () => {
+  // Escape cancels the capture and must not close the sheet behind it.
+  for (const key of ["Escape", "Tab"]) {
+    assert.equal(sheetKeyRoute(key, { menuOpen: false, inMenu: false, capturing: true }), "none");
+    assert.equal(sheetKeyRoute(key, { menuOpen: true, inMenu: false, capturing: true }), "none");
+    assert.equal(sheetKeyRoute(key, { menuOpen: false, inMenu: false, capturing: true, confirming: true, searchActive: true }), "none");
+  }
+});
+
+test("Escape undoes the nearest thing first: menu, confirmation, search, then the sheet", () => {
+  const all = { menuOpen: true, inMenu: false, confirming: true, searchActive: true };
+  assert.equal(sheetKeyRoute("Escape", all), "close-menu");
+  assert.equal(sheetKeyRoute("Escape", { ...all, menuOpen: false }), "confirm");
+  assert.equal(sheetKeyRoute("Escape", { ...all, menuOpen: false, confirming: false }), "search");
+  assert.equal(sheetKeyRoute("Escape", { menuOpen: false, inMenu: false }), "sheet");
+  // Tab is not Escape: a filled search box does not keep focus in it.
+  assert.equal(sheetKeyRoute("Tab", { menuOpen: false, inMenu: false, searchActive: true }), "sheet");
+});
+
+test("agent labels carry the launch mode, and ssh the client", () => {
+  assert.equal(label({ terminal_type: "codex" }), "Codex · new conversation");
+  assert.equal(label({ terminal_type: "claude-code", claude_mode: "resume" }), "Claude Code · choose session");
+  assert.equal(label({ terminal_type: "claude-code", agent_mode: "agents" }), "Claude Code · agent manager");
+  assert.equal(label({ terminal_type: "ssh", ssh_host: "box", ssh_user: "me" }), "SSH · me@box");
+});
+
+test("the palette sees every settings field as an entry", () => {
+  const entries = Panels.prototype.settingEntries.call({});
+  assert.ok(entries.length > 20);
+  assert.ok(entries.every((entry) => entry.id && entry.label && entry.tab));
+  assert.ok(entries.some((entry) => entry.id === "overlay.enabled" && entry.tab === "window"));
+});

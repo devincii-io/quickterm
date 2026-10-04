@@ -1,26 +1,17 @@
 import { openFolderBrowser } from "./folder_browser.js";
 import { icon } from "./icons.js";
-import { CUSTOM_THEME } from "./themes.js";
 
 export const DASHBOARD_REFRESH_MS = 5000;
 
-export const THEME_CATALOG_GROUPS = [
-  ["Dark", ["graphite", "one-dark", "dracula", "github-dark", "github-dark-dimmed", "solarized-dark", "material-ocean", "night-owl", "oxocarbon"]],
-  ["Neon", ["tokyo-night", "tokyo-night-storm", "cobalt2"]],
-  ["Soft", ["catppuccin-mocha", "catppuccin-macchiato", "catppuccin-frappe", "nord", "everforest", "rose-pine", "rose-pine-moon", "ayu-mirage"]],
-  ["Warm", ["gruvbox-dark", "kanagawa", "monokai", "horizon"]],
-  ["Light", ["rose-pine-dawn", "github-light", "solarized-light"]],
-  ["Custom", [CUSTOM_THEME]],
-];
-
 export const TERMINAL_TYPES = [
   { id: "claude-code", label: "Claude Code", executable: "claude.exe" },
+  { id: "codex", label: "Codex", executable: "codex.exe" },
   { id: "powershell-core", label: "PowerShell 7", executable: "pwsh.exe" },
   { id: "windows-powershell", label: "Windows PowerShell", executable: "powershell.exe" },
   { id: "command-prompt", label: "Command Prompt", executable: "cmd.exe" },
   { id: "wsl", label: "Windows Subsystem for Linux", executable: "wsl.exe" },
-  { id: "ssh", label: "SSH (PuTTY plink)", executable: "" },
-  { id: "sftp", label: "SFTP (PuTTY psftp)", executable: "" },
+  { id: "ssh", label: "SSH", executable: "" },
+  { id: "sftp", label: "SFTP", executable: "" },
   { id: "custom", label: "Custom command", executable: "" },
 ];
 
@@ -29,23 +20,6 @@ export function make(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-export function envToLines(env) {
-  return Object.entries(env || {}).map(([key, value]) => `${key}=${value}`).join("\n");
-}
-
-export function parseEnvLines(text) {
-  const env = {};
-  for (const raw of (text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    if (key) env[key] = line.slice(eq + 1);
-  }
-  return env;
 }
 
 export function environmentError(env) {
@@ -74,9 +48,11 @@ export function inferTerminalType(profile) {
   const bare = cmd.endsWith(".exe") ? cmd.slice(0, -4) : cmd;
   // Claude integration is opt-in via terminal_type. A legacy custom command
   // named `claude` may carry bespoke args and must not silently acquire
-  // continue/picker semantics merely by opening Settings.
+  // continue/picker semantics merely by opening Settings. Codex is inferred
+  // from its command, including the .cmd shim npm installs.
   let type = "custom";
-  if (bare === "pwsh") type = "powershell-core";
+  if (bare === "codex" || cmd === "codex.cmd") type = "codex";
+  else if (bare === "pwsh") type = "powershell-core";
   else if (bare === "powershell") type = "windows-powershell";
   else if (bare === "cmd") type = "command-prompt";
   else if (bare === "wsl") type = "wsl";

@@ -8,12 +8,13 @@
 // Items:
 //   { heading }                        a group label, not selectable
 //   { separator: true }
-//   { label, detail?, hint?, icon?, color?, selected?, disabled?, danger?,
-//     run(), keepOpen?, actions?: [{ icon, title, run(), keepOpen? }] }
+//   { label, detail?, hint?, trailing?, icon?, color?, selected?, disabled?,
+//     danger?, run(), keepOpen?, actions?: [{ icon, title, run(), keepOpen? }] }
 //
 // `run` fires on click or Enter. `actions` are small icon buttons at the end
 // of the row, shown while the row is active: a second verb on the same
-// subject without a submenu.
+// subject without a submenu. `trailing()` returns a node drawn at the end of
+// the row in place of the text hint, such as a theme's colour swatch.
 
 import { claimFocus, releaseFocus } from "./focus.js";
 import { icon } from "./icons.js";
@@ -203,7 +204,11 @@ export function openMenu({ anchor, trigger = anchor, items, label, align = "star
     copy.append(make("span", "qt-menu-label", item.label));
     if (item.detail) copy.append(make("span", "qt-menu-detail", item.detail));
     row.append(mark, copy);
-    if (item.hint) row.append(make("span", "qt-menu-hint", item.hint));
+    if (item.trailing) {
+      const trailing = make("span", "qt-menu-trailing");
+      trailing.append(item.trailing());
+      row.append(trailing);
+    } else if (item.hint) row.append(make("span", "qt-menu-hint", item.hint));
     if (item.actions?.length) {
       const actions = make("span", "qt-menu-actions");
       for (const action of item.actions) {

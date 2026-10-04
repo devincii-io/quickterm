@@ -19,6 +19,8 @@ import sys
 import webbrowser
 from pathlib import Path
 
+from quickterm import overlay
+
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 # Ctrl+click may be induced by untrusted terminal output. Open only file types
 # that are conventionally passive; reveal every other file in Explorer/Finder
@@ -38,6 +40,7 @@ def open_target(target: str) -> dict:
     cleaned = (target or "").strip().strip('"').strip("'")
     if not cleaned:
         raise ValueError("empty target")
+    overlay.hold_open()
     # URI schemes are case-insensitive (RFC 3986). Terminal link providers can
     # preserve the spelling printed by a tool, so accept HTTPS:// just like a
     # browser does instead of misclassifying it as an unsupported scheme.
@@ -134,6 +137,7 @@ def open_folder(path: str, app: str) -> dict:
         raise FileNotFoundError(cleaned)
     if not folder.is_dir():
         raise ValueError("not a folder")
+    overlay.hold_open()
     if app == "vscode":
         code = find_vscode()
         if not code:
