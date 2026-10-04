@@ -1,7 +1,8 @@
 /* QuickTerm file viewer (viewer.html): a standalone page that never loads
    themes.js, so it cannot follow the selected theme. It carries the house
-   theme's pre-boot tokens instead (app.css :root, "graphite"), and below this
-   block it names no colour of its own. */
+   theme's base colours instead (graphite's six chrome colours and its
+   terminal background, not the derived app.css :root values), and below
+   this block it names no colour of its own. */
 
 :root {
   color-scheme: dark;

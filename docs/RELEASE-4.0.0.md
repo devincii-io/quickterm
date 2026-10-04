@@ -22,8 +22,19 @@ on its own tint fell under 4.5:1 in most themes, the kill-all comment and
 contract said open workspaces were not edited on disk when they are, and the
 native smoke below had run before the review fixes. The contrast is now
 derived and tested for both surfaces, the docs describe the code, and the
-smoke ran again on the final tree. No release-blocking source findings
-remain.
+smoke ran again on the final tree.
+
+The theme rework landed last: 20 upstream palettes in place of the old set,
+every stylesheet colour moved onto a theme token, and a contract test that
+fails on a colour literal outside `:root`. Merging it with the contrast work
+showed that three light themes (Tokyo Night Day, Kanagawa Lotus, Everforest
+Light) keep their ink too soft for the accent on its tint; the accent text
+now falls back toward black there. A review of the merge found four more:
+these notes still listed the live agent and overlay runs as unverified, the
+workspace view title used a view colour held only to 3:1, a comment in
+`viewer.css` described values it does not carry, and nothing tested that the
+native window's first paint equals `--bg`. All four are fixed. No
+release-blocking source findings remain.
 
 Limitations that stay: workspace layout ownership is still advisory for
 authenticated API clients, and Settings conflict detection is a client-side
@@ -34,46 +45,62 @@ the list and leaves the CLI's own picker as the fallback.
 ## Checks
 
 - Full manual gate (`scripts/check.py` from PowerShell with the venv
-  PYTHONPATH and the direct 3.12.13 interpreter): exit 0, "Manual CI
-  passed." pytest 1254 passed, 18 skipped in 83.40 s (separate full runs:
-  81.0 s, and 97 s while the machine was busy). Ruff clean. `node --test`
-  397/397 pass, `node --check` clean on every JS file, `git diff --check`
-  clean. The node MODULE_TYPELESS warnings come from an untracked
-  `package.json` in the working copy, which was left alone.
-- Native workspace smoke (`scripts/smoke_workspace_views.py`, run the same
-  way, with TEMP and TMP pointing at a scratch folder so its isolated APPDATA
-  lived there, a free port and no summon key): exit 0, all 48 checks passed,
-  plus "Native close-to-tray with retained terminals passed", in 36.8 s. This
-  run is on the final tree, after every review fix; the first run (46.6 s)
-  was on the integration tree before them.
+  PYTHONPATH and the direct 3.12.13 interpreter) on the final tree: exit 0,
+  "Manual CI passed." pytest 1259 passed, 18 skipped in 32.05 s. Ruff clean.
+  `node --test` 464/464 pass, `node --check` clean on every JS file,
+  `git diff --check` clean. Earlier runs of the same gate on busier
+  machines took 74 to 97 s.
+- Native workspace smoke (`scripts/smoke_workspace_views.py`, TEMP and TMP
+  pointing at a scratch folder so its isolated APPDATA lived there, a free
+  port and no summon key): exit 0 on the tree with the themes merged. Every
+  listed check passed, from "the shell hosts no workspace of its own" to
+  "Native close-to-tray with retained terminals passed".
+- Live UI run against an isolated backend (port 8641, its own APPDATA, no
+  summon key) in a browser: the shell boots one scratch view and no main
+  workspace; two workspaces open from the sidebar and tile; the sidebar order
+  stays fixed while terminals change state; a row is killed by pointer
+  (Cancel focused) and by keyboard (Kill focused, Enter); a click inside a
+  view closes an open kill box; a reload restores the arrangement without
+  leaking registry entries. Settings search, the Terminals list, the Codex
+  and Claude Code option menus, shortcut capture and the palette prefixes
+  were exercised. Open on a saved Codex profile started the vendored
+  `codex.exe` with `--cd <workspace>`, and Open on a Claude Code profile
+  started `claude` in the workspace folder. Both first screens were read,
+  then both terminals were killed from the sidebar by keyboard and their
+  processes were gone. `GET /api/system/ssh-hosts` returned the three hosts
+  of this machine's `~/.ssh/config`; one resolved through `ssh -G`.
+- Native window and overlay run from the source build on the real desktop
+  (one 1920x1080 monitor, its own APPDATA, summon key Ctrl+Alt+F12 so the
+  user's key stayed untouched): the window opened at the configured
+  1280x800; the summon key showed the overlay at exactly the top half of the
+  work area, without a frame and on top, sliding in over about 120 ms; a
+  second press hid it; starting Notepad hid it on focus loss; turning the
+  overlay off restored the frame, the original bounds and normal stacking.
+  A changed summon key worked at once after saving, a key held by another
+  program was reported in `hotkey_error`, and the remembered bounds were
+  written about 0.5 s after a move and restored on the next start.
+- Cold start, 3.13.0 against 4.0 on isolated headless backends, 5 measured
+  runs each with the cache cleared: page load to the first cmd prompt,
+  median 4578 ms against 4577 ms; to the terminal WebSocket opening, median
+  1591 ms against 1796 ms (+13 %, inside the 25 % budget).
 - PyInstaller built `dist/QuickTerm` from `quickterm.spec` with the bundled
-  PuTTY tools present. That build and the frozen checks below predate the
-  second review's fixes (frontend colours, comments and docs), so the
-  published artifacts must be rebuilt from the final commit.
-- Frozen v4.0.0 smoke (`scripts/smoke_packaged.py`, isolated APPDATA under a
-  scratch folder): passed. It verified authenticated PTY creation, replay,
-  live output and exit, the dynamically loaded open, update and connection
-  routes, workspace metadata edits and a settings history restore. The
-  application folder is 42.80 MB.
+  PuTTY tools present. Frozen v4.0.0 smoke (`scripts/smoke_packaged.py`,
+  isolated APPDATA): passed with authenticated PTY creation, replay, live
+  output and exit, and the dynamically loaded routes. The application
+  folder is 42.80 MB. The release artifacts are rebuilt from the tagged
+  commit and pass `scripts/check.py --artifacts` and both smokes again.
 - The frozen build was also started on port 8681 with a fresh APPDATA and no
   summon key. `/api/health` reported 4.0.0. `GET /api/system/agents`
   answered 200 with Claude Code (12 options) and Codex (13 options),
-  `GET /api/system/ssh-hosts` answered 200 with the three aliases of this
-  machine's `~/.ssh/config` and the System32 OpenSSH client,
-  `GET /api/system/terminals` and `GET /api/agent-sessions` answered 200,
-  `GET /api/system/ssh-hosts/-bad` 400, `POST /api/open {"target":"ftp://x"}`
-  400 (not 500) and `GET /api/update` 200. Without the token
-  `/api/system/ssh-hosts` answered 403. That proves the new importlib modules
-  `agents`, `agent_sessions` and `ssh_config` are in the frozen build. The
-  process was stopped by its PID afterwards.
-- The full gate ran again on the release tree (version 4.0.0, changelog,
-  README and these notes): exit 0, "Manual CI passed.", pytest 1254 passed,
-  18 skipped in 81.23 s, ruff clean, `node --test` 397/397 pass. After the
-  second review's fixes it ran once more: exit 0, pytest 1254 passed, 18
-  skipped in 74.65 s, ruff clean, `node --test` 397/397 pass.
-- No leftover processes. Nothing was pushed or tagged. The installer,
-  portable ZIP, Python distributions and SHA256SUMS were not built for this
-  verification; that is the release step.
+  `GET /api/system/ssh-hosts` answered 200 with the three aliases and the
+  System32 OpenSSH client, `GET /api/system/terminals` and
+  `GET /api/agent-sessions` answered 200, `GET /api/system/ssh-hosts/-bad`
+  400, `POST /api/open {"target":"ftp://x"}` 400 (not 500) and
+  `GET /api/update` 200. Without the token `/api/system/ssh-hosts` answered
+  403. The new importlib modules `agents`, `agent_sessions` and `ssh_config`
+  are in the frozen build.
+- No leftover processes. All of the above used scratch APPDATA folders; the
+  user's running QuickTerm and its configuration were not touched.
 
 ## Rollback
 
@@ -98,13 +125,14 @@ No rollback or installation was performed against the user's running copy.
 
 ## Unverified
 
-- No real Claude Code, Codex or ssh process was started by these checks and
-  no SSH host was connected. Agent and OpenSSH argument lists, the
-  `~/.ssh/config` parser, `ssh -G` parsing and the session stores are
-  covered by tests on sample data.
-- The overlay's Win32 path (frame stripping, topmost placement, the slide
-  and hide on focus loss) is covered by tests with stubbed ctypes. The
-  packaged build was checked through its HTTP API, not by summoning it.
+- No SSH, SFTP or Telnet session was opened to a real host. Aliases were
+  read and resolved, and the argument lists are covered by tests.
+- No prompt was sent to Claude Code or Codex; their first screens were the
+  check. The recent conversation lists were checked against this machine's
+  session stores and sample data.
+- The overlay was driven on one monitor from the source build. The packaged
+  build was checked through its HTTP API, not by summoning it. Several
+  monitors and high-DPI scaling were not tested.
 - Remote hosts, container engines, serial hardware and RDP/VNC servers were
   not connected, as in 3.13.
 - Release binaries are unsigned. SmartScreen may warn; SHA-256 manifests

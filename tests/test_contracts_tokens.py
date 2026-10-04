@@ -130,3 +130,15 @@ def test_light_themes_switch_the_native_colour_scheme():
     assert "color-scheme: dark;" in app_css
     assert ':root[data-theme-mode="light"] { color-scheme: light; }' in app_css
     assert 'document.documentElement.dataset.themeMode = light ? "light" : "dark";' in themes
+
+
+def test_the_native_window_paints_the_pre_boot_background():
+    # pywebview paints WINDOW_BACKGROUND before the page loads; anything other
+    # than --bg flashes a second colour at every start.
+    from quickterm import app
+
+    css = (CSS_DIR / "app.css").read_text(encoding="utf-8")
+    root = css[css.index(":root {"):css.index("}", css.index(":root {"))]
+    match = re.search(r"--bg: (#[0-9a-fA-F]{6});", root)
+    assert match, "--bg is a literal in app.css :root"
+    assert app.WINDOW_BACKGROUND.lower() == match.group(1).lower()

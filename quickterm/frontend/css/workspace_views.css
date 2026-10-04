@@ -81,7 +81,9 @@ body.embedded .launcher.sidebar, body.embedded .float-launch { display: none; }
   min-height: 27px;
   padding: 3px 4px 3px 9px;
   background: var(--surface);
-  color: var(--workspace-color);
+  /* Text owes 4.5:1; the view colour is held to 3:1, so it marks the border
+     and the dot, not the name. */
+  color: var(--text-soft);
   font: 11px var(--mono);
   border-bottom: 1px solid color-mix(in srgb, var(--workspace-color) 40%, var(--surface));
   cursor: grab;
