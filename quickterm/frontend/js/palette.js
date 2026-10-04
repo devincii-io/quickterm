@@ -75,7 +75,9 @@ export class Palette {
     else this.openPalette();
   }
 
-  async openPalette() {
+  // `query` pre-fills the box, so a caller can open it already narrowed by a
+  // prefix (the sidebar's search opens it on "@").
+  async openPalette(query = "") {
     const requestId = ++this.requestId;
     const wasOpen = this.open;
     this.open = true;
@@ -91,7 +93,7 @@ export class Palette {
     if (!wasOpen) claimFocus("palette");
     this._leaveSubModes();
     this.overlay.hidden = false;
-    this.input.value = "";
+    this.input.value = typeof query === "string" ? query : "";
     this.input.placeholder = `Find anything · ${PREFIX_HINT}`;
     this.late = emptyLate();
     this._compose();
@@ -599,6 +601,7 @@ export class Palette {
       if (!this.filtered.length) return;
       const d = e.key === "ArrowDown" ? 1 : -1;
       this.sel = (this.sel + d + this.filtered.length) % this.filtered.length;
+      this.moved = true;
       this._renderList();
       return;
     }
@@ -625,7 +628,12 @@ export class Palette {
   _refilter(resetSelection = true) {
     const raw = this.input.value.trim();
     const { kind, text: q } = this._inSubMode() ? { kind: null, text: raw } : parsePrefix(raw);
-    const previous = resetSelection ? null : this.filtered[this.sel];
+    // A late fill (saved workspaces, agent sessions) keeps the row only when
+    // someone picked it with the arrows. Otherwise the first row stays first:
+    // keeping whatever was row 0 before the fill pushed "close workspace view"
+    // to the bottom and left it selected.
+    if (resetSelection) this.moved = false;
+    const previous = resetSelection || !this.moved ? null : this.filtered[this.sel];
     this.filtered = this.items
       .filter((item) => (kind ? rowGroup(item) === kind : q || !item.quiet))
       // `search` widens what an item can be found by without widening what it

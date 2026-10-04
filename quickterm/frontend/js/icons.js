@@ -36,6 +36,7 @@ const PATHS = {
     '<rect x="3" y="4.5" width="13" height="13" rx="1.8"/><path d="M15 3.5h5.5V9"/><line x1="20" y1="4" x2="13.5" y2="10.5"/>',
   more: '<circle cx="12" cy="5.5" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="12" cy="18.5" r="1.1"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.3" y1="15.3" x2="20.5" y2="20.5"/>',
+  filter: '<line x1="4" y1="7" x2="20" y2="7"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="10" y1="17" x2="14" y2="17"/>',
   keyboard:
     '<rect x="2.5" y="6" width="19" height="12" rx="2"/>' +
     '<path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01"/><line x1="8" y1="14" x2="16" y2="14"/>',

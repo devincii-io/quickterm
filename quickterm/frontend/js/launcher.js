@@ -9,7 +9,8 @@ import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
   clampSidebarWidth, isWideSidebar, sessionFolder, sessionTooltip, sidebarGroups, groupSummary,
   folderName, terminalChoices, canLaunch, choiceKey, loadMode, saveMode, loadWidth, saveWidth,
-  loadClosedGroups, saveClosedGroups, foldId,
+  loadClosedGroups, saveClosedGroups, foldId, visibleGroups, loadView, saveView, normalizeView,
+  isDefaultView, SIDEBAR_VIEW_DEFAULTS,
 } from "./sidebar_model.js";
 
 // The pure half lives in sidebar_model.js; its public names stay importable
@@ -234,7 +235,54 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       onClose: (reason) => { if (reason !== "run") handBack(); },
     });
   }, { signal });
-  section.append(make("span", "sidebar-section-label", "Workspaces"), add);
+  // Search hands over to the palette, already narrowed to workspaces and
+  // terminals: one finder, not a second one squeezed into the sidebar.
+  const search = iconButton("sidebar-section-add sidebar-section-search", "search",
+    "Find a workspace or terminal (Alt+K, then @)", () => actions.search?.());
+  // The view menu: what the list shows and how. Per window, like the mode.
+  let view = loadView();
+  const viewButton = iconButton("sidebar-section-add sidebar-section-view", "filter", "View options");
+  viewButton.setAttribute("aria-haspopup", "menu");
+  viewButton.setAttribute("aria-expanded", "false");
+  const paintViewButton = () => {
+    const custom = !isDefaultView(view);
+    setClass(viewButton, "custom", custom);
+    setLabel(viewButton, custom ? "View options (changed)" : "View options");
+  };
+  const setView = (patch) => {
+    view = normalizeView({ ...view, ...patch });
+    saveView(view);
+    paintViewButton();
+    patchGroups();
+  };
+  viewButton.addEventListener("click", () => {
+    const choose = (label, detail, selected, patch) => ({ label, detail, selected, run: () => setView(patch) });
+    toggleMenu({
+      anchor: section,
+      trigger: viewButton,
+      label: "View options",
+      align: "end",
+      items: [
+        { heading: "Show" },
+        choose("Empty workspaces", "no terminals, not open", view.empty, { empty: !view.empty }),
+        choose("Finished terminals", "kept for their last output", view.finished, { finished: !view.finished }),
+        { heading: "Group by" },
+        choose("Workspace", "", view.group === "workspace", { group: "workspace" }),
+        choose("Nothing", "one list of terminals", view.group === "none", { group: "none" }),
+        { heading: "Sort by" },
+        choose("Name", "rows stay where they are", view.sort === "name", { sort: "name" }),
+        choose("Recent activity", "busy and new output first", view.sort === "activity", { sort: "activity" }),
+        { separator: true },
+        {
+          label: "Reset view", icon: "x", disabled: isDefaultView(view),
+          run: () => setView({ ...SIDEBAR_VIEW_DEFAULTS }),
+        },
+      ],
+      onClose: (reason) => { if (reason !== "run") handBack(); },
+    });
+  }, { signal });
+  paintViewButton();
+  section.append(make("span", "sidebar-section-label", "Workspaces"), search, viewButton, add);
   el.append(section);
 
   // The active workspace's second line: its folder, the "workspace here"
@@ -313,7 +361,12 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const groupList = make("div", "sidebar-groups");
   const emptyNote = make("div", "sidebar-empty", "no workspaces and no terminals");
   emptyNote.hidden = true;
-  sessionList.append(groupList, emptyNote);
+  // Hidden workspaces stay one click away: this line turns them back on.
+  const hiddenNote = make("button", "sidebar-hidden-note");
+  hiddenNote.type = "button";
+  hiddenNote.hidden = true;
+  hiddenNote.addEventListener("click", () => setView({ empty: true }), { signal });
+  sessionList.append(groupList, emptyNote, hiddenNote);
   el.append(sessionList, parking);
 
   const closedGroups = loadClosedGroups();
@@ -505,7 +558,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       finished ? "finished" : "",
     ].filter(Boolean).join(" ");
     setText(name, label);
-    let title = sessionTooltip(session, group?.label || "");
+    let title = sessionTooltip(session, item.owner || group?.label || "");
     const profile = (model.profiles || []).find((each) => each.name === session.profile);
     if (profile) {
       title += `\n${connectionLabel(profile)}: ${connectionTarget(profile)}`;
@@ -517,8 +570,13 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     // The folder is the fact that tells one project's shell from another's, so
     // it gets its own line as soon as the sidebar is wide enough to hold it.
     const folder = folderName(sessionFolder(session));
-    setText(where, folder);
-    where.hidden = !folder;
+    const flat = group?.kind === "flat";
+    // "qt · qt" says nothing twice: the folder joins only when it differs.
+    const sameName = String(item.owner || "").toLowerCase() === folder.toLowerCase();
+    const whereText = flat ? [item.owner, sameName ? "" : folder].filter(Boolean).join(" · ") : folder;
+    setText(where, whereText);
+    where.hidden = !whereText;
+    setClass(where, "always", flat);
     // Chips only for the states worth interrupting for: a plain background
     // shell is a hollow dot, or the list turns into a wall of badges.
     const chipped = ["attention", "unread", "busy", "elsewhere"].includes(state.key);
@@ -625,15 +683,16 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const { head, chevron, dot, name, count, closeView, kebab, slot, rows } = parts.get(node);
     const hasRows = group.sessions.length > 0;
     const closed = hasRows && closedGroups.has(foldId(group));
-    for (const kind of ["workspace", "scratch", "unassigned"]) setClass(node, kind, group.kind === kind);
+    for (const kind of ["workspace", "scratch", "unassigned", "flat"]) setClass(node, kind, group.kind === kind);
     setClass(node, "open", group.open);
     setClass(node, "active", group.active);
     setClass(node, "has-attention", group.counts.attention > 0);
     setClass(node, "folded", closed);
     setClass(head, "warning", group.pathExists === false);
-    // Kept in the layout so every name lines up; `hidden` would collapse it.
+    // Always drawn, so every head reads as a row you can open: down while its
+    // terminals show, right when folded or when there is nothing inside.
     setClass(chevron, "empty", !hasRows);
-    const glyph = closed ? "chevron-right" : "chevron-down";
+    const glyph = closed || !hasRows ? "chevron-right" : "chevron-down";
     if (chevron.dataset.glyph !== glyph) {
       chevron.dataset.glyph = glyph;
       chevron.textContent = "";
@@ -644,6 +703,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     else dot.style.removeProperty("--group-color");
     setText(name, group.label);
     setText(count, String(group.sessions.length));
+    count.hidden = !hasRows;
     const where = group.kind === "unassigned" ? "Live terminals no workspace owns"
       : group.path ? `${group.path}${group.pathExists === false ? " (missing)" : ""}`
         : group.label;
@@ -671,14 +731,18 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
 
   const patchGroups = () => {
     const focused = sessionList.contains(document.activeElement) ? document.activeElement : null;
-    const groups = sidebarGroups(model.sessions, model);
+    const everything = sidebarGroups(model.sessions, { ...model, view });
+    const { groups, hidden } = visibleGroups(everything, view);
     const nodes = patchList(groupList, groups, {
       key: (group) => `group:${group.key}`,
       create: createGroup,
       update: updateGroup,
     });
     if (!nodes.some((node) => itemFor(node)?.active) && activeLine.parentNode !== parking) parking.append(activeLine);
-    emptyNote.hidden = groups.length > 0;
+    emptyNote.hidden = groups.length > 0 || hidden > 0;
+    hiddenNote.hidden = hidden === 0;
+    setText(hiddenNote, `Show ${hidden} empty workspace${hidden === 1 ? "" : "s"}`);
+    hiddenNote.title = "Workspaces with no terminals that are not open. The view menu above hides or shows them.";
     // Close a confirmation whose terminal or workspace is no longer listed.
     const listed = new Set();
     for (const group of groups) {

@@ -177,6 +177,9 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 }
 .sidebar-section-add:hover, .sidebar-section-add[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
 .sidebar-section-add:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* A changed view is marked on its button, so a hidden workspace is never a
+   mystery: the tint says the list is filtered. */
+.sidebar-section-view.custom { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); }
 
 /* ---------- the active workspace's second line ---------- */
 
@@ -262,7 +265,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .session-row {
   width: 100%;
   min-width: 0;
-  min-height: 24px;
+  min-height: 26px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -283,7 +286,7 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
   flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  font-size: 10.5px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -340,6 +343,8 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
    enough to hold one; below that the tooltip carries it. */
 .session-where { display: none; flex-basis: 100%; padding-left: 13px; color: var(--muted); font-size: 8.5px; }
 body.sidebar-wide .session-where { display: block; }
+/* In the ungrouped list the row names its workspace, at any width. */
+.session-where.always { display: block; }
 
 .session-chip {
   flex: none;
@@ -356,35 +361,39 @@ body.sidebar-wide .session-where { display: block; }
 .chip-elsewhere { background: var(--surface); color: var(--muted); }
 .chip-attention { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
-/* Every saved workspace has a head, in name order, open or not. The head is
-   the way to open or focus its view; the chevron folds its rows. */
+/* A workspace is a row like a terminal: an arrow, its colour, its name and,
+   when it holds any, how many terminals. A click opens or focuses its view;
+   the arrow folds its terminals. */
 .session-group { padding: 1px 0; }
 .session-group-headline { position: relative; }
 .session-group-head {
   width: 100%;
-  min-height: 22px;
+  min-height: 26px;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 1px 6px 1px 4px;
+  gap: 6px;
+  padding: 2px 6px 2px 3px;
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--muted);
-  font: 9.5px var(--mono);
-  letter-spacing: .04em;
+  color: var(--text-soft);
+  font: 11px var(--mono);
   text-align: left;
   cursor: pointer;
 }
 .session-group-head:hover { background: var(--surface-raised); color: var(--text); }
 .session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.session-group.open > .session-group-headline > .session-group-head { color: var(--text-soft); }
+.session-group.open > .session-group-headline > .session-group-head { color: var(--text); }
 .session-group.active > .session-group-headline > .session-group-head { color: var(--text); font-weight: 600; }
 .session-group-head.warning .session-group-name { text-decoration: underline dotted var(--danger); }
-.session-group.unassigned > .session-group-headline > .session-group-head { text-transform: uppercase; letter-spacing: .06em; font-size: 8.5px; }
+.session-group.unassigned > .session-group-headline > .session-group-head,
+.session-group.flat > .session-group-headline > .session-group-head { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: 8.5px; }
 .session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-group-chevron { width: 10px; flex: none; display: grid; place-items: center; }
-.session-group-chevron.empty { visibility: hidden; }
+.session-group-chevron { width: 12px; flex: none; display: grid; place-items: center; color: var(--muted); }
+.session-group-head:hover .session-group-chevron { color: var(--text); }
+/* Nothing to fold, but still a row that opens: the arrow stays, quieter. */
+.session-group-chevron.empty { opacity: .45; }
+.sidebar-count[hidden] { display: none; }
 .session-group.folded > .session-group-rows { display: none; }
 /* The view's colour when it is open in this window, a hollow ring when not. */
 .session-group-dot {
@@ -396,8 +405,35 @@ body.sidebar-wide .session-where { display: block; }
   background: var(--group-color, var(--accent));
 }
 .session-group-dot.hollow { border-color: var(--muted); background: transparent; }
-.session-group.unassigned .session-group-dot { display: none; }
-.session-group-rows { display: flex; flex-direction: column; gap: 1px; padding-left: 8px; }
+.session-group.unassigned .session-group-dot,
+.session-group.flat .session-group-dot { display: none; }
+/* Terminals hang under their workspace on a guide line, like a tree. */
+.session-group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: 9px;
+  padding-left: 5px;
+  border-left: 1px solid var(--line);
+}
+.session-group.active > .session-group-rows { border-left-color: var(--accent-border); }
+.session-group.flat > .session-group-rows { margin-left: 0; padding-left: 0; border-left: 0; }
+
+/* "N empty workspaces hidden · show", under the list. */
+.sidebar-hidden-note {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font: 9.5px var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-hidden-note:hover { background: var(--surface-raised); color: var(--text); }
+.sidebar-hidden-note:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* Hover and focus-within actions. They sit over the right end of the head or
    row (the count, the chips) and stay drawn while their confirmation is open,
@@ -512,6 +548,8 @@ body.sidebar-collapsed .sidebar-setup,
 body.sidebar-collapsed .sidebar-section,
 body.sidebar-collapsed .session-name,
 body.sidebar-collapsed .session-where,
+body.sidebar-collapsed .session-where.always,
+body.sidebar-collapsed .sidebar-hidden-note,
 body.sidebar-collapsed .session-chip,
 body.sidebar-collapsed .session-group-headline,
 body.sidebar-collapsed .session-group-detail,
@@ -522,7 +560,7 @@ body.sidebar-collapsed .sidebar-admin-badge { display: none; }
 body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
 body.sidebar-collapsed .session-group { padding: 0; }
 body.sidebar-collapsed .session-group > .session-group-rows,
-body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; padding: 0; }
+body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
 body.sidebar-collapsed .session-state { width: 8px; height: 8px; }
 /* The active view's terminals keep an accent edge, so the rail still says

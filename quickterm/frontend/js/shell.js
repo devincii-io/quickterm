@@ -453,6 +453,12 @@ export async function bootShell() {
       }),
       workspaceHere: reported(() => chromeApp.createWorkspaceHere()),
       openFolder: (app) => chromeApp.openHere(app),
+      search: () => {
+        closeMenu("replaced");
+        closeConfirm("replaced");
+        panels.close();
+        palette.openPalette("@");
+      },
       sidebarResized: () => setTimeout(() => views.layout({ animate: false }), 160),
       handBack: () => views.focusView(views.active),
     },
