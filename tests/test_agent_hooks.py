@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from dataclasses import dataclass, field
 
 import pytest
@@ -19,6 +20,12 @@ from tests.test_session_manager import _RecordingPty
 
 TOKEN = "s3cret"
 BASE = "http://127.0.0.1:8620"
+
+
+@pytest.fixture(autouse=True)
+def usable_curl(monkeypatch):
+    # Hermetic: the launch tests must not depend on this machine's curl.
+    monkeypatch.setattr(agent_hooks, "curl_usable", lambda: True)
 
 
 # --- state -------------------------------------------------------------------
@@ -109,6 +116,15 @@ def test_subagents_come_and_go():
                                    "age_seconds": int(now - state.subagents[0].started)}
     state, _, _ = run([("SubagentStop", {"agent_id": "a1"})], start=state, t0=now)
     assert [s.id for s in state.subagents] == ["a2"]
+
+
+def test_a_compaction_mid_turn_keeps_the_state_and_a_new_session_resets_it():
+    working, _, now = run([("UserPromptSubmit", {"prompt": "p"}), ("PreToolUse", {"tool_name": "Bash"})])
+    assert apply(working, "claude", "SessionStart", {"source": "compact"}, now).state is working
+    for source in ("startup", "resume", "clear", "fork"):
+        fresh = apply(working, "claude", "SessionStart", {"source": source}, now).state
+        assert (fresh.state, fresh.prompt) == ("idle", None)
+    assert apply(None, "claude", "SessionStart", {"source": "compact"}, now).state.state == "idle"
 
 
 def test_session_end_clears_and_unknown_events_change_nothing():
@@ -215,6 +231,86 @@ def test_codex_gets_notify_unless_the_user_has_one(tmp_path, monkeypatch):
     assert agent_hooks.launch_args("codex", "codex.exe", ["agents"], None, base) == ["agents"]
     (home / "config.toml").write_text('notify = ["mine.exe"]\n', encoding="utf-8")
     assert agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base) == ["--cd", "x"]
+
+
+def test_merged_settings_files_do_not_pile_up(tmp_path):
+    base = tmp_path / "hooks"
+    last = None
+    for n in range(agent_hooks.MERGED_KEEP + 4):
+        last = agent_hooks.launch_args(
+            "claude", "claude.exe", [f'--settings={{"env": {{"N": "{n}"}}}}'], None, base
+        )
+    kept = sorted(base.glob("claude-settings-*.json"))
+    assert len(kept) == agent_hooks.MERGED_KEEP
+    assert last[-1].split("=", 1)[1] in {p.as_posix() for p in kept}
+
+
+def test_parallel_launches_all_get_hooks(tmp_path):
+    # Several agent panes restoring at once build in worker threads that all
+    # write the same files; none may lose its hooks to a collision.
+    import threading
+
+    base = tmp_path / "hooks"
+    results: list[list[str]] = []
+
+    def worker(n):
+        for i in range(4):
+            given = [f'--settings={{"env": {{"N": "{n % 2}"}}}}'] if i % 2 else ["--continue"]
+            results.append(agent_hooks.launch_args("claude", "claude.exe", given, None, base))
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(results) == 32
+    assert all(r[-1].startswith("--settings=") and "hooks" in r[-1] for r in results)
+    assert not list(base.glob("*.tmp"))
+
+
+def test_a_write_that_loses_a_race_accepts_the_same_text(tmp_path, monkeypatch):
+    target = tmp_path / "f.curl"
+
+    def racing_replace(src, dst):
+        target.write_text("same", encoding="utf-8")
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(agent_hooks.os, "replace", racing_replace)
+    agent_hooks._write_if_changed(target, "same")
+    with pytest.raises(PermissionError):
+        agent_hooks._write_if_changed(target, "other")
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_bare_name_that_is_a_batch_shim_gets_the_cmd_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_hooks.shutil, "which", lambda name: f"C:/npm/{name}.cmd")
+    odd = tmp_path / "R&D"
+    assert agent_hooks.launch_args("claude", "claude", [], None, odd) == []
+    assert agent_hooks.launch_args("codex", "codex", ["--cd", "x"], None, tmp_path) == ["--cd", "x"]
+    assert agent_hooks.launch_args("claude", "claude", [], None, tmp_path)[0].startswith("--settings=")
+
+
+def test_an_old_or_missing_curl_turns_hooks_off(tmp_path, monkeypatch):
+    monkeypatch.undo()  # the real curl_usable, over a fake curl
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        out = {"old": b"curl 7.79.1 (Windows) libcurl/7.79.1\r\n", "new": b"curl 8.13.0 (Windows)\r\n"}
+        if argv[0] not in out:
+            raise FileNotFoundError(argv[0])
+        return subprocess.CompletedProcess(argv, 0, out[argv[0]], b"")
+
+    monkeypatch.setattr(agent_hooks.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent_hooks, "_curl_checked", {})
+    for program, usable in (("old", False), ("new", True), ("gone", False)):
+        monkeypatch.setattr(agent_hooks, "curl_program", lambda p=program: p)
+        assert agent_hooks.curl_usable() is usable
+        result = agent_hooks.launch_args("claude", "claude.exe", [], None, tmp_path / program)
+        assert bool(result) is usable
+    assert len(calls) == 3  # asked once per program
+    assert agent_hooks._parse_curl_version("curl 8.3.0 (x)") == (8, 3, 0)
+    assert agent_hooks._parse_curl_version("nonsense") is None
 
 
 def test_a_folder_a_shell_would_rewrite_gets_no_hooks(tmp_path):
@@ -328,6 +424,16 @@ def test_create_app_hands_the_hook_target_to_the_manager(hooked):
     _, manager, ctx = hooked
     assert manager.hook_env == {"port": 8620, "token": ctx.hook_token}
     assert ctx.hook_token != TOKEN
+
+
+def test_no_hooks_for_an_elevated_backend_or_one_not_on_loopback_v4():
+    for kwargs, cfg in (({"elevated": True}, FakeConfig()), ({}, FakeConfig(host="::1"))):
+        manager = FakeSessionManager()
+        create_app(manager, cfg, TOKEN, **kwargs)
+        assert not hasattr(manager, "hook_env")
+    manager = FakeSessionManager()
+    create_app(manager, FakeConfig(host="0.0.0.0"), TOKEN)
+    assert manager.hook_env["port"] == 8620
 
 
 def test_the_route_records_an_envelope_and_raw_codex_json(hooked):

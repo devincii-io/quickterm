@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from quickterm.session_manager import Attachment, SessionManager
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+# Binds that answer on 127.0.0.1, where the agent hooks post.
+HOOK_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0")
 
 # tests/test_coalescing.py patches this cap on this module and calls the two
 # wrappers below through it, so they pass the value on to quickterm.api.attach.
@@ -100,7 +102,10 @@ def create_app(
         suspend_hotkeys=suspend_hotkeys,
     )
     set_agent_hooks = getattr(manager, "set_agent_hooks", None)
-    if set_agent_hooks is not None:
+    # No hooks for an elevated backend: an administrator agent would run curl
+    # with configs any process of the user can rewrite. And the hooks post to
+    # 127.0.0.1, which a backend bound elsewhere does not answer.
+    if set_agent_hooks is not None and not elevated and cfg.host in HOOK_HOSTS:
         set_agent_hooks(cfg.port, ctx.hook_token)
     app.add_middleware(LocalGuard, ctx=ctx)
     for routes in (
