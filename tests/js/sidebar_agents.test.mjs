@@ -8,6 +8,7 @@ import {
   activitySeconds, agentLines, groupBranch, groupSummary, needsYou, nextNeedsYou, relativeTime,
   sessionState, sessionTooltip, sidebarGroups, subagentLabel, visibleGroups,
 } from "../../quickterm/frontend/js/sidebar_model.js";
+import { gitPaths, sessionToMarkSeen, sidebarModel } from "../../quickterm/frontend/js/sidebar.js";
 
 function session(id, extra = {}) {
   return {
@@ -149,4 +150,31 @@ test("the head shows the branch unless it repeats the name", () => {
   assert.equal(groupBranch({ label: "qt/feat-beta", shortLabel: "feat-beta", git: { branch: "feat/beta" } }), "");
   assert.equal(groupBranch({ label: "qt", git: { branch: null, head: "abc1234" } }), "@abc1234");
   assert.equal(groupBranch({ label: "qt", git: null }), "");
+});
+
+test("looking at a finished agent turn marks it seen, like an attention", () => {
+  const look = (sessions) => sessionToMarkSeen({
+    sessions, focusedId: "a", focusChanged: true, visible: true, windowFocused: true,
+  });
+  assert.equal(look([session("a", { agent: agent("done") })]), "a");
+  assert.equal(look([session("a", { agent: agent("failed") })]), "a");
+  assert.equal(look([session("a", { agent: agent("working") })]), null);
+  assert.equal(look([session("a", { agent: agent("idle") })]), null);
+});
+
+test("git facts are asked once per folder and reach the workspace model", () => {
+  const folders = new Map([
+    ["qt", { path: "C:\\src\\qt", pathExists: true }],
+    ["copy", { path: "C:\\src\\qt", pathExists: true }],
+    ["none", { path: null, pathExists: null }],
+  ]);
+  assert.deepEqual(gitPaths(folders), ["C:\\src\\qt"]);
+  assert.deepEqual(gitPaths(new Map()), []);
+  const git = new Map([["C:\\src\\qt", main.git]]);
+  const model = sidebarModel({
+    state: { profiles: [], workspaceNames: ["qt", "none", "scratch-view-abcdefgh"], cfg: {} },
+    folders, git, focusedId: "s1",
+  });
+  assert.deepEqual(model.workspaces.map((ws) => [ws.name, ws.git?.branch ?? null]), [["qt", "main"], ["none", null]]);
+  assert.equal(model.focusedId, "s1");
 });

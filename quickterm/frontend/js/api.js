@@ -46,6 +46,10 @@ export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeU
 // The user looked at this terminal: clears its "needs you" state (404 once
 // the registry has dropped it, which callers may ignore).
 export const markSessionSeen = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/seen`, {});
+// Types into a terminal from outside, as `quickterm send` does; `enter` adds
+// the Return. The server marks the terminal touched: someone asked for this.
+export const sendInput = (id, text, enter = false) =>
+  req("POST", `/api/sessions/${encodeURIComponent(id)}/input`, { text, enter: Boolean(enter) });
 export const cleanupSessions =(sessionIds) => req("POST", "/api/sessions/cleanup", { session_ids: sessionIds });
 export const killAllSessions = () => req("POST", "/api/sessions/kill-all", {});
 export const claimLaunch = () => req("GET", "/api/launches/next");
@@ -68,6 +72,13 @@ export const putWorkspace = (name, layout, logo, sessionIds = [], path, options)
     ...(path === undefined ? {} : { path }),
   }, options);
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
+// Branch and worktree facts for up to 256 folders, read from .git without
+// starting git: {"<path as sent>": null | {branch, head, worktree, main_path}}.
+export const gitInfo = (paths) => req("POST", "/api/git/info", { paths: [...(paths || [])] });
+// A new branch checked out in its own folder, saved as workspace
+// "<from>/<branch slug>": {workspace, path, setup: null | {command, source}}.
+export const createWorktree = (from, branch, base) =>
+  req("POST", "/api/workspaces/worktree", { from, branch, ...(base ? { base } : {}) });
 // Directory-only listing for the in-app folder browser. A blank path lets the
 // backend choose the home folder, so the caller never has to know one.
 export const listDirs = (path) =>
