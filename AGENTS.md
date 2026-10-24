@@ -64,7 +64,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   console host caps bulk output at about 5-6 MB/s with either binding.
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
   Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
-  detach, Alt+W confirmed kill, and
+  detach, Alt+W confirmed kill, Alt+J next terminal that needs you, and
   Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
   (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; Alt+Shift+S
   cycles the sidebar (full, rail, hidden; plain Alt+B is readline's
@@ -267,6 +267,14 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   restart. With `overlay.enabled`, the summon key toggles the primary window
   as a drop-down (`overlay.py`); close-to-tray treats a hidden overlay as a
   hidden window.
+- Agent state comes from hooks added per launch (`agent_hooks.py`), never
+  from the user's `~/.claude/settings.json` or Codex `config.toml`. Every PTY
+  carries `QUICKTERM_SESSION_ID`, `QUICKTERM_PORT` and `QUICKTERM_HOOK_TOKEN`;
+  the hook token opens only `/api/sessions/{sid}/agent-event`, so a program in
+  a terminal never sees the full API token. Hooks run Windows' curl async: a
+  Python process per PreToolUse would slow every tool call. Git facts are read
+  from `.git` files (`git_info.py`); `git` itself runs only to create a
+  worktree, off the loop, with a list argv and the `GIT_*` overrides removed.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`

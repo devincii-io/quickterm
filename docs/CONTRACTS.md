@@ -2062,7 +2062,35 @@ POST /api/sessions/{sid}/agent-event
   header X-QuickTerm-Hook-Token: <hook token>   (the normal X-QuickTerm-Token also works)
   body   {"agent": "claude" | "codex", "event": "<hook event name>", "payload": {...raw hook JSON...}}
   -> 204; 404 unknown sid; 401 bad or missing token; 400 malformed body; body capped at 256 KiB
+
+POST /api/sessions/{sid}/agent-event?agent=claude|codex
+  body   the raw hook JSON alone; the event comes from `hook_event_name` (Claude) or `type` (Codex)
 ```
+
+The bare form exists because Codex's `notify` passes its JSON as the last
+argument, which curl can only send as the whole body. Only this route answers
+401; every other route keeps 403, and the hook token is refused there.
+
+Transport: Claude gets one command hook per event, marked `async: true`, that
+runs `%SystemRoot%\System32\curl.exe -K <config>` from
+`%APPDATA%/quickterm/hooks/`; the configs read the three variables and stdin,
+so one static set serves every terminal. Claude's `"type": "http"` hooks
+cannot put an env var into the URL. Two `--settings` flags do not merge (the
+last wins), so a profile's own `settings` option is read, QuickTerm's hooks are
+appended, and the result is written to `hooks/claude-settings-<hash>.json` and
+passed as the only `--settings`; unreadable user settings leave the launch
+without hooks. Codex gets `-c notify=[curl, -K, codex-notify.curl,
+--data-binary]` before any subcommand, and nothing when its `config.toml`
+already sets `notify` (a per-launch `notify` replaces the user's). Codex hooks
+are not used: each must be trusted in `/hooks` before it runs. No hooks for
+`agents` mode, a `.cmd`/`.bat` Codex shim, an explicit `cmd` or `args` in the
+request, or elevated terminals. `LaunchSpec.agent` ("claude" | "codex" | None)
+carries the choice to `SessionManager._build`, which adds the arguments there
+because the session id exists only at that point.
+
+Hook events run as separate processes and can arrive out of order: an event
+that would move the state back from a more final one within 1 s (a tool event
+after "waiting", anything after "done") is dropped.
 
 Claude Code agents launched through `launch.resolve` get QuickTerm's hooks
 for that launch only (never by editing the user's `~/.claude/settings.json`).
@@ -2127,6 +2155,37 @@ package-lock.json `npm ci`, pnpm-lock.yaml `pnpm install`, yarn.lock
 frontend opens the new workspace's view, starts the default terminal there
 and types `command` followed by Enter, so the user sees it run. Removing a
 worktree is not part of this round.
+
+Beyond the codes above: an existing branch, target folder or workspace name
+is 409 before git runs, and any other `git worktree add` failure is 500 with
+git's last stderr line. A worktree made from a linked worktree still lands
+next to the main checkout; the default base is the source checkout's HEAD.
+Workspace names may contain `/`, so the name routes are `{name:path}`
+(Starlette decodes `%2F` before routing).
+
+### Frontend for agent state and worktrees
+
+- Terminal rows: working pulses (the busy look), waiting has the needs-you
+  halo, done a ring, failed a red dot; the tooltip carries prompt, tool,
+  message and subagent count; running subagents are muted, non-focusable
+  lines under the row. Looking at a done or failed terminal marks it seen.
+- Relative idle time ("now", "5m") after the name on hover or focus only.
+- Alt+J focuses the next terminal that needs you (waiting, attention, done
+  or failed and unseen) in sidebar order and wraps.
+- The `@` palette, with nothing typed, ranks needs-you, done and failed,
+  working, then the rest; once typed, the match leads and rank breaks ties.
+- Workspace rows show the branch (detached `@sha`) unless it repeats the
+  name; worktree workspaces sit under their main checkout. Git info is one
+  batched `POST /api/git/info` 1.5 s after the folders arrive, then every 60 s.
+- "new worktree..." is a palette row and a row-menu entry for git
+  workspaces, with the branch typed in the palette; the setup command goes
+  through `POST /api/sessions/{id}/input`.
+- Shift+Enter in a Claude Code or Codex pane sends `ESC CR` (ConPTY turns it
+  into Alt+Enter, both CLIs' newline); other panes are unchanged.
+- A pane in a hidden view, or covered by a zoomed pane, drops its WebGL addon
+  5 s after it was hidden and loads a new one when shown; buffer and
+  WebSocket stay. The shell tells each view through
+  `window.quicktermView.setHidden(hidden)`.
 
 ### The PTY host
 
