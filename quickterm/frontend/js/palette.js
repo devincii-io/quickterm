@@ -13,7 +13,7 @@ import { workspaceLabel } from "./boot_context.js";
 import { AGENT_TYPES, agentTypeOf } from "./agent_profile.js";
 import {
   PREFIX_HINT, agentRows, agentSessionRows, agentSessionTarget, configRows, fuzzyScore, killName, killRows,
-  parsePrefix, rowGroup, settingRows, terminalRows, workspaceRows,
+  parsePrefix, placeOrder, rowGroup, settingRows, terminalRows, workspaceRows, worktreeSources,
 } from "./palette_items.js";
 
 // Snippet rows must show what will actually be sent. Keep it to one line so a
@@ -44,6 +44,8 @@ export class Palette {
     this.killMode = false;
     this.killTarget = null;
     this.killPending = false;
+    this.treeMode = false;
+    this.treePending = false;
     this.foreignSessions = [];
     this.late = emptyLate();
     this.requestId = 0;
@@ -175,6 +177,19 @@ export class Palette {
     this._newWindowMode(beside);
   }
 
+  // The sidebar's "New worktree…" lands here with its workspace and asks only
+  // for the branch; the palette's own row asks for the workspace first.
+  worktreeMode(from = null) {
+    if (!this.open) {
+      this.open = true;
+      this.requestId++;
+      claimFocus("palette");
+      this.overlay.hidden = false;
+    }
+    if (from) this._worktreeBranch(from);
+    else this._worktreeList();
+  }
+
   // The input is the palette: every path that shows it, opening or stepping
   // into a two-step prompt, lands here. Focus is re-asserted on the next frame
   // because the overlay was hidden a moment ago and WebView2 does not always
@@ -191,7 +206,7 @@ export class Palette {
   // A prompt or one of the lists reached from a command row: the command
   // list's late enrichment must not overwrite it.
   _inSubMode() {
-    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode || this.killMode);
+    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode || this.killMode || this.treeMode);
   }
 
   _leaveSubModes() {
@@ -201,6 +216,7 @@ export class Palette {
     this.searchMode = false;
     this.killMode = false;
     this.killTarget = null;
+    this.treeMode = false;
   }
 
   _current(requestId) {
@@ -321,6 +337,10 @@ export class Palette {
         kind: "action", label: "save workspace…", hint: "opens Dashboard",
         run: () => a.openPanel?.("dashboard"),
       },
+      ...(typeof a.createWorktree === "function" ? [{
+        kind: "action", label: "new worktree…", hint: "a new branch in its own folder, as a workspace",
+        keepOpen: true, run: () => this._worktreeList(),
+      }] : []),
       {
         kind: "action", label: "open file viewer…", keepOpen: true,
         run: () => this._promptMode("file path", (v) => {
@@ -565,6 +585,67 @@ export class Palette {
     this._refilter(false);
   }
 
+  // Which saved workspace in a git folder the worktree starts from. The
+  // records already fetched show at once; a fresh read fills in the rest.
+  async _worktreeList() {
+    this._leaveSubModes();
+    this.treeMode = true;
+    this.input.value = "";
+    this.input.placeholder = "New worktree from which workspace? Esc goes back";
+    const request = ++this.requestId;
+    const fill = (reset = false) => {
+      const rows = worktreeSources(this.late.details, this.app.currentWorkspace?.() || null);
+      this.items = [
+        ...rows.map((row) => ({
+          kind: "workspace", label: `new worktree from: ${row.name}`,
+          hint: [row.branch, row.path].filter(Boolean).join(" · "),
+          keepOpen: true, run: () => this._worktreeBranch(row.name),
+        })),
+        { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
+      ];
+      this._refilter(reset);
+      return rows.length;
+    };
+    fill(true);
+    this.focusInput();
+    const names = await api.listWorkspaces().catch(() => []);
+    const records = await Promise.all(names.map(async (name) => [name, await api.getWorkspace(name).catch(() => null)]));
+    if (!this.open || !this.treeMode || request !== this.requestId) return;
+    for (const [name, record] of records) if (record) this.late.details.set(name, record);
+    if (!fill()) this.input.placeholder = "No saved workspace is in a git folder";
+  }
+
+  // The branch name is the one free text the chrome asks for. The answer
+  // and any refusal show as a line under the input, which keeps the typed
+  // name, so Enter retries after a fix.
+  _worktreeBranch(from) {
+    this._leaveSubModes();
+    this._promptMode(`New branch for a worktree of ${from}, then Enter`, (branch) => this._worktreeCreate(from, branch), {
+      stayOpen: true,
+    });
+  }
+
+  async _worktreeCreate(from, branch) {
+    if (this.treePending) return;
+    const prompt = this.prompt;
+    const say = (label, hint = "") => {
+      this.filtered = [{ kind: "worktree", label, hint, keepOpen: true, run: () => {} }];
+      this.sel = 0;
+      this._renderList();
+    };
+    this.treePending = true;
+    say(`creating worktree ${branch} from ${from}…`);
+    try {
+      await this.app.createWorktree(from, branch);
+    } catch (error) {
+      if (this.open && this.prompt === prompt) say(error?.detail || "The worktree could not be created.", "Enter retries · Esc closes");
+      return;
+    } finally {
+      this.treePending = false;
+    }
+    if (this.open && this.prompt === prompt) this.close();
+  }
+
   _key(e) {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -573,7 +654,7 @@ export class Palette {
         this._killMode();
         return;
       }
-      if (this.foreignMode || this.windowMode || this.searchMode || this.killMode) {
+      if (this.foreignMode || this.windowMode || this.searchMode || this.killMode || this.treeMode) {
         this.openPalette();
         return;
       }
@@ -641,7 +722,7 @@ export class Palette {
       // snippet described as the deploy step even though its name is `dp`.
       .map((item, i) => ({ item, i, score: fuzzyScore(q, item.search || item.label) }))
       .filter((x) => x.score >= 0)
-      .sort((x, y) => y.score - x.score || x.i - y.i)
+      .sort(kind === "place" ? placeOrder(q) : (x, y) => y.score - x.score || x.i - y.i)
       .map((x) => x.item);
     const kept = previous ? this.filtered.findIndex((item) => item.label === previous.label) : -1;
     this.sel = kept >= 0 ? kept : 0;
