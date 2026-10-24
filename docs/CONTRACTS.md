@@ -2218,10 +2218,15 @@ As built (`pty_host.py`), one program has three roles chosen by `app.main()`:
   `%LOCALAPPDATA%\QuickTerm\host\<version>-<hash>\QuickTerm-host.exe`
   (`QUICKTERM_HOST_DIR` overrides the root). The renamed exe keeps Setup's
   `taskkill /IM QuickTerm.exe` away from it. The running build plus one more
-  are kept; a copy whose exe cannot be deleted is in use and stays. A copy
-  that fails is discarded and the backend runs from the install folder. The
-  elevated instance starts the install folder's exe (recorded in `.source`),
-  never the user-writable copy.
+  are kept; a copy whose exe cannot be deleted is in use and stays. The
+  `.complete` marker records the copy's file count and total size, and a copy
+  that no longer matches is copied again; a copied backend that exits before
+  it answers the probe is discarded and the backend starts once from the
+  install folder. The elevated instance starts the installed `QuickTerm.exe`
+  of the same build (an all-users install from Inno's uninstall key first,
+  then the copy's `.source`), never the user-writable copy; without one it
+  fails with 500. Uninstall asks before it stops the current user's
+  processes, and leaves other users' backends running from their copies.
 - **viewer** (`--viewer`): every pywebview window, one process, a child of the
   backend, driven by JSON lines on its stdin/stdout (commands open, show,
   quit; events ready, adopted, closed, opened). The backend dying closes the
