@@ -30,6 +30,7 @@ hiddenimports += [
     "quickterm.agent_sessions",
     "quickterm.ssh_config",
     "quickterm.update",
+    "quickterm.pty_host",
     "quickterm.assets",
     "quickterm.workspace",
     "quickterm.config",

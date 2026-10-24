@@ -9,6 +9,9 @@ still fight over the same files. This script points a throwaway instance at
 its own %APPDATA%\quickterm-dev-appdata and a non-default port instead, so it
 never touches a live instance's settings, workspace, or sessions.
 
+`uv run quickterm` is only the launcher: it starts the backend detached (which
+keeps this APPDATA) and returns at once. Quit the instance from its tray icon.
+
 Usage: .\scripts\dev-instance.ps1 [-Port 8899]
 #>
 param(

@@ -1,9 +1,11 @@
 """Windows system-tray icon via ctypes Shell_NotifyIcon. No third-party deps.
 
-The primary desktop window hides to this tray instead of quitting when closing
-would kill live terminals the user typed into (policy in app.py). Left-click or
-"Open" re-shows the window; "Quit" exits the app for real. Survives an
-explorer.exe restart by re-adding the icon on TaskbarCreated.
+The backend process owns this icon. When the last window closes while a
+terminal the user typed into is still alive, the backend stays here instead of
+quitting (policy in pty_host.py). Left-click or "Open" brings a window back,
+starting the window process when there is none; "Quit" stops the backend and
+every terminal. Survives an explorer.exe restart by re-adding the icon on
+TaskbarCreated.
 
 All Win32 calls stay on one dedicated thread (message loop), mirroring
 hotkeys.py. Callbacks fire on that thread; callers pass thread-safe functions.
@@ -141,25 +143,31 @@ def _pid_of(hwnd: int) -> int:
     return pid.value
 
 
-def foreground_is_ours() -> bool:
-    """Whether the window in front belongs to this process (any viewer)."""
+def _ours(pids: set[int] | None) -> set[int]:
+    return {os.getpid()} if pids is None else set(pids)
+
+
+def foreground_is_ours(pids: set[int] | None = None) -> bool:
+    """Whether the window in front belongs to one of `pids` (default: this
+    process). The backend passes its viewer process."""
     hwnd = _user32.GetForegroundWindow()
-    return bool(hwnd) and _pid_of(hwnd) == os.getpid()
+    return bool(hwnd) and _pid_of(hwnd) in _ours(pids)
 
 
-def own_window(title: str) -> tuple[int, bool] | None:
-    """This process's top-level window with exactly ``title``, and whether it
-    is visible. Hidden windows count: that is the tray-hidden case.
+def own_window(title: str, pids: set[int] | None = None) -> tuple[int, bool] | None:
+    """The top-level window of one of `pids` (default: this process) titled
+    exactly ``title``, and whether it is visible. Hidden windows count: that is
+    the overlay-hidden case.
 
     The process check comes first, so the title is only ever read from our own
     windows (another app titled "QuickTerm" is never flashed).
     """
     found: list[tuple[int, bool]] = []
-    me = os.getpid()
+    mine = _ours(pids)
 
     @_WNDENUMPROC
     def visit(hwnd: int, _lparam: int) -> bool:
-        if _pid_of(hwnd) != me:
+        if _pid_of(hwnd) not in mine:
             return True
         length = _user32.GetWindowTextLengthW(hwnd)
         if length != len(title):

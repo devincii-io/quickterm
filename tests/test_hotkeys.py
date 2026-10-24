@@ -312,12 +312,15 @@ def toggle_env(monkeypatch):
 
     from quickterm import hotkeys, overlay
 
-    state = SimpleNamespace(visible=[7], hidden=[], applied=set(), calls=[], user32=None)
+    state = SimpleNamespace(
+        visible=[7], hidden=[], applied=set(), calls=[], user32=None, pids=[]
+    )
 
-    def windows(_title, *, own_process=False):
+    def windows(_title, *, own_process=False, pids=None):
         # The toggle restyles what it finds, so it must never look at another
-        # process's "QuickTerm" window.
+        # process's "QuickTerm" window: only this one's, or the viewer's.
         assert own_process is True
+        state.pids.append(pids)
         return state.user32, state.visible, state.hidden
 
     monkeypatch.setattr(hotkeys, "_quickterm_windows", windows)
@@ -381,6 +384,18 @@ def test_without_the_overlay_the_toggle_minimizes_and_restores(toggle_env):
     toggle_env.user32 = FakeWindows(foreground=99)
     hotkeys.toggle_window("QuickTerm")
     assert toggle_env.user32.calls == [("show", 7, hotkeys._SW_RESTORE), ("foreground", 7)]
+
+
+def test_the_toggle_aims_at_the_viewer_process_and_says_what_it_found(toggle_env):
+    from quickterm import hotkeys
+
+    toggle_env.user32 = FakeWindows(foreground=99)
+    assert hotkeys.toggle_window("QuickTerm", None, pids={4242}) is True
+    assert toggle_env.pids == [{4242}]
+
+    # No window at all: the backend starts its window process instead.
+    toggle_env.visible, toggle_env.hidden = [], []
+    assert hotkeys.toggle_window("QuickTerm", None, pids={4242}) is False
 
 
 # --- app.py: live rebinding --------------------------------------------------
@@ -450,6 +465,27 @@ def test_the_summon_callback_reads_the_overlay_at_press_time(monkeypatch):
         cfg.overlay = SimpleNamespace(enabled=True)
         manager.entries[-1].callback()
         assert pressed == [("QuickTerm", cfg.overlay)]
+    finally:
+        loop.close()
+
+
+def test_the_backend_summon_replaces_the_in_process_toggle(monkeypatch):
+    from quickterm import app, hotkeys
+
+    monkeypatch.setattr(
+        hotkeys, "toggle_window", lambda *a, **k: pytest.fail("the backend has no window")
+    )
+    pressed = []
+    loop = asyncio.new_event_loop()
+    try:
+        manager = _RecordingManager(lambda entries: [True] * len(entries))
+        cfg = _app_cfg(keys=())
+        app._GlobalHotkeys(
+            hotkeys, manager, loop, None, cfg, summon=lambda: pressed.append(True)
+        ).rebind(cfg)
+        assert manager.entries[-1].on_hotkey_thread is True
+        manager.entries[-1].callback()
+        assert pressed == [True]
     finally:
         loop.close()
 

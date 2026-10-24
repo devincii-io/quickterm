@@ -73,21 +73,37 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+; The new launcher finds the running backend. When it is an older build it is
+; replaced at once if no terminal is busy or touched; otherwise the launcher
+; asks, and a declined restart keeps the old backend until nothing is at risk.
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; The backend and its windows run from a copy under the host folder below, as
+; QuickTerm-host.exe, so the uninstaller has to stop them by that name.
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM QuickTerm-host.exe"; Flags: runhidden; RunOnceId: "StopQuickTermHost"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#AppExeName}"; Flags: runhidden; RunOnceId: "StopQuickTerm"
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\QuickTerm\host"
 
 [Code]
 // ------------------------------------------------------------------------
 // Closing a running QuickTerm before overwriting it.
 //
-// CloseApplications=yes alone does not do it. It asks the Restart Manager,
-// the Restart Manager asks the top-level window, and that request lands in
-// app.on_closing, where the close-to-tray policy CANCELS the close whenever a
-// session is touched, retained or busy. That is precisely the state of someone
-// who has been working. The window hides to the tray and answers "no", and
-// Setup then either stalls on "the following applications are in use", naming
-// a window that is no longer in the taskbar, or force-terminates the process
-// and takes every terminal with it. Either way the user sees
-// "DeleteFile failed; code 5 - access denied" on QuickTerm.exe mid-install.
+// Since 4.2 the backend that owns the terminals does not run from {app}: the
+// launcher copies the program to %LOCALAPPDATA%\QuickTerm\host\<build> and
+// starts it there as QuickTerm-host.exe, together with its window process.
+// Nothing of it holds a lock in {app}, and nothing here kills it, so an update
+// leaves every terminal running. What can still hold {app} is QuickTerm.exe
+// itself: a launcher for a moment, a backend that could not be copied and runs
+// in place, the elevated instance, or a version before 4.2, where one process
+// held the terminals and the window. Only then is the user asked.
+//
+// CloseApplications=yes alone does not close those. Before 4.2 the Restart
+// Manager's request landed in the close-to-tray policy, which CANCELS the close
+// whenever a session is touched, retained or busy, and Setup then stalled on
+// "the following applications are in use" or force-terminated the process.
 //
 // Asked, not assumed: closing someone's terminals without warning is worse
 // than a failed install. Declining is a clean abort, not a half-written
@@ -120,11 +136,25 @@ begin
     Result := ResultCode;
 end;
 
+// True when a process with this image name runs. tasklist prints a header-less
+// line per match; find answers 0 when it saw one.
+function ImageRunning(const Image: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{cmd}'),
+                 '/C tasklist /FI "IMAGENAME eq ' + Image + '" /NH | find /I "' + Image + '" >NUL',
+                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
 begin
   Result := '';
+  // The usual case since 4.2: only the backend copy runs, and it stays.
+  if not ImageRunning('{#AppExeName}') then
+    Exit;
   if not WizardSilent() then
     if MsgBox('QuickTerm is being replaced, so any running copy has to close first.'
               + #13#10#13#10 + 'Terminals that are still open will be stopped.'

@@ -1,4 +1,10 @@
-"""Entry point: config, backend bootstrap, and native desktop window."""
+"""Entry point: the launcher, the backend (`--serve`) and the window process (`--viewer`).
+
+On Windows the backend, which owns every PTY, and the window process are
+separate (see pty_host.py), so closing or restarting the window and installing
+an update leave the terminals running. POSIX keeps one process with a browser
+window.
+"""
 
 from __future__ import annotations
 
@@ -24,9 +30,10 @@ from typing import TYPE_CHECKING, Any, Callable
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__, cli, launch
+from quickterm import __version__, cli, launch, pty_host
 from quickterm.server import client_host, create_app
 from quickterm.windows import (
+    WindowInfo,
     WindowRegistry,
     WorkspaceClaimed,
     new_window_id,
@@ -48,28 +55,23 @@ SECONDARY_OFFSET = 32
 BOUNDS_SAVE_DELAY_S = 0.5
 # Spec defaults, for a config.py that predates the window and overlay fields.
 _WINDOW_DEFAULTS = {"width": 1280, "height": 800, "remember_bounds": True}
+TITLE = "QuickTerm"
+ELEVATED_TITLE = "QuickTerm - Administrator"
+# How long the launcher waits for a backend it started, or for a retired one
+# to let go of the port.
+BACKEND_START_S = 30.0
+BACKEND_RETIRE_S = 20.0
+GRACEFUL_SHUTDOWN_S = 3
 log = logging.getLogger("quickterm")
 
-# Set by the in-app updater immediately before it launches the installer. The
-# close-to-tray policy must stand down for that one close, or Inno Setup is
-# left asking a window that refuses to go away.
-_updating = threading.Event()
-_shutdown_hook: Callable[[], None] | None = None
 # Hotkey launches run as tasks nobody awaits; the loop keeps only weak
 # references, so they are held here until they finish.
 _launch_tasks: set[asyncio.Task] = set()
 
 
-def begin_update_shutdown() -> None:
-    """Stand down close-to-tray and quit shortly, for the in-app updater."""
-    _updating.set()
-    hook = _shutdown_hook
-    if hook is None:
-        return
-    # Deferred so the /api/update/install response reaches the window first.
-    timer = threading.Timer(1.5, hook)
-    timer.daemon = True
-    timer.start()
+def begin_update_shutdown() -> bool:
+    """The in-app updater's stand-down; pty_host.begin_update decides."""
+    return pty_host.begin_update()
 
 
 class _PrivacyFormatter(logging.Formatter):
@@ -203,6 +205,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="QuickTerm")
     parser.add_argument("--elevated-spec", help=argparse.SUPPRESS)
     parser.add_argument("--handoff", help=argparse.SUPPRESS)
+    # The roles of pty_host.py: the backend, the window process, and a
+    # launcher that starts the backend without asking it for a window.
+    parser.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--viewer", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--window-id", help=argparse.SUPPRESS)
+    parser.add_argument("--workspace", help=argparse.SUPPRESS)
+    parser.add_argument("--cwd", help=argparse.SUPPRESS)
+    parser.add_argument("--elevated", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help="override the local backend port")
     parser.add_argument(
         "path", nargs="?", help="open a terminal in this directory (Explorer 'Open QuickTerm here')"
@@ -232,6 +243,19 @@ def main() -> None:
         if not 0 <= args.port <= 65535:
             parser.error("--port must be between 0 and 65535")
         _override_port(cfg, _free_port(cfg.host) if args.port == 0 else args.port)
+    if args.viewer:
+        _setup_logging("viewer.log")
+        if sys.platform != "win32":
+            sys.exit("The window process exists only on Windows.")
+        sys.exit(
+            _run_viewer(
+                cfg,
+                window_id=args.window_id,
+                workspace=args.workspace,
+                cwd=args.cwd,
+                elevated=args.elevated,
+            )
+        )
     initial_launch = None
     elevated = bool(args.elevated_spec)
     if args.elevated_spec:
@@ -239,10 +263,29 @@ def main() -> None:
 
         initial_launch = decode_spec(args.elevated_spec)
         _override_port(cfg, _free_port(cfg.host))
+    if sys.platform == "win32":
+        if args.serve or elevated:
+            _setup_logging()
+            log.info("QuickTerm %s backend starting on %s:%s", __version__, cfg.host, cfg.port)
+            # The elevated instance is its own backend, run in place, with its
+            # one window; it ends with that window.
+            code = _run_backend(
+                cfg, initial_launch=initial_launch, elevated=elevated, handoff=handoff,
+                open_viewer=elevated,
+            )
+        else:
+            _setup_logging("launcher.log")
+            code = _run_launcher(
+                cfg, open_dir=open_dir, handoff=handoff, background=args.background,
+                port_override=args.port,
+            )
+        if code:
+            sys.exit(code)
+        return
     _setup_logging()
     log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
-    # One ordinary backend and one viewer: later launches hand work to it and
-    # summon it instead of creating another window onto the same session set.
+    # One ordinary backend: later launches hand work to it instead of starting
+    # another one onto the same session set.
     if not elevated and _already_running(cfg.port, cfg.host):
         if open_dir:
             _queue_running_launch(cfg.port, open_dir, cfg.host)
@@ -251,18 +294,7 @@ def main() -> None:
             failure = cli.post_launch(cfg.port, handoff, cfg.host)
             if failure:
                 log.error("command-line launch handoff failed: %s", failure)
-        if sys.platform == "win32":
-            from quickterm.hotkeys import summon_window
-
-            summon_window()
-        else:
-            _launch_window(cfg.port, cwd=open_dir, host=cfg.host)
-        return
-    if sys.platform == "win32":
-        if not _run_desktop(
-            cfg, initial_launch=initial_launch, elevated=elevated, cwd=open_dir, handoff=handoff
-        ):
-            sys.exit("QuickTerm could not create its native desktop window.")
+        _launch_window(cfg.port, cwd=open_dir, host=cfg.host)
         return
     try:
         asyncio.run(_serve(cfg, initial_launch=initial_launch, cwd=open_dir, handoff=handoff))
@@ -326,7 +358,10 @@ def _base_url(port: int, host: str = "127.0.0.1") -> str:
     return f"http://{client_host(host)}:{port}"
 
 
-def _setup_logging() -> None:
+def _setup_logging(filename: str = "quickterm.log") -> None:
+    """One file per process role: the backend, the window process and the
+    launcher run at the same time, and a rotation renames a file the other
+    process still holds open."""
     from quickterm.config import config_dir
 
     log_dir = config_dir() / "logs"
@@ -347,7 +382,7 @@ def _setup_logging() -> None:
             pass
     debug_io = os.environ.get("QUICKTERM_DEBUG_IO") == "1"
     handler = RotatingFileHandler(
-        log_dir / "quickterm.log", maxBytes=128 * 1024, backupCount=1, encoding="utf-8"
+        log_dir / filename, maxBytes=128 * 1024, backupCount=1, encoding="utf-8"
     )
     handler.setLevel(logging.INFO if debug_io else logging.WARNING)
     handler.setFormatter(_PrivacyFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
@@ -419,6 +454,7 @@ async def _serve(
     open_window: Callable[[str | None, str | None], str] | None = None,
     notify: Callable[[str, str, str, str | None], None] | None = None,
     handoff: dict[str, str] | None = None,
+    summon: Callable[[], None] | None = None,
 ) -> None:
     from quickterm.session_manager import SessionManager
     from quickterm.ws_protocol import WebSocketProtocol
@@ -430,7 +466,7 @@ async def _serve(
     loop.set_exception_handler(_quiet_connection_resets)
     manager = SessionManager(loop, cfg.scrollback_bytes, cfg.max_sessions)
     # Started before the app so its routes can rebind and suspend them.
-    hotkeys = _start_hotkeys(loop, manager, cfg)
+    hotkeys = _start_hotkeys(loop, manager, cfg, summon=summon)
     try:
         app = create_app(
             manager,
@@ -461,6 +497,11 @@ async def _serve(
             ws_max_size=256 * 1024,
             ws_max_queue=16,
             ws_per_message_deflate=False,
+            # Without a bound uvicorn waits for every request in flight, and the
+            # launch long-poll holds one for up to 20 s while a WebView2 process
+            # that outlives its window keeps the socket open: the terminals
+            # were stopped that much later than the port closed.
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S,
         )
     )
     if state is not None:
@@ -493,91 +534,110 @@ async def _serve(
 
 
 def _sessions_worth_keeping(manager: Any) -> bool:
-    """Closing the window only hides to tray when quitting would lose real
-    work: a live session the user typed into, explicitly retained, or one with a child process.
-    Untouched empty shells are not worth staying resident for.
-    """
-    try:
-        busy = manager.busy_ids() if hasattr(manager, "busy_ids") else set()
-        return any(
-            i.alive and (
-                getattr(i, "touched", False)
-                or getattr(i, "retained", False)
-                or getattr(i, "id", None) in busy
-            )
-            for i in manager.list()
-        )
-    except Exception:
-        # Fail safe: an unexpected error here must hide to tray, never quit and
-        # take the user's running terminals with it.
-        log.exception("could not evaluate session keep policy; hiding to tray")
-        return True
+    """The close-to-tray rule (pty_host.sessions_worth_keeping)."""
+    return pty_host.sessions_worth_keeping(manager)
 
 
 def attention_balloon(name: str, kind: str, text: str | None) -> tuple[str, str]:
-    """Title and body of the tray balloon for a terminal that wants the user."""
-    title = f"{name or 'A terminal'} needs you"
-    if text:
-        body = text
-    elif kind == "bell":
-        body = "It rang the bell."
-    elif kind == "exit":
-        body = "It has finished."
-    else:
-        body = "It is waiting for you."
-    return title, body
+    """Title and body of the tray balloon (pty_host.attention_balloon)."""
+    return pty_host.attention_balloon(name, kind, text)
+
+
+class _HostLink:
+    """The window process's line to the backend's window registry.
+
+    `owner_of` asks the registry over the authenticated API; `adopted` and
+    `forget` go over the control channel, so the backend also knows which
+    claims to drop when this process dies without saying goodbye. Without a
+    channel (a viewer nobody started) a closed window frees its claim through
+    the API instead.
+    """
+
+    def __init__(self, cfg: Any, channel: Any | None) -> None:
+        self._cfg = cfg
+        self._channel = channel
+
+    def _client(self) -> cli.Client:
+        return cli.Client(cli.base_url(self._cfg.port, self._cfg.host), timeout=5.0)
+
+    def owner_of(self, workspace: str) -> WindowInfo | None:
+        try:
+            payload = self._client().call("GET", "/api/windows")
+        except cli.CliError:
+            log.debug("window registry unavailable", exc_info=True)
+            return None
+        windows = payload.get("windows") if isinstance(payload, dict) else None
+        for item in windows if isinstance(windows, list) else []:
+            if isinstance(item, dict) and item.get("workspace") == workspace:
+                return WindowInfo(
+                    id=str(item.get("id") or ""),
+                    workspace=workspace,
+                    title=str(item.get("title") or ""),
+                    primary=bool(item.get("primary")),
+                )
+        return None
+
+    def adopted(self, window_id: str) -> None:
+        if self._channel is not None:
+            self._channel.send({"event": "adopted", "window_id": window_id})
+
+    def forget(self, window_id: str) -> None:
+        if self._channel is not None and self._channel.send(
+            {"event": "closed", "window_id": window_id}
+        ):
+            return
+        try:
+            self._client().call("DELETE", f"/api/windows/{urllib.parse.quote(window_id, safe='')}")
+        except cli.CliError:
+            log.debug("could not release a window claim", exc_info=True)
 
 
 class _ViewerWindows:
-    """Every native viewer this process owns, and the close/quit policy.
+    """Every native window this window process owns.
 
     Two lists of windows exist and they are deliberately not the same thing.
-    `WindowRegistry` records what each window CLAIMS and expires an entry on a
-    missed heartbeat, because a viewer can be a browser tab that dies without a
-    word. This class records the native shells this process actually created,
-    and every quit decision reads it instead: a stalled heartbeat must never be
-    mistaken for "the last window closed", which would take the user's
-    terminals down with it.
+    `WindowRegistry` (in the backend) records what each window CLAIMS and
+    expires an entry on a missed heartbeat, because a viewer can be a browser
+    tab that dies without a word. This class records the native shells this
+    process actually created: when the last one closes the process ends, and
+    the backend, which sees it go, decides whether to stay in the tray. A
+    window never hides on close any more; the terminals live in the backend.
     """
 
-    def __init__(
-        self,
-        cfg: "AppConfig",
-        state: dict[str, Any],
-        registry: WindowRegistry,
-        *,
-        elevated: bool,
-        base_title: str,
-    ) -> None:
+    def __init__(self, cfg: "AppConfig", registry: Any, *, base_title: str) -> None:
         self._cfg = cfg
-        self._state = state
         self._registry = registry
-        self._elevated = elevated
         self._base_title = base_title
         self._lock = threading.Lock()
         self._live: dict[str, Any] = {}  # pywebview uid -> window, oldest first
         self._ids: dict[str, str] = {}  # pywebview uid -> registry window id
         self.quitting = threading.Event()
-        self.tray: Any | None = None
 
     def adopt(self, window: Any, window_id: str) -> None:
-        """Take ownership of a native window's close policy and file drops."""
+        """Take ownership of a native window's lifetime and file drops."""
         uid = str(getattr(window, "uid", "") or window_id)
         with self._lock:
             self._live[uid] = window
             self._ids[uid] = window_id
-        # Zero-argument lambdas on purpose: pywebview inspects the handler
+        # Zero-argument lambda on purpose: pywebview inspects the handler
         # signature and only calls a no-parameter handler with no arguments.
-        window.events.closing += lambda: self._on_closing(uid)
         window.events.closed += lambda: self._on_closed(uid)
         _wire_native_file_drop(window)
+        adopted = getattr(self._registry, "adopted", None)
+        if adopted is not None:
+            adopted(window_id)
 
     def count(self) -> int:
         with self._lock:
             return len(self._live)
 
-    def open(self, *, workspace: str | None = None, cwd: str | None = None) -> str:
-        """Create another viewer onto this same backend. Returns its window id."""
+    def open(
+        self, *, workspace: str | None = None, cwd: str | None = None, check_claim: bool = True
+    ) -> str:
+        """Create another window onto the same backend. Returns its window id.
+
+        `check_claim=False` when the backend already checked, because it asked.
+        """
         if threading.current_thread() is threading.main_thread():
             # pywebview materialises a window at runtime only when
             # create_window is called off the main thread; from the main thread
@@ -585,7 +645,7 @@ class _ViewerWindows:
             # is already running the GUI loop there.
             raise RuntimeError("a window cannot be opened from the main thread")
         name = normalize_workspace(workspace)
-        if name is not None:
+        if name is not None and check_claim:
             # Refuse before anything is drawn. Letting the window open and then
             # fail its claim would show the user an empty shell and no reason.
             owner = self._registry.owner_of(name)
@@ -637,20 +697,19 @@ class _ViewerWindows:
             on_screen = None
         return candidate if on_screen is not None else geometry
 
-    def show_all(self) -> None:
-        """Tray Open. The primary drops down as the overlay when that is on;
-        a primary left in overlay style after it was turned off goes back to
-        normal. Runs on the tray thread, never on the event loop."""
-        overlay_cfg = getattr(self._cfg, "overlay", None)
+    def show_all(self, *, skip_primary: bool = False) -> None:
+        """Show and restore every window (tray Open, a second launch).
+
+        The backend owns the drop-down overlay; when it already dropped the
+        primary down it passes `skip_primary`. Runs on the control thread.
+        """
         for window in self._snapshot():
-            if getattr(window, "title", None) == self._base_title and _summon_overlay(
-                self._base_title, overlay_cfg
-            ):
+            if skip_primary and getattr(window, "title", None) == self._base_title:
                 continue
             _show_window(window)
 
     def quit_all(self) -> None:
-        """Real quit: every window goes, and with the last one the backend."""
+        """Every window goes, and with the last one this process."""
         self.quitting.set()
         for window in self._snapshot():
             try:
@@ -661,72 +720,6 @@ class _ViewerWindows:
     def _snapshot(self) -> list[Any]:
         with self._lock:
             return list(self._live.values())
-
-    def _on_closing(self, uid: str) -> bool:
-        # _updating: the in-app updater is about to run Setup, which asks the
-        # windows to close. Hiding to tray there strands the installer.
-        if self.quitting.is_set() or _updating.is_set():
-            return True
-        with self._lock:
-            window = self._live.get(uid)
-            others = len(self._live) - (1 if uid in self._live else 0)
-        # A secondary window is only a viewer. Closing it must never stop the
-        # backend or another window's terminals: sessions are backend-owned and
-        # stay attachable from whichever window claims their workspace next.
-        if others > 0:
-            return True
-        if self._elevated or self.tray is None:
-            # An elevated instance never hides: a resident admin backend that
-            # lives only in the notification area would be a foot-gun. Without
-            # a tray icon there is nothing to hide behind either. Either way
-            # the last close is a real quit.
-            return True
-        if not _sessions_worth_keeping(self._state.get("manager")):
-            return True  # nothing running worth the RAM: real quit
-        if window is None:
-            return True
-        window.hide()
-        self.tray.balloon_once(
-            "QuickTerm is still running",
-            "Your terminals keep running in the background. "
-            "Click the tray icon to reopen, right-click it to quit.",
-        )
-        return False  # cancel the close; we merely hid
-
-    def notify_attention(
-        self, session_id: str, name: str, kind: str, text: str | None
-    ) -> None:
-        """A terminal wants the user (the server's `notify` hook).
-
-        Called on the event loop, already rate-limited per session. The Win32
-        calls run on a short thread of their own: Shell_NotifyIconW talks to
-        Explorer and stalls with it, and no terminal may stall with Explorer.
-        """
-        threading.Thread(
-            target=self._notify_now,
-            args=(name, kind, text),
-            name="attention-notify",
-            daemon=True,
-        ).start()
-
-    def _notify_now(self, name: str, kind: str, text: str | None) -> None:
-        if self.quitting.is_set():
-            return
-        try:
-            from quickterm import tray as tray_mod
-
-            # Someone is looking at QuickTerm already; the sidebar says it.
-            if tray_mod.foreground_is_ours():
-                return
-            primary = tray_mod.own_window(self._base_title)
-            if primary is not None and primary[1]:
-                tray_mod.flash_window(primary[0])
-            elif self.tray is not None and self.count() <= 1:
-                # Only the last window ever hides, so a hidden primary with no
-                # other viewer means everything is in the tray.
-                self.tray.balloon(*attention_balloon(name, kind, text))
-        except Exception:
-            log.debug("attention notification failed", exc_info=True)
 
     def _on_closed(self, uid: str) -> None:
         with self._lock:
@@ -758,61 +751,362 @@ class _ViewerWindows:
             log.debug("could not promote a window title", exc_info=True)
 
 
-def _run_desktop(
+# ---------------------------------------------------------------------------
+# The launcher: find or start the backend, then ask it for a window
+# ---------------------------------------------------------------------------
+
+
+def _run_launcher(
+    cfg: "AppConfig",
+    *,
+    open_dir: str | None = None,
+    handoff: dict[str, str] | None = None,
+    background: bool = False,
+    port_override: int | None = None,
+) -> int:
+    """What a plain `QuickTerm.exe` does on Windows. Returns the exit code.
+
+    The backend outlives this process; a backend that is already running gets
+    the launch handed to it, exactly as a second launch always did. A backend
+    of another build (an update was installed meanwhile) is replaced when no
+    terminal would lose work, otherwise the user is asked.
+    """
+    started = False
+    if _already_running(cfg.port, cfg.host):
+        info = _host_info(cfg)
+        if _should_hand_over(info):
+            outcome = _hand_over(cfg, info or {}, handoff=handoff, port_override=port_override)
+            if outcome == "failed":
+                return 2
+            started = outcome == "started"
+    else:
+        if not _start_backend(cfg, handoff=handoff, port_override=port_override):
+            log.error("the QuickTerm backend did not start on %s:%s", cfg.host, cfg.port)
+            return 2
+        started = True
+    if not started:
+        if open_dir:
+            _queue_running_launch(cfg.port, open_dir, cfg.host)
+        if handoff:
+            # Another app came up between the verb's check and this one.
+            failure = cli.post_launch(cfg.port, handoff, cfg.host)
+            if failure:
+                log.error("command-line launch handoff failed: %s", failure)
+    if not background:
+        # A first window opens in the Explorer folder itself; a running one
+        # already has the folder queued above.
+        _summon_backend(cfg, cwd=open_dir if started else None)
+    return 0
+
+
+def _host_call(
+    cfg: "AppConfig", method: str, path: str, body: Any = None
+) -> tuple[int, Any]:
+    """One call to the backend; (0, None) when it could not be made."""
+    client = cli.Client(cli.base_url(cfg.port, cfg.host), timeout=15.0)
+    try:
+        return client.call_status(method, path, body)
+    except cli.CliError:
+        log.debug("backend call %s %s failed", method, path, exc_info=True)
+        return 0, None
+
+
+def _host_info(cfg: "AppConfig") -> dict[str, Any] | None:
+    status, payload = _host_call(cfg, "GET", "/api/host")
+    return payload if status == 200 and isinstance(payload, dict) else None
+
+
+def _should_hand_over(info: dict[str, Any] | None) -> bool:
+    """A frozen launcher meets a frozen backend of another, not newer, build."""
+    if not info or not info.get("managed") or not info.get("frozen") or not pty_host.frozen():
+        return False
+    if info.get("build") == pty_host.running_build():
+        return False
+    from quickterm.update import is_newer
+
+    # Never replace a newer backend with an older install.
+    return not is_newer(str(info.get("version") or "0"), __version__)
+
+
+def _hand_over(
+    cfg: "AppConfig",
+    info: dict[str, Any],
+    *,
+    handoff: dict[str, str] | None = None,
+    port_override: int | None = None,
+) -> str:
+    """Replace the running backend with this build: "started", "kept" or "failed"."""
+    status, payload = _host_call(cfg, "POST", "/api/host/retire", {"force": False})
+    if status == 409:
+        if info.get("superseded"):
+            # The user already said no once; it leaves on its own when nothing
+            # is at risk, and asking at every launch would be nagging.
+            return "kept"
+        sessions = payload.get("sessions") if isinstance(payload, dict) else None
+        if not _ask_restart(str(info.get("version") or ""), sessions or []):
+            log.info("update: the running backend keeps its terminals for now")
+            return "kept"
+        status, payload = _host_call(cfg, "POST", "/api/host/retire", {"force": True})
+    if status != 202:
+        log.warning("update: the running backend did not retire (%s)", status)
+        return "kept"
+    if not _wait_for_backend(cfg, running=False, timeout=BACKEND_RETIRE_S):
+        log.warning("update: the old backend still answers; attaching to it")
+        return "kept"
+    if not _start_backend(cfg, handoff=handoff, port_override=port_override):
+        log.error("update: the new backend did not start")
+        return "failed"
+    return "started"
+
+
+def _ask_restart(old_version: str, sessions: list[Any]) -> bool:
+    """Ask whether to stop the old version's terminals now. Windows only."""
+    if os.name != "nt":
+        return False
+    names = []
+    for item in sessions[:8]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("name") or str(item.get("id") or "")[:8] or "a terminal")
+        names.append(f"  {label}" + (" (running a program)" if item.get("busy") else ""))
+    if len(sessions) > len(names):
+        names.append(f"  and {len(sessions) - len(names)} more")
+    text = (
+        f"QuickTerm {__version__} is installed, but QuickTerm {old_version or 'the old version'} "
+        "is still running these terminals:\n\n"
+        + "\n".join(names)
+        + "\n\nRestart QuickTerm now? These terminals will be closed.\n\n"
+        "Choose No to keep them running. QuickTerm switches to the new version the next "
+        "time none of them is in use."
+    )
+    try:
+        import ctypes
+
+        mb_yesno, mb_iconquestion, mb_setforeground, mb_topmost = 0x4, 0x20, 0x10000, 0x40000
+        answer = ctypes.windll.user32.MessageBoxW(
+            None, text, "QuickTerm update",
+            mb_yesno | mb_iconquestion | mb_setforeground | mb_topmost,
+        )
+    except Exception:
+        log.warning("could not ask about the update restart", exc_info=True)
+        return False
+    return answer == 6  # IDYES
+
+
+def _backend_command(argv: list[str]) -> list[str]:
+    """The backend's command line: frozen, from this build's copy under the
+    host folder, so Setup can replace the program files while it runs."""
+    if not pty_host.frozen():
+        return pty_host.program_command(argv)
+    exe = Path(sys.executable).resolve()
+    try:
+        build = pty_host.build_id(exe.parent, exe.name)
+        root = pty_host.host_root()
+        copy = pty_host.ensure_copy(exe.parent, root, build, exe_name=exe.name)
+        pty_host.prune(root, build)
+        return [str(copy), *argv]
+    except OSError:
+        # Running in place still works; only an update then has to stop it.
+        log.warning("could not copy the backend; it runs from the install folder", exc_info=True)
+        return [str(exe), *argv]
+
+
+def _start_backend(
+    cfg: "AppConfig",
+    *,
+    handoff: dict[str, str] | None = None,
+    port_override: int | None = None,
+) -> bool:
+    """Start a detached backend and wait until it answers the verified probe."""
+    argv = ["--serve"]
+    if port_override is not None:
+        argv += ["--port", str(cfg.port)]
+    if handoff:
+        argv += ["--handoff", json.dumps(handoff)]
+    try:
+        process = pty_host.spawn_backend(_backend_command(argv))
+    except OSError:
+        log.exception("could not start the QuickTerm backend")
+        return False
+    return _wait_for_backend(cfg, running=True, timeout=BACKEND_START_S, process=process)
+
+
+def _wait_for_backend(
+    cfg: "AppConfig", *, running: bool, timeout: float, process: Any | None = None
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if _already_running(cfg.port, cfg.host) is running:
+            return True
+        if process is not None and process.poll() is not None:
+            # Another launcher's backend may have won the port meanwhile.
+            return _already_running(cfg.port, cfg.host) is running
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _summon_backend(cfg: "AppConfig", cwd: str | None = None) -> None:
+    """Ask the backend to show its windows, or to start its window process."""
+    pty_host.allow_foreground()
+    status, _payload = _host_call(cfg, "POST", "/api/host/summon", {"cwd": cwd} if cwd else {})
+    if status == 200:
+        return
+    # A backend from before the PTY host has no such route; its window lives
+    # in its own process and the cross-process summon still finds it.
+    from quickterm.hotkeys import summon_window
+
+    summon_window()
+
+
+# ---------------------------------------------------------------------------
+# The backend
+# ---------------------------------------------------------------------------
+
+
+def _stop_server(state: dict[str, Any]) -> None:
+    server = state.get("server")
+    loop = state.get("loop")
+    if server is None or loop is None:
+        state["exit_requested"] = True
+        return
+    try:
+        loop.call_soon_threadsafe(setattr, server, "should_exit", True)
+    except RuntimeError:
+        pass
+
+
+def _run_backend(
     cfg: "AppConfig",
     *,
     initial_launch: dict[str, Any] | None = None,
     elevated: bool = False,
-    cwd: str | None = None,
     handoff: dict[str, str] | None = None,
-) -> bool:
-    """Run the backend beside a native Windows WebView on the main thread."""
+    open_viewer: bool = False,
+) -> int:
+    """The process that owns the PTYs: server, hotkeys and tray, no window.
+
+    Windows come from the window process it starts (pty_host.Host). The tray
+    and the global hotkeys live here because they must keep working while no
+    window exists: they are how the user gets one back, and a profile hotkey
+    spawns its PTY here anyway.
+    """
+    if not elevated and _already_running(cfg.port, cfg.host):
+        # Two launchers raced and the other backend won. Going on would discard
+        # its scratch workspace at startup before failing to bind the port.
+        log.info("a backend already runs on %s:%s", cfg.host, cfg.port)
+        return 0
+    title = ELEVATED_TITLE if elevated else TITLE
+    registry = WindowRegistry()
+    state: dict[str, Any] = {}
+    host = pty_host.Host(
+        cfg,
+        registry,
+        base_title=title,
+        elevated=elevated,
+        manager=lambda: state.get("manager"),
+        request_exit=lambda: _stop_server(state),
+    )
+    pty_host.install(host)
+    overlay_mod = None
+    if os.name == "nt":
+        from quickterm import overlay as overlay_mod
+
+        overlay_mod.set_owner_pids(host.viewer_pids)
+    tray = None
+    if not elevated and os.name == "nt":
+        try:
+            from quickterm.tray import TrayIcon
+
+            tray = TrayIcon(on_open=host.show, on_quit=host.quit)
+            # start() reports whether an icon really exists. Staying resident
+            # behind no icon would look like a crash.
+            if tray.start() is False:
+                log.warning("tray icon unavailable; the last window close will quit")
+                tray.dispose()
+                tray = None
+            else:
+                host.tray = tray
+        except Exception:
+            log.exception("tray unavailable; the last window close will quit")
+            tray = None
+    ready = threading.Event()
+
+    def when_ready() -> None:
+        if not ready.wait(60):
+            return
+        host.start_checks()
+        if open_viewer:
+            host.summon()
+
+    threading.Thread(target=when_ready, name="host-ready", daemon=True).start()
+    try:
+        asyncio.run(
+            _serve(
+                cfg,
+                ready_event=ready,
+                launch_window=False,
+                state=state,
+                initial_launch=initial_launch,
+                elevated=elevated,
+                windows=registry,
+                open_window=host.open_window,
+                notify=host.notify_attention,
+                handoff=handoff,
+                summon=host.toggle,
+            )
+        )
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        log.exception("the backend failed")
+        return 1
+    finally:
+        host.close()
+        if tray is not None:
+            tray.dispose()
+        pty_host.install(None)
+        if overlay_mod is not None:
+            overlay_mod.set_owner_pids(None)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# The window process
+# ---------------------------------------------------------------------------
+
+
+def _run_viewer(
+    cfg: "AppConfig",
+    *,
+    window_id: str | None = None,
+    workspace: str | None = None,
+    cwd: str | None = None,
+    elevated: bool = False,
+    control: bool = True,
+) -> int:
+    """The native windows onto a running backend, on the main thread.
+
+    The backend starts this process and talks to it over stdin and stdout
+    (`control`); the process ends with its last window, or when the backend
+    goes, because a window onto a dead backend shows only dead panes.
+    """
     if sys.platform != "win32":
-        return False
+        return 2
     try:
         import webview
     except ImportError:
         log.exception("native WebView is unavailable")
-        return False
-
-    ready = threading.Event()
-    state: dict[str, Any] = {}
-    errors: list[BaseException] = []
-    title = "QuickTerm - Administrator" if elevated else "QuickTerm"
-    # One registry, shared: the API routes hand out and check workspace claims
-    # while the GUI side drops a claim the moment its window is destroyed.
-    registry = WindowRegistry()
-    viewers = _ViewerWindows(cfg, state, registry, elevated=elevated, base_title=title)
-
-    def serve() -> None:
+        return 2
+    channel = None
+    if control:
         try:
-            asyncio.run(
-                _serve(
-                    cfg,
-                    ready_event=ready,
-                    launch_window=False,
-                    state=state,
-                    initial_launch=initial_launch,
-                    elevated=elevated,
-                    windows=registry,
-                    open_window=_open_window_hook(viewers),
-                    notify=viewers.notify_attention,
-                    handoff=handoff,
-                )
-            )
-        except BaseException as exc:
-            errors.append(exc)
-            ready.set()
-
-    backend = threading.Thread(target=serve, name="quickterm-server", daemon=True)
-    backend.start()
-    ready.wait(timeout=15)
-    if errors or not ready.is_set():
-        if errors:
-            log.error("backend failed before the desktop window opened", exc_info=errors[0])
-        return False
-
-    window_id = new_window_id()
+            channel = pty_host.ViewerChannel()
+        except OSError:
+            log.warning("no control channel; running without the backend's commands")
+    title = ELEVATED_TITLE if elevated else TITLE
+    viewers = _ViewerWindows(cfg, _HostLink(cfg, channel), base_title=title)
+    window_id = window_id or new_window_id()
     desktop_api = _DesktopApi(viewers)
     # Remembered bounds belong to the normal primary window. The administrator
     # window shares %APPDATA%, so it neither restores them nor records its own.
@@ -820,9 +1114,13 @@ def _run_desktop(
         {"width": _window_cfg(cfg).width, "height": _window_cfg(cfg).height}
         if elevated else _initial_geometry(cfg, _screen_list)
     )
+    try:
+        name = normalize_workspace(workspace)
+    except ValueError:
+        name = None
     window = webview.create_window(
         title,
-        _window_url(cfg.port, cwd, host=cfg.host, window_id=window_id, primary=True),
+        _window_url(cfg.port, cwd, host=cfg.host, workspace=name, window_id=window_id, primary=True),
         **geometry,
         min_size=MIN_WINDOW_SIZE,
         background_color=WINDOW_BACKGROUND,
@@ -832,57 +1130,70 @@ def _run_desktop(
     desktop_api._bind_window(window)
     viewers.adopt(window, window_id)
     if not elevated:
-        _BoundsRecorder(window, cfg, initial=geometry).wire()
+        _BoundsRecorder(
+            window, cfg, initial=geometry, overlay_applied=lambda: _overlay_style(title)
+        ).wire()
 
-    # Hide-to-tray: closing the LAST window keeps terminals alive in the
-    # background when they hold real work; otherwise it quits. Closing any
-    # earlier window is just a viewer going away. Elevated instances never hide
-    # at all: a resident admin backend would be a foot-gun.
-    global _shutdown_hook
-    _shutdown_hook = viewers.quit_all
-    if not elevated:
-        try:
-            from quickterm.tray import TrayIcon
+    def control_loop() -> None:
+        if channel is None:
+            return
+        channel.send({"event": "ready"})
+        _serve_viewer_control(channel, viewers)
 
-            tray = TrayIcon(on_open=viewers.show_all, on_quit=viewers.quit_all)
-            # start() now reports whether an icon really exists. Without that,
-            # close-to-tray could hide the window behind nothing.
-            if tray.start() is False:
-                log.warning("tray icon unavailable; window close will quit")
-                tray.dispose()
+    from quickterm.config import config_dir
+
+    # Returns once the last window is destroyed; pywebview ends its GUI loop on
+    # the last window, not on the first. control_loop runs on its own thread
+    # once the loop is up, which is where runtime windows can be created.
+    webview.start(
+        control_loop,
+        gui="edgechromium",
+        private_mode=False,
+        storage_path=str(config_dir() / "webview"),
+    )
+    return 0
+
+
+def _serve_viewer_control(channel: Any, viewers: _ViewerWindows) -> None:
+    """Run the backend's commands until it says quit or its pipe closes."""
+    for message in channel.commands():
+        op = message.get("op")
+        if op == "open":
+            request = message.get("request")
+            try:
+                window_id = viewers.open(
+                    workspace=message.get("workspace"),
+                    cwd=message.get("cwd") or None,
+                    check_claim=False,
+                )
+            except WorkspaceClaimed as exc:
+                channel.send({"event": "open_failed", "request": request,
+                              "error": "workspace_claimed", "detail": str(exc)})
+            except Exception as exc:
+                log.warning("could not open a window", exc_info=True)
+                channel.send({"event": "open_failed", "request": request,
+                              "error": "failed", "detail": str(exc)})
             else:
-                viewers.tray = tray
-        except Exception:
-            log.exception("tray unavailable; window close will quit")
+                channel.send({"event": "opened", "request": request, "window_id": window_id})
+        elif op == "show":
+            viewers.show_all(skip_primary=bool(message.get("skip_primary")))
+        elif op == "quit":
+            break
+    # A quit, or the backend is gone: either way nothing here is useful now.
+    viewers.quit_all()
 
+
+def _overlay_style(title: str) -> bool:
+    """Whether this process's primary window is in drop-down style right now."""
+    if os.name != "nt":
+        return False
     try:
-        from quickterm.config import config_dir
+        from quickterm import overlay, tray
 
-        # Returns once the last window is destroyed; pywebview ends its GUI
-        # loop on the last window, not on the first.
-        webview.start(
-            gui="edgechromium",
-            private_mode=False,
-            storage_path=str(config_dir() / "webview"),
-        )
-    finally:
-        if viewers.tray is not None:
-            viewers.tray.dispose()
-        server = state.get("server")
-        loop = state.get("loop")
-        if server is not None and loop is not None:
-            loop.call_soon_threadsafe(setattr, server, "should_exit", True)
-        backend.join(timeout=10)
-    return True
-
-
-def _open_window_hook(viewers: _ViewerWindows) -> Callable[[str | None, str | None], str]:
-    """Adapt the viewer supervisor to the server's open-window hook.
-
-    Kept as a plain function so `create_app` never learns what pywebview is;
-    the server only knows it may call something that returns a new window id.
-    """
-    return lambda workspace, cwd: viewers.open(workspace=workspace, cwd=cwd)
+        found = tray.own_window(title)
+        return bool(found) and overlay.looks_applied(found[0])
+    except Exception:
+        return False
 
 
 def _show_window(window: Any) -> None:
@@ -890,33 +1201,7 @@ def _show_window(window: Any) -> None:
         window.show()
         window.restore()
     except Exception:
-        log.debug("tray show failed", exc_info=True)
-
-
-def _summon_overlay(title: str, overlay_cfg: Any) -> bool:
-    """Show this process's window titled `title` as the drop-down when the
-    overlay is on. With it off, put a window left in overlay style back.
-
-    Returns whether the window was shown here, so the caller skips its own
-    show. Win32 work: call it from the tray or hotkey thread.
-    """
-    if os.name != "nt":
-        return False
-    try:
-        from quickterm import overlay, tray
-
-        if not overlay.enabled(overlay_cfg):
-            for hwnd in overlay.applied_windows():
-                overlay.restore_normal(hwnd)
-            return False
-        found = tray.own_window(title)
-        if found is None:
-            return False
-        overlay.show_overlay(found[0], overlay_cfg)
-        return True
-    except Exception:
-        log.debug("overlay show failed", exc_info=True)
-        return False
+        log.debug("window show failed", exc_info=True)
 
 
 def _window_cfg(cfg: Any) -> Any:
@@ -1341,12 +1626,17 @@ class _GlobalHotkeys:
         loop: asyncio.AbstractEventLoop,
         manager: "SessionManager",
         cfg: "AppConfig",
+        *,
+        summon: Callable[[], None] | None = None,
     ) -> None:
         self._mod = hotkeys_mod
         self._hk = hk
         self._loop = loop
         self._manager = manager
         self._cfg = cfg
+        # The backend's Host.toggle: it also starts the window process when
+        # there is no window to toggle.
+        self._summon = summon
         self._lock = threading.Lock()
 
     def _entries(self, cfg: "AppConfig") -> tuple[list[Any], list[str]]:
@@ -1364,13 +1654,8 @@ class _GlobalHotkeys:
             toggle = self._mod.toggle_window
             # Reads the live overlay settings at press time, and runs on the
             # hotkey thread: the Win32 window work never touches the loop.
-            entries.append(
-                entry(
-                    cfg.summon_hotkey,
-                    lambda: toggle("QuickTerm", getattr(cfg, "overlay", None)),
-                    True,
-                )
-            )
+            press = self._summon or (lambda: toggle(TITLE, getattr(cfg, "overlay", None)))
+            entries.append(entry(cfg.summon_hotkey, press, True))
             labels.append(cfg.summon_hotkey)
         return entries, labels
 
@@ -1401,14 +1686,18 @@ class _GlobalHotkeys:
 
 
 def _start_hotkeys(
-    loop: asyncio.AbstractEventLoop, manager: "SessionManager", cfg: "AppConfig"
+    loop: asyncio.AbstractEventLoop,
+    manager: "SessionManager",
+    cfg: "AppConfig",
+    *,
+    summon: Callable[[], None] | None = None,
 ) -> _GlobalHotkeys | None:
     # lazy + guarded: a missing or broken hotkeys module never blocks startup
     try:
         import quickterm.hotkeys as hotkeys_mod
 
         hk = hotkeys_mod.HotkeyManager(loop)
-        hotkeys = _GlobalHotkeys(hotkeys_mod, hk, loop, manager, cfg)
+        hotkeys = _GlobalHotkeys(hotkeys_mod, hk, loop, manager, cfg, summon=summon)
         # Windows refuses a combination another program already owns. That
         # used to fail silently and leave a tray-hidden window unreachable;
         # Settings renders cfg.hotkey_error next to the field instead.
