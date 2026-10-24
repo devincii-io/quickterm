@@ -16,7 +16,7 @@ class _RecordingPty:
     last: "_RecordingPty | None" = None
 
     def __init__(self, cmd, args, cwd, env, cols, rows, loop, on_output, on_exit):
-        self.cmd, self.env = cmd, env
+        self.cmd, self.args, self.env = cmd, args, env
         self.alive, self.exit_code, self.pid = True, None, 4242
         self.on_output, self.on_exit = on_output, on_exit
         self.thread = threading.get_ident()
@@ -37,8 +37,12 @@ async def test_spawn_preserves_profile_env_and_workspace_metadata(monkeypatch):
     mgr = SessionManager(asyncio.get_running_loop())
     info = mgr.spawn(cmd="x.exe", workspace="proj", env={"USER_SET": "1"})
     env = _RecordingPty.last.env
+    # The API token never reaches a terminal; the session id always does
+    # (agent hooks report under it), the hook port and token once the server
+    # has set them.
     assert "QUICKTERM_TOKEN" not in env
-    assert "QUICKTERM_SESSION_ID" not in env
+    assert env["QUICKTERM_SESSION_ID"] == info.id
+    assert "QUICKTERM_HOOK_TOKEN" not in env
     assert env["USER_SET"] == "1"
     assert info.workspace == "proj"
 
