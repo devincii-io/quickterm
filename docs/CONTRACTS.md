@@ -2082,7 +2082,13 @@ passed as the only `--settings`; unreadable user settings leave the launch
 without hooks. Codex gets `-c notify=[curl, -K, codex-notify.curl,
 --data-binary]` before any subcommand, and nothing when its `config.toml`
 already sets `notify` (a per-launch `notify` replaces the user's). Codex hooks
-are not used: each must be trusted in `/hooks` before it runs. No hooks for
+are not used: each must be trusted in `/hooks` before it runs. No hooks in
+the elevated backend, a backend whose `host` is not `127.0.0.1`, `localhost`
+or `0.0.0.0` (the configs post to 127.0.0.1), or when `curl --version` is
+older than 8.3 (`--variable`, `--expand-*`; checked once off the loop). Hook
+files are written under a lock with unique temp names; the 8 most recently
+used `claude-settings-<hash>.json` are kept. A SessionStart with source
+`compact` keeps the state; the other sources reset it to idle. No hooks for
 `agents` mode, a `.cmd`/`.bat` Codex shim, an explicit `cmd` or `args` in the
 request, or elevated terminals. `LaunchSpec.agent` ("claude" | "codex" | None)
 carries the choice to `SessionManager._build`, which adds the arguments there
