@@ -99,8 +99,8 @@ test("the sidebar model lists saved workspaces with their folders, the views and
     logoUrl: "/logo",
   });
   assert.deepEqual(model.workspaces, [
-    { name: "api", path: "/work/api", pathExists: false },
-    { name: "docs", path: null, pathExists: null },
+    { name: "api", path: "/work/api", pathExists: false, git: null },
+    { name: "docs", path: null, pathExists: null, git: null },
   ], "scratch is never a saved workspace, and an unread folder is unknown, not missing");
   assert.deepEqual(model.views, [{ workspace: "api", label: "api", color: "#fff", active: true }]);
   assert.equal(model.sessions, sessions);
@@ -110,7 +110,7 @@ test("the sidebar model lists saved workspaces with their folders, the views and
   assert.equal(model.defaultProfile, "pwsh");
   assert.equal(model.logoUrl, "/logo");
   assert.deepEqual(Object.keys(model).sort(), [
-    "attached", "defaultProfile", "here", "inventory", "logoUrl", "owned", "profiles", "selectedTerminal",
+    "attached", "defaultProfile", "focusedId", "here", "inventory", "logoUrl", "owned", "profiles", "selectedTerminal",
     "sessions", "views", "workspaces",
   ], "exactly the SidebarModel of spec 4.2");
 });

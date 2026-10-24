@@ -7,6 +7,9 @@
 //   Alt+Z              zoom pane
 //   Alt+D              detach pane; process keeps running
 //   Alt+W              confirm kill terminal process tree and close pane
+//   Alt+J              jump to the next terminal that needs you, cycling
+//                      (no readline, PSReadLine, zsh, fish or agent CLI
+//                      default binds plain Alt+J)
 //   Alt+Arrows         move focus between panes
 //   Alt+Shift+H        split side by side
 //   Alt+Shift+V        split top and bottom
@@ -40,6 +43,7 @@ export const SHORTCUTS = [
   { id: "zoom", keys: "Alt+Z", label: "Zoom the focused pane; again shows all panes", group: "Terminals", bindings: ["alt+z"] },
   { id: "detach", keys: "Alt+D", label: "Detach the pane; the process keeps running", group: "Terminals", bindings: ["alt+d"] },
   { id: "kill", keys: "Alt+W", label: "Arm the kill bar; Alt+W or Enter again kills, Escape cancels", group: "Terminals", bindings: ["alt+w"] },
+  { id: "needs-you", keys: "Alt+J", label: "Jump to the next terminal that needs you: waiting, ringing, or a finished agent turn", group: "Terminals", bindings: ["alt+j"] },
   { id: "focus", keys: "Alt+Arrows", label: "Move between panes", group: "Panes", bindings: arrows("alt") },
   { id: "split-right", keys: "Alt+Shift+→ or Alt+Shift+H", label: "Split the selected terminal to the right", group: "Panes", bindings: ["alt+shift+right", "alt+shift+h"] },
   { id: "split-down", keys: "Alt+Shift+↓ or Alt+Shift+V", label: "Split the selected terminal below", group: "Panes", bindings: ["alt+shift+down", "alt+shift+v"] },
@@ -134,6 +138,8 @@ export function initKeys(actions) {
         z: actions.zoom,
         d: actions.closePane,
         w: actions.killSession,
+        // Reaches the terminal when no jump is wired in this document.
+        j: actions.nextNeedsYou,
       };
       if (plain[key]) done(plain[key]);
       return;

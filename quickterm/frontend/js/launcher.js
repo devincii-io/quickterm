@@ -9,10 +9,11 @@ import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
   clampSidebarWidth, isWideSidebar, rowWhere, sessionTooltip, sidebarGroups, groupSummary,
   folderName, terminalChoices, canLaunch, choiceKey, loadMode, saveMode, loadWidth, saveWidth,
-  loadClosedGroups, saveClosedGroups, foldId, visibleGroups,
+  loadClosedGroups, saveClosedGroups, foldId, visibleGroups, activitySeconds, relativeTime, groupBranch,
+  nextNeedsYou as findNeedsYou,
 } from "./sidebar_model.js";
 import { createViewControls } from "./sidebar_view_menu.js";
-import { iconButton, make, setLabel } from "./sidebar_dom.js";
+import { fromKeyboard, iconButton, make, patchSubagents, setLabel, wireFloat } from "./sidebar_dom.js";
 
 // The pure half lives in sidebar_model.js; its public names stay importable
 // from here.
@@ -29,27 +30,6 @@ export {
 //   rail    30px of dots, so the state of every terminal is still in view
 //   hidden  nothing at all; a small floating "+" sits at the terminal's top
 //           left corner
-
-// The floating "+" that stands in for the sidebar while it is hidden. It is
-// static in index.html and pinned by CSS at the top left; it does not move.
-function wireFloat(actions, signal, showSidebar) {
-  const float = document.getElementById("float-launch");
-  if (!float) return { show() {}, hide() {} };
-  const open = float.querySelector(".float-new");
-  const reveal = float.querySelector(".float-show");
-  open?.addEventListener("click", () => actions.newTerminal?.(), { signal });
-  open?.addEventListener("contextmenu", (event) => { event.preventDefault(); showSidebar(); }, { signal });
-  reveal?.addEventListener("click", showSidebar, { signal });
-  return {
-    show() { float.hidden = false; },
-    hide() { float.hidden = true; },
-  };
-}
-
-// A click synthesised by Enter or Space has no pointer behind it.
-function fromKeyboard(event) {
-  return event?.detail === 0;
-}
 
 export function initLauncher(el, { actions = {}, chrome = [], elevated = false } = {}) {
   if (el._launcherAbort) el._launcherAbort.abort();
@@ -456,13 +436,15 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const name = make("span", "session-name");
     const chip = make("span", "session-chip");
     const where = make("small", "session-where");
-    row.append(dot, name, chip, where);
+    const age = make("small", "session-age");
+    row.append(dot, name, age, chip, where);
     const tray = make("div", "session-actions");
     const detachButton = iconButton("session-action session-detach", "unplug", "Detach", () => detach(entry));
     const kill = iconButton("session-action session-kill danger", "stop", "Kill", (event) => killConfirm(entry, fromKeyboard(event)));
     tray.append(detachButton, kill);
-    entry.append(row, tray);
-    parts.set(entry, { row, name, chip, where, detach: detachButton, kill });
+    const subagents = make("div", "session-subagents");
+    entry.append(row, tray, subagents);
+    parts.set(entry, { row, name, chip, where, age, subagents, detach: detachButton, kill });
 
     row.addEventListener("click", () => {
       const session = itemFor(entry)?.session;
@@ -500,9 +482,11 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   // before patchList inserts it.
   const updateRow = (entry, item, group) => {
     const { session, state, attachedIn, finished } = item;
-    const { row, name, chip, where, detach: detachButton, kill } = parts.get(entry);
+    const { row, name, chip, where, age, subagents, detach: detachButton, kill } = parts.get(entry);
     const label = session.name || String(session.id).slice(0, 8);
     setClass(entry, "needs-you", state.key === "attention");
+    setClass(entry, "has-subagents", patchSubagents(subagents, session.agent));
+    setText(age, relativeTime(activitySeconds(session)));
     row.className = [
       "session-row",
       `state-${state.key}`,
@@ -526,7 +510,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     setClass(where, "always", group?.kind === "flat");
     // Chips only for the states worth interrupting for: a plain background
     // shell is a hollow dot, or the list turns into a wall of badges.
-    const chipped = ["attention", "unread", "busy", "elsewhere"].includes(state.key);
+    const chipped = ["attention", "unread", "busy", "elsewhere", "done", "failed"].includes(state.key);
     chip.hidden = !chipped;
     chip.className = chipped ? `session-chip chip-${state.key}` : "session-chip";
     setText(chip, chipped ? (state.key === "unread" ? "new" : state.label) : "");
@@ -556,6 +540,9 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const items = [];
     if (group.kind === "workspace") {
       items.push({ label: "Open in new window", icon: "new-window", run: () => actions.openWorkspaceInWindow?.(group.name) });
+    }
+    if (group.git) {
+      items.push({ label: "New worktree…", icon: "plus", detail: "a new branch in its own folder", run: () => actions.newWorktree?.(group.name) });
     }
     items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
     if (group.kind === "workspace") {
@@ -587,7 +574,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const dot = make("span", "session-group-dot");
     const name = make("span", "session-group-name");
     const count = make("span", "sidebar-count");
-    head.append(chevron, dot, name, count);
+    const branch = make("small", "session-group-branch");
+    head.append(chevron, dot, name, branch, count);
     const tray = make("div", "group-actions");
     const closeView = iconButton("group-action group-close", "x", "Close view");
     const kebab = iconButton("group-action group-more", "more", "Workspace actions");
@@ -598,7 +586,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const slot = make("div", "session-group-detail");
     const rows = make("div", "session-group-rows");
     node.append(headline, slot, rows);
-    parts.set(node, { headline, head, chevron, dot, name, count, tray, closeView, kebab, slot, rows });
+    parts.set(node, { headline, head, chevron, dot, name, branch, count, tray, closeView, kebab, slot, rows });
 
     head.addEventListener("click", (event) => {
       const group = itemFor(node);
@@ -628,10 +616,13 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
 
   const updateGroup = (node, group) => {
     const groupParts = parts.get(node);
-    const { head, chevron, dot, name, count, closeView, kebab, rows } = groupParts;
+    const { head, chevron, dot, name, branch, count, closeView, kebab, rows } = groupParts;
     const hasRows = group.sessions.length > 0;
     const closed = hasRows && closedGroups.has(foldId(group));
     for (const kind of ["workspace", "scratch", "unassigned", "flat"]) setClass(node, kind, group.kind === kind);
+    setClass(node, "worktree", Boolean(group.parent));
+    setText(branch, groupBranch(group));
+    branch.hidden = !branch.textContent;
     setClass(node, "open", group.open);
     setClass(node, "active", group.active);
     setClass(node, "has-attention", group.counts.attention > 0);
@@ -649,7 +640,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     setClass(dot, "hollow", !group.open);
     if (group.open && group.color) dot.style.setProperty("--group-color", group.color);
     else dot.style.removeProperty("--group-color");
-    setText(name, group.label);
+    setText(name, group.shortLabel || group.label);
     setText(count, String(group.sessions.length));
     count.hidden = !hasRows;
     const where = group.kind === "unassigned" ? "Live terminals no workspace owns"
@@ -889,6 +880,15 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       select(choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length]);
       handBack();
       return selected;
+    },
+    // Alt+J: the next terminal that needs you after the focused one, in the
+    // order the list shows them, folded groups included.
+    nextNeedsYou() {
+      const order = sidebarGroups(model.sessions, { ...model, view: viewControls.view() })
+        .flatMap((group) => group.sessions.map((entry) => entry.session));
+      const next = findNeedsYou(order, model.focusedId || null);
+      if (next) actions.activateTerminal?.(next);
+      return next;
     },
     mode: () => mode,
     setMode,

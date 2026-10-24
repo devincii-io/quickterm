@@ -110,13 +110,41 @@ function terminalName(entry) {
   return entry?.session?.name || entry?.session?.id || "terminal";
 }
 
+function agentStateOf(entry) {
+  return entry?.session?.agent?.state || null;
+}
+
 function terminalState(entry) {
   const session = entry?.session || {};
-  if (session.attention) return "needs you";
+  const agent = agentStateOf(entry);
+  if (session.attention || agent === "waiting") return "needs you";
   if (session.alive === false) return "finished";
+  if (agent === "done" || agent === "failed" || agent === "working") return agent;
   if (entry?.attachedIn) return "open";
   if (session.busy === true) return "busy";
   return "background";
+}
+
+// The `@` list puts what wants you first: waiting or ringing terminals, then
+// finished agent turns, then working ones, then everything else in its usual
+// order. The sidebar's order never changes; only this list ranks.
+export function placeRank(item) {
+  const entry = item?.terminal;
+  if (!entry) return 3;
+  const state = terminalState(entry);
+  if (state === "needs you") return 0;
+  if (state === "done" || state === "failed") return 1;
+  if (state === "working" || state === "busy") return 2;
+  return 3;
+}
+
+// Sort scored rows `{item, i, score}`. With nothing typed the rank leads; once
+// something is typed the match leads and the rank breaks ties.
+export function placeOrder(query) {
+  return (x, y) => (query ? y.score - x.score : 0)
+    || placeRank(x.item) - placeRank(y.item)
+    || y.score - x.score
+    || x.i - y.i;
 }
 
 function terminalPlace(entry) {
@@ -241,6 +269,19 @@ export function agentSessionRows(profile, sessions, app) {
     search: `resume ${agent} session: ${session.title || ""} ${session.id}`,
     run: () => app?.resumeAgentSession?.(profile, session.id),
   }));
+}
+
+// The workspaces a worktree can start from: saved ones whose folder is a git
+// checkout (GET /api/workspaces/{name} carries `git`), the one in front first,
+// the rest by name.
+export function worktreeSources(details = new Map(), current = null) {
+  const rows = [];
+  for (const [name, saved] of details) {
+    if (isScratchWorkspace(name) || !saved?.git) continue;
+    rows.push({ name, branch: saved.git.branch || saved.git.head || "", path: saved.path || "" });
+  }
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
+  return rows.sort((a, b) => (b.name === current) - (a.name === current) || byName(a, b));
 }
 
 // The kill sub-mode's list. The palette adds what choosing a row does: a
