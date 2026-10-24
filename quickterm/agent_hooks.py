@@ -23,6 +23,10 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import tempfile
+import threading
+import time
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -62,6 +66,18 @@ SETTINGS_MAX_BYTES = 2 * 1024 * 1024
 # read by bash or cmd.exe, so a folder containing one gets no hooks.
 _SHELL_UNSAFE = re.compile(r'["$`%!\r\n]')
 _BATCH_UNSAFE = re.compile(r'["&|<>^%!\r\n]')
+# --variable and the --expand-* options arrived in curl 8.3.0. Windows 10 and
+# 11 ship a curl that Windows Update keeps current (8.13 after mid 2024), but
+# an unpatched build still has 7.x, which would refuse every config.
+CURL_MIN = (8, 3)
+# Merged settings files of the most recently launched user settings that are
+# kept; a running Claude may still read one, older ones are deleted.
+MERGED_KEEP = 8
+# Spawns build in worker threads, so several agent panes restoring together
+# write the same files at once.
+_files_lock = threading.Lock()
+_REPLACE_TRIES = 40
+_curl_checked: dict[str, tuple[int, ...] | None] = {}
 
 
 # --- launch -----------------------------------------------------------------
@@ -78,6 +94,38 @@ def curl_program() -> str:
         root = os.environ.get("SystemRoot") or r"C:\Windows"
         return (Path(root) / "System32" / "curl.exe").as_posix()
     return shutil.which("curl") or "curl"
+
+
+def _parse_curl_version(text: str) -> tuple[int, ...] | None:
+    match = re.match(r"curl (\d+)\.(\d+)(?:\.(\d+))?", text)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups(default="0"))
+
+
+def curl_version(program: str) -> tuple[int, ...] | None:
+    """``program``'s version, or None when it does not run. Asked once per
+    program and backend. Blocking: starts curl."""
+    if program in _curl_checked:
+        return _curl_checked[program]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        done = subprocess.run(
+            [program, "--version"], capture_output=True, timeout=10, check=False,
+            stdin=subprocess.DEVNULL, creationflags=flags,
+        )
+        version = _parse_curl_version(done.stdout.decode("ascii", "replace"))
+    except (OSError, subprocess.SubprocessError):
+        version = None
+    if version is None or version < CURL_MIN:
+        log.warning("agent hooks off: %s is missing or older than curl 8.3 (%s)", program, version)
+    _curl_checked[program] = version
+    return version
+
+
+def curl_usable() -> bool:
+    version = curl_version(curl_program())
+    return version is not None and version >= CURL_MIN
 
 
 def _curl_config(agent: str, event: str | None) -> str:
@@ -132,19 +180,45 @@ def claude_hooks(base: Path) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def _write_if_changed(path: Path, text: str) -> None:
+def _holds(path: Path, text: str) -> bool:
     try:
-        if path.read_text(encoding="utf-8") == text:
-            return
+        return path.read_text(encoding="utf-8") == text
     except OSError:
-        pass
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
+        return False
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    if _holds(path, text):
+        return
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        # Windows refuses a replace while another writer (a second QuickTerm
+        # backend) has the target open; what counts is that it ends up
+        # holding this text, whoever wrote it.
+        for attempt in range(_REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if _holds(path, text):
+                    return
+                if attempt == _REPLACE_TRIES - 1:
+                    raise
+                time.sleep(0.005)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def ensure_files(base: Path) -> None:
     """Write the curl configs and the Claude settings file. Blocking."""
+    with _files_lock:
+        _ensure_files(base)
+
+
+def _ensure_files(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     for event in CLAUDE_EVENTS:
         _write_if_changed(base / f"claude-{event}.curl", _curl_config("claude", event))
@@ -196,7 +270,30 @@ def _settings_arg(args: list[str]) -> tuple[int, int, str] | None:
 
 
 def _is_batch(cmd: str) -> bool:
-    return cmd.lower().endswith((".cmd", ".bat"))
+    # A bare name runs whatever PATH finds, as in agents._guard_batch.
+    resolved = cmd if os.path.dirname(cmd) else (shutil.which(cmd) or cmd)
+    return resolved.lower().endswith((".cmd", ".bat"))
+
+
+def _prune_merged(base: Path, keep: Path) -> None:
+    """Delete all but the most recently used merged settings files.
+
+    Each copies the user's settings, secrets in ``env`` included, so they
+    must not pile up; ``keep`` was just used and is marked newest.
+    """
+    os.utime(keep)
+    try:
+        merged = sorted(
+            base.glob("claude-settings-*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True
+        )
+    except OSError:
+        return
+    for stale in merged[MERGED_KEEP:]:
+        if stale != keep:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
 
 def claude_args(cmd: str, args: list[str], cwd: str | None, base: Path) -> list[str]:
@@ -221,7 +318,9 @@ def claude_args(cmd: str, args: list[str], cwd: str | None, base: Path) -> list[
         text = json.dumps(merge_claude_settings(parsed, base), indent=2) + "\n"
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         target = base / f"claude-settings-{digest}.json"
-        _write_if_changed(target, text)
+        with _files_lock:
+            _write_if_changed(target, text)
+            _prune_merged(base, target)
         del out[start:start + length]
     arg = f"--settings={target.as_posix()}"
     if _is_batch(cmd) and _BATCH_UNSAFE.search(arg):
@@ -263,7 +362,7 @@ def launch_args(
     Any failure leaves the launch as it was: hooks are an extra.
     """
     base = base if base is not None else hooks_dir()
-    if _SHELL_UNSAFE.search(base.as_posix()):
+    if _SHELL_UNSAFE.search(base.as_posix()) or not curl_usable():
         return args
     try:
         ensure_files(base)
@@ -355,7 +454,11 @@ def apply(
 
     if event == "SessionEnd":
         return Outcome(None)
-    if event == "SessionStart":
+    # SessionStart also fires with source "compact" in the middle of a turn,
+    # which starts nothing new.
+    if event == "SessionStart" and (
+        current is None or payload.get("source") in (None, "startup", "resume", "clear", "fork")
+    ):
         return Outcome(AgentState("claude", "idle", now))
     state = current if current is not None and current.kind == "claude" else AgentState(
         "claude", "idle", now
