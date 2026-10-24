@@ -34,6 +34,9 @@ export class LayoutManager {
     this.zoomed = false;
     this.zoomedPane = null;
     this.broadcasting = false;
+    // This document's workspace view is hidden in the shell (another view
+    // is zoomed). The shell says so; the iframe cannot see it from inside.
+    this.viewHidden = false;
     // Bumped by every render(), so a deferred "catch the DOM up" step can
     // tell whether a later structural change already did that work.
     this._renderGeneration = 0;
@@ -58,8 +61,27 @@ export class LayoutManager {
       onUserInput: (data, p) => this._broadcastFrom(p, data),
     });
     if (this.broadcasting) pane.setBroadcasting(true);
+    // Before its terminal exists, so a pane restored into a hidden view never
+    // takes a WebGL context it would give back seconds later.
+    if (this.viewHidden) pane.setOffscreen(true);
     this._wireDrag(pane);
     return pane;
+  }
+
+  // ---- visibility ----
+
+  setViewHidden(hidden) {
+    this.viewHidden = Boolean(hidden);
+    this._syncVisibility();
+  }
+
+  // Which panes nobody can see: all of them in a hidden view, and every pane
+  // but the zoomed one while a pane is zoomed. pane.js releases their
+  // renderers (setOffscreen).
+  _syncVisibility() {
+    for (const p of this.panes()) {
+      p.setOffscreen(this.viewHidden || (this.zoomed && p !== this.zoomedPane));
+    }
   }
 
   // ---- broadcast input ----
@@ -109,6 +131,7 @@ export class LayoutManager {
       el.style.flex = "1 1 auto";
       this.gridEl.appendChild(el);
     }
+    this._syncVisibility();
     this.fitAll();
   }
 
@@ -321,6 +344,7 @@ export class LayoutManager {
     this.zoomHostEl.appendChild(this.focused.el);
     document.body.classList.add("zoomed");
     this.focused.setZoomed(true);
+    this._syncVisibility();
     this.focused.fitSoon();
     // Moving the element blurred xterm's textarea. Without this, the next
     // keystrokes went to <body> and nowhere else.
@@ -335,6 +359,7 @@ export class LayoutManager {
     this.zoomHostEl.textContent = "";
     this.gridEl.hidden = false;
     document.body.classList.remove("zoomed");
+    this._syncVisibility();
   }
 
   // ---- focus ----

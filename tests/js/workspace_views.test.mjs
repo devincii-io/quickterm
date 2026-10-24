@@ -342,3 +342,35 @@ test("a view whose document refuses to close stays open", async () => {
   assert.deepEqual(views.views(), [api]);
   assert.match(errors[0], /switching/);
 });
+
+test("views hidden behind a zoomed view are told so, and told again when they come back", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs");
+  const said = { api: [], docs: [] };
+  for (const view of [api, docs]) {
+    view.frame.contentWindow.quicktermView.setHidden = (value) => said[view.label].push(value);
+    views.ready(view.frame.contentWindow);
+  }
+  assert.deepEqual(said, { api: [false], docs: [false] }, "a ready view learns its state once");
+  views.zoom(docs);
+  assert.deepEqual(said.api, [false, true], "the view the zoom hides releases its renderers");
+  assert.deepEqual(said.docs, [false], "the zoomed view hears nothing new");
+  views.layout({ animate: false });
+  assert.deepEqual(said.api, [false, true], "an unchanged state is not repeated");
+  views.zoom(docs);
+  assert.deepEqual(said.api, [false, true, false]);
+});
+
+test("a view that boots while hidden learns it from ready()", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs");
+  views.zoom(api);
+  const said = [];
+  docs.frame.contentWindow.quicktermView.setHidden = (value) => said.push(value);
+  views.ready(docs.frame.contentWindow);
+  assert.deepEqual(said, [true]);
+});

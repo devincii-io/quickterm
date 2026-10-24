@@ -422,6 +422,7 @@ async function bootView() {
   window.quicktermView = {
     workspace: () => state.currentWorkspace,
     suspend: suspendView,
+    setHidden: (hidden) => layout.setViewHidden(hidden),
     close: closeView,
     app,
     syncConfig: onConfigSaved,
