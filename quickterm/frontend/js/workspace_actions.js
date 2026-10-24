@@ -34,6 +34,8 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // backend (bad name, no git folder, branch or folder taken) is thrown with its
 // `detail` for the input that asked; anything after the worktree exists goes
 // to the banner, because the worktree is there either way.
+const NOT_LOCAL_SHELL = new Set(["claude-code", "codex", "ssh", "sftp", "wsl", "custom"]);
+
 export async function createWorktreeWorkspace({
   api, from, branch, openView, appFor, onWorkspacesChanged, showError, tries = 20, wait = pause,
 }) {
@@ -55,6 +57,14 @@ export async function createWorktreeWorkspace({
   }
   if (!sessionId) {
     showError(`No terminal started in ${created.workspace}. Run ${command} there yourself.`);
+    return created;
+  }
+  // The default terminal can be an agent (the command would become a prompt),
+  // a remote shell (it would run on the server) or WSL (a Linux install in a
+  // Windows folder). Only a local shell gets it typed.
+  const type = appFor(view)?.focusedTerminalType?.() || null;
+  if (NOT_LOCAL_SHELL.has(type)) {
+    showError(`Worktree ${created.workspace} is ready. Run ${command} in a local shell there.`);
     return created;
   }
   try {

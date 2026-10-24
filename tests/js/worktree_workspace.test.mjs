@@ -72,3 +72,13 @@ test("after the worktree exists, failures go to the banner", async () => {
   await createWorktreeWorkspace({ ...refused.options, branch: "x" });
   assert.deepEqual(refused.errors, ["409 exited"]);
 });
+
+test("an agent, remote or WSL default terminal gets the command in the banner, not typed", async () => {
+  for (const type of ["claude-code", "codex", "ssh", "wsl"]) {
+    const { options, calls, errors } = harness();
+    options.appFor = () => ({ focusedSessionId: () => "s1", focusedTerminalType: () => type });
+    await createWorktreeWorkspace({ ...options, branch: "x" });
+    assert.ok(!calls.some(([kind]) => kind === "send"), type);
+    assert.match(errors[0], /Run uv sync in a local shell/);
+  }
+});

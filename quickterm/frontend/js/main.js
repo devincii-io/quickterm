@@ -289,6 +289,7 @@ async function bootView() {
     attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
     focusedSessionId: () => layout.focused?.session?.id || null,
+    focusedTerminalType: () => layout.focused?.terminalType || null,
     focusSession: (id) => {
       const pane = layout.panes().find((item) => item.session?.id === id);
       if (pane) layout.focusPane(pane);

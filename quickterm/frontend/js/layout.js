@@ -7,6 +7,7 @@
 // reused across re-renders so terminals survive structural changes.
 
 import { Pane } from "./pane.js";
+import { isAgentType } from "./agent_profile.js";
 import { broadcastTargets, unbracketedPaste, withoutTerminalReplies } from "./broadcast.js";
 import { launchOptionsFromNode, launchOptionsToNode } from "./launch_options.js";
 import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";
@@ -101,9 +102,13 @@ export class LayoutManager {
     const pasted = unbracketedPaste(data);
     const typed = pasted === null ? withoutTerminalReplies(data) : null;
     if (typed === "") return;
+    // Shift+Enter in an agent pane is ESC CR, which a shell reads as Escape
+    // (cmd.exe clears the line); a pane that is not an agent gets the Enter
+    // that Shift+Enter would have typed there.
+    const agentNewline = typed === "\x1b\r" && isAgentType(source.terminalType);
     for (const p of broadcastTargets(this.panes(), source)) {
       if (pasted !== null) p.pasteText(pasted);
-      else p.sendText(typed);
+      else p.sendText(agentNewline && !isAgentType(p.terminalType) ? "\r" : typed);
     }
   }
 

@@ -163,3 +163,17 @@ test("a zoomed pane stays on screen and the panes it covers go offscreen", () =>
   layout.setViewHidden(true);
   assert.deepEqual(panes.map((pane) => pane.offscreen), [true, true, true], "a hidden view hides its zoomed pane too");
 });
+
+test("a broadcast Shift+Enter from an agent pane reaches shell panes as Enter", () => {
+  const pane = (terminalType) => ({ terminalType, sent: [], acceptsInput: () => true, sendText(text) { this.sent.push(text); return true; } });
+  const agent = pane("claude-code");
+  const codex = pane("codex");
+  const shell = pane("command-prompt");
+  const layout = layoutWith([agent, codex, shell], { broadcasting: true });
+  layout._broadcastFrom(agent, "\x1b\r");
+  assert.deepEqual(codex.sent, ["\x1b\r"]);
+  assert.deepEqual(shell.sent, ["\r"]);
+  // Alt+Enter typed in a shell pane is not the agent newline and goes as is.
+  layout._broadcastFrom(shell, "\x1b\r");
+  assert.deepEqual(agent.sent, ["\x1b\r"]);
+});

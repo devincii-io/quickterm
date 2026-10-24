@@ -270,11 +270,16 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 - Agent state comes from hooks added per launch (`agent_hooks.py`), never
   from the user's `~/.claude/settings.json` or Codex `config.toml`. Every PTY
   carries `QUICKTERM_SESSION_ID`, `QUICKTERM_PORT` and `QUICKTERM_HOOK_TOKEN`;
-  the hook token opens only `/api/sessions/{sid}/agent-event`, so a program in
-  a terminal never sees the full API token. Hooks run Windows' curl async: a
-  Python process per PreToolUse would slow every tool call. Git facts are read
-  from `.git` files (`git_info.py`); `git` itself runs only to create a
-  worktree, off the loop, with a list argv and the `GIT_*` overrides removed.
+  the hook token opens only `/api/sessions/{sid}/agent-event`, so the full API
+  token is not in a terminal's environment (it is still in
+  `runtime.token`, which `quickterm send` reads). No hooks in the elevated
+  instance: their curl configs live where a normal process can rewrite them.
+  Hooks run Windows' curl async: a Python process per PreToolUse would slow
+  every tool call. Git facts are read from `.git` files (`git_info.py`); `git`
+  itself runs only to create a worktree, off the loop, with a list argv and
+  the repository location variables (`GIT_DIR`, `GIT_WORK_TREE` and the like)
+  removed. `GIT_CONFIG_*` and `GIT_SSH_COMMAND` pass through on purpose: they
+  are the user's own environment, not input from a request.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
