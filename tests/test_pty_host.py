@@ -579,6 +579,15 @@ def test_a_declined_restart_keeps_the_old_backend(monkeypatch):
     assert calls == [("POST", "/api/host/retire", {"force": False})]
 
 
+def test_a_backend_already_declined_once_is_not_asked_about_again(monkeypatch):
+    from quickterm import app
+
+    monkeypatch.setattr(app, "_host_call", lambda *a, **k: (409, {"sessions": [{"id": "a"}]}))
+    monkeypatch.setattr(app, "_ask_restart", lambda *a: pytest.fail("asked twice"))
+    cfg = SimpleNamespace(port=8650, host="127.0.0.1")
+    assert app._hand_over(cfg, {"version": "4.1.1", "superseded": True}) == "kept"
+
+
 def test_an_accepted_restart_retires_waits_and_starts_the_new_backend(monkeypatch):
     from quickterm import app
 

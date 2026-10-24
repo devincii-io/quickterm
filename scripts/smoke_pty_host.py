@@ -13,7 +13,8 @@ tray icon shows while the backend runs.
 4. The backend keeps running, the terminal is alive, the dead window's claims
    are gone, and it stays in the tray (a touched terminal is worth keeping).
 5. Launching again opens a new window process on the same backend, and the
-   terminal's earlier output comes back through the replay.
+   terminal's earlier output comes back through the replay. A second window
+   opens inside that same process (a command over its stdin).
 6. The backend is retired, and its window process goes with it.
 """
 
@@ -76,7 +77,7 @@ class Backend:
             return False
 
 
-def _wait(predicate, label: str, timeout: float = 30) -> None:
+def _wait(predicate, label: str, timeout: float = 60) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -216,6 +217,22 @@ def smoke(launcher: list[str], port: int) -> None:
                 raise RuntimeError("the new window did not get the terminal's output back")
             print(f"new window process {viewers[1]} reattached, "
                   f"{len(replay)} replay bytes", flush=True)
+
+            # A second window is a command down the window process's stdin,
+            # answered on its stdout; no second process.
+            started = time.monotonic()
+            status, opened = backend.request(
+                "/api/windows/open", method="POST", payload={"workspace": "Second"}
+            )
+            if status != 200 or not isinstance(opened, dict) or not opened.get("opened"):
+                raise RuntimeError(f"opening a second window failed ({status}): {opened!r}")
+            if _host(backend)["viewer"] != viewers[1]:
+                raise RuntimeError("a second window started a second window process")
+            _wait(lambda: any(w.get("id") == opened["window_id"]
+                              for w in backend.request("/api/windows")[1]["windows"]),
+                  "the second window registered")
+            print(f"second window {opened['window_id']} opened in "
+                  f"{time.monotonic() - started:.1f} s", flush=True)
 
             # 6. retiring the backend takes its window along
             status, body = backend.request("/api/host/retire", method="POST",

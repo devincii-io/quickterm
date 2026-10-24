@@ -61,6 +61,7 @@ ELEVATED_TITLE = "QuickTerm - Administrator"
 # to let go of the port.
 BACKEND_START_S = 30.0
 BACKEND_RETIRE_S = 20.0
+GRACEFUL_SHUTDOWN_S = 3
 log = logging.getLogger("quickterm")
 
 # Hotkey launches run as tasks nobody awaits; the loop keeps only weak
@@ -496,6 +497,11 @@ async def _serve(
             ws_max_size=256 * 1024,
             ws_max_queue=16,
             ws_per_message_deflate=False,
+            # Without a bound uvicorn waits for every request in flight, and the
+            # launch long-poll holds one for up to 20 s while a WebView2 process
+            # that outlives its window keeps the socket open: the terminals
+            # were stopped that much later than the port closed.
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S,
         )
     )
     if state is not None:
@@ -832,6 +838,10 @@ def _hand_over(
     """Replace the running backend with this build: "started", "kept" or "failed"."""
     status, payload = _host_call(cfg, "POST", "/api/host/retire", {"force": False})
     if status == 409:
+        if info.get("superseded"):
+            # The user already said no once; it leaves on its own when nothing
+            # is at risk, and asking at every launch would be nagging.
+            return "kept"
         sessions = payload.get("sessions") if isinstance(payload, dict) else None
         if not _ask_restart(str(info.get("version") or ""), sessions or []):
             log.info("update: the running backend keeps its terminals for now")
