@@ -1067,7 +1067,7 @@ def test_workspace_crud(client, fake_workspace):
     ws = client.get("/api/workspaces/dev").json()
     assert ws == {
         "name": "dev", "layout": layout, "logo": None, "path": None,
-        "session_ids": [], "path_exists": False, "temporary": False,
+        "session_ids": [], "path_exists": False, "temporary": False, "git": None,
     }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
