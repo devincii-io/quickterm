@@ -991,6 +991,11 @@ def _run_backend(
     window exists: they are how the user gets one back, and a profile hotkey
     spawns its PTY here anyway.
     """
+    if not elevated and _already_running(cfg.port, cfg.host):
+        # Two launchers raced and the other backend won. Going on would discard
+        # its scratch workspace at startup before failing to bind the port.
+        log.info("a backend already runs on %s:%s", cfg.host, cfg.port)
+        return 0
     title = ELEVATED_TITLE if elevated else TITLE
     registry = WindowRegistry()
     state: dict[str, Any] = {}

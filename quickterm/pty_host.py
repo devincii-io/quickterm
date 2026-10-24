@@ -701,10 +701,13 @@ class Host:
             raise RuntimeError(str(result.get("detail") or "the window could not be opened"))
         return str(result.get("window_id"))
 
-    def summon(self, cwd: str | None = None) -> str:
+    def summon(self, cwd: str | None = None, *, wait: bool = True) -> str:
         """Show the windows, or start a viewer when there is none.
 
         "shown", "started", or "unavailable" while the backend is leaving.
+        `wait=False` returns as soon as the process is started: the hotkey and
+        tray threads must not sit through a WebView2 cold start, so the rest
+        (the drop-down for the overlay) runs on a thread of its own.
         """
         with self._lock:
             if self.quitting.is_set():
@@ -715,7 +718,14 @@ class Host:
         if started is None:
             self.show()
             return "shown"
-        self._await_ready(started[0], overlay=self._overlay_on())
+        overlay = self._overlay_on()
+        if wait:
+            self._await_ready(started[0], overlay=overlay)
+        else:
+            threading.Thread(
+                target=self._await_ready, args=(started[0],), kwargs={"overlay": overlay},
+                name="viewer-start", daemon=True,
+            ).start()
         return "started"
 
     def show(self) -> None:
@@ -725,11 +735,9 @@ class Host:
         """
         with self._lock:
             viewer = self._viewer
-            started = None
-            if viewer is None and not self.quitting.is_set():
-                started = self._spawn_viewer_locked()
-        if started is not None:
-            self._await_ready(started[0], overlay=self._overlay_on())
+            start = viewer is None and not self.quitting.is_set()
+        if start:
+            self.summon(wait=False)
             return
         if viewer is None:
             return
@@ -753,7 +761,7 @@ class Host:
             except Exception:
                 log.debug("summon toggle failed", exc_info=True)
         if not found:
-            self.summon()
+            self.summon(wait=False)
 
     def _overlay_on(self) -> bool:
         if os.name != "nt":

@@ -461,6 +461,31 @@ def test_a_claimed_workspace_is_refused_with_the_owner(stub_host):
         stub_host.open_window("taken", None)
 
 
+def test_the_hotkey_and_the_tray_never_wait_for_a_window_process_to_boot(tmp_path):
+    # A WebView2 cold start takes seconds; the hotkey thread also serves every
+    # other hotkey and the tray thread the icon, so neither may sit through it.
+    silent = tmp_path / "silent_viewer.py"
+    silent.write_text("import sys\nsys.stdin.buffer.read()\n", encoding="utf-8")
+    host, _ = _host(
+        _Manager([_Info("a", touched=True)]),
+        viewer_command=lambda argv: [sys.executable, str(silent), *argv],
+    )
+    try:
+        started = time.monotonic()
+        host.toggle()
+        assert time.monotonic() - started < 2
+        assert host.viewer_pids()
+        host._viewer.close_input()
+        assert host._viewer is None or host._viewer.wait(10)
+
+        started = time.monotonic()
+        host.show()
+        assert time.monotonic() - started < 2
+        assert host.viewer_pids()
+    finally:
+        host.close()
+
+
 def test_a_crashed_window_process_frees_its_claims_and_the_terminals_stay(stub_host):
     window_id = stub_host.open_window(None, None)
     second = stub_host.open_window("dev", None)
