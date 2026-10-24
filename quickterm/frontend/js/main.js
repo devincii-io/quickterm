@@ -369,6 +369,7 @@ async function bootView() {
     zoom: app.zoom,
     closePane: app.closePane,
     killSession: () => app.killFocusedSession({ keyboard: true }),
+    nextNeedsYou: () => chrome.launcherView?.nextNeedsYou?.(),
     focusDir: (direction) => layout.focusDir(direction),
     toggleDashboard: () => { dropOverlays(); palette.close(); panels.toggle("dashboard"); },
     toggleSettings: () => { dropOverlays(); palette.close(); panels.toggle("settings"); },
