@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from quickterm import launch
+from quickterm import agent_hooks, launch
 from quickterm.api.common import (
     asdict,
     bounded_int,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 # One native notification per terminal per this many seconds. The sidebar
 # state is not throttled; only the flash and the balloon are.
 NOTIFY_INTERVAL_S = 30.0
+AGENT_EVENT_MAX_BYTES = 256 * 1024
 
 
 def _wire_notifier(ctx: ApiContext) -> None:
@@ -76,6 +78,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             d["busy"] = info.id in busy_set
             d["activity"] = manager.session_activity(info.id)
             d["attention"] = manager.session_attention(info.id)
+            d["agent"] = manager.session_agent(info.id)
             if info.id in usage:
                 d["usage"] = usage[info.id]
             out.append(d)
@@ -86,6 +89,27 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         """The user looked at this terminal: clear its "needs you" state."""
         try:
             manager.mark_seen(sid)
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        return Response(status_code=204)
+
+    @app.post("/api/sessions/{sid}/agent-event")
+    async def agent_event(sid: str, request: Request, agent: str | None = None) -> Response:
+        """One Claude Code or Codex hook event, from the curl the hook runs.
+
+        The guard lets the hook token in here and nowhere else.
+        """
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > AGENT_EVENT_MAX_BYTES:
+                raise HTTPException(400, "body too large")
+        try:
+            agent_name, event, payload = agent_hooks.parse_body(json.loads(raw), agent)
+        except (ValueError, RecursionError) as exc:
+            raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "bad body") from None
+        try:
+            manager.agent_event(sid, agent_name, event, payload)
         except KeyError:
             raise HTTPException(404, "no such session") from None
         return Response(status_code=204)

@@ -18,6 +18,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import agent_hooks
+from .agent_hooks import AgentState
 from .config import default_cwd, validate_environment
 from .fanout import QUEUE_MAX_BYTES, QUEUE_MERGE_BYTES, Attachment, AttachmentQueue, Viewers
 from .process_usage import (
@@ -121,6 +123,8 @@ class Session:
         # Set before a kill is attempted, so the exit it causes is not
         # reported as the terminal asking for the user.
         self.stopping = False
+        # What the agent's hooks last reported; None without an agent.
+        self.agent: AgentState | None = None
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
         """Replay snapshot: an optional mode preamble, then the ring's chunks.
@@ -161,6 +165,13 @@ class SessionManager:
         self._attention_listener: Callable[[SessionInfo, Attention], None] | None = None
         # Shares the registry dict, so it must only ever be mutated in place.
         self._reaper = Reaper(loop, self._sessions, self.kill, self.busy_ids)
+        # QUICKTERM_PORT and QUICKTERM_HOOK_TOKEN for every child, set by the
+        # server; empty until then, and agent launches then get no hooks.
+        self._hook_env: dict[str, str] = {}
+
+    def set_agent_hooks(self, port: int, token: str) -> None:
+        """Where agent hooks report to; every later spawn carries it."""
+        self._hook_env = {"QUICKTERM_PORT": str(port), "QUICKTERM_HOOK_TOKEN": token}
 
     def set_max_sessions(self, limit: int) -> None:
         self._max_sessions = limit
@@ -191,8 +202,12 @@ class SessionManager:
         cols: int = 120,
         rows: int = 30,
         workspace: str | None = None,
+        agent: str | None = None,
     ) -> SessionInfo:
-        """Start a session synchronously (loop thread: app startup, hotkeys)."""
+        """Start a session synchronously (loop thread: app startup, hotkeys).
+
+        ``agent`` ("claude" or "codex") adds QuickTerm's hooks to the launch.
+        """
         self._check_limit()
         session = self._build(
             name=name,
@@ -204,6 +219,7 @@ class SessionManager:
             cols=cols,
             rows=rows,
             workspace=workspace,
+            agent=agent,
         )
         self._sessions[session.info.id] = session
         return session.info
@@ -220,6 +236,7 @@ class SessionManager:
         cols: int = 120,
         rows: int = 30,
         workspace: str | None = None,
+        agent: str | None = None,
     ) -> SessionInfo:
         """``spawn`` for request handlers: the PTY is built off the loop.
 
@@ -242,6 +259,7 @@ class SessionManager:
                 cols=cols,
                 rows=rows,
                 workspace=workspace,
+                agent=agent,
             )
         )
         build.add_done_callback(self._finish_async_spawn)
@@ -271,12 +289,20 @@ class SessionManager:
         cols: int,
         rows: int,
         workspace: str | None,
+        agent: str | None = None,
     ) -> Session:
         """Create the Session and start its PTY. Blocking; touches no registry."""
+        sid = uuid.uuid4().hex
         child_env = dict(validate_environment(env or {}))
+        hook_env = self._hook_env
+        child_env.update(hook_env)
+        child_env["QUICKTERM_SESSION_ID"] = sid
         start_dir = cwd or default_cwd()
+        args = list(args or [])
+        if agent in agent_hooks.AGENTS and hook_env:
+            args = agent_hooks.launch_args(agent, cmd, args, start_dir)
         info = SessionInfo(
-            id=uuid.uuid4().hex,
+            id=sid,
             name=name or profile or cmd,
             profile=profile,
             alive=True,
@@ -292,7 +318,7 @@ class SessionManager:
         try:
             session.pty = PtySession(
                 cmd,
-                list(args or []),
+                args,
                 start_dir,
                 child_env,
                 cols,
@@ -361,6 +387,30 @@ class SessionManager:
         if s is None:
             raise KeyError(sid)
         s.attention = None
+        s.agent = agent_hooks.seen(s.agent, time.monotonic())
+
+    def agent_event(self, sid: str, agent: str, event: str, payload: dict[str, Any]) -> None:
+        """Fold one hook event into the session's agent state (loop thread).
+
+        KeyError when ``sid`` is unknown. An exited session keeps no agent,
+        so a late event for it changes nothing.
+        """
+        s = self._sessions.get(sid)
+        if s is None:
+            raise KeyError(sid)
+        if not s.info.alive:
+            return
+        outcome = agent_hooks.apply(s.agent, agent, event, payload, time.monotonic())
+        s.agent = outcome.state
+        if outcome.waiting is not None and s.attention is None:
+            self._raise_attention(s, "notify", outcome.waiting)
+
+    def session_agent(self, sid: str) -> dict[str, Any] | None:
+        """The ``agent`` field of the list route, or None."""
+        s = self._sessions.get(sid)
+        if s is None:
+            return None
+        return agent_hooks.describe(s.agent, time.monotonic())
 
     def session_attention(self, sid: str) -> dict[str, Any] | None:
         """``{kind, text, age_seconds}`` for the list route, or None."""
@@ -542,6 +592,7 @@ class SessionManager:
             if session.info.exit_code is None:
                 session.info.exit_code = 1
             session.ended_at = time.monotonic()
+            session.agent = None
             session._attachments.publish(None)
         self._loop.call_later(_KILL_REMOVE_GRACE_S, self._remove_if_same, sid, session)
 
@@ -622,6 +673,7 @@ class SessionManager:
         session.info.alive = False
         session.info.exit_code = code
         session.ended_at = time.monotonic()
+        session.agent = None
         if was_alive:
             # Only a terminal the user had a stake in (opened and then typed
             # into or explicitly detached; the reaper's own "cared about"),

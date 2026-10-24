@@ -61,9 +61,12 @@ class LaunchSpec:
     profile: str | None = None
     # What errors call this terminal: profile name, else requested name, else cmd.
     label: str = ""
+    # "claude" or "codex" when this starts an agent profile's own command:
+    # the session manager then adds QuickTerm's hooks to the launch.
+    agent: str | None = None
 
     def spawn_kwargs(self) -> dict[str, Any]:
-        return {
+        kwargs: dict[str, Any] = {
             "name": self.name,
             "profile": self.profile,
             "cmd": self.cmd,
@@ -71,6 +74,9 @@ class LaunchSpec:
             "cwd": self.cwd,
             "env": dict(self.env),
         }
+        if self.agent is not None:
+            kwargs["agent"] = self.agent
+        return kwargs
 
 
 def terminal_label(label: str | None) -> str:
@@ -284,6 +290,7 @@ def _openssh(
 
 
 AGENT_MODE_PROFILE = "agent_mode requires a Claude Code or Codex profile"
+_HOOK_AGENTS = {"claude-code": "claude", "codex": "codex"}
 
 
 def _agent_mode(prof: Any, claude_mode: Any, agent_mode: Any, agent_session: Any) -> str | None:
@@ -376,7 +383,10 @@ def resolve(
     requested_name = name.strip()[:NAME_MAX_CHARS] if name and name.strip() else None
 
     folder = request_cwd or workspace_root
+    hook_agent = None
     if prof is not None:
+        if cmd is None and args is None:
+            hook_agent = _HOOK_AGENTS.get(getattr(prof, "terminal_type", None))
         try:
             resolved_cmd, resolved_args, cwd = resolve_profile(
                 prof, folder, agent_mode=mode, agent_session=agent_session
@@ -420,4 +430,5 @@ def resolve(
         name=requested_name,
         profile=prof.name if prof is not None else None,
         label=label,
+        agent=hook_agent,
     )

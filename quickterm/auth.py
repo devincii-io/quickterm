@@ -19,6 +19,8 @@ from quickterm.config import config_dir
 TOKEN_FILE = "runtime.token"
 SUBPROTOCOL_PREFIX = "qtauth."  # WebSocket clients can't set headers; they pass
 HEADER = "x-quickterm-token"    # the token as this subprotocol instead.
+# The per-start hook token (api/context.py), accepted by the agent-event route only.
+HOOK_HEADER = "x-quickterm-hook-token"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
 
 
