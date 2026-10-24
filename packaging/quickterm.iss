@@ -78,13 +78,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 ; asks, and a declined restart keeps the old backend until nothing is at risk.
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-; The backend and its windows run from a copy under the host folder below, as
-; QuickTerm-host.exe, so the uninstaller has to stop them by that name.
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM QuickTerm-host.exe"; Flags: runhidden; RunOnceId: "StopQuickTermHost"
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#AppExeName}"; Flags: runhidden; RunOnceId: "StopQuickTerm"
-
 [UninstallDelete]
+; The backend copies of the user who uninstalls. InitializeUninstall below
+; stops that user's backend first, after asking.
 Type: filesandordirs; Name: "{localappdata}\QuickTerm\host"
 
 [Code]
@@ -96,9 +92,14 @@ Type: filesandordirs; Name: "{localappdata}\QuickTerm\host"
 // starts it there as QuickTerm-host.exe, together with its window process.
 // Nothing of it holds a lock in {app}, and nothing here kills it, so an update
 // leaves every terminal running. What can still hold {app} is QuickTerm.exe
-// itself: a launcher for a moment, a backend that could not be copied and runs
-// in place, the elevated instance, or a version before 4.2, where one process
-// held the terminals and the window. Only then is the user asked.
+// itself: a launcher for a moment, a backend whose copy could not be made, the
+// elevated instance (started from {app} on purpose, so an administrator process
+// never loads from the user-writable copy), or a version before 4.2, where one
+// process held the terminals and the window. Only then is the user asked.
+//
+// Every helper program runs by its absolute path from {sys}, with {sys} as the
+// working folder: cmd.exe looks for a bare program name in the current folder
+// first, which may be Downloads, and Setup may run elevated.
 //
 // CloseApplications=yes alone does not close those. Before 4.2 the Restart
 // Manager's request landed in the close-to-tray policy, which CANCELS the close
@@ -129,22 +130,66 @@ function TaskKill(const Args: String): Integer;
 var
   ResultCode: Integer;
 begin
-  if not Exec(ExpandConstant('{sys}\taskkill.exe'), Args, '', SW_HIDE,
+  if not Exec(ExpandConstant('{sys}\taskkill.exe'), Args, ExpandConstant('{sys}'), SW_HIDE,
               ewWaitUntilTerminated, ResultCode) then
     Result := -1
   else
     Result := ResultCode;
 end;
 
-// True when a process with this image name runs. tasklist prints a header-less
-// line per match; find answers 0 when it saw one.
-function ImageRunning(const Image: String): Boolean;
+// The tasklist/taskkill filter for the user running Setup or Uninstall.
+function CurrentUserFilter(): String;
+begin
+  Result := '/FI "USERNAME eq ' + GetEnv('USERDOMAIN') + '\' + GetUserNameString() + '"';
+end;
+
+// True when a process with this image name runs (only the current user's with
+// CurrentUserOnly). tasklist writes one CSV line per match into a file, which
+// is read here: no `find`, and cmd.exe is only there for the redirection.
+function ImageRunning(const Image: String; CurrentUserOnly: Boolean): Boolean;
 var
   ResultCode: Integer;
+  Listing, Filter: String;
+  Output: AnsiString;
 begin
-  Result := Exec(ExpandConstant('{cmd}'),
-                 '/C tasklist /FI "IMAGENAME eq ' + Image + '" /NH | find /I "' + Image + '" >NUL',
-                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  Result := False;
+  Listing := AddBackslash(GetTempDir()) + 'quickterm-tasklist.txt';
+  DeleteFile(Listing);
+  Filter := '/FI "IMAGENAME eq ' + Image + '"';
+  if CurrentUserOnly then
+    Filter := Filter + ' ' + CurrentUserFilter();
+  if not Exec(ExpandConstant('{cmd}'),
+              '/C ""' + ExpandConstant('{sys}\tasklist.exe') + '" /NH /FO CSV ' + Filter
+              + ' > "' + Listing + '""',
+              ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if LoadStringFromFile(Listing, Output) then
+    Result := Pos('"' + Lowercase(Image) + '"', Lowercase(String(Output))) > 0;
+  DeleteFile(Listing);
+end;
+
+// Uninstalling stops this user's backend and with it every terminal, so it is
+// asked like an update that has to close QuickTerm. Other users' backends run
+// from their own copies, hold nothing in {app}, and are none of this
+// uninstaller's business.
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  if not (ImageRunning('QuickTerm-host.exe', True) or ImageRunning('{#AppExeName}', True)) then
+    Exit;
+  if not UninstallSilent() then
+    if MsgBox('QuickTerm is being removed, so it has to close first.'
+              + #13#10#13#10 + 'Terminals that are still open will be stopped.'
+              + #13#10#13#10 + 'Close QuickTerm now and continue?',
+              mbConfirmation, MB_YESNO) = IDNO then
+    begin
+      Result := False;
+      Exit;
+    end;
+  TaskKill('/F ' + CurrentUserFilter() + ' /IM QuickTerm-host.exe');
+  TaskKill('/F ' + CurrentUserFilter() + ' /IM {#AppExeName}');
+  // Windows releases the image locks a moment after the process goes.
+  Sleep(900);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -153,7 +198,7 @@ var
 begin
   Result := '';
   // The usual case since 4.2: only the backend copy runs, and it stays.
-  if not ImageRunning('{#AppExeName}') then
+  if not ImageRunning('{#AppExeName}', False) then
     Exit;
   if not WizardSilent() then
     if MsgBox('QuickTerm is being replaced, so any running copy has to close first.'

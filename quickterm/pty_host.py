@@ -101,8 +101,94 @@ def running_from_copy() -> bool:
     return frozen() and Path(sys.executable).name.lower() == HOST_EXE.lower()
 
 
-def _is_complete(folder: Path) -> bool:
-    return (folder / COMPLETE_MARKER).is_file() and (folder / HOST_EXE).is_file()
+# Inno Setup's uninstall key for the AppId in packaging/quickterm.iss.
+_UNINSTALL_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    r"\{6B44DB88-0701-4953-AF24-73FD7DD546C9}_is1"
+)
+
+
+def _machine_install() -> Path | None:
+    """QuickTerm.exe of an all-users install, from the machine registry."""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, _UNINSTALL_KEY, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            location, _kind = winreg.QueryValueEx(key, "InstallLocation")
+    except OSError:
+        return None
+    return Path(str(location)) / INSTALL_EXE if location else None
+
+
+def install_executable() -> Path | None:
+    """The installed QuickTerm.exe this process belongs to (frozen only).
+
+    The copy lives in the user's writable %LOCALAPPDATA%, so anything that
+    runs elevated must start from the install instead: for an all-users
+    install that folder is protected, and a DLL planted in the copy would
+    otherwise load into the administrator process. The machine registry's
+    install wins when it is this very build; the copy's own `.source` names a
+    per-user install, whose folder is no better protected than the copy.
+    None when no install of this build is found.
+    """
+    if not frozen():
+        return None
+    exe = Path(sys.executable).resolve()
+    if not running_from_copy():
+        return exe
+    build = exe.parent.name
+    candidates = [_machine_install()]
+    try:
+        candidates.append(Path((exe.parent / SOURCE_FILE).read_text(encoding="utf-8").strip()))
+    except OSError:
+        pass
+    for candidate in candidates:
+        if candidate is None or candidate.name.lower() != INSTALL_EXE.lower():
+            continue
+        try:
+            if build_id(candidate.parent, candidate.name) == build:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _inventory(folder: Path) -> dict[str, int]:
+    """File count and total size of a copy, its completion marker aside."""
+    files = size = 0
+    for path in folder.rglob("*"):
+        if path.name == COMPLETE_MARKER and path.parent == folder:
+            continue
+        if path.is_file():
+            files += 1
+            size += path.stat().st_size
+    return {"files": files, "bytes": size}
+
+
+def _is_complete(folder: Path, *, verify: bool = False) -> bool:
+    """Whether `folder` is a finished copy; with `verify`, also an intact one.
+
+    The marker records what was copied. Antivirus that quarantines one DLL of a
+    copy leaves the marker in place, and reusing that copy would fail at every
+    start of the same build, reinstalling included.
+    """
+    marker = folder / COMPLETE_MARKER
+    if not marker.is_file() or not (folder / HOST_EXE).is_file():
+        return False
+    if not verify:
+        return True
+    try:
+        recorded = json.loads(marker.read_text(encoding="utf-8"))
+        return isinstance(recorded, dict) and all(
+            recorded.get(key) == value for key, value in _inventory(folder).items()
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def ensure_copy(
@@ -114,10 +200,11 @@ def ensure_copy(
     completion marker already inside, so a reader never sees half a copy and two
     launchers racing each other end up sharing the winner's folder. The
     executable is renamed to `HOST_EXE`: the installer closes `QuickTerm.exe`
-    by image name, and that must never reach a backend.
+    by image name, and that must never reach a backend. A copy that no longer
+    matches its marker is replaced.
     """
     target = root / build
-    if _is_complete(target):
+    if _is_complete(target, verify=True):
         _touch(target / COMPLETE_MARKER)
         return target / HOST_EXE
     root.mkdir(parents=True, exist_ok=True)
@@ -126,9 +213,11 @@ def ensure_copy(
         shutil.copytree(source, staging, ignore=shutil.ignore_patterns("unins*"))
         os.replace(staging / exe_name, staging / HOST_EXE)
         (staging / SOURCE_FILE).write_text(str(source / exe_name), encoding="utf-8")
-        (staging / COMPLETE_MARKER).write_text(build, encoding="utf-8")
-        if target.exists() and not _is_complete(target) and not discard(target):
-            raise OSError(f"an incomplete copy of {build} is in use")
+        (staging / COMPLETE_MARKER).write_text(
+            json.dumps({"build": build, **_inventory(staging)}), encoding="utf-8"
+        )
+        if target.exists() and not _is_complete(target, verify=True) and not discard(target):
+            raise OSError(f"a damaged copy of {build} is in use")
         try:
             os.rename(staging, target)
         except OSError:
@@ -611,9 +700,10 @@ class Host:
         A backend running from its copy holds no file Setup replaces, so it
         stays, and so do its windows (they run from the copy too). The new
         version's launcher, which Setup starts at the end, decides about the
-        handover. A backend running in place (source checkout, the elevated
-        instance, a copy that could not be made) would be killed mid-install
-        and has to go first.
+        handover. A backend running from the install folder (the elevated
+        instance, which elevation.py starts from there so it never loads from
+        the user-writable copy, or one whose copy could not be made) would be
+        killed mid-install and has to go first; so does a source checkout.
         """
         if self.from_copy:
             log.info("update: the backend runs from its copy and stays")
@@ -816,10 +906,12 @@ class Host:
 
         window_id = new_window_id()
         argv = ["--port", str(self.cfg.port), "--window-id", window_id]
+        # One argument each: a workspace named "-x" would otherwise read as an
+        # option to the window process's parser.
         if workspace:
-            argv += ["--workspace", workspace]
+            argv.append(f"--workspace={workspace}")
         if cwd:
-            argv += ["--cwd", cwd]
+            argv.append(f"--cwd={cwd}")
         if self.elevated:
             argv.append("--elevated")
         allow_foreground()
