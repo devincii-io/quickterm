@@ -147,12 +147,12 @@ def test_screen_list_reads_pywebviews_module_property(monkeypatch):
 
 
 def test_the_primary_window_restores_through_the_screen_list(monkeypatch):
-    """Pin the call site: the desktop path hands _initial_geometry a callable."""
+    """Pin the call site: the window process hands _initial_geometry a callable."""
     import inspect
 
     from quickterm import app
 
-    source = inspect.getsource(app._run_desktop)
+    source = inspect.getsource(app._run_viewer)
     assert "_initial_geometry(cfg, _screen_list)" in source
     assert "webview.screens)" not in source
 

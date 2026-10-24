@@ -295,6 +295,54 @@ _saved: dict[int, _Saved] = {}
 # The other program's window that had the foreground when the drop-down was
 # summoned. Hiding with the summon key hands the foreground back to it.
 _previous: dict[int, int] = {}
+# The backend restyles windows its viewer process owns, so "another program"
+# means a process that is neither this one nor one of these.
+_owner_pids: Callable[[], set[int]] | None = None
+
+
+def set_owner_pids(pids: Callable[[], set[int]] | None) -> None:
+    """Count the windows of `pids()` as QuickTerm's own, besides this process."""
+    global _owner_pids
+    _owner_pids = pids
+
+
+def _is_ours(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    source = _owner_pids
+    if source is None:
+        return False
+    try:
+        return pid in source()
+    except Exception:
+        return False
+
+
+def forget_dead() -> None:
+    """Drop the saved state of windows that no longer exist (a viewer exited)."""
+    win = _api()
+    if win is None:
+        return
+    with _state_lock:
+        for hwnd in [h for h in _saved if not win.is_window(h)]:
+            _saved.pop(hwnd, None)
+            _previous.pop(hwnd, None)
+
+
+def looks_applied(hwnd: int) -> bool:
+    """Whether `hwnd` is in overlay style, read from the window itself.
+
+    The process that restyles the window (the backend) keeps the saved state;
+    the viewer, which records the remembered bounds, only sees the style: a
+    window without its caption is the drop-down.
+    """
+    win = _api()
+    if win is None or not hwnd:
+        return False
+    try:
+        return not win.get_style(hwnd) & _WS_CAPTION
+    except Exception:
+        return False
 
 
 def _api() -> Any | None:
@@ -336,7 +384,7 @@ def show_overlay(hwnd: int, cfg: Any) -> None:
     win.set_foreground(hwnd)
     with _state_lock:
         _previous.pop(hwnd, None)
-        if previous and previous != hwnd and win.pid_of(previous) != os.getpid():
+        if previous and previous != hwnd and not _is_ours(win.pid_of(previous)):
             _previous[hwnd] = previous
     edge = _setting(cfg, "edge", "top")
     work = win.work_area(_setting(cfg, "monitor", "cursor"))
@@ -452,7 +500,7 @@ def _on_foreground(get_cfg: Callable[[], Any], hwnd: int) -> None:
     if not enabled(cfg) or not _setting(cfg, "hide_on_blur", True) or _held():
         return
     win = _api()
-    if win is None or not hwnd or win.pid_of(hwnd) == os.getpid():
+    if win is None or not hwnd or _is_ours(win.pid_of(hwnd)):
         return
     for target in applied_windows():
         if win.visible(target):

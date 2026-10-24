@@ -406,27 +406,28 @@ def _title_matches(candidate: str, requested: str) -> bool:
 
 
 def _quickterm_windows(
-    title: str, *, own_process: bool = False
+    title: str, *, own_process: bool = False, pids: set[int] | None = None
 ) -> tuple[Any, list[int], list[int]]:
     """Top-level windows titled exactly `title`, visible ones first.
 
-    `own_process` keeps only this process's windows. The summon toggle needs
-    that: it restyles the window it finds as the overlay, and a second
-    instance (another `--port`, a dev server) also has a window titled
-    "QuickTerm". The second-launch handoff looks across processes on purpose.
+    `own_process` keeps only the windows of `pids` (default: this process).
+    The summon toggle needs that: it restyles the window it finds as the
+    overlay, and a second instance (another `--port`, a dev server) also has a
+    window titled "QuickTerm"; the backend passes its own viewer process. The
+    second-launch handoff looks across processes on purpose.
     """
     user32 = ctypes.windll.user32
     user32.GetForegroundWindow.restype = wintypes.HWND
     visible: list[int] = []
     hidden: list[int] = []
-    me = os.getpid()
+    mine = {os.getpid()} if pids is None else set(pids)
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _enum(hwnd, _lparam):
         if own_process:
             pid = wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value != me:
+            if pid.value not in mine:
                 return True
         n = user32.GetWindowTextLengthW(hwnd)
         if n:
@@ -457,8 +458,12 @@ def summon_window(title: str = "QuickTerm") -> None:
         log.debug("summon_window failed", exc_info=True)
 
 
-def toggle_window(title: str = "QuickTerm", overlay: Any = None) -> None:
-    """The summon hotkey. Runs on the hotkey thread.
+def toggle_window(
+    title: str = "QuickTerm", overlay: Any = None, *, pids: set[int] | None = None
+) -> bool:
+    """The summon hotkey. Runs on the hotkey thread. Returns whether a window
+    of `pids` (default: this process) was there to toggle; the backend starts
+    its viewer when there was none.
 
     With `overlay.enabled` the window is a drop-down: hide it when it is
     showing and in front, else drop it down. Otherwise minimize it when it is
@@ -468,9 +473,9 @@ def toggle_window(title: str = "QuickTerm", overlay: Any = None) -> None:
     from quickterm import overlay as overlay_mod
 
     try:
-        user32, visible, hidden = _quickterm_windows(title, own_process=True)
+        user32, visible, hidden = _quickterm_windows(title, own_process=True, pids=pids)
         if not (visible or hidden):
-            return
+            return False
         hwnd = (visible or hidden)[0]
         in_front = bool(visible) and user32.GetForegroundWindow() == hwnd
         if overlay_mod.enabled(overlay):
@@ -478,15 +483,17 @@ def toggle_window(title: str = "QuickTerm", overlay: Any = None) -> None:
                 overlay_mod.hide_overlay(hwnd, overlay)
             else:
                 overlay_mod.show_overlay(hwnd, overlay)
-            return
+            return True
         if overlay_mod.is_applied(hwnd):
             overlay_mod.show_normal(hwnd)
-            return
+            return True
         if in_front:
             user32.ShowWindow(hwnd, _SW_MINIMIZE)
         else:
-            # Covers a tray-hidden window too: summon it back.
+            # Covers a hidden window too: summon it back.
             user32.ShowWindow(hwnd, _SW_RESTORE)
             user32.SetForegroundWindow(hwnd)
+        return True
     except Exception:
         log.debug("toggle_window failed", exc_info=True)
+        return False

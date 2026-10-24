@@ -4,7 +4,8 @@ check() asks the pinned repo's latest-release endpoint whether a newer version
 exists (cached; at most one network call per _CACHE_TTL_S unless forced).
 download_and_run() fetches the Windows Setup asset from that release, verifies
 it against the release's SHA256SUMS.txt, and launches it. The Inno Setup
-installer closes the running app and upgrades in place.
+installer replaces the program folder; the backend runs from its own copy
+(pty_host.py), so its terminals keep running through the install.
 
 Trust model: only https URLs from the pinned REPO's release payload are ever
 fetched, and the installer must hash-match the checksums file published by the
@@ -149,13 +150,12 @@ def download_and_run() -> dict:
     update_dir = Path(tempfile.mkdtemp(prefix="quickterm-update-"))
     path = update_dir / str(setup["name"])
     path.write_bytes(blob)
-    # Tell the desktop shell to stand down BEFORE the installer starts. Inno's
-    # CloseApplications asks the top-level window to close, which lands in
-    # app.on_closing, and with any touched/retained/busy session (exactly the
-    # state of someone who has been working) that hid to tray and cancelled the
-    # close. Setup then either stalled on "the following applications are in
-    # use", pointing at a window gone from the taskbar, or force-terminated the
-    # process and took every terminal with it.
+    # Tell the backend BEFORE the installer starts. One that runs from its
+    # versioned copy (pty_host.py) holds no file Setup replaces and stays with
+    # its terminals; the new version's launcher, started by Setup at the end,
+    # takes over when nothing is busy or touched and asks otherwise. One that
+    # runs in place (a source checkout, the elevated instance) quits first, or
+    # Setup would stall on it or kill it mid-install.
     _request_app_shutdown()
     _launch_detached(path)
     return {"launched": True, "version": latest}
@@ -194,11 +194,13 @@ def _launch_detached(path: Path) -> None:
 
 
 def _request_app_shutdown() -> None:
+    # pty_host, not app: in the frozen build app.py is __main__, so importing
+    # quickterm.app made a second copy whose host was never set.
     try:
-        import quickterm.app as app
+        import quickterm.pty_host as pty_host
 
-        app.begin_update_shutdown()
-    except Exception:  # headless/test runs have no desktop shell
+        pty_host.begin_update()
+    except Exception:  # headless/test runs have no host
         pass
 
 

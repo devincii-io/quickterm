@@ -116,7 +116,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     # Summoning would raise the developer's own QuickTerm window.
     summoned: list[bool] = []
-    monkeypatch.setattr(cli, "_summon", lambda: summoned.append(True))
+    monkeypatch.setattr(cli, "_summon", lambda *_args: summoned.append(True))
     # Windows retries a refused loopback connect for about two seconds; the
     # "not running" answers need not wait for that here.
     monkeypatch.setattr(cli, "_HEALTH_TIMEOUT_S", 0.2)

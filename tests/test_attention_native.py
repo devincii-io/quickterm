@@ -1,4 +1,7 @@
-"""The desktop shell's side of "needs you": flash the taskbar, or a tray balloon."""
+"""The backend's side of "needs you": flash the taskbar, or a tray balloon.
+
+The tray lives in the backend and the windows in its window process, so every
+window check here is about that process's windows."""
 
 from __future__ import annotations
 
@@ -12,8 +15,8 @@ import pytest
 
 import quickterm
 from quickterm import app as app_mod
+from quickterm import pty_host
 from quickterm.windows import WindowRegistry
-from tests.test_close_policy import _FakeWindow
 
 
 class _Tray:
@@ -33,8 +36,17 @@ def fake_tray_module(monkeypatch):
     mod.foreground = False
     mod.window = (101, True)
     mod.flashed = []
-    mod.foreground_is_ours = lambda: mod.foreground
-    mod.own_window = lambda title: mod.window if title == "QuickTerm" else None
+    mod.asked = []
+
+    def foreground_is_ours(pids=None):
+        mod.asked.append(pids)
+        return mod.foreground
+
+    def own_window(title, pids=None):
+        return mod.window if title == "QuickTerm" and pids == {77} else None
+
+    mod.foreground_is_ours = foreground_is_ours
+    mod.own_window = own_window
     mod.flash_window = mod.flashed.append
     monkeypatch.setitem(sys.modules, "quickterm.tray", mod)
     monkeypatch.setattr(quickterm, "tray", mod, raising=False)
@@ -42,51 +54,58 @@ def fake_tray_module(monkeypatch):
 
 
 @pytest.fixture
-def viewers(monkeypatch):
-    monkeypatch.setattr(app_mod, "_updating", threading.Event())
-    cfg = SimpleNamespace(port=8620, host="127.0.0.1")
-    shell = app_mod._ViewerWindows(
-        cfg, {}, WindowRegistry(), elevated=False, base_title="QuickTerm"
-    )
-    shell.adopt(_FakeWindow("master"), "w1")
+def host():
+    cfg = SimpleNamespace(port=8650, host="127.0.0.1")
+    shell = pty_host.Host(cfg, WindowRegistry(), from_copy=True)
+    # A running window process with one window (pid 77).
+    shell._viewer = SimpleNamespace(pid=77, window_ids=["w1"])
     shell.tray = _Tray()
     return shell
 
 
-def test_a_visible_primary_window_is_flashed(viewers, fake_tray_module):
-    viewers._notify_now("claude", "notify", "Approve?")
+def test_a_visible_primary_window_is_flashed(host, fake_tray_module):
+    host.notify_now("claude", "notify", "Approve?")
     assert fake_tray_module.flashed == [101]
-    assert viewers.tray.balloons == []
+    assert host.tray.balloons == []
+    # "In front" means the window process's window, not the backend's.
+    assert fake_tray_module.asked == [{77}]
 
 
-def test_nothing_happens_while_quickterm_is_in_front(viewers, fake_tray_module):
+def test_nothing_happens_while_quickterm_is_in_front(host, fake_tray_module):
     fake_tray_module.foreground = True
-    viewers._notify_now("claude", "bell", None)
+    host.notify_now("claude", "bell", None)
     assert fake_tray_module.flashed == []
-    assert viewers.tray.balloons == []
+    assert host.tray.balloons == []
 
 
-def test_a_tray_hidden_app_shows_a_balloon(viewers, fake_tray_module):
+def test_a_hidden_primary_shows_a_balloon(host, fake_tray_module):
     fake_tray_module.window = (101, False)
-    viewers._notify_now("build", "exit", "exited with code 1")
+    host.notify_now("build", "exit", "exited with code 1")
     assert fake_tray_module.flashed == []
-    assert viewers.tray.balloons == [("build needs you", "exited with code 1")]
+    assert host.tray.balloons == [("build needs you", "exited with code 1")]
 
 
-def test_hidden_without_a_tray_icon_stays_quiet(viewers, fake_tray_module):
+def test_no_window_process_at_all_shows_a_balloon(host, fake_tray_module):
+    # The backend stayed in the tray after the last window closed.
+    host._viewer = None
+    host.notify_now("build", "exit", None)
+    assert host.tray.balloons == [("build needs you", "It has finished.")]
+
+
+def test_hidden_without_a_tray_icon_stays_quiet(host, fake_tray_module):
     fake_tray_module.window = (101, False)
-    viewers.tray = None
-    viewers._notify_now("build", "bell", None)
+    host.tray = None
+    host.notify_now("build", "bell", None)
     assert fake_tray_module.flashed == []
 
 
-def test_a_quitting_app_notifies_nobody(viewers, fake_tray_module):
-    viewers.quitting.set()
-    viewers._notify_now("claude", "bell", None)
+def test_a_quitting_app_notifies_nobody(host, fake_tray_module):
+    host.quitting.set()
+    host.notify_now("claude", "bell", None)
     assert fake_tray_module.flashed == []
 
 
-def test_the_hook_returns_at_once_and_notifies_off_the_loop(viewers, monkeypatch):
+def test_the_hook_returns_at_once_and_notifies_off_the_loop(host, monkeypatch):
     done = threading.Event()
     seen = []
 
@@ -94,8 +113,8 @@ def test_the_hook_returns_at_once_and_notifies_off_the_loop(viewers, monkeypatch
         seen.append((threading.current_thread().name, name, kind, text))
         done.set()
 
-    monkeypatch.setattr(viewers, "_notify_now", record)
-    viewers.notify_attention("sid", "claude", "notify", "hi")
+    monkeypatch.setattr(host, "notify_now", record)
+    host.notify_attention("sid", "claude", "notify", "hi")
     assert done.wait(5)
     assert seen == [("attention-notify", "claude", "notify", "hi")]
 
