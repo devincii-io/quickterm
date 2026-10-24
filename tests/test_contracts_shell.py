@@ -659,8 +659,9 @@ def test_an_exited_pane_restarts_in_place_with_its_own_launch():
     assert '`[exited · code ${this._exitCode}]`' in pane
     # Enter only while exited, and inside xterm's own key handler, so the
     # keyboard is never taken from focus.js's owner.
-    keys = pane[pane.index("this.term.attachCustomKeyEventHandler((e) => {"):]
-    keys = keys[:keys.index("\n    });")]
+    assert "this.term.attachCustomKeyEventHandler((e) => this._handleKey(e));" in pane
+    keys = pane[pane.index("  _handleKey(e) {"):]
+    keys = keys[:keys.index("\n  }\n")]
     assert 'e.key === "Enter" && this.state === "exited"' in keys
     assert "this.requestRestart();" in keys
     assert 'this.onActionRequest("restart", this);' in pane
