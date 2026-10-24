@@ -70,15 +70,98 @@ export const UNASSIGNED_GROUP = "Unassigned";
 // `attachments` counts subscribers on the backend, not panes in this window,
 // so a terminal open in another QuickTerm window says so rather than looking
 // abandoned. That matters before moving it.
+//
+// An agent's hook state (`session.agent`, CONTRACTS 4.2) comes before being
+// open here: a Claude that is working, done or failed says so on its dot
+// whether or not a pane shows it. Waiting is the needs-you look. An idle
+// agent, or none, keeps the plain terminal rules.
 export function sessionState(session, isAttached) {
   const activity = session?.activity || {};
-  if (session?.attention) return { key: "attention", label: "needs you" };
+  const agent = agentState(session);
+  if (session?.attention || agent === "waiting") return { key: "attention", label: "needs you" };
   if (session?.alive === false) return { key: "finished", label: "finished" };
+  if (agent === "working") return { key: "busy", label: "working" };
+  if (agent === "done" || agent === "failed") return { key: agent, label: agent };
   if (isAttached) return { key: "open", label: "open" };
   if (session?.busy === true) return { key: "busy", label: "busy" };
   if ((activity.background_output_bytes || 0) > 0) return { key: "unread", label: "new output" };
   if ((session?.attachments || 0) > 0) return { key: "elsewhere", label: "open elsewhere" };
   return { key: "idle", label: "background" };
+}
+
+export const AGENT_STATES = ["working", "waiting", "done", "failed", "idle"];
+const AGENT_NAMES = { claude: "Claude", codex: "Codex" };
+const AGENT_STATE_TEXT = {
+  working: "working", waiting: "waiting for you", done: "done, not seen yet", failed: "failed", idle: "idle",
+};
+
+export function agentState(session) {
+  const state = session?.agent?.state;
+  return AGENT_STATES.includes(state) ? state : null;
+}
+
+// Waiting, ringing, or a finished turn nobody has looked at. The backend's
+// mark_seen turns done and failed into idle, so done here means unseen.
+export function needsYou(session) {
+  if (!session) return false;
+  if (session.attention) return true;
+  return ["waiting", "done", "failed"].includes(agentState(session));
+}
+
+// The terminal Alt+J goes to: the next one after `currentId` in the
+// sidebar's own order that needs you, wrapping around. null when none does
+// (or only the current one).
+export function nextNeedsYou(sessions = [], currentId = null) {
+  const list = (sessions || []).filter((session) => session?.id);
+  const start = list.findIndex((session) => session.id === currentId);
+  for (let step = 1; step <= list.length; step++) {
+    const session = list[(start + step) % list.length];
+    if (session.id !== currentId && needsYou(session)) return session;
+  }
+  return null;
+}
+
+// The tooltip lines an agent adds: what it was asked, what it runs now, what
+// it last said.
+export function agentLines(agent) {
+  if (!agent || !AGENT_STATES.includes(agent.state)) return [];
+  const lines = [`${AGENT_NAMES[agent.kind] || "agent"}: ${AGENT_STATE_TEXT[agent.state]}`];
+  if (agent.prompt) lines.push(`asked: ${agent.prompt}`);
+  if (agent.tool) lines.push(`running: ${agent.tool}`);
+  if (agent.message) lines.push(`said: ${agent.message}`);
+  const count = runningSubagents(agent).length;
+  if (count) lines.push(`${count} subagent${count === 1 ? "" : "s"} running`);
+  return lines;
+}
+
+export function runningSubagents(agent) {
+  return Array.isArray(agent?.subagents) ? agent.subagents.filter((sub) => sub?.id) : [];
+}
+
+// A subagent's child row says what it is doing in one line: the description
+// the parent gave it, else its type.
+export function subagentLabel(sub) {
+  return String(sub?.description || sub?.type || "subagent");
+}
+
+// Seconds since a terminal last did anything, for the row's hover time.
+// Busy and working are now. null when the payload does not say.
+export function activitySeconds(session) {
+  if (session?.busy === true || agentState(session) === "working") return 0;
+  for (const value of [session?.activity?.idle_seconds, session?.agent?.age_seconds]) {
+    const seconds = Number(value);
+    if (value != null && Number.isFinite(seconds)) return Math.max(0, seconds);
+  }
+  return null;
+}
+
+export function relativeTime(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return "";
+  const whole = Math.max(0, Math.floor(Number(seconds)));
+  if (whole < 60) return "now";
+  if (whole < 3600) return `${Math.floor(whole / 60)}m`;
+  if (whole < 86400) return `${Math.floor(whole / 3600)}h`;
+  return `${Math.floor(whole / 86400)}d`;
 }
 
 // The folder a row names: where the shell says it is now (OSC 7 / OSC 9;9),
@@ -136,6 +219,8 @@ export function sessionSummary(session) {
     parts.push(Number.isFinite(age) ? `needs you ${formatUptime(age)} ago` : "needs you");
   } else if (session?.alive === false) {
     parts.push(exitText(session));
+  } else if (agentState(session) && agentState(session) !== "idle") {
+    parts.push(AGENT_STATE_TEXT[agentState(session)]);
   } else if (unread > 0) {
     const age = activity.background_output_age_seconds;
     parts.push(Number.isFinite(age)
@@ -156,7 +241,7 @@ export function sessionSummary(session) {
 // scan a list by.
 export function sessionTooltip(session, groupName) {
   const usage = session?.usage;
-  const lines = [session?.name || session?.id, sessionSummary(session)];
+  const lines = [session?.name || session?.id, sessionSummary(session), ...agentLines(session?.agent)];
   if (session?.attention) lines.push(`needs you: ${attentionText(session.attention)}`);
   if (session?.alive === false) lines.push(`finished, ${exitText(session)}; click to read its output`);
   lines.push(`workspace: ${groupName}`);
@@ -175,7 +260,8 @@ export function sessionTooltip(session, groupName) {
   return lines.filter(Boolean).join("\n");
 }
 
-export const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread"];
+export const COUNTED_STATES = ["attention", "finished", "open", "busy", "unread", "done", "failed"];
+const emptyCounts = () => ({ attention: 0, open: 0, busy: 0, unread: 0, finished: 0, done: 0, failed: 0 });
 export const KIND_ORDER = { flat: 0, workspace: 0, scratch: 1, unassigned: 2 };
 
 export function lookup(map, id) {
@@ -233,8 +319,10 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
       color: view?.color || null,
       path: info?.path ?? null,
       pathExists: info?.pathExists ?? null,
+      git: info?.git ?? null,
+      parent: null,
       sessions: [],
-      counts: { attention: 0, open: 0, busy: 0, unread: 0, finished: 0 },
+      counts: emptyCounts(),
     };
     groups.set(key, group);
     return group;
@@ -265,10 +353,48 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
     group.sessions.sort(recent ? (a, b) => idleOf(a.session) - idleOf(b.session) || byName(a, b) : byName);
   }
   const ordered = [...groups.values()].filter((group) => !flat || group.kind === "flat");
-  return ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+  return nestWorktrees(ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
     || (recent ? groupIdle(a) - groupIdle(b) : 0)
     || byText(a.label, b.label)
-    || byText(a.key, b.key));
+    || byText(a.key, b.key)));
+}
+
+function pathKey(path) {
+  return String(path || "").replace(/[\\/]+/g, "/").replace(/\/$/, "").toLowerCase();
+}
+
+// A worktree workspace hangs under the workspace whose folder is its main
+// checkout, the way terminals hang under a workspace; siblings keep the order
+// they already had. A worktree whose main checkout is no workspace stays a
+// group of its own.
+function nestWorktrees(groups) {
+  const mains = new Map();
+  for (const group of groups) {
+    if (group.kind === "workspace" && group.path && !group.git?.worktree) mains.set(pathKey(group.path), group);
+  }
+  const children = new Map();
+  const top = [];
+  for (const group of groups) {
+    const main = group.kind === "workspace" && group.git?.worktree && group.git.main_path
+      ? mains.get(pathKey(group.git.main_path)) : null;
+    if (!main || main === group) { top.push(group); continue; }
+    group.parent = main.key;
+    if (group.label.startsWith(`${main.label}/`)) group.shortLabel = group.label.slice(main.label.length + 1);
+    if (!children.has(main.key)) children.set(main.key, []);
+    children.get(main.key).push(group);
+  }
+  return top.flatMap((group) => [group, ...(children.get(group.key) || [])]);
+}
+
+// The branch a workspace head shows, muted: a detached HEAD by its short sha.
+// Empty when it would only repeat the name (a worktree is named after its
+// branch slug).
+export function groupBranch(group) {
+  const git = group?.git;
+  const branch = git?.branch || (git?.head ? `@${git.head}` : "");
+  const plain = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (!branch || plain(branch) === plain(group.shortLabel || group.label)) return "";
+  return branch;
 }
 
 // Seconds since a terminal last did anything. Busy and ringing terminals are
@@ -289,8 +415,8 @@ function ensureFlat(groups) {
   if (!group) {
     group = {
       key: "flat", name: null, label: "Terminals", kind: "flat", open: false, active: false,
-      color: null, path: null, pathExists: null, sessions: [],
-      counts: { attention: 0, open: 0, busy: 0, unread: 0, finished: 0 },
+      color: null, path: null, pathExists: null, git: null, parent: null, sessions: [],
+      counts: emptyCounts(),
     };
     groups.set("flat", group);
   }
@@ -304,7 +430,11 @@ function ensureFlat(groups) {
 export function visibleGroups(groups = [], view) {
   const options = { ...SIDEBAR_VIEW_DEFAULTS, ...(view || {}) };
   if (options.empty) return { groups, hidden: 0 };
-  const shown = groups.filter((group) => group.sessions.length > 0 || group.open || group.active);
+  const keep = new Set(groups.filter((group) => group.sessions.length > 0 || group.open || group.active).map((group) => group.key));
+  // A shown worktree keeps its main workspace drawn, or it would hang under
+  // whatever group happens to precede it.
+  for (const group of groups) if (group.parent && keep.has(group.key)) keep.add(group.parent);
+  const shown = groups.filter((group) => keep.has(group.key));
   return { groups: shown, hidden: groups.length - shown.length };
 }
 
@@ -354,7 +484,10 @@ export function groupSummary(group) {
   if (count("open")) parts.push(`${count("open")} open`);
   if (count("unread")) parts.push(`${count("unread")} new output`);
   if (count("busy")) parts.push(`${count("busy")} busy`);
-  const quiet = sessions.length - attention - finished - count("open") - count("unread") - count("busy");
+  if (count("done")) parts.push(`${count("done")} done`);
+  if (count("failed")) parts.push(`${count("failed")} failed`);
+  const quiet = sessions.length - attention - finished - count("open") - count("unread") - count("busy")
+    - count("done") - count("failed");
   if (quiet > 0) parts.push(`${quiet} background`);
   if (finished) parts.push(`${finished} finished`);
   return parts.join(" · ");
