@@ -75,6 +75,13 @@ export const UNASSIGNED_GROUP = "Unassigned";
 // open here: a Claude that is working, done or failed says so on its dot
 // whether or not a pane shows it. Waiting is the needs-you look. An idle
 // agent, or none, keeps the plain terminal rules.
+// A process-tree "busy" for a terminal whose agent reports its own state is
+// noise: Claude and Codex always have child processes, so an idle agent would
+// read as busy forever. The hook state decides for them.
+export function processBusy(session) {
+  return session?.busy === true && !session?.agent;
+}
+
 export function sessionState(session, isAttached) {
   const activity = session?.activity || {};
   const agent = agentState(session);
@@ -83,7 +90,7 @@ export function sessionState(session, isAttached) {
   if (agent === "working") return { key: "busy", label: "working" };
   if (agent === "done" || agent === "failed") return { key: agent, label: agent };
   if (isAttached) return { key: "open", label: "open" };
-  if (session?.busy === true) return { key: "busy", label: "busy" };
+  if (processBusy(session)) return { key: "busy", label: "busy" };
   if ((activity.background_output_bytes || 0) > 0) return { key: "unread", label: "new output" };
   if ((session?.attachments || 0) > 0) return { key: "elsewhere", label: "open elsewhere" };
   return { key: "idle", label: "background" };
@@ -147,7 +154,7 @@ export function subagentLabel(sub) {
 // Seconds since a terminal last did anything, for the row's hover time.
 // Busy and working are now. null when the payload does not say.
 export function activitySeconds(session) {
-  if (session?.busy === true || agentState(session) === "working") return 0;
+  if (processBusy(session) || agentState(session) === "working") return 0;
   for (const value of [session?.activity?.idle_seconds, session?.agent?.age_seconds]) {
     const seconds = Number(value);
     if (value != null && Number.isFinite(seconds)) return Math.max(0, seconds);
@@ -226,7 +233,7 @@ export function sessionSummary(session) {
     parts.push(Number.isFinite(age)
       ? `+${formatBytes(unread)} ${formatUptime(age)} ago`
       : `+${formatBytes(unread)}`);
-  } else if (session?.busy === true) {
+  } else if (processBusy(session)) {
     parts.push("working");
   } else {
     parts.push(`quiet ${formatUptime(activity.idle_seconds || 0)}`);
@@ -400,7 +407,7 @@ export function groupBranch(group) {
 // Seconds since a terminal last did anything. Busy and ringing terminals are
 // happening now; a finished one sorts after every live one.
 function idleOf(session) {
-  if (session?.attention || session?.busy === true) return 0;
+  if (session?.attention || processBusy(session) || agentState(session) === "working") return 0;
   if (session?.alive === false) return Number.MAX_SAFE_INTEGER;
   const seconds = Number(session?.activity?.idle_seconds);
   return Number.isFinite(seconds) ? seconds : Number.MAX_SAFE_INTEGER - 1;

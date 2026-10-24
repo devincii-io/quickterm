@@ -121,7 +121,7 @@ function terminalState(entry) {
   if (session.alive === false) return "finished";
   if (agent === "done" || agent === "failed" || agent === "working") return agent;
   if (entry?.attachedIn) return "open";
-  if (session.busy === true) return "busy";
+  if (session.busy === true && !session.agent) return "busy";
   return "background";
 }
 

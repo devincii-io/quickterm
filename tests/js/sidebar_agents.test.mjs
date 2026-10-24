@@ -178,3 +178,14 @@ test("git facts are asked once per folder and reach the workspace model", () => 
   assert.deepEqual(model.workspaces.map((ws) => [ws.name, ws.git?.branch ?? null]), [["qt", "main"], ["none", null]]);
   assert.equal(model.focusedId, "s1");
 });
+
+test("an idle agent is not busy just because its process has children", async () => {
+  const { sessionState, processBusy } = await import("../../quickterm/frontend/js/sidebar_model.js");
+  const idleAgent = { alive: true, busy: true, agent: { kind: "claude", state: "idle" } };
+  assert.equal(processBusy(idleAgent), false);
+  assert.equal(sessionState(idleAgent, false).key, "idle");
+  const shell = { alive: true, busy: true, agent: null };
+  assert.equal(processBusy(shell), true);
+  assert.equal(sessionState(shell, false).key, "busy");
+  assert.equal(sessionState({ ...idleAgent, agent: { kind: "claude", state: "working" } }, false).label, "working");
+});
