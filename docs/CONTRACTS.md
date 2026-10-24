@@ -2038,6 +2038,110 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   surfaces and focus colors from the selected palette; terminal ANSI colors
   remain separate. Reduced-motion and forced-colors modes are supported.
 
+## Agent state, git worktrees and the PTY host (4.2, frozen 2026-10-24)
+
+Frozen before the 4.2 round so the backend and frontend parts can be built in
+parallel. Changing anything here goes through the integrator.
+
+### Agent state from hooks
+
+Every PTY QuickTerm spawns gets three environment variables:
+
+```
+QUICKTERM_SESSION_ID=<session id>
+QUICKTERM_PORT=<backend port>
+QUICKTERM_HOOK_TOKEN=<hook token>
+```
+
+The hook token is random per backend start and is accepted by exactly one
+route, so a program in a terminal does not get the full API token from its
+environment:
+
+```
+POST /api/sessions/{sid}/agent-event
+  header X-QuickTerm-Hook-Token: <hook token>   (the normal X-QuickTerm-Token also works)
+  body   {"agent": "claude" | "codex", "event": "<hook event name>", "payload": {...raw hook JSON...}}
+  -> 204; 404 unknown sid; 401 bad or missing token; 400 malformed body; body capped at 256 KiB
+```
+
+Claude Code agents launched through `launch.resolve` get QuickTerm's hooks
+for that launch only (never by editing the user's `~/.claude/settings.json`).
+Codex gets the equivalent through its per-launch config. A hook that runs
+without `QUICKTERM_SESSION_ID` does nothing and exits 0.
+
+`GET /api/sessions` items gain one field:
+
+```
+"agent": null | {
+  "kind": "claude" | "codex",
+  "state": "working" | "waiting" | "done" | "failed" | "idle",
+  "prompt": str | null,      # last user prompt, clean_text, <= 200 chars
+  "message": str | null,     # last assistant message, clean_text, <= 200 chars
+  "tool": str | null,        # tool running now while working, else null
+  "subagents": [{"id": str, "type": str | null, "description": str | null, "age_seconds": int}],
+  "age_seconds": int         # since the last state change
+}
+```
+
+Claude events map to states: SessionStart idle; UserPromptSubmit working
+(sets prompt, clears message); PreToolUse and PostToolUse working (tool);
+PermissionRequest and a permission Notification waiting; Stop done (message);
+StopFailure failed; SubagentStart adds and SubagentStop removes a subagent;
+SessionEnd sets `agent` back to null. Codex's turn-complete notification is
+done (message). `mark_seen` turns done and failed into idle; typing never
+changes the state. The process exiting sets `agent` to null. "waiting" also
+raises the existing attention with kind `"notify"` when nothing else did.
+
+### Git info and worktree workspaces
+
+Git facts come from reading `.git` (a folder, or a `gitdir:` file for a
+worktree) and `HEAD`; listing never starts a `git` process.
+
+```
+git_info := null | {
+  "branch": str | null,       # null on a detached HEAD
+  "head": str | null,         # short sha when detached
+  "worktree": bool,           # a linked worktree, not the main checkout
+  "main_path": str | null     # the main checkout's folder when worktree is true
+}
+
+POST /api/git/info  {"paths": [str, ...]}   (at most 256)
+  -> {"<path as sent>": git_info, ...}
+
+GET /api/workspaces/{name}  gains  "git": git_info   (for its path)
+
+POST /api/workspaces/worktree
+  {"from": "<workspace name>", "branch": "<new branch>", "base": "<ref>"?}
+  -> 201 {"workspace": "<new workspace name>", "path": str,
+          "setup": null | {"command": str, "source": str}}
+  -> 400 bad branch name, the workspace has no git folder; 404 unknown workspace;
+     409 the branch or the target folder already exists
+```
+
+The worktree goes to `<parent of main checkout>/<repo folder>-<branch slug>`
+and runs `git worktree add -b <branch> <path> [<base>]` off the event loop. The
+new workspace is named `<from>/<branch slug>`, its `path` the new folder, its
+layout empty. `setup` is the first match of uv.lock `uv sync`,
+package-lock.json `npm ci`, pnpm-lock.yaml `pnpm install`, yarn.lock
+`yarn install`, poetry.lock `poetry install`; the backend never runs it. The
+frontend opens the new workspace's view, starts the default terminal there
+and types `command` followed by Enter, so the user sees it run. Removing a
+worktree is not part of this round.
+
+### The PTY host
+
+The process that owns the PTYs (the backend: server, session manager,
+hotkeys, tray) and the process that shows the window are separate. Closing
+or restarting the window process, and installing an update, leave the backend
+and its terminals running; the next window attaches to it on the same port
+with the same token, through the existing attach and replay. The HTTP and WS
+interfaces above do not change. An update replaces the program files, so the
+backend runs from a copy of the program that the installer does not lock;
+an update that changes the backend itself restarts it only when no terminal is
+busy or touched, otherwise it asks, and the new backend takes over the next
+time the old one has nothing to keep. Restoring scrollback after a reboot is
+not part of this round.
+
 ## Testing
 
 `tests/` with pytest. Backend units must not require a real browser. PTY tests
