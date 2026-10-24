@@ -20,6 +20,7 @@ uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
 uv run --no-sync python scripts/smoke_packaged.py                  # frozen PTY/auth/replay/routes smoke
 uv run --no-sync python scripts/smoke_workspace_views.py           # isolated native dual-view/close smoke
+uv run --no-sync python scripts/smoke_pty_host.py                  # a terminal survives the window process
 python scripts/bench_throughput.py 20                             # output throughput
 ```
 
@@ -48,10 +49,16 @@ xterm.js + one WS per pane; write-callback backpressure; input only forwarded
 in phase "live".
 
 `docs/CONTRACTS.md` is the binding interface spec. Update it when changing any
-public interface. `app.py` boots backend + pywebview window (configured size
-or remembered bounds from `window_state.py`, optional drop-down overlay from
-`overlay.py`); close-to-tray (`tray.py`, ctypes) only when a live session is
-touched, explicitly retained, or busy, else quit.
+public interface. The terminals outlive the window (`pty_host.py`): plain
+`QuickTerm.exe` is a launcher that finds or starts the detached backend
+(`--serve`: server, sessions, hotkeys, tray) and asks it for a window; the
+backend runs every window in one child viewer process (`--viewer`, pywebview,
+configured size or remembered bounds from `window_state.py`, optional
+drop-down overlay from `overlay.py`). Closing the last window ends the
+viewer; the backend stays in the tray (`tray.py`, ctypes) only when a live
+session is touched, explicitly retained, or busy, else it quits. Frozen, the
+backend runs from a versioned copy under `%LOCALAPPDATA%\QuickTerm\host\` as
+`QuickTerm-host.exe`, so Setup can replace the program while terminals run.
 `update.py` probes the pinned GitHub repo's latest release; install downloads
 the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
 
@@ -322,8 +329,9 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   MUST be listed in `hiddenimports` in `quickterm.spec`, or the frozen build
   500s that endpoint with `ModuleNotFoundError`. When you add a new
   importlib-loaded route module, add it to the spec.
-- Verify any packaged build by launching `dist/QuickTerm/QuickTerm.exe --port 8641`,
-  then: `/api/health` answers and `/api/sessions` (header `X-QuickTerm-Token`
+- Verify any packaged build by launching `dist/QuickTerm/QuickTerm.exe --serve --port 8641`
+  (a plain launch copies the build into the real `%LOCALAPPDATA%` and opens a
+  window), then: `/api/health` answers and `/api/sessions` (header `X-QuickTerm-Token`
   from `%APPDATA%/quickterm/runtime.token`) shows `alive: true`. Smoke-test the
   importlib routes too: `POST /api/open {"target":"ftp://x"}` -> 400 (not 500)
   proves `opener` is bundled; `GET /api/update` answers (not 500) proves

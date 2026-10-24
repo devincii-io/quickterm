@@ -2201,6 +2201,41 @@ busy or touched, otherwise it asks, and the new backend takes over the next
 time the old one has nothing to keep. Restoring scrollback after a reboot is
 not part of this round.
 
+As built (`pty_host.py`), one program has three roles chosen by `app.main()`:
+
+- **launcher** (`QuickTerm.exe`, no role flag): finds the backend through the
+  verified probe or starts it detached, asks it for a window
+  (`POST /api/host/summon`) and exits. A launcher of another, not older,
+  frozen build first calls `POST /api/host/retire`.
+- **backend** (`--serve`): server, sessions, global hotkeys and tray, which
+  must work while no window exists. Frozen, it runs from
+  `%LOCALAPPDATA%\QuickTerm\host\<version>-<hash>\QuickTerm-host.exe`
+  (`QUICKTERM_HOST_DIR` overrides the root). The renamed exe keeps Setup's
+  `taskkill /IM QuickTerm.exe` away from it. The running build plus one more
+  are kept; a copy whose exe cannot be deleted is in use and stays. A copy
+  that fails is discarded and the backend runs from the install folder. The
+  elevated instance starts the install folder's exe (recorded in `.source`),
+  never the user-writable copy.
+- **viewer** (`--viewer`): every pywebview window, one process, a child of the
+  backend, driven by JSON lines on its stdin/stdout (commands open, show,
+  quit; events ready, adopted, closed, opened). The backend dying closes the
+  pipe and the windows. Closing the last window ends the viewer; the backend
+  then applies the close-to-tray rule (a live session touched, retained or
+  busy keeps it in the tray, else it exits; elevated or tray-less, it exits).
+  A crashed viewer's workspace claims are freed at once.
+
+```
+GET  /api/host          -> {build, version, pid, viewer_pid, ...} which backend this is
+POST /api/host/summon   {"cwd"?: str} -> show the windows, or start the viewer
+POST /api/host/retire   {"force"?: bool} -> 202 leaving; 409 naming busy or touched terminals
+```
+
+A refused retire marks the old backend superseded: it leaves once it has no
+window and nothing at risk, and is not asked again. Uvicorn's graceful
+shutdown is bounded to 3 s, so terminals stop promptly after the port closes.
+Each role logs to its own file (`quickterm.log`, `viewer.log`,
+`launcher.log`).
+
 ## Testing
 
 `tests/` with pytest. Backend units must not require a real browser. PTY tests
