@@ -923,10 +923,30 @@ def _start_backend(
         argv += ["--port", str(cfg.port)]
     if handoff:
         argv += ["--handoff", json.dumps(handoff)]
+    command = _backend_command(argv)
     try:
-        process = pty_host.spawn_backend(_backend_command(argv))
+        process = pty_host.spawn_backend(command)
     except OSError:
         log.exception("could not start the QuickTerm backend")
+        process = None
+    if process is not None and _wait_for_backend(
+        cfg, running=True, timeout=BACKEND_START_S, process=process
+    ):
+        return True
+    copy = Path(command[0])
+    if copy.name.lower() != pty_host.HOST_EXE.lower() or (
+        process is not None and process.poll() is None
+    ):
+        return False
+    # The copy died before it answered: a file in it may have been taken away
+    # (antivirus quarantine). Throw it away so the next start copies afresh,
+    # and start this once from the install folder instead.
+    log.warning("the backend copy failed to start; running from the install folder")
+    pty_host.discard(copy.parent)
+    try:
+        process = pty_host.spawn_backend([sys.executable, *argv])
+    except OSError:
+        log.exception("could not start the QuickTerm backend in place")
         return False
     return _wait_for_backend(cfg, running=True, timeout=BACKEND_START_S, process=process)
 

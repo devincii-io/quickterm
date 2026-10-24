@@ -154,8 +154,10 @@ def download_and_run() -> dict:
     # versioned copy (pty_host.py) holds no file Setup replaces and stays with
     # its terminals; the new version's launcher, started by Setup at the end,
     # takes over when nothing is busy or touched and asks otherwise. One that
-    # runs in place (a source checkout, the elevated instance) quits first, or
-    # Setup would stall on it or kill it mid-install.
+    # runs from the install folder (the elevated instance, which elevation.py
+    # starts from there on purpose, or a backend whose copy could not be made)
+    # quits first, or Setup would stall on it or kill it mid-install; so does a
+    # source checkout.
     _request_app_shutdown()
     _launch_detached(path)
     return {"launched": True, "version": latest}

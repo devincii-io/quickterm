@@ -72,7 +72,14 @@ def launch(spec: dict[str, Any]) -> None:
         raise OSError("administrator terminals are only available on Windows")
     token = encode_spec(spec)
     if getattr(sys, "frozen", False):
-        executable = sys.executable
+        from quickterm import pty_host
+
+        # The backend runs from its copy in %LOCALAPPDATA%, which the user can
+        # write to; the administrator process must load from the install.
+        install = pty_host.install_executable()
+        if install is None:
+            raise OSError("the QuickTerm installation was not found; reinstall QuickTerm")
+        executable = str(install)
         argv = ["--elevated-spec", token]
     else:
         executable = sys.executable

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import sys
 import textwrap
 import threading
@@ -82,6 +83,94 @@ def test_a_copy_left_half_done_is_replaced(tmp_path):
     exe = pty_host.ensure_copy(install, root, build)
     assert exe.is_file()
     assert not (root / build / "stray").exists()
+
+
+def test_a_copy_with_a_quarantined_file_is_copied_again(tmp_path):
+    # Antivirus takes one DLL away and leaves the marker: reusing that copy
+    # would fail at every start of this build, reinstalling included.
+    install = _install(tmp_path)
+    root = tmp_path / "host"
+    build = pty_host.build_id(install)
+    exe = pty_host.ensure_copy(install, root, build)
+    quarantined = root / build / "_internal" / "conpty" / "OpenConsole.exe"
+    quarantined.unlink()
+
+    assert pty_host.ensure_copy(install, root, build) == exe
+    assert quarantined.read_bytes() == b"console"
+
+    # A file emptied in place changes the size the marker recorded.
+    quarantined.write_bytes(b"")
+    pty_host.ensure_copy(install, root, build)
+    assert quarantined.read_bytes() == b"console"
+
+
+def test_a_copy_without_a_readable_marker_is_copied_again(tmp_path):
+    install = _install(tmp_path)
+    root = tmp_path / "host"
+    build = pty_host.build_id(install)
+    pty_host.ensure_copy(install, root, build)
+    (root / build / pty_host.COMPLETE_MARKER).write_text(build, encoding="utf-8")
+    (root / build / "stray").write_text("x", encoding="utf-8")
+    pty_host.ensure_copy(install, root, build)
+    assert not (root / build / "stray").exists()
+
+
+def _frozen_copy(monkeypatch, tmp_path):
+    install = _install(tmp_path)
+    root = tmp_path / "host"
+    exe = pty_host.ensure_copy(install, root, pty_host.build_id(install))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    monkeypatch.setattr(pty_host, "_machine_install", lambda: None)
+    return install, exe
+
+
+def test_the_install_of_a_copy_is_found_through_its_source(monkeypatch, tmp_path):
+    install, _exe = _frozen_copy(monkeypatch, tmp_path)
+    assert pty_host.install_executable() == install / "QuickTerm.exe"
+
+
+def test_an_all_users_install_of_this_build_wins_over_the_source_file(monkeypatch, tmp_path):
+    install, exe = _frozen_copy(monkeypatch, tmp_path)
+    machine = tmp_path / "ProgramFiles" / "QuickTerm"
+    shutil.copytree(install, machine)
+    # The copy is user-writable, so its .source may point anywhere.
+    (exe.parent / pty_host.SOURCE_FILE).write_text(str(tmp_path / "evil" / "QuickTerm.exe"))
+    monkeypatch.setattr(pty_host, "_machine_install", lambda: machine / "QuickTerm.exe")
+    assert pty_host.install_executable() == machine / "QuickTerm.exe"
+
+
+def test_no_install_of_this_build_means_none(monkeypatch, tmp_path):
+    install, _exe = _frozen_copy(monkeypatch, tmp_path)
+    (install / "QuickTerm.exe").write_bytes(b"a newer build was installed meanwhile")
+    assert pty_host.install_executable() is None
+
+
+def test_elevation_starts_the_install_never_the_copy(monkeypatch, tmp_path):
+    import types
+
+    from quickterm import elevation
+
+    install, exe = _frozen_copy(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        elevation, "os", types.SimpleNamespace(name="nt", getcwd=lambda: r"C:\work", path=os.path)
+    )
+    monkeypatch.setattr(
+        elevation.ctypes, "windll",
+        types.SimpleNamespace(shell32=types.SimpleNamespace(
+            ShellExecuteW=lambda *args: calls.append(args) or 42)),
+        raising=False,
+    )
+    monkeypatch.setattr(elevation.overlay, "hold_open", lambda *a, **k: None)
+    elevation.launch({"cmd": "cmd.exe"})
+    assert calls[0][2] == str(install / "QuickTerm.exe")
+    assert calls[0][3].startswith("--elevated-spec ")
+
+    (install / "QuickTerm.exe").unlink()
+    with pytest.raises(OSError):
+        elevation.launch({"cmd": "cmd.exe"})
+    assert len(calls) == 1
 
 
 def _fake_copy(root: Path, name: str, used_at: float) -> Path:
@@ -441,7 +530,31 @@ def test_a_window_opened_with_no_window_process_starts_one_with_that_workspace(s
     window_id = stub_host.open_window("dev", None)
     argv = stub_host.commands[0]
     assert argv[argv.index("--window-id") + 1] == window_id
-    assert argv[argv.index("--workspace") + 1] == "dev"
+    assert "--workspace=dev" in argv
+
+
+def test_a_workspace_named_like_an_option_reaches_the_window_process(stub_host, monkeypatch):
+    from quickterm import app
+
+    stub_host.open_window("-x", r"C:\-proj")
+    argv = stub_host.commands[0]
+    assert "--workspace=-x" in argv and r"--cwd=C:\-proj" in argv
+
+    # And the window process's own parser reads them back as values.
+    seen = {}
+    monkeypatch.setattr(sys, "argv", ["QuickTerm", "--viewer", *argv])
+    monkeypatch.setattr(app, "_harden_program_lookup", lambda: None)
+    monkeypatch.setattr(app, "_check_windows_build", lambda: None)
+    monkeypatch.setattr(app, "_setup_logging", lambda *a: None)
+    monkeypatch.setattr(app, "_run_viewer", lambda cfg, **kw: seen.update(kw) or 0)
+    monkeypatch.setattr(
+        "quickterm.config.load_config", lambda: SimpleNamespace(port=8620, host="127.0.0.1")
+    )
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(SystemExit) as raised:
+        app.main()
+    assert raised.value.code == 0
+    assert (seen["workspace"], seen["cwd"]) == ("-x", r"C:\-proj")
 
 
 def test_more_windows_are_commands_to_the_same_process(stub_host):
@@ -671,6 +784,51 @@ def test_the_backend_command_runs_the_copy_when_frozen(monkeypatch, tmp_path):
     assert Path(command[0]).name == pty_host.HOST_EXE
     assert Path(command[0]).parent.parent == tmp_path / "host"
     assert command[1:] == ["--serve"]
+
+
+class _Process:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+
+def test_a_copy_that_dies_before_answering_is_discarded_and_the_install_runs(
+    monkeypatch, tmp_path
+):
+    from quickterm import app
+
+    copy = tmp_path / "host" / "4.2.0-abc" / pty_host.HOST_EXE
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(b"exe")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "QuickTerm.exe"))
+    monkeypatch.setattr(app, "_backend_command", lambda argv: [str(copy), *argv])
+    spawned = []
+
+    def spawn(command):
+        spawned.append(command)
+        # The copy dies at once; the install folder's backend comes up.
+        return _Process(1 if len(spawned) == 1 else None)
+
+    monkeypatch.setattr(pty_host, "spawn_backend", spawn)
+    monkeypatch.setattr(app, "_already_running", lambda port, host: len(spawned) == 2)
+    cfg = SimpleNamespace(port=8650, host="127.0.0.1")
+
+    assert app._start_backend(cfg) is True
+    assert spawned == [[str(copy), "--serve"], [str(tmp_path / "QuickTerm.exe"), "--serve"]]
+    assert not copy.parent.exists()  # the next start copies afresh
+
+
+def test_a_backend_that_is_merely_slow_is_left_alone(monkeypatch, tmp_path):
+    from quickterm import app
+
+    copy = tmp_path / "host" / "4.2.0-abc" / pty_host.HOST_EXE
+    monkeypatch.setattr(app, "_backend_command", lambda argv: [str(copy), *argv])
+    monkeypatch.setattr(pty_host, "spawn_backend", lambda command: _Process(None))
+    monkeypatch.setattr(app, "_wait_for_backend", lambda *a, **k: False)
+    monkeypatch.setattr(pty_host, "discard", lambda folder: pytest.fail("discarded a live copy"))
+    assert app._start_backend(SimpleNamespace(port=8650, host="127.0.0.1")) is False
 
 
 def test_a_failed_copy_runs_the_backend_in_place(monkeypatch, tmp_path):
