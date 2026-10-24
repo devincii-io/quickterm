@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import secrets
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Response, WebSocket
@@ -22,14 +24,26 @@ def _token_required(method: str, path: str) -> bool:
     return not (method == "GET" and path.startswith("/api/assets/"))
 
 
-def _refusal(ctx: ApiContext, headers: Headers, method: str, path: str) -> str | None:
+def is_hook_route(method: str, path: str) -> bool:
+    """The one route the hook token opens."""
+    return method == "POST" and _HOOK_ROUTE.fullmatch(path) is not None
+
+
+_HOOK_ROUTE = re.compile(r"/api/sessions/[^/]+/agent-event")
+
+
+def _refusal(ctx: ApiContext, headers: Headers, method: str, path: str) -> tuple[int, str] | None:
     if headers.get("host", "") not in ctx.allowed_hosts:
-        return "forbidden: bad host"
+        return 403, "forbidden: bad host"
     origin = headers.get("origin")
     if origin is not None and origin not in ctx.allowed_origins:
-        return "forbidden: bad origin"
+        return 403, "forbidden: bad origin"
     if ctx.token and _token_required(method, path) and headers.get(auth.HEADER) != ctx.token:
-        return "forbidden: bad token"
+        if not is_hook_route(method, path):
+            return 403, "forbidden: bad token"
+        offered = headers.get(auth.HOOK_HEADER, "")
+        if not (ctx.hook_token and secrets.compare_digest(offered.encode(), ctx.hook_token.encode())):
+            return 401, "unauthorized: bad hook token"
     return None
 
 
@@ -55,7 +69,8 @@ class LocalGuard:
         path = scope["path"]
         refusal = _refusal(self.ctx, Headers(scope=scope), scope["method"], path)
         if refusal is not None:
-            await Response(refusal, status_code=403)(scope, receive, send)
+            status, text = refusal
+            await Response(text, status_code=status)(scope, receive, send)
             return
 
         async def send_with_caching(message: Any) -> None:

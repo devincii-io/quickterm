@@ -99,6 +99,9 @@ def create_app(
         rebind_hotkeys=rebind_hotkeys,
         suspend_hotkeys=suspend_hotkeys,
     )
+    set_agent_hooks = getattr(manager, "set_agent_hooks", None)
+    if set_agent_hooks is not None:
+        set_agent_hooks(cfg.port, ctx.hook_token)
     app.add_middleware(LocalGuard, ctx=ctx)
     for routes in (
         system, sessions, remote, launches, window_routes, workspaces, config, assets, attach
