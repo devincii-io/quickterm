@@ -366,6 +366,14 @@ def test_new_hands_the_launch_to_the_running_app(capsys, backend, tmp_path, monk
     assert len(isolated) == 3
 
 
+def test_new_starts_an_agent_by_its_kind(capsys, backend, isolated):
+    port = str(backend.port)
+    assert _run(capsys, "new", "claude-code", "--workspace", "dev", "--port", port)[0] == 0
+    assert backend.requests[-1][2] == {"profile": "claude-code", "workspace": "dev"}
+    assert _run(capsys, "new", "codex", "--profile", "x", "--port", port)[0] == cli.EXIT_USAGE
+    assert _run(capsys, "new", "bash", "--port", port)[0] == cli.EXIT_USAGE
+
+
 def test_open_asks_for_the_workspace(capsys, backend, isolated):
     assert _run(capsys, "open", "dev", "--port", str(backend.port))[0] == 0
     assert backend.requests[-1][:3] == ("POST", "/api/launches", {"workspace": "dev"})

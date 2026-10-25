@@ -16,7 +16,7 @@ test("ids are unique and every entry belongs to a real tab", () => {
     assert.ok(entry.label && entry.hint !== undefined, entry.id);
   }
   for (const id of [
-    "font_family", "font_size", "theme", "logo", "default_profile", "window.size", "window.remember_bounds",
+    "font_family", "font_size", "theme", "logo", "shell", "window.size", "window.remember_bounds",
     "overlay.enabled", "overlay.edge", "overlay.width_pct", "overlay.height_pct", "overlay.always_on_top",
     "overlay.hide_on_blur", "overlay.monitor", "overlay.animate", "summon_hotkey", "scrollback_bytes",
     "idle_timeout_s", "max_sessions", "scratch_dir", "host", "port", "update_check", "config_history",

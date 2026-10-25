@@ -5,10 +5,12 @@ runs as its own process (`--serve`), as in the app; this process is the
 window process. A test window appears briefly for capture, then closes, and
 the backend must still hold every terminal.
 
-The window's document is the shell and hosts no workspace. The check opens
-two workspace views, drives real terminals in both, closes one (a failed save
-first, which must keep it open) while the other keeps running, then closes
-the last one and finds the empty stage.
+The window's document is the shell and hosts no workspace; its stage shows
+one workspace view at a time. The check opens two workspaces, finds only one
+shown and the other hidden with its full box, drives real terminals in both,
+switches between them, closes the shown one (a failed save first, which must
+keep it open) and finds the other shown, opens the window's one scratch view
+and sends it a folder, then closes the last view and finds the empty stage.
 """
 
 import argparse
@@ -55,9 +57,18 @@ const child = companion.frame.contentWindow;
 check(first.quicktermView.workspace() === 'Primary', 'primary workspace boot');
 check(child.quicktermView.workspace() === 'Companion', 'companion workspace boot');
 check(normalizeWindows(await api.listWindows()).length === 3, 'the shell and both views registered');
-check(views.stage.classList.contains('multiple'), 'two views draw borders and headers');
-check(views.root.type === 'split' && views.root.dir === 'h', 'a wide view is split side by side');
-check(primary.closeButton && companion.closeButton, 'every view has a close button');
+// One workspace on the stage: the newest is shown, the other keeps its box
+// but is invisible and inert. No header, no frame, no divider.
+check(views.active === companion, 'the opened workspace is the shown one');
+check(getComputedStyle(primary.el).visibility === 'hidden' && primary.el.inert, 'the other view is hidden and inert');
+check(getComputedStyle(companion.el).visibility === 'visible' && !companion.el.inert, 'the shown view is visible');
+const stageBox = views.stage.getBoundingClientRect();
+for (const view of [primary, companion]) {
+  const box = view.el.getBoundingClientRect();
+  check(Math.abs(box.width - stageBox.width) <= 1 && Math.abs(box.height - stageBox.height) <= 1, 'every view covers the whole stage');
+}
+check(!views.stage.querySelector('header, .workspace-view-divider')
+  && views.views().every(view => view.el.children.length === 1 && view.el.firstElementChild === view.frame), 'no view chrome at all');
 await child.eval("import('/js/workspace.js').then(module => { window.smokeWorkspace = module; })");
 const measure = doc => [...doc.querySelectorAll('.xterm-screen')].map(el => {
   const rect = el.getBoundingClientRect();
@@ -66,10 +77,14 @@ const measure = doc => [...doc.querySelectorAll('.xterm-screen')].map(el => {
 });
 await pause(400);
 const sizes = {primary: measure(first.document), companion: measure(child.document)};
-check(sizes.primary.every(r => r.width > 100 && r.height > 100), 'primary terminal has usable dimensions');
+check(sizes.primary.every(r => r.width > 100 && r.height > 100), 'a hidden view keeps usable terminal dimensions');
 check(sizes.companion.every(r => r.width > 100 && r.height > 100), 'companion terminal has usable dimensions');
 check(sizes.companion.every(r => r.right <= r.viewportWidth + 1 && r.bottom <= r.viewportHeight + 1), 'companion terminal fits viewport');
-for (const [win, label] of [[first, 'PRIMARY'], [child, 'COMPANION']]) {
+for (const [view, label] of [[primary, 'PRIMARY'], [companion, 'COMPANION']]) {
+  views.focusView(view);
+  await pause();
+  check(views.active === view, `showing ${label} from the shell`);
+  const win = view.frame.contentWindow;
   const doc = win.document;
   await win.eval("import('/js/pane.js').then(({Pane}) => { const original = Pane.prototype.focusSoon; Pane.prototype.focusSoon = function() { window.smokePane = this; return original.call(this); }; })");
   const area = doc.querySelector('.xterm-helper-textarea');
@@ -104,33 +119,27 @@ for (const [win, label] of [[first, 'PRIMARY'], [child, 'COMPANION']]) {
   const grid = doc.getElementById('grid').getBoundingClientRect();
   check(Math.abs(survivor.width - grid.width) <= 2 && Math.abs(survivor.height - grid.height) <= 2, `survivor fills the grid ${label}`);
 }
-views.zoom(primary);
+// Switching: one gesture shows the other workspace, the walk wraps, and the
+// shown row is the highlighted one in the sidebar.
+views.focusView(primary);
 await pause();
-check(companion.el.hidden && views.zoomed === primary, 'zooming a view hides the other');
-views.zoom(primary);
-await pause();
-check(!companion.el.hidden && views.zoomed === null, 'zooming again shows every view');
-const divider = views.stage.querySelector('.workspace-view-divider');
-divider.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
-check(Math.round(views.root.ratio * 100) === 55, 'keyboard divider resize');
-divider.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
-check(Math.round(views.root.ratio * 100) === 50, 'double-click balances the split');
-check(views.moveView(companion, primary, 'top'), 'header drop docks the view on the chosen side');
-check(views.root.dir === 'v' && views.root.children[0].pane === companion, 'the companion sits above the primary');
-check(views.moveView(companion, primary, 'right'), 'and back to the right');
-check(views.root.dir === 'h' && views.root.children[1].pane === companion, 'the companion sits beside the primary again');
+check(views.active === primary && getComputedStyle(companion.el).visibility === 'hidden', 'showing a workspace hides the other');
+const activeHead = () => document.querySelector('.session-group.active .session-group-name')?.textContent;
+await wait(() => activeHead() === 'Primary', 'the shown workspace is the highlighted sidebar row');
+check(views.cycle(1) && views.active === companion, 'next workspace');
+check(views.cycle(1) && views.active === primary, 'the walk wraps');
 const sessions = await api.getSessions({metrics: false});
 check(sessions.length === 4 && sessions.every(s => s.alive), 'all real PTYs remain alive after splits');
+views.focusView(companion);
 const savedFetch = child.fetch;
 child.fetch = (url, options) => options?.method === 'PUT' && String(url).includes('/api/workspaces/')
   ? Promise.reject(new Error('smoke: injected save failure')) : savedFetch.call(child, url, options);
 await views.close(companion);
-check(views.views().includes(companion), 'failed save keeps view open');
+check(views.views().includes(companion) && views.active === companion, 'failed save keeps view open and shown');
 child.fetch = savedFetch;
 await views.close(companion);
 check(!views.views().includes(companion) && normalizeWindows(await api.listWindows()).length === 2, 'successful close removes view and claim');
-check(!views.stage.classList.contains('multiple'), 'a lone view draws no borders');
-check(views.active === primary, 'the remaining view takes over the keyboard');
+check(views.active === primary && getComputedStyle(primary.el).visibility === 'visible', 'closing the shown view shows the one shown before it');
 check(first.quicktermView.workspace() === 'Primary', 'the other view keeps running');
 check((await api.getSessions({metrics: false})).every(s => s.alive), 'closing view preserves PTYs');
 const retained = (await api.getSessions({metrics: false})).filter(s => s.workspace === 'Companion');
@@ -162,8 +171,18 @@ await pause();
 check((await api.getWorkspace('Companion')).layout.title !== 'queued stale save', 'pagehide final snapshot follows queued saves');
 reloaded.fetch = originalFetch;
 check(await views.close(reopened), 'close the reopened companion');
+// One scratch view per window, labelled scratch, shown again rather than
+// opened twice; Explorer's folder lands in it as a new terminal.
+const scratch = await views.open(null);
+check(scratch && views.appFor(scratch) && views.nameOf(scratch) === 'scratch', 'the scratch view is labelled scratch');
+check(await views.open(null) === scratch && views.views().length === 2, 'scratch opens once per window');
+const scratchApp = views.appFor(scratch);
+const before = scratchApp.attachedSessionIds().length;
+check(await views.open(null, {cwd: primary.frame.contentWindow.quicktermView.app.workspacePath()}) === scratch, 'a folder goes to the scratch view');
+await wait(() => scratchApp.attachedSessionIds().length === before + 1, 'the folder starts a terminal in scratch');
+check(await views.close(scratch), 'close the scratch view');
 check(await views.close(primary), 'the last view closes like any other');
-check(views.views().length === 0 && !views.empty.hidden, 'an empty stage offers a new scratch view');
+check(views.views().length === 0 && !views.empty.hidden, 'an empty stage offers the scratch workspace');
 check((await api.getSessions({metrics: false})).every(s => s.alive), 'closing every view kills nothing');
 document.querySelector('#app-error-close').click();
 return {checks, sizes};
@@ -236,9 +255,9 @@ def main():
             port=port,
             update_check=False,
             scratch_dir=isolated,
-            default_profile="Smoke cmd",
+            shell="cmd",
             summon_hotkey="",
-            profiles=[config.Profile("Smoke cmd", "cmd.exe", args=["/q", "/k"])],
+            profiles=[config.Profile("Smoke cmd", "cmd.exe", args=["/q", "/k"], terminal_type="custom")],
         )
         cfg.voice.enabled = False
         config.save_config(cfg)
@@ -254,7 +273,7 @@ def main():
 
         def create_test_window(title, url, **kwargs):
             # A window asked for one workspace opens it as its only view and
-            # neither restores nor stores an arrangement.
+            # neither restores nor stores the list of open workspaces.
             url = url.replace("?", "?workspace=Primary&", 1)
             kwargs["hidden"] = True
             return create("QuickTerm release smoke", url, **kwargs)

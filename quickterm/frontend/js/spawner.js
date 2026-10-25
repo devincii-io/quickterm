@@ -3,27 +3,22 @@
 // elevate). The spec helpers at the top are pure and tested in node.
 
 import { SCRATCH_WS } from "./boot_context.js";
-import { AGENT_TYPES, isAgentType } from "./agent_profile.js";
+import { AGENT_TYPES, agentProfile, isAgentType } from "./agent_profile.js";
 import { launchOptions, repeatLaunchOptions } from "./launch_options.js";
-import { normalAgentSplitMode, splitDirectory } from "./split_policy.js";
+import { shellTerminalType, shellValueLabel } from "./shell_choice.js";
+import { splitDirectory } from "./split_policy.js";
+import { insidePath, samePath } from "./here.js";
 
-// With no personal profile to open, the system shell named by `preferred`
-// (a default_profile such as "git-bash"), else the first one available.
-export function defaultSystemSpec(terminalInventory, preferred = "") {
-  const types = (terminalInventory && terminalInventory.types) || [];
-  const isUsable = (type) => type.executable && type.available !== false
-    && !["custom", ...AGENT_TYPES, "ssh", "sftp"].includes(type.id);
-  const usable = types.find((type) => type.id === preferred && isUsable(type)) || types.find(isUsable);
-  if (!usable) return null;
-  // The same arguments the new-terminal menu starts these shells with.
-  const args = usable.id === "powershell-core" || usable.id === "windows-powershell"
-    ? ["-NoLogo"]
-    : usable.id === "wsl" ? ["--cd", "~"]
-      : ["git-bash", "bash", "zsh", "fish"].includes(usable.id) ? ["-l"] : [];
-  return { cmd: usable.executable, args, name: usable.label, terminalType: usable.id };
-}
-
+// What a pane remembers about how it was started without a profile: a
+// command line, or a shell named by its config value (`{shell, name}`), which
+// the backend resolves again on every start.
 export function serializableSpec(spec) {
+  if (typeof spec.shell === "string" && !spec.cmd) {
+    const out = { shell: spec.shell, name: spec.name || shellValueLabel(spec.shell) };
+    if (spec.cwd) out.cwd = spec.cwd;
+    out.terminal_type = shellTerminalType(spec.shell);
+    return out;
+  }
   const out = {
     cmd: spec.cmd,
     args: [...(spec.args || [])],
@@ -46,11 +41,36 @@ export function commandTerminalType(spec) {
   return null;
 }
 
+// A 4.2 layout saved the built-in "Claude · continue" choices as a raw
+// command. Since 4.3 they start through the agent settings, inside the shell,
+// with hooks; this reads the kind and mode back out of such a spec.
+const LEGACY_MODES = {
+  "claude-code": [[["--continue"], "continue"], [["--resume"], "resume"], [[], "new"]],
+  codex: [[["resume", "--last"], "continue"], [["resume"], "resume"], [[], "new"]],
+};
+
+export function legacyAgentSpec(spec) {
+  const kind = spec?.terminal_type || spec?.terminalType;
+  if (!isAgentType(kind) || !spec.cmd) return null;
+  const args = spec.args || [];
+  const found = LEGACY_MODES[kind].find(([words]) => words.length === args.length
+    && words.every((word, index) => word === args[index]));
+  return found ? { kind, mode: found[1] } : null;
+}
+
+// Alt+N and the "+" open where the focused terminal is, as long as that is
+// still inside the workspace folder; anywhere else (a `cd` out of the
+// project, a WSL path, a folder never reported) means the workspace folder.
+// Paths compare as here.js compares them.
+export function sameFolderCwd(paneCwd, root) {
+  return samePath(paneCwd, root) || insidePath(paneCwd, root) ? paneCwd : null;
+}
+
 // The profile whose agent can pick a dead pane's conversation up again: an
-// agent profile (Claude Code or Codex), or a shell that was running claude.
+// agent (Claude Code or Codex), or a shell profile that was running claude.
 export function claudeProfileForPane(profiles, pane) {
   const profile = profiles.find((item) => item.name === pane.profileName) || null;
-  if (!profile) return null;
+  if (!profile) return agentForLostProfile(profiles, pane);
   if (isAgentType(profile.terminal_type)) return profile;
   const hint = [profile.name, profile.cmd, profile.start_command, pane.title]
     .filter(Boolean).join(" ");
@@ -62,24 +82,28 @@ export function claudeProfileForPane(profiles, pane) {
   return mentionsClaude && (directClaude || resumableShell) ? profile : null;
 }
 
+// A pane whose profile is gone: 4.3 turned the agent profiles into settings,
+// so a layout still names "Claude New". Its pane type, else a profile name or
+// title naming the agent, picks the agent from `profiles` (allProfiles()).
+function agentForLostProfile(profiles, pane) {
+  const hint = [pane.profileName, pane.title].filter(Boolean).join(" ");
+  const kind = isAgentType(pane.terminalType) ? pane.terminalType
+    : /\bcodex\b/i.test(hint) ? "codex"
+      : /\bclaude\b/i.test(hint) ? "claude-code" : null;
+  return kind ? profiles.find((item) => item.name === kind && isAgentType(item.terminal_type)) || null : null;
+}
+
 export function createSpawner({
   api, state, layout, ownSession, scheduleWorkspaceSave, refreshStatusSoon, refreshInventory, showError,
 }) {
-  // An empty default_profile is Settings' explicit "System default shell"
-  // choice, not "unset". Falling through to profiles[0] made that option a
-  // no-op and handed every new pane the first personal profile instead.
-  function defaultProfile() {
-    const name = state.cfg.default_profile;
-    if (state.requireConfiguredTerminals) {
-      return state.profiles.find((item) => item.name === name && !["rdp", "vnc"].includes(item.terminal_type))
-        || state.profiles.find((item) => !["ssh", "sftp", "telnet", "serial", "docker", "podman", "kubernetes", "rdp", "vnc"].includes(item.terminal_type)) || null;
-    }
-    if (name === "") return null;
-    const profile = state.profiles.find((item) => item.name === name);
-    if (profile) return profile;
-    // A system shell id ("git-bash") is a default of its own, not a profile.
-    if ((state.terminalInventory?.types || []).some((type) => type.id === name)) return null;
-    return state.profiles[0] || null;
+  // Saved profiles, and Claude Code and Codex from the agent settings under
+  // their kind as the name ("claude-code"), which is how a request names them.
+  function allProfiles() {
+    const saved = state.profiles || [];
+    const agents = AGENT_TYPES
+      .filter((kind) => !saved.some((profile) => profile.name === kind))
+      .map((kind) => agentProfile(kind, state.cfg?.agents?.[kind]));
+    return [...saved, ...agents];
   }
 
   // Where a new terminal should start when the caller has no directory of its
@@ -94,11 +118,11 @@ export function createSpawner({
   }
 
   function profileByName(name) {
-    return state.profiles.find((profile) => profile.name === name) || null;
+    return allProfiles().find((profile) => profile.name === name) || null;
   }
 
   function profileTerminalType(name) {
-    return state.profiles.find((profile) => profile.name === name)?.terminal_type || null;
+    return profileByName(name)?.terminal_type || null;
   }
 
   // Tag new sessions with their named workspace. Scratch remains untagged
@@ -112,6 +136,13 @@ export function createSpawner({
   // session, start command or args back. A fresh launch passes its own, `{}` for none,
   // so a new terminal in a replaceable pane never inherits the old launch.
   async function spawnInto(pane, profileName, cwd, options) {
+    if (!profileByName(profileName)) {
+      // A pane saved with a profile that is gone (4.3 removed the shell and
+      // agent profiles) still opens: in the shell, saying why.
+      const info = await spawnShellInto(pane, cwd, null);
+      if (info) pane.flashNotice?.(`[profile "${profileName}" no longer exists · started the shell]`, 5000);
+      return info;
+    }
     const launch = repeatLaunchOptions(pane, profileName, options, profileTerminalType(profileName));
     if (!pane.beginSpawn()) return null;
     try {
@@ -145,6 +176,9 @@ export function createSpawner({
   }
 
   async function spawnSpecInto(pane, spec) {
+    const legacy = legacyAgentSpec(spec);
+    if (legacy) return spawnInto(pane, legacy.kind, spec.cwd || null, { agentMode: legacy.mode });
+    if (typeof spec.shell === "string" && !spec.cmd) return spawnShellInto(pane, spec.cwd || null, spec.shell);
     if (!pane.beginSpawn()) return null;
     const launchSpec = serializableSpec(spec);
     try {
@@ -168,25 +202,40 @@ export function createSpawner({
     }
   }
 
-  function spawnDefaultInto(pane, cwdOverride) {
-    if (state.selectedTerminal) {
-      if (state.selectedTerminal.kind === "profile") {
-        return spawnInto(pane, state.selectedTerminal.profile.name, contextCwd(cwdOverride), {});
-      }
-      return spawnSpecInto(pane, {
-        cmd: state.selectedTerminal.cmd,
-        args: state.selectedTerminal.args || [],
-        cwd: contextCwd(cwdOverride),
-        name: state.selectedTerminal.label,
-        terminalType: state.selectedTerminal.id,
+  // A shell with no profile. `shell` null is the configured one, resolved by
+  // the backend on every start, so a restart follows a changed setting; a
+  // named one (a "+" menu row) is remembered on the pane.
+  async function spawnShellInto(pane, cwd, shell = null) {
+    if (!pane.beginSpawn()) return null;
+    const named = typeof shell === "string";
+    try {
+      const info = await api.createSession({
+        cwd: cwd || undefined,
+        workspace: spawnWorkspaceTag(),
+        ...(named ? { shell } : {}),
       });
+      pane.profileName = null;
+      pane.terminalType = shellTerminalType(named ? shell : (state.cfg?.shell ?? ""));
+      pane.setLaunchCwd(info.cwd || cwd || null);
+      pane.launchSpec = named ? serializableSpec({ shell }) : null;
+      pane.launchOptions = null;
+      pane.attach(info);
+      pane.spawnedFresh = true;
+      ownSession(info.id);
+      scheduleWorkspaceSave();
+      refreshStatusSoon();
+      return info;
+    } catch (error) {
+      pane.endSpawn();
+      pane.showNotice(`[${error.detail || "the shell did not start"}]`);
+      return null;
     }
-    const profile = defaultProfile();
-    if (profile) return spawnInto(pane, profile.name, contextCwd(cwdOverride), {});
-    const system = !state.requireConfiguredTerminals && defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
-    if (system) return spawnSpecInto(pane, { ...system, cwd: contextCwd(cwdOverride) });
-    pane.showNotice(state.requireConfiguredTerminals ? "[Set up a terminal in Terminals and connections]" : "[no shell found, add one in settings]");
-    return Promise.resolve(null);
+  }
+
+  // A new terminal with no profile (Alt+N, "+", a folder handed in from
+  // Explorer or `quickterm new`): the configured shell.
+  function spawnDefaultInto(pane, cwdOverride) {
+    return spawnShellInto(pane, contextCwd(cwdOverride), null);
   }
 
   function splitCwd(source, choice) {
@@ -199,32 +248,8 @@ export function createSpawner({
   }
 
   function spawnSplitInto(pane, source) {
-    if (state.selectedTerminal) {
-      const cwd = splitCwd(source, state.selectedTerminal);
-      if (state.selectedTerminal.kind === "profile") {
-        const profile = state.selectedTerminal.profile;
-        const agentMode = normalAgentSplitMode(profile);
-        return spawnInto(pane, profile.name, contextCwd(cwd), { agentMode });
-      }
-      return spawnSpecInto(pane, {
-        cmd: state.selectedTerminal.cmd,
-        args: state.selectedTerminal.args || [],
-        cwd,
-        name: state.selectedTerminal.label,
-        terminalType: state.selectedTerminal.id,
-      });
-    }
-    const profile = defaultProfile();
-    if (profile) {
-      const choice = { kind: "profile", profile };
-      return spawnInto(pane, profile.name, contextCwd(splitCwd(source, choice)), {
-        agentMode: normalAgentSplitMode(profile),
-      });
-    }
-    const system = !state.requireConfiguredTerminals && defaultSystemSpec(state.terminalInventory, state.cfg.default_profile);
-    if (!system) return spawnDefaultInto(pane);
-    const choice = { kind: "system", id: system.terminalType, ...system };
-    return spawnSpecInto(pane, { ...system, cwd: contextCwd(splitCwd(source, choice)) });
+    const choice = { kind: "system", id: shellTerminalType(state.cfg?.shell ?? "") };
+    return spawnShellInto(pane, contextCwd(splitCwd(source, choice)), null);
   }
 
   async function runProfile(profile) {
@@ -284,6 +309,11 @@ export function createSpawner({
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
     layout.focusPane(pane);
+    // A "+" menu shell row: {kind: "shell", shell: "<config value>"}.
+    if (typeof system.shell === "string") {
+      await spawnShellInto(pane, contextCwd(null), system.shell);
+      return;
+    }
     await spawnSpecInto(pane, {
       cmd: system.cmd,
       args: system.args || [],
@@ -343,6 +373,11 @@ export function createSpawner({
   }
 
   function elevateSystemTerminal(system) {
+    if (typeof system.shell === "string") {
+      return elevate({
+        shell: system.shell, cwd: contextCwd(null) || undefined, workspace: spawnWorkspaceTag(),
+      }, system.label || shellValueLabel(system.shell));
+    }
     return elevate({
       cmd: system.cmd,
       args: system.args || [],
@@ -391,7 +426,7 @@ export function createSpawner({
   }
 
   async function resumeClaudePane(pane, mode = "continue") {
-    const profile = claudeProfileForPane(state.profiles, pane);
+    const profile = claudeProfileForPane(allProfiles(), pane);
     if (!profile) return null;
     // Explicit recovery only: continue the latest project conversation or let
     // the agent present its own native picker. Neither path impersonates the
@@ -410,7 +445,8 @@ export function createSpawner({
   }
 
   return {
-    defaultProfile,
+    allProfiles,
+    spawnShellInto,
     contextCwd,
     profileByName,
     profileTerminalType,

@@ -1,9 +1,7 @@
 // Rearranging panes by drag. Pure on purpose: which part of a pane the
 // pointer is over, and the tree surgery that moves one leaf beside another,
 // are the parts worth testing and neither needs a DOM. layout.js owns the
-// pointer events and renders the result; workspace_views.js reuses the same
-// functions for whole workspace views, which are leaves of the same kind of
-// tree (split_tree.js).
+// pointer events and renders the result (split_tree.js holds the tree).
 
 import { findLeaf, parentOf, replaceChild } from "./split_tree.js";
 

@@ -46,6 +46,10 @@ FOLDER_ERRORS = {
     "codex": "Codex profile requires a project folder",
 }
 SESSION_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
+PROMPT_MAX_CHARS = 16_000
+# cmd.exe ends a command line at 8191 characters; the agent's own arguments
+# and the shell wrapping need the rest.
+CMD_PROMPT_MAX_CHARS = 7_000
 _MODEL = r"^[A-Za-z0-9._:\[\]-]{1,100}$"
 _NAME = r"^[A-Za-z0-9._-]{1,64}$"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -77,7 +81,7 @@ class Option:
     def schema(self) -> dict:
         out: dict[str, Any] = {
             "key": self.key, "label": self.label, "kind": self.kind,
-            "hint": self.hint, "advanced": self.advanced,
+            "hint": self.hint, "advanced": self.advanced, "flag": self.flag,
         }
         if self.kind in ("choice", "combo"):
             out["choices"] = [{"value": value, "label": label} for value, label in self.choices]
@@ -249,14 +253,42 @@ def _lines(value: str) -> list[str]:
     return [line.strip() for line in value.replace("\r", "").split("\n") if line.strip()]
 
 
+def validate_prompt(value: Any) -> str | None:
+    """A launch's first prompt, or None. ValueError for anything else.
+
+    A prompt never starts with "-" (the agent would read it as an option) and
+    holds no double quote: Windows PowerShell 5.1 passes a native argument
+    with an embedded quote unescaped, which splits it into several arguments.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("prompt must be a string")
+    if len(value) > PROMPT_MAX_CHARS:
+        raise ValueError(f"prompt must be at most {PROMPT_MAX_CHARS} characters")
+    if "\0" in value:
+        raise ValueError("prompt must not contain NUL")
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("-"):
+        raise ValueError("prompt must not start with -")
+    if '"' in text:
+        raise ValueError("prompt must not contain double quotes")
+    return text
+
+
 def resolve(
-    profile: Any, cwd: str | None, *, mode: str | None = None, session: str | None = None
+    profile: Any, cwd: str | None, *, mode: str | None = None, session: str | None = None,
+    prompt: str | None = None,
 ) -> tuple[str, list[str], str]:
     """Command, arguments and process folder for one agent profile.
 
     `mode` overrides the profile's launch mode for this launch; `session`
     resumes (or, for Codex, forks) that session id and implies resume.
+    `prompt` is the first message, given as the agent's positional argument.
     """
+    prompt = validate_prompt(prompt)
     validate(profile)
     kind = profile.terminal_type
     if not isinstance(cwd, str) or not cwd.strip():
@@ -279,6 +311,10 @@ def resolve(
     else:
         executable = _codex_command(configured)
         args = _codex_args(mode, session, cwd, values) + extra
+    if prompt is not None:
+        if mode == "agents":
+            raise ValueError("prompt does not apply to the agents mode")
+        args.append(prompt)
     _guard_batch(executable, args)
     return executable, args, cwd
 
@@ -333,15 +369,22 @@ def _codex_args(mode: str, session: str | None, cwd: str, values: dict) -> list[
     return args
 
 
-def _guard_batch(executable: str, args: list[str]) -> None:
+def is_batch(executable: str) -> bool:
+    """True when `executable` is (or resolves on PATH to) a .cmd or .bat file,
+    which cmd.exe runs and re-parses."""
     resolved = executable
     if not os.path.dirname(executable):
         resolved = shutil.which(executable) or executable
-    if not resolved.lower().endswith((".cmd", ".bat")):
+    return resolved.lower().endswith((".cmd", ".bat"))
+
+
+def _guard_batch(executable: str, args: list[str]) -> None:
+    if not is_batch(executable):
         return
     for arg in args:
         if _CMD_UNSAFE.search(arg):
-            raise ValueError(f"{arg} contains characters cmd.exe would reinterpret")
+            shown = arg if len(arg) <= 80 else arg[:77] + "..."
+            raise ValueError(f"{shown} contains characters cmd.exe would reinterpret")
 
 
 def _vendored_codex(shim: str) -> str | None:

@@ -207,24 +207,6 @@
 }
 .icon-button:hover { background: var(--surface-raised); color: var(--text); }
 
-/* A chip, not a button: it opens something and should read as a label with an
-   affordance, which is why it is mono and pill-shaped. */
-.card-open-button {
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--fg-faint);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10.5px;
-}
-.card-open-button:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent-text);
-}
-
 .ui-input {
   height: 32px;
   padding: 0 9px;
@@ -419,24 +401,6 @@
   text-transform: uppercase;
 }
 
-/* A group of profiles of one terminal type: the title and how many sit under
-   it on one line. Unstyled, the count fell onto a line of its own and read
-   as a stray "1" under every heading. */
-.config-group-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin: 18px 0 8px;
-}
-.config-group-heading:first-child { margin-top: 0; }
-.config-group-title { margin: 0; }
-.config-group-count,
-.config-group-note {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 10.5px;
-}
-
 .settings-grid { gap: 12px 14px; }
 .settings-field { gap: 5px; }
 .field-label { color: var(--text-soft); font-size: 11.5px; font-weight: 600; }
@@ -459,31 +423,6 @@
   font-size: 10.5px;
   line-height: 1.55;
 }
-
-.advanced-notice {
-  margin: 12px 0 10px;
-  padding: 2px 0 2px 10px;
-  border-left: 2px solid color-mix(in srgb, var(--sage) 55%, transparent);
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.55;
-}
-
-/* Raw JSON is the one place in Settings that is genuinely a text editor, so
-   it gets the well surface the terminal sits on. */
-.settings-json {
-  min-height: 300px;
-  height: 54vh;
-  padding: 11px 12px;
-  border: 1px solid var(--fg-faint);
-  border-radius: 6px;
-  background: var(--well);
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-.settings-json:focus { border-color: var(--accent-border); }
 
 /* The folder picker sits beside a .ui-input and has to match its new height,
    or the pair reads as a field with a taller button bolted to it. */
@@ -601,14 +540,6 @@
 }
 .logo-preview-fallback { font-size: 12px; }
 .logo-picker-copy > strong { font-size: 11.5px; }
-.branding-scratch-note {
-  margin-top: 8px;
-  padding: 8px 10px;
-  border: 1px dashed var(--fg-faint);
-  border-radius: 6px;
-  font-size: 10.5px;
-  line-height: 1.55;
-}
 
 /* ---- terminal configs and snippets: rows and a side editor ---- */
 
@@ -954,20 +885,6 @@
 .about-update-status { margin-bottom: 10px; max-width: 74ch; font-size: 11.5px; line-height: 1.55; }
 .about-update-row { gap: 7px; }
 
-.voice-callout {
-  gap: 12px;
-  margin: 12px 0;
-  padding: 12px 0;
-  border: 0;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-}
-.voice-callout h3 { font-size: 12.5px; font-weight: 600; }
-.voice-callout p { margin-top: 4px; font-size: 11.5px; }
-.voice-wave { font-size: 16px; }
-
 /* ============================= help ============================= */
 
 .help-intro { max-width: 74ch; padding: 0 0 16px; }
@@ -1045,7 +962,6 @@
   font-size: 10.5px;
 }
 #app-error-close:hover { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--text); }
-
 
 /* ======================= narrow windows =======================
    These re-state the narrow behaviour rather than leaving it to app.css:

@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from quickterm import browse, putty_tools
+from quickterm import browse, putty_tools, shells
 from quickterm.api.common import asdict, checked_dir, read_json, resolve_request
 
 if TYPE_CHECKING:
@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 FILE_READ_CAP = 512 * 1024
 _CHALLENGE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+
+
+def _windows() -> bool:
+    return os.name == "nt"
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -201,10 +205,22 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         # The PuTTY tools stay off PATH here: the elevated instance resolves
         # the spec once more and appends them itself.
         resolved = await resolve_request(ctx, body, append_tools=False)
+        if resolved.remote is not None:
+            # Elevation would only make the local ssh client run as
+            # administrator; the shell on the host is the same either way.
+            raise HTTPException(400, "administrator terminals are not available on a remote workspace")
+        cmd, args, cwd = resolved.cmd, resolved.args, resolved.cwd
+        if resolved.wrap is not None:
+            # An agent runs inside the shell here too; the elevated instance
+            # adds no hooks, so the wrapped command is final.
+            try:
+                cmd, args, cwd = shells.wrap(resolved.wrap, cmd, args, cwd)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         spec = {
-            "cmd": resolved.cmd,
-            "args": resolved.args,
-            "cwd": resolved.cwd,
+            "cmd": cmd,
+            "args": args,
+            "cwd": cwd,
             "env": resolved.env,
             "name": resolved.name or resolved.label,
         }
@@ -220,24 +236,80 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(500, str(exc)) from exc
         return {"launched": True}
 
+    def _may_download() -> bool:
+        # Never in the elevated instance: an administrator process must not
+        # run an installer a normal process could have swapped on disk.
+        return _windows() and not ctx.elevated
+
     @app.get("/api/update")
     async def update_check(force: bool = False) -> dict:
         update = importlib.import_module("quickterm.update")  # stubbable in tests
         try:
             # network probe: keep it off the event loop
-            return await asyncio.to_thread(update.check, force)
+            result = await asyncio.to_thread(update.check, force)
         except Exception as exc:
             raise HTTPException(502, f"update check failed: {exc}") from exc
+        # Read at every check, so a Settings save applies to the next one.
+        if (
+            result.get("installable")
+            and _may_download()
+            and getattr(cfg, "update_check", True)
+            and getattr(cfg, "update_auto_download", True)
+        ):
+            try:
+                update.start_download()
+            except ValueError:
+                pass
+        return result
+
+    @app.get("/api/update/status")
+    def update_status() -> dict:
+        update = importlib.import_module("quickterm.update")
+        if ctx.elevated:
+            return {**update.status(), "state": "idle"}
+        return update.status()
+
+    @app.post("/api/update/download")
+    async def update_download() -> Response:
+        update = importlib.import_module("quickterm.update")
+        if not _may_download():
+            raise HTTPException(400, "in-app update is not available in this instance")
+        try:
+            result = await asyncio.to_thread(update.check, False)
+        except Exception as exc:
+            raise HTTPException(502, f"update check failed: {exc}") from exc
+        if not result.get("installable"):
+            raise HTTPException(400, "no installable update is available")
+        try:
+            update.start_download()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return Response(status_code=204)
 
     @app.post("/api/update/install")
     async def update_install() -> dict:
-        update = importlib.import_module("quickterm.update")  # stubbable in tests
+        update = importlib.import_module("quickterm.update")
+        if not _may_download():
+            raise HTTPException(400, "in-app update is not available in this instance")
         try:
-            return await asyncio.to_thread(update.download_and_run)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(502, f"update install failed: {exc}") from exc
+            # Hashes up to 200 MB and starts processes: off the loop.
+            return await asyncio.to_thread(update.install)
+        except update.UpdateNotReady as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Setup could not be started: {exc}") from exc
+
+    @app.post("/api/update/restart")
+    async def update_restart() -> dict:
+        update = importlib.import_module("quickterm.update")
+        if not _may_download():
+            raise HTTPException(400, "in-app update is not available in this instance")
+        try:
+            return await asyncio.to_thread(update.restart)
+        except update.UpdateNotReady as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"QuickTerm could not be started: {exc}") from exc
 
     @app.post("/api/open")
     async def open_target(request: Request) -> dict:
@@ -367,7 +439,7 @@ def _terminal_inventory() -> dict:
     program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
     pwsh_candidates = [program_files / "PowerShell" / "7" / "pwsh.exe"]
     pwsh_candidates.extend(sorted((program_files / "PowerShell").glob("*/pwsh.exe"), reverse=True))
-    shells = [
+    shells_found = [
         (
             "claude-code",
             "Claude Code",
@@ -408,7 +480,7 @@ def _terminal_inventory() -> dict:
         ("nushell", "Nushell", _first_executable("nu.exe")),
     ]
     distributions: list[str] = []
-    wsl = next((exe for type_id, _label, exe in shells if type_id == "wsl"), None)
+    wsl = next((exe for type_id, _label, exe in shells_found if type_id == "wsl"), None)
     if wsl:
         try:
             result = subprocess.run(
@@ -429,7 +501,7 @@ def _terminal_inventory() -> dict:
             ]
         except (OSError, subprocess.SubprocessError):
             pass
-    pwsh = next(exe for type_id, _label, exe in shells if type_id == "powershell-core")
+    pwsh = next(exe for type_id, _label, exe in shells_found if type_id == "powershell-core")
     types = [
         {
             "id": type_id,
@@ -437,16 +509,20 @@ def _terminal_inventory() -> dict:
             "executable": executable,
             "available": executable is not None,
         }
-        for type_id, label, executable in shells
+        for type_id, label, executable in shells_found
     ]
     types.insert(1, _codex_entry())
     types += _ssh_entries(
         _optional_str(putty_tools.plink_path()), _optional_str(putty_tools.psftp_path()), windows=True
     )
+    git_bash = next(exe for type_id, _label, exe in shells_found if type_id == "git-bash")
     return {
         "types": types + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
         "wsl_distributions": distributions,
         "installs": [] if pwsh else [_powershell_install()],
+        "shells": shells.entries(
+            windows=True, git_bash=git_bash is not None, distributions=distributions
+        ),
     }
 
 
@@ -510,4 +586,7 @@ def _posix_inventory() -> dict:
         })
     types += _ssh_entries(None, None, windows=False)
     types.append({"id": "custom", "label": "Custom command", "executable": None, "available": True})
-    return {"types": types, "wsl_distributions": [], "installs": []}
+    return {
+        "types": types, "wsl_distributions": [], "installs": [],
+        "shells": shells.entries(windows=False),
+    }

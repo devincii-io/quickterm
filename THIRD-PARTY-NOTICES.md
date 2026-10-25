@@ -43,6 +43,14 @@ contributors); built from Microsoft's Windows Terminal / Console repository
 (https://github.com/microsoft/terminal), copyright (c) Microsoft
 Corporation, released under the MIT License.
 
+## highlight.js (frontend/vendor/highlight.min.js)
+
+highlight.js 11.11.1, the common-languages build from the
+`@highlightjs/cdn-assets` release (https://github.com/highlightjs/highlight.js),
+copyright (c) 2006 Ivan Sagalaev and other contributors, released under the
+BSD 3-Clause License. The full licence text ships next to it as
+`frontend/vendor/highlight-LICENSE.txt`.
+
 ## Terminal colour themes
 
 The built-in themes in `quickterm/frontend/js/themes.js` reproduce the colour

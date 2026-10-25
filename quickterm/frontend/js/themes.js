@@ -404,8 +404,8 @@ export function getTheme(id, custom = {}) {
   };
 }
 
-// The workspace colours: one per open view, taken from the theme's own ANSI
-// hues so a view frame reads as part of the palette (workspace_views.js).
+// The workspace colours, taken from the theme's own ANSI hues so an open
+// workspace's sidebar dot reads as part of the palette (workspace_views.js).
 export const VIEW_COLOR_KEYS = ["yellow", "blue", "green", "magenta", "red", "cyan"];
 
 // Every CSS custom property applyChromeTheme() writes, for the theme `id`.

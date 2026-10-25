@@ -1,13 +1,13 @@
 // The window's own document. It hosts no workspace, no layout, no autosave
 // and no terminal. It owns what the whole window shares: the sidebar, the
 // palette and the panels, the launch loop, the settings watcher, the theme,
-// the update check, the setup tour and the error banner, plus the stage of
-// workspace views (workspace_views.js). Every workspace, scratch included,
-// is one of those views.
+// the update check, the setup tour and the error banner, plus the stage
+// (workspace_views.js), which shows one workspace view at a time. Every
+// workspace, scratch included, is one of those views.
 //
 // The palette, the panels and the sidebar talk to one app object
 // (`chromeApp`). Members that concern the whole window are answered here;
-// everything else goes to the active view's app; with no view open a small
+// everything else goes to the shown view's app; with no view open a small
 // facade answers, and an action that needs a terminal opens a scratch view
 // first.
 
@@ -22,7 +22,12 @@ import { closeMenu } from "./menu.js";
 import { acceptConfirm, closeConfirm } from "./confirm_popover.js";
 import { setupNeeded } from "./setup.js";
 import { watchGlobalSettings } from "./global_settings.js";
-import { WorkspaceViews, viewArrangementStore } from "./workspace_views.js";
+import { WorkspaceViews, openViewsStore, workspaceSlots } from "./workspace_views.js";
+import { RecentTerminals } from "./recent_terminals.js";
+import { createSwitcher } from "./switcher.js";
+import { createRightPanel } from "./right_panel.js";
+import { CMD_PROMPT_MAX, PROMPT_MAX, SCRATCH_PANEL_NAME, cmdSafe, panelShows } from "./right_panel_model.js";
+import { markNavToggle } from "./sidebar_dom.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import {
@@ -38,7 +43,8 @@ import { createTerminalActions } from "./terminal_actions.js";
 import { createTerminalRouting, sessionOwner } from "./shell_routing.js";
 import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
-import { createWorkspaceActions, createWorktreeWorkspace, validateWorkspaceName } from "./workspace_actions.js";
+import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
+import { createRemoteWorkspace } from "./remote_workspace.js";
 
 const $ = (id) => document.getElementById(id);
 const noop = () => {};
@@ -52,7 +58,7 @@ export const SHELL_MEMBERS = Object.freeze([
   "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal", "moveTerminalHere",
   "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals", "setupTour",
   "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme",
-  "deleteWorkspace", "revealSearchResult",
+  "deleteWorkspace", "revealSearchResult", "cycleWorkspace", "showRightPanel",
 ]);
 
 // The app object the palette, the panels and the sidebar see.
@@ -98,7 +104,12 @@ export async function bootShell() {
   if (state.cfg.elevated) document.body.classList.add("elevated");
 
   // ---- this window in the registry: registered, primary, claims nothing ----
-  const refresh = () => sidebar.refreshSoon();
+  // The right panel follows the shown workspace; a switch reaches it here.
+  let rightPanel = null;
+  const refresh = () => {
+    sidebar.refreshSoon();
+    rightPanel?.follow();
+  };
   const registry = createWindowRegistry({
     api, state, identity, showError,
     cancelWorkspaceSave: noop,
@@ -109,21 +120,24 @@ export async function bootShell() {
   registry.startWindowHeartbeat();
 
   // ---- the stage ----
-  // Only the window the user started keeps its tiling across a restart.
-  // localStorage is shared by every window on this origin, so a second
-  // window (opened on a workspace of its own) must neither restore it nor
-  // write over it.
-  const keepsViewArrangement = identity.workspace === undefined && state.windowIsPrimary;
+  // Only the window the user started keeps its open workspaces across a
+  // restart. localStorage is shared by every window on this origin, so a
+  // second window (opened on a workspace of its own) must neither restore
+  // them nor write over them.
+  const keepsOpenViews = identity.workspace === undefined && state.windowIsPrimary;
   const views = new WorkspaceViews({
-    fit: () => { for (const view of views.views()) views.appFor(view)?.fitAll?.(); },
+    fit: () => views.appFor(views.active)?.fitAll?.(),
     error: showError,
-    store: keepsViewArrangement ? viewArrangementStore() : null,
+    store: keepsOpenViews ? openViewsStore() : null,
     newScratch: () => newScratchView(),
     parentId: () => state.windowId,
-    reservedNames: () => state.workspaceNames,
   });
   window.quicktermViews = views;
   const activeApp = () => views.appFor(views.active);
+  // The terminals focused last, for Ctrl+Tab (switcher below).
+  const recent = new RecentTerminals();
+  const focusedTerminal = () => (views.active ? activeApp()?.focusedSessionId?.() || null : null);
+  const noteFocus = () => recent.note(focusedTerminal());
   const eachViewDocument = () => views.views()
     .map((view) => view.frame?.contentWindow?.quicktermView)
     .filter(Boolean);
@@ -133,7 +147,11 @@ export async function bootShell() {
   async function refreshFolders() {
     const entries = await Promise.all(state.workspaceNames.filter((name) => !isScratchWorkspace(name)).map(async (name) => {
       const saved = await workspace.details(name).catch(() => null);
-      return [name, { path: saved?.path || null, pathExists: saved ? saved.path_exists !== false : null }];
+      return [name, {
+        path: saved?.path || null, pathExists: saved ? saved.path_exists !== false : null,
+        // A remote workspace's git facts come with it (cached over ssh).
+        host: saved?.host || null, git: saved?.host ? saved.git || null : null,
+      }];
     }));
     folders.clear();
     for (const [name, folder] of entries) folders.set(name, folder);
@@ -144,14 +162,15 @@ export async function bootShell() {
   async function openWorkspace(name) {
     return Boolean(await views.open(name || null));
   }
+  // The window's one scratch view, opened when it is not open yet.
   async function newScratchView() {
     return Boolean(await views.open(null));
   }
-  // True when no view of this window shows `name` any more. A label only
-  // names a scratch view, and never when it is also a saved workspace's name.
+  // True when no view of this window shows `name` any more. "scratch" names
+  // the scratch view, and never when it is also a saved workspace's name.
   async function closeWorkspaceView(name) {
     const view = views.viewForWorkspace(name)
-      || (state.workspaceNames.includes(name) ? null : views.scratchViewLabelled(name));
+      || (name === "scratch" && !state.workspaceNames.includes(name) ? views.scratchView() : null);
     return view ? views.close(view) : true;
   }
   let lastActionError = null;
@@ -221,7 +240,10 @@ export async function bootShell() {
     removeSessionsFromSavedWorkspaces: (ids) => actions.removeSessionsFromSavedWorkspaces(ids),
     markSeen: (id) => sidebar.markSeen(id),
     refreshSoon: () => refresh(),
-    forgetSession: (id) => sidebar.forget(id),
+    forgetSession: (id) => {
+      recent.drop(id);
+      sidebar.forget(id);
+    },
     publishKilled: (ids) => {
       try {
         localStorage.setItem(KILLED_SESSIONS_KEY, JSON.stringify({ ids, nonce: `${Date.now()}:${Math.random()}` }));
@@ -297,6 +319,10 @@ export async function bootShell() {
       try { return await deleteWorkspace(name); } catch (_) { return false; }
     },
     revealSearchResult,
+    // The next (1) or previous (-1) open workspace in sidebar order.
+    cycleWorkspace: (delta) => views.cycle(delta),
+    // The palette's "files", "changes" and "pull request" rows.
+    showRightPanel: (tab) => rightPanel?.show(tab),
   };
 
   // With no view open, the palette and the panels still need answers. The
@@ -335,10 +361,6 @@ export async function bootShell() {
     ),
     openNewWindow: registry.openNewWindow,
     explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
-    canShowWorkspaceBeside: () => true,
-    openWorkspaceBeside: (name) => views.open(name),
-    focusShownWorkspace: (name) => views.focusWorkspace(name),
-    shownViews: () => views.list(),
     setWorkspaceFolder: actions.setWorkspaceFolder,
     setWorkspaceAppearance: actions.setWorkspaceAppearance,
     killWorkspaceSession: actions.killWorkspaceSession,
@@ -371,9 +393,9 @@ export async function bootShell() {
     moveSessionHere: viaView("moveSessionHere"),
     createWorkspaceHere: async () => false,
     saveWorkspace: async () => "Open a workspace view first.",
-    createWorktree: (from, branch) => createWorktreeWorkspace({
-      api, from, branch, showError, onWorkspacesChanged,
-      openView: (name) => views.open(name), appFor: (view) => views.appFor(view),
+    checkRemoteFolder: (host, path) => api.checkRemoteFolder(host, path),
+    createRemoteWorkspace: (host, path) => createRemoteWorkspace({
+      api, host, path, onWorkspacesChanged, openView: (name) => views.open(name),
     }),
   });
   const chromeApp = shellApp({ shell, facade, activeApp });
@@ -400,7 +422,12 @@ export async function bootShell() {
     showError, clearError,
     scratchLabels: new Map(),
     ownsKeyboard: () => focusOwners().length > 0,
-    refreshSoon: () => refresh(),
+    // Every focus change in a view and every view shown comes through here,
+    // which is when the recent-terminals list learns the focused terminal.
+    refreshSoon: () => {
+      noteFocus();
+      refresh();
+    },
     settingsEvents,
     get selectedTerminal() { return state.selectedTerminal; },
     set selectedTerminal(choice) { state.selectedTerminal = choice; },
@@ -427,6 +454,7 @@ export async function bootShell() {
     api, state, views, panels, palette, folders,
     actions: {
       newTerminal: () => chromeApp.newTerminal(),
+      toggleRightPanel: () => rightPanel?.toggle(),
       runProfile: (profile) => chromeApp.runProfile(profile),
       runSystem: (choice) => chromeApp.runSystemTerminal(choice),
       install: (choice) => chromeApp.installShell(choice),
@@ -463,11 +491,103 @@ export async function bootShell() {
         panels.close();
         palette.openPalette("@");
       },
-      sidebarResized: () => setTimeout(() => views.layout({ animate: false }), 160),
+      sidebarResized: () => setTimeout(() => views.fit(), 160),
       handBack: () => views.focusView(views.active),
     },
   });
   sidebar.init();
+
+  // ---- the window's own keys: workspaces by number, recent terminals ----
+  // Views reach these through quicktermChrome.windowKeys (keys.js), so a key
+  // pressed in a terminal does the same as one pressed in the sidebar.
+  const sessionById = (id) => (sidebar.sessions() || []).find((session) => session?.id === id) || null;
+  const switcher = createSwitcher({
+    recent,
+    current: focusedTerminal,
+    // A terminal the session list does not know yet (just started) counts
+    // while a pane shows it; one the list reports finished is dropped.
+    alive: (id) => {
+      const session = sessionById(id);
+      return session ? session.alive !== false : Boolean(sidebar.context().attached[id]);
+    },
+    rows: (ids) => {
+      const terminals = new Map(liveTerminals().map((item) => [item.session.id, item]));
+      const colors = new Map(views.list().map((item) => [item.workspace, item.color]));
+      const current = focusedTerminal();
+      return ids.map((id) => {
+        const item = terminals.get(id);
+        const owner = item?.workspace || sidebar.context().attached[id] || null;
+        return {
+          id,
+          name: item?.session.name || sessionById(id)?.name || "terminal",
+          where: item?.label || (owner ? workspaceLabel(owner) : "unassigned"),
+          color: owner ? colors.get(owner) || null : null,
+          current: id === current,
+        };
+      });
+    },
+    choose: (id) => {
+      const session = sessionById(id);
+      if (session) reported(routing.activateTerminal)(session);
+      else views.focusSession(id);
+    },
+    handBack: () => views.focusView(views.active),
+  });
+  // ---- the right panel: files, changes and the pull request ----
+  // "Fix with Claude" starts Claude Code in that workspace with the prompt,
+  // in its view. cmd.exe would re-parse the prompt's newlines and symbols, so
+  // under that shell it goes once more in a flattened form.
+  // `build(max)` makes the prompt in at most `max` characters, so the cmd
+  // retry trims the log tails rather than cutting the end off.
+  async function fixWithClaude(name, build) {
+    const scratch = name === SCRATCH_PANEL_NAME;
+    const where = scratch ? { cwd: state.scratchRoot || undefined } : { workspace: name };
+    const spawn = (text) => api.createSession({ profile: "claude-code", agent_mode: "new", prompt: text, ...where });
+    let info;
+    try {
+      info = await spawn(build(PROMPT_MAX));
+    } catch (error) {
+      if (!/cmd\.exe/.test(error?.detail || "")) throw error;
+      info = await spawn(cmdSafe(build(CMD_PROMPT_MAX)));
+    }
+    const view = await views.open(scratch ? null : name);
+    const app = view ? views.appFor(view) : null;
+    if (!app?.attachSession(scratch ? info : { ...info, workspace: name })) {
+      showError("Claude Code started, but its terminal could not be shown. Find it in the sidebar.");
+      return false;
+    }
+    refresh();
+    return true;
+  }
+  rightPanel = createRightPanel({
+    views,
+    // The scratch view has a folder too; the panel's routes know it by a
+    // reserved name.
+    shownWorkspace: () => {
+      const name = views.active ? views.workspaceOf(views.active) : null;
+      if (!name) return null;
+      return isScratchWorkspace(name) ? SCRATCH_PANEL_NAME : name;
+    },
+    details: (name) => (name === SCRATCH_PANEL_NAME
+      ? { path: state.scratchRoot || null, host: null }
+      : workspace.details(name)),
+    activeApp,
+    fixWithClaude,
+    focusBack: () => views.focusView(views.active),
+    fit: () => views.fit(),
+    showError,
+    // The left footer's "right panel" icon is on while the panel shows.
+    onMode: (mode) => markNavToggle($("launcher"), "right panel", panelShows(mode)),
+  });
+
+  const windowKeys = {
+    toggleRightPanel: () => rightPanel.toggle(),
+    showWorkspace: (n) => views.showSlot(workspaceSlots(sidebar.groups(), views.list().map((item) => item.workspace)), n),
+    cycleWorkspace: (delta) => views.cycle(delta),
+    recentTerminals: (delta) => switcher.step(delta),
+    ctrlReleased: () => switcher.release(),
+  };
+  window.quicktermChrome.windowKeys = windowKeys;
 
   // ---- the keyboard, while the shell itself has it (sidebar, panels) ----
   // Any overlay holding the keyboard here (palette, panel, menu, a sidebar
@@ -504,6 +624,7 @@ export async function bootShell() {
     fontBigger: () => chromeApp.fontBigger(),
     fontSmaller: () => chromeApp.fontSmaller(),
     fontReset: () => chromeApp.fontReset(),
+    ...windowKeys,
   });
   $("app-error-close").addEventListener("click", () => {
     clearError();
@@ -547,10 +668,12 @@ export async function bootShell() {
   // ---- what the window opens on ----
   // A failed GET /api/workspaces at boot (a backend still starting, one 500)
   // says nothing about which workspaces exist. Reporting every stored view as
-  // missing persisted an empty arrangement over the real one; with the list
-  // unknown each view's own claim and restore decide instead.
+  // missing persisted an empty list over the real one; with the list unknown
+  // each view's own claim and restore decide instead.
   const listKnown = loadedWorkspaces !== null;
   const exists = (name) => !listKnown || state.workspaceNames.includes(name);
+  // A reload: the previous page's views may still hold their claims.
+  await views.releaseLeftovers();
   let restored = null;
   if (identity.workspace !== undefined) {
     // A second window, asked for one workspace or for scratch.
@@ -561,12 +684,12 @@ export async function bootShell() {
       rememberedWorkspace: storedScratchActive() ? null : storedWorkspace(),
     });
   }
-  // Explorer's "Open QuickTerm here": a scratch view whose first terminal
-  // starts in that folder, beside whatever came back.
+  // Explorer's "Open QuickTerm here": a terminal in that folder, in the
+  // scratch view (opened first when it did not come back).
   if (openDir) await views.open(null, { cwd: openDir });
   if (!views.views().length) {
     // The workspace 3.x remembered, read only until this window has stored
-    // an arrangement of its own.
+    // a list of its own.
     const remembered = identity.workspace === undefined && !restored?.stored ? storedWorkspace() : null;
     const usable = remembered && !isScratchWorkspace(remembered) && exists(remembered);
     if (!usable || !(await views.open(remembered))) {
@@ -578,6 +701,6 @@ export async function bootShell() {
   claimLaunchLoop();
   refreshFolders();
   if (cachedInventory) configSync.refreshCachedInventory();
-  watchUpdates({ api, state, panels });
+  watchUpdates({ state, handBack: () => views.focusView(views.active) });
   if (setupNeeded(state.profiles)) panels.show("setup");
 }

@@ -26,6 +26,15 @@ export function setLabel(button, title) {
   setAttrs(button, { title, "aria-label": title });
 }
 
+// A footer icon that switches something on and off (the right panel): it
+// shows as on while that thing shows. `root` is the sidebar element.
+export function markNavToggle(root, label, on) {
+  const button = root?.querySelector?.(`.sidebar-nav-button[data-nav="${label}"]`);
+  if (!button) return false;
+  button.setAttribute("aria-pressed", String(Boolean(on)));
+  return true;
+}
+
 // A click synthesised by Enter or Space has no pointer behind it.
 export function fromKeyboard(event) {
   return event?.detail === 0;

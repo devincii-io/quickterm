@@ -29,7 +29,6 @@
 #app > .app-error { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); width: min(760px, calc(100vw - 32px)); border: 1px solid var(--danger); border-radius: 5px; }
 #app-error-text { overflow-wrap: anywhere; }
 body.embedded #app > .app-error { display: none; }
-.dashboard .workspace-folder-editor .logo-picker { flex-basis: 100%; width: 100%; }
 @media (max-width: 600px) {
   .connection-fields.two-column { grid-template-columns: 1fr; }
 }

@@ -111,7 +111,8 @@ async def resolve_request(
     # inheriting the source pane's cwd). Profiles contribute nothing here.
     request_cwd = cwd if cwd and cwd.strip() else None
     root = None
-    if request_cwd is None:
+    remote = await asyncio.to_thread(launch.workspace_target, workspace_name)
+    if request_cwd is None and remote is None:
         root = await asyncio.to_thread(launch.workspace_start, workspace_name)
     try:
         return await asyncio.to_thread(
@@ -130,6 +131,9 @@ async def resolve_request(
                 request_cwd=request_cwd,
                 workspace_root=root,
                 append_tools=append_tools,
+                shell=body.get("shell"),
+                prompt=body.get("prompt"),
+                remote=remote,
             )
         )
     except launch.LaunchError as exc:

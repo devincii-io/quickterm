@@ -567,7 +567,10 @@ def sessions_at_risk(manager: Any) -> list[dict[str, Any]] | None:
 
 
 def attention_balloon(name: str, kind: str, text: str | None) -> tuple[str, str]:
-    """Title and body of the tray balloon for a terminal that wants the user."""
+    """Title and body of the tray balloon for a terminal that wants the user,
+    or for an agent that finished its turn (kind "done")."""
+    if kind == "done":
+        return f"{name or 'An agent'} finished", text or "Its turn is done."
     title = f"{name or 'A terminal'} needs you"
     if text:
         body = text
@@ -578,6 +581,35 @@ def attention_balloon(name: str, kind: str, text: str | None) -> tuple[str, str]
     else:
         body = "It is waiting for you."
     return title, body
+
+
+def notice_actions(
+    mode: str, *, in_front: bool, window_visible: bool, has_tray: bool, hidden_only: bool
+) -> tuple[bool, bool]:
+    """``(flash, balloon)`` for one notice, from Settings > Notifications.
+
+    Nothing while a QuickTerm window is in front: the terminal is on screen
+    or one click away in the sidebar, which already shows the state. "flash"
+    flashes the visible window's taskbar button and nothing else. "notify"
+    flashes it too and shows a Windows notification from the tray icon; with
+    no visible window it is the notification alone, and only when every
+    window is in the tray (``hidden_only``), since another visible window
+    would show the sidebar.
+    """
+    if in_front or mode not in ("flash", "notify"):
+        return False, False
+    flash = window_visible
+    balloon = mode == "notify" and has_tray and (window_visible or hidden_only)
+    return flash, balloon
+
+
+def play_notification_sound() -> None:
+    """The Windows notification sound, for Settings > Notifications > Sound."""
+    if os.name != "nt":
+        return
+    import winsound
+
+    winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
 
 # ---------------------------------------------------------------------------
@@ -1013,32 +1045,49 @@ class Host:
 
     # ---- attention -----------------------------------------------------------
 
-    def notify_attention(self, session_id: str, name: str, kind: str, text: str | None) -> None:
+    def notify_attention(
+        self, session_id: str, name: str, kind: str, text: str | None,
+        mode: str = "notify", sound: bool = False,
+    ) -> None:
         """The server's `notify` hook. Called on the loop; returns at once.
 
         Shell_NotifyIconW talks to Explorer and stalls with it, and no terminal
         may stall with Explorer, so the Win32 calls run on a thread of their own.
         """
         threading.Thread(
-            target=self.notify_now, args=(name, kind, text), name="attention-notify", daemon=True
+            target=self.notify_now, args=(name, kind, text),
+            kwargs={"mode": mode, "sound": sound}, name="attention-notify", daemon=True,
         ).start()
 
-    def notify_now(self, name: str, kind: str, text: str | None) -> None:
+    def notify_now(
+        self, name: str, kind: str, text: str | None, *, mode: str = "notify", sound: bool = False
+    ) -> None:
         if self.quitting.is_set():
             return
         try:
             from quickterm import tray as tray_mod
 
             pids = self.viewer_pids()
-            # Someone is looking at QuickTerm already; the sidebar says it.
-            if pids and tray_mod.foreground_is_ours(pids=pids):
-                return
-            primary = tray_mod.own_window(self.base_title, pids=pids) if pids else None
-            if primary is not None and primary[1]:
-                tray_mod.flash_window(primary[0])
-            elif self.tray is not None and self.window_count() <= 1:
+            in_front = bool(pids) and tray_mod.foreground_is_ours(pids=pids)
+            primary = None
+            if pids and not in_front:
+                primary = tray_mod.own_window(self.base_title, pids=pids)
+            flash, balloon = notice_actions(
+                mode,
+                in_front=in_front,
+                window_visible=primary is not None and primary[1],
+                has_tray=self.tray is not None,
                 # No window, or only a hidden primary: everything is in the tray.
-                self.tray.balloon(*attention_balloon(name, kind, text))
+                hidden_only=self.window_count() <= 1,
+            )
+            if flash and primary is not None:
+                tray_mod.flash_window(primary[0])
+            if balloon and self.tray is not None:
+                # The tray balloon makes its own sound unless told not to; the
+                # Sound setting decides, through one sound of our own.
+                self.tray.balloon(*attention_balloon(name, kind, text), quiet=True)
+            if sound and (flash or balloon):
+                play_notification_sound()
         except Exception:
             log.debug("attention notification failed", exc_info=True)
 

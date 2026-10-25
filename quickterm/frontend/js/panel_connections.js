@@ -12,7 +12,6 @@ import {
   comboInput, configChoice, configEmpty, configProblems, configToggle,
 } from "./panel_settings_kit.js";
 import { itemDirty, renderConfigList } from "./config_list.js";
-import { renderAgentFields } from "./panel_agent_fields.js";
 import { shortcutInput, shortcutWarnings } from "./shortcut_input.js";
 import {
   agentConflicts, commandLineText, defaultArgsFor, fitsCommandLine,
@@ -44,6 +43,10 @@ export const CONNECTION_CATALOG = [
   { id: "vnc", label: "VNC", group: "Desktop", cmd: "" },
 ];
 
+// Since 4.3 a profile is a connection, a custom command, or a shell with a
+// start command. Plain shells are in the "+" menu and the agents are
+// settings, so neither is offered here.
+const PROFILE_GROUPS = ["Shells", "Remote", "Devices", "Containers", "Desktop"];
 const DESKTOP = new Set(["rdp", "vnc"]);
 const CONTAINERS = new Set(["docker", "podman", "kubernetes"]);
 
@@ -97,7 +100,12 @@ export function connectionProblems(profile, profiles) {
   if (CONTAINERS.has(kind) && !options.target?.trim()) errors.push("Enter a container or pod.");
   if (kind === "serial" && !options.device?.trim()) errors.push("Enter a serial device.");
   if (["custom", "vnc"].includes(kind) && !profile.cmd?.trim()) errors.push("Choose a client executable.");
-  errors.push(...agentConflicts(kind, profile.agent));
+  if (isAgentType(kind)) errors.push("Claude Code and Codex are set up under Agents, not as a terminal.");
+  else if (isShellKind(kind) && !profile.start_command?.trim()) {
+    errors.push("Enter a start command. The plain shell is already in the + menu.");
+  } else if (isShellKind(kind) && AGENT_START.test(profile.start_command)) {
+    errors.push("Claude Code and Codex start from the + menu; set them up under Agents.");
+  }
   for (const [value, label, low, high] of [
     [profile.ssh_port, "Port", 1, 65535], [options.port, "Port", 1, 65535],
     [options.baud, "Baud rate", 50, 4000000], [options.width, "Width", 200, 16384], [options.height, "Height", 200, 16384],
@@ -108,6 +116,9 @@ export function connectionProblems(profile, profiles) {
   if (envError) errors.push(envError);
   return errors;
 }
+
+// A start command that only runs an agent: config.py refuses it on save.
+const AGENT_START = /^\s*["']?(?:[^\s"']*[\\/])?(?:claude|codex)(?:\.exe)?["']?(?:\s|$)/i;
 
 function inventoryEntry(inventory, id) {
   return inventory?.types?.find((item) => item.id === id) || null;
@@ -183,7 +194,7 @@ function sshHosts(panel) {
   return panel.sshHostsLoad;
 }
 
-function agentCatalog(panel) {
+export function agentCatalog(panel) {
   panel.agentCatalogLoad ||= Promise.resolve()
     .then(() => services(panel).getAgentCatalog?.())
     .catch(() => null);
@@ -193,8 +204,8 @@ function agentCatalog(panel) {
 function addMenuItems(panel, addProfile) {
   const inventory = panel.terminalInventory;
   const items = [];
-  for (const group of ["Shells", "Agents", "Remote", "Devices", "Containers", "Desktop"]) {
-    items.push({ heading: group });
+  for (const group of PROFILE_GROUPS) {
+    items.push({ heading: group === "Shells" ? "Shell with a start command" : group });
     for (const type of CONNECTION_CATALOG.filter((item) => item.group === group)) {
       const detected = inventoryEntry(inventory, type.id);
       items.push({
@@ -291,14 +302,13 @@ export function renderConnections(host) {
     onRemove: (profile) => {
       const at = cfg.profiles.indexOf(profile);
       if (at >= 0) cfg.profiles.splice(at, 1);
-      if (cfg.default_profile === profile.name) cfg.default_profile = "";
     },
     emptyState: () => {
       const add = this._button("Add a terminal", "primary-button compact");
       add.addEventListener("click", () => list.openAdd());
       return configEmpty({
         lead: "No terminals saved yet.",
-        body: "Every installed shell is already in the launcher. Save one here to give it a name, a start command, a shortcut, or to reach an agent, a server or a container.",
+        body: "Every installed shell, Claude Code and Codex are already in the + menu. Save a terminal here to reach a server, a container or a device, or to run a shell with a start command.",
         action: add,
       });
     },
@@ -379,17 +389,7 @@ function renderEditor(profile, pane, updateRow) {
     return { control, field: node };
   };
 
-  let previousName = profile.name;
-  text("Name", profile, "name", {
-    placeholder: "My terminal",
-    nullable: false,
-    typed: false,
-    onInput: () => {
-      // The default terminal is stored by name, so it follows a rename.
-      if (cfg.default_profile && cfg.default_profile === previousName) cfg.default_profile = profile.name;
-      previousName = profile.name;
-    },
-  });
+  text("Name", profile, "name", { placeholder: "My terminal", nullable: false, typed: false });
   text("Description", profile, "description", { placeholder: "What this terminal is for", nullable: false, typed: false });
 
   // Fields whose visibility follows the kind, which typing a command can change.
@@ -405,32 +405,7 @@ function renderEditor(profile, pane, updateRow) {
     if (distroField) distroField.hidden = kind !== "wsl";
   };
 
-  const modeHost = make("div", "settings-grid two-column connection-fields");
-  const agentAdvanced = make("div");
-
-  if (isAgentType(kind)) {
-    text("Executable", profile, "cmd", {
-      placeholder: kind === "codex" ? "codex" : "claude",
-      hint: "Empty means the one found on PATH.",
-      nullable: false,
-    });
-    const agentHost = make("div", "agent-fields");
-    agentHost.append(make("p", "config-detail-placeholder", "Loading options…"));
-    pane.append(agentHost);
-    agentCatalog(this).then((catalog) => {
-      if (this._configList?.selected?.() !== profile) return;
-      agentHost.textContent = "";
-      const type = catalog?.types?.find((item) => item.id === kind) || null;
-      renderAgentFields(agentHost, profile, type, {
-        modeHost,
-        advancedHost: agentAdvanced,
-        onChange: () => {
-          settle();
-          touched();
-        },
-      });
-    });
-  } else if (remote) {
+  if (remote) {
     renderSshFields.call(this, profile, kind, fields, { text, settle, touched });
   } else if (["telnet", "rdp", "vnc"].includes(kind)) {
     text("Host", connection, "host", { placeholder: "server.example.com" });
@@ -508,7 +483,6 @@ function renderEditor(profile, pane, updateRow) {
     fields.append(distroField);
   }
 
-  pane.append(modeHost);
 
   const behavior = make("div", "settings-grid two-column connection-fields");
   const warnings = make("div", "shortcut-warnings");
@@ -548,7 +522,6 @@ function renderEditor(profile, pane, updateRow) {
   // ---- Advanced: arguments, environment, start command ----
   const advanced = make("details", "config-advanced");
   advanced.append(make("summary", "", "Advanced"));
-  advanced.append(agentAdvanced);
   argsArea = make("textarea", "ui-input connection-args");
   argsArea.value = (profile.args || []).join("\n");
   argsArea.rows = 3;
@@ -562,7 +535,7 @@ function renderEditor(profile, pane, updateRow) {
     origin.args = [...lines];
     touched();
   });
-  argsField = this._field("Arguments, one per line", argsArea, isAgentType(kind) ? "Added after the options above." : "");
+  argsField = this._field("Arguments, one per line", argsArea);
   advanced.append(argsField);
   // Only the local shells run a start command (launch.resolve_profile); ssh
   // shows its remote command up front instead.
@@ -576,7 +549,7 @@ function renderEditor(profile, pane, updateRow) {
       touched();
     });
     startField = this._field("Start command", start, "Runs inside the shell and keeps it open.");
-    advanced.append(startField);
+    fields.append(startField);
   }
   advanced.append(renderEnvironment.call(this, profile, touched));
   advanced.open = Boolean(environmentError(profile.env));
@@ -719,7 +692,7 @@ function renderSshFields(profile, kind, fields, { text, settle, touched }) {
   }
 }
 
-function renderEnvironment(profile, touched) {
+export function renderEnvironment(profile, touched) {
   const box = make("div", "connection-environment-field");
   box.dataset.setting = "environment";
   box.append(make("span", "field-label", "Environment"));

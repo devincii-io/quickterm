@@ -1,120 +1,70 @@
-// The dashboard is built once and patched afterwards.
+// The workspace board: every saved workspace as a card in one of four
+// columns (CONTRACTS 4.3). It lives in the panel that used to be the
+// dashboard, opened by the same button, Alt+G and palette entry. Its second
+// tab, Agents, shows every agent session by where it is: needs you, working,
+// done, idle (panel_agents.js).
 //
-// It reloads itself every 5 s (panels.js owns the timer). It used to answer
-// that by emptying the panel body and rebuilding every node, which made the
-// panel unusable: a half-typed workspace name, an armed "Overwrite?", an open
-// folder editor and the folder picker's own captured <input> were all thrown
-// away mid-interaction. See render.js for the full story.
-//
-// So there are two phases, and they are strictly separated:
-//
-//   buildDashboard()  creates the skeleton and wires every event listener. It
-//                     runs when the panel first shows the dashboard, and again
-//                     only if another view has taken over the panel body.
-//   applyDashboard()  writes fresh data into that skeleton. It runs on every
-//                     refresh and must never replace a node the user can be
-//                     inside.
-//
-// Because listeners are wired once, they must not close over the data they
-// were built from. They read itemFor(node) (rows) or view.* (singletons), both
-// of which the apply phase keeps current.
+// Built once and patched afterwards, like every live panel (render.js): the
+// 5 s refresh must not take the search text, the focused card or a drag in
+// progress away. Listeners read itemFor(node) or the live view object, never
+// the data they were built from.
 
 import * as api from "./api.js";
-import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
-import { icon } from "./icons.js";
-import {
-  countPanes, folderPickerControl, formatBytes, formatUptime, layoutSessionIds, make,
-  shortPath,
-} from "./panel_shared.js";
-import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
-import { attentionText, sessionFolder } from "./launcher.js";
+import { isScratchWorkspace } from "./boot_context.js";
+import { BOARD_COLUMNS, boardCards, boardColumns, movedStatus, statusOf } from "./board_model.js";
+import { applyAgents, buildAgents, focusFirstAgent } from "./panel_agents.js";
+import { make } from "./panel_shared.js";
+import { itemFor, patchList, setAttrs, setClass, setText } from "./render.js";
 
-// A miniature of a workspace's split layout for its card.
-export function layoutPreview(layout) {
-  const build = (node) => {
-    if (!node || node.type !== "split") {
-      const pane = make("span", "workspace-preview-pane");
-      pane.append(make("i", "", node && node.profile ? node.profile : "terminal"));
-      return pane;
-    }
-    const split = make("span", `workspace-preview-split ${node.dir === "v" ? "vertical" : "horizontal"}`);
-    const ratio = Math.max(20, Math.min(80, Math.round((node.ratio || 0.5) * 100)));
-    const children = node.children || [];
-    const first = build(children[0]);
-    const second = build(children[1]);
-    first.style.flex = `${ratio} 1 0`;
-    second.style.flex = `${100 - ratio} 1 0`;
-    split.append(first, second);
-    return split;
-  };
-  const preview = make("div", "workspace-preview");
-  preview.append(build(layout));
-  return preview;
+// Same distance as a pane drag (layout.js): less is a click.
+const DRAG_START_PX = 6;
+const TAB_KEY = "quickterm.boardTab";
+const TABS = Object.freeze([
+  Object.freeze({ id: "workspaces", label: "Workspaces", placeholder: "Search workspaces",
+    aria: "Search workspaces by name, repo or branch" }),
+  Object.freeze({ id: "agents", label: "Agents", placeholder: "Search agents",
+    aria: "Search agents by what was asked or answered, workspace or branch" }),
+]);
+
+function loadTab() {
+  try {
+    const value = globalThis.localStorage?.getItem(TAB_KEY);
+    return TABS.some((tab) => tab.id === value) ? value : "workspaces";
+  } catch (_) {
+    return "workspaces";
+  }
 }
 
-// Sessions nobody claims are grouped under this label, which is also the signal
-// to the move/kill calls that there is no owning workspace to name.
-const UNASSIGNED = "Unassigned";
+function saveTab(value) {
+  try { globalThis.localStorage?.setItem(TAB_KEY, value); } catch (_) { /* per-viewer only */ }
+}
 
-// The four hero tiles. Labels are fixed, so only the numbers are ever written.
-const STAT_TILES = [
-  ["workspaces", "workspaces"],
-  ["current", "this workspace"],
-  ["live", "all live"],
-  ["memory", "host RAM"],
-];
-
-// Ceiling on the refresh lock a folder picker holds. The lock is a courtesy
-// now that a refresh is non-destructive, so a picker that never reports back
-// must not be able to pin the dashboard stale for the rest of the session.
-const PICKER_HOLD_CEILING_MS = 60000;
-
-// Per-node references, so the apply phase never has to query the DOM.
+const columnParts = new WeakMap();
 const cardParts = new WeakMap();
-const usageParts = new WeakMap();
-const rowParts = new WeakMap();
-const groupParts = new WeakMap();
-const profileParts = new WeakMap();
+const lineParts = new WeakMap();
 
-function padded(value) {
-  return String(value).padStart(2, "0");
-}
-
-// The shared folder picker disables its Browse button for as long as the
-// directory chooser is up, and a disabled button drops focus to <body>. That
-// is exactly why the old "pause while something in the panel has focus" guard
-// let the refresh run straight through a folder choice. Focus cannot answer
-// the question, so say it outright: take the lock on the way in and drop it
-// when Browse comes back.
-function holdRefreshWhilePicking(panel, field) {
-  const browse = field.querySelector("button");
-  if (!browse || typeof MutationObserver !== "function") return;
-  // Capture, because the picker stops the click from bubbling.
-  field.addEventListener("click", (event) => {
-    if (event.target !== browse && !browse.contains(event.target)) return;
-    const release = panel.holdDashboardRefresh();
-    const ceiling = setTimeout(release, PICKER_HOLD_CEILING_MS);
-    const observer = new MutationObserver(() => {
-      if (browse.disabled) return; // the chooser is still up
-      clearTimeout(ceiling);
-      observer.disconnect();
-      release();
-    });
-    observer.observe(browse, { attributes: true, attributeFilter: ["disabled"] });
-  }, true);
-}
-
-async function collect() {
-  const [names, sessions] = await Promise.all([
+async function collect(app) {
+  const [names, sessions, board] = await Promise.all([
     api.listWorkspaces().catch(() => null),
-    api.getSessions().catch(() => null),
+    api.getSessions({ metrics: false }).catch(() => null),
+    api.getBoard().catch(() => null),
   ]);
-  if (names == null) return { workspaces: null, sessions };
-  const workspaces = await Promise.all(names.map(async (name) => ({
-    name,
-    data: await api.getWorkspace(name).catch(() => null),
-  })));
-  return { workspaces, sessions };
+  const workspaces = names == null ? null : await Promise.all(
+    names.filter((name) => !isScratchWorkspace(name)).map(async (name) => {
+      const data = await api.getWorkspace(name).catch(() => null);
+      return { name, path: data?.path || null, git: data?.git || null, host: data?.host || null };
+    }),
+  );
+  // Who owns a terminal is the sidebar's answer (a pane on it, then a view's
+  // claim, then the backend's tag), so a card never disagrees with the list.
+  const owners = {};
+  const attached = {};
+  for (const entry of app.liveTerminals?.() || []) {
+    if (!entry?.session?.id) continue;
+    if (entry.workspace) owners[entry.session.id] = entry.workspace;
+    if (entry.attachedIn) attached[entry.session.id] = entry.attachedIn;
+  }
+  return { workspaces, sessions, status: board?.status || null, owners, attached };
 }
 
 export async function renderDashboard() {
@@ -123,609 +73,376 @@ export async function renderDashboard() {
   if (!mounted()) {
     this._dash = null;
     this.bodyEl.textContent = "";
-    this.bodyEl.append(make("div", "panel-loading", "Collecting your workspace…"));
+    this.bodyEl.append(make("div", "panel-loading", "Collecting your workspaces…"));
   }
   let data;
   try {
-    data = await collect();
+    data = await collect(this.app);
   } finally {
     this._dashLoading = false;
   }
   if (this.open !== "dashboard") return;
   if (!mounted()) {
-    // Either the first open, or Settings/Help owned the body while the data
-    // was in flight. Nothing here is worth preserving, so build fresh.
     this.bodyEl.textContent = "";
-    this._dash = buildDashboard.call(this);
+    this._dash = buildBoard(this);
     this.bodyEl.append(this._dash.root);
   }
-  applyDashboard.call(this, this._dash, data);
-  const reveal = this._revealWorkspace;
-  this._revealWorkspace = null;
-  if (reveal) revealWorkspaceCard(this, this._dash, reveal);
+  const view = this._dash;
+  if (this.headTools && this.headTools.firstChild !== view.tools) this.headTools.replaceChildren(view.tools);
+  // A failed fetch keeps the last good picture instead of blanking the board.
+  if (data.workspaces) view.workspaces = data.workspaces;
+  if (data.sessions) view.sessions = data.sessions;
+  if (data.status) view.status = { ...data.status, ...view.pending };
+  view.owners = data.owners;
+  view.attached = data.attached;
+  applyBoard(view);
+  applyAgents(view.agents, queryFor(view, "agents"));
 }
 
-// The sidebar's "Workspace settings" lands here: the card of that workspace,
-// scrolled into view with its folder and logo editor open.
-function revealWorkspaceCard(panel, view, name) {
-  const card = [...view.grid.children].find((node) => itemFor(node)?.name === name);
-  if (!card) return;
-  card.scrollIntoView?.({ block: "center" });
-  openFolderEditor(panel, card, cardParts.get(card).editFolder);
+function queryFor(view, tab) {
+  return tab === view.tab ? view.search.value : view.queries[tab];
 }
 
-function buildDashboard() {
-  const panel = this;
-  const root = make("div", "dashboard");
-  // ctx carries the per-refresh facts a row needs but does not own (which
-  // workspace is current, which sessions this window holds). The apply phase
-  // replaces it; the specs below read it when they run, never before.
-  const view = { root, ctx: {}, workspaces: null, sessions: null };
-
-  // Hero -------------------------------------------------------------------
-  const hero = make("div", "dashboard-hero");
-  const heroCopy = make("div", "hero-copy");
-  view.heroTitle = make("h2", "hero-title");
-  view.heroText = make("p", "hero-text");
-  heroCopy.append(make("span", "hero-kicker", "Workspace overview"), view.heroTitle, view.heroText);
-  const stats = make("div", "dashboard-stats");
-  view.stats = {};
-  for (const [id, label] of STAT_TILES) {
-    const tile = make("div", "dashboard-stat");
-    const value = make("strong");
-    tile.append(value, make("span", "", label));
-    stats.append(tile);
-    view.stats[id] = value;
+function selectTab(view, tab) {
+  if (!TABS.some((entry) => entry.id === tab)) return;
+  if (tab !== view.tab) {
+    view.queries[view.tab] = view.search.value;
+    view.tab = tab;
+    view.search.value = view.queries[tab] || "";
+    saveTab(tab);
   }
-  hero.append(heroCopy, stats);
-  root.append(hero);
+  const spec = TABS.find((entry) => entry.id === tab);
+  view.search.placeholder = spec.placeholder;
+  view.search.setAttribute("aria-label", spec.aria);
+  for (const [id, button] of view.tabButtons) {
+    const current = id === tab;
+    setAttrs(button, { "aria-selected": current ? "true" : "false", tabindex: current ? "0" : "-1" });
+    setClass(button, "active", current);
+  }
+  view.workspaceBoard.hidden = tab !== "workspaces";
+  view.agents.root.hidden = tab !== "agents";
+  setAttrs(view.root, { "data-tab": tab });
+}
 
-  // Terminal usage ---------------------------------------------------------
-  const usageSection = make("section", "dashboard-section usage-section");
-  const usageHeading = panel._sectionHeading(
-    "Terminal usage",
-    "Live host process-tree working set and sampled CPU. Figures are local estimates, not billing or enforcement data.",
-  );
-  view.killAll = panel._button("Kill all terminals…", "secondary-button danger-text");
-  view.killAll.addEventListener("click", () => {
-    const count = view.ctx.live.length;
-    const warning = `Stop ${count} live terminal${count === 1 ? "" : "s"} across all workspaces? Attached panes will close and unsaved shell work will be lost.`;
-    panel._confirmNear(view.killAll, warning, "Kill all", async () => {
-      const result = await panel.app.killAllSessions();
-      if (panel.open === "dashboard") panel._dashboard();
-      // "Remove only verified kills": a terminal the backend could not stop is
-      // still running, so it stays on screen and the confirmation says so.
-      if (result.failed) {
-        throw new Error(`${result.failed} terminal${result.failed === 1 ? "" : "s"} could not be stopped and remain visible.`);
-      }
+function buildBoard(panel) {
+  const root = make("div", "board");
+  const view = {
+    root, panel,
+    workspaces: [], sessions: [], status: {}, owners: {}, attached: {},
+    // Moves sent but not answered yet: a refresh that read the file before
+    // the PUT landed must not throw the card back for a moment.
+    pending: {},
+    drag: null,
+    columns: new Map(),
+  };
+
+  view.search = make("input", "ui-input board-search");
+  view.search.type = "search";
+  view.search.spellcheck = false;
+  // config-filter-input: Escape in a filled box clears it before a second one
+  // closes the sheet (panels.js sheetKeyRoute).
+  view.search.classList.add("config-filter-input");
+  view.search.addEventListener("input", () => {
+    if (view.tab === "agents") applyAgents(view.agents, view.search.value);
+    else applyBoard(view);
+  });
+  view.search.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (view.tab === "agents") focusFirstAgent(view.agents);
+      else view.workspaceBoard.querySelector(".board-card")?.focus();
+    }
+  });
+
+  // Two tabs beside the title, then the search: nothing else in the head.
+  const tabs = make("div", "board-tabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Board");
+  view.tabButtons = new Map();
+  for (const { id, label } of TABS) {
+    const button = make("button", "board-tab", label);
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.addEventListener("click", () => {
+      selectTab(view, id);
+      if (id === "agents") applyAgents(view.agents, view.search.value);
+      else applyBoard(view);
     });
+    view.tabButtons.set(id, button);
+    tabs.append(button);
+  }
+  tabs.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const ids = TABS.map((entry) => entry.id);
+    const next = ids[(ids.indexOf(view.tab) + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length];
+    view.tabButtons.get(next).click();
+    view.tabButtons.get(next).focus();
   });
-  usageHeading.append(view.killAll);
-  view.usageRows = make("div", "usage-rows");
-  view.usageEmpty = make("p", "detached-empty", "No live terminals to measure.");
-  const usageTable = make("div", "usage-table");
-  usageTable.append(view.usageRows, view.usageEmpty);
-  usageSection.append(usageHeading, usageTable);
-  root.append(usageSection);
+  view.tools = make("div", "board-tools");
+  view.tools.append(tabs, view.search);
 
-  view.usageSpec = {
-    key: (session) => session.id,
-    create: () => createUsageRow(),
-    update: (node, session) => updateUsageRow(node, session, view.ctx),
-  };
-
-  // Workspaces -------------------------------------------------------------
-  const wsSection = make("section", "dashboard-section workspace-section");
-  const wsHeading = panel._sectionHeading(
-    "Workspaces",
-    "A workspace is a folder plus the terminals you arranged in it.",
-  );
-  const saveForm = make("div", "save-workspace-form");
-  const saveInput = panel._textInput("", "Name this workspace");
-  // A workspace is a folder, so naming one asks for the folder in the same
-  // breath. Pre-filled with wherever the live layout already points, and never
-  // with the scratch root: suggestedWorkspaceFolder() offers the focused pane's
-  // real directory instead.
-  //
-  // These two inputs are created exactly once for the lifetime of the open
-  // panel. They are the nodes the folder picker captures before it awaits the
-  // chooser, so replacing them is what made picking a folder do nothing.
-  const suggested = panel.app.suggestedWorkspaceFolder ? panel.app.suggestedWorkspaceFolder() : null;
-  const folderInput = panel._textInput(suggested || "", "Folder for this workspace");
-  const folderField = folderPickerControl(folderInput, { label: "Choose the workspace folder" });
-  holdRefreshWhilePicking(panel, folderField);
-  const saveButton = panel._button("Save current", "primary-button");
-  const saveNote = make("p", "save-workspace-note");
-  let confirmOverwrite = null; // name armed for a second "really overwrite" click
-  const resetSaveForm = () => {
-    confirmOverwrite = null;
-    saveButton.textContent = "Save current";
-    saveNote.textContent = "";
-  };
-  const save = async () => {
-    const name = saveInput.value.trim();
-    const problem = panel.app.validateWorkspaceName
-      ? panel.app.validateWorkspaceName(name)
-      : (name ? null : "Give the workspace a name.");
-    if (problem) {
-      saveNote.textContent = problem;
-      saveInput.focus();
-      return;
-    }
-    // Overwriting a different existing workspace loses its layout, so ask once.
-    // The name list is read here rather than captured when the form was built,
-    // because the form outlives every refresh now.
-    const current = panel.app.currentWorkspace && panel.app.currentWorkspace();
-    const existing = new Set((view.workspaces || []).map((workspace) => workspace.name));
-    if (existing.has(name) && name !== current && confirmOverwrite !== name) {
-      confirmOverwrite = name;
-      saveButton.textContent = "Overwrite?";
-      saveNote.textContent = `"${name}" already exists. Save again to replace it.`;
-      return;
-    }
-    saveButton.disabled = true;
-    const failure = await panel.app.saveWorkspace(name, folderInput.value);
-    saveButton.disabled = false;
-    if (failure) {
-      saveNote.textContent = failure;
-      saveInput.focus();
-      return;
-    }
-    // The form used to be wiped by the rebuild that followed a save. It
-    // survives now, so clear it deliberately.
-    saveInput.value = "";
-    resetSaveForm();
-    if (panel.open === "dashboard") panel._dashboard();
-  };
-  saveButton.addEventListener("click", save);
-  saveInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") save();
-  });
-  saveInput.addEventListener("input", resetSaveForm);
-  saveForm.append(saveInput, folderField, saveButton);
-  wsHeading.append(saveForm, saveNote);
-
-  view.grid = make("div", "workspace-grid");
-  view.gridEmpty = make("div", "workspace-empty-card");
-  view.gridEmpty.append(
-    make("h3", "", "Your first workspace starts here"),
-    make("p", "", "Arrange your terminals, give the layout a name, then save it above."),
-  );
-  wsSection.append(wsHeading, view.grid, view.gridEmpty);
-  root.append(wsSection);
+  view.note = make("p", "board-note");
+  view.note.hidden = true;
+  const columns = make("div", "board-columns");
+  for (const { id, label } of BOARD_COLUMNS) {
+    const column = make("section", "board-column");
+    column.dataset.status = id;
+    const head = make("header", "board-column-head");
+    const mark = make("span", "board-status-icon");
+    mark.dataset.status = id;
+    mark.setAttribute("aria-hidden", "true");
+    const count = make("span", "board-column-count");
+    head.append(mark, make("h2", "board-column-title", label), count);
+    const list = make("div", "board-cards");
+    list.setAttribute("aria-label", label);
+    const empty = make("p", "board-empty", "Empty");
+    column.append(head, list, empty);
+    columns.append(column);
+    columnParts.set(column, { count, list, empty });
+    view.columns.set(id, column);
+  }
+  view.workspaceBoard = make("div", "board-workspaces");
+  view.workspaceBoard.append(view.note, columns);
+  view.agents = buildAgents(view);
+  root.append(view.workspaceBoard, view.agents.root);
+  view.tab = loadTab();
+  view.queries = { workspaces: "", agents: "" };
+  selectTab(view, view.tab);
 
   view.cardSpec = {
-    key: (workspace) => workspace.name,
-    create: (workspace, index) => createWorkspaceCard(panel, index),
-    update: (card, workspace, index) => updateWorkspaceCard(panel, card, workspace, index),
+    key: (card) => card.name,
+    create: () => createCard(view),
+    update: (node, card) => updateCard(node, card),
   };
-
-  // Detached sessions ------------------------------------------------------
-  const detachedSection = make("section", "dashboard-section detached-section");
-  const detachedHeading = panel._sectionHeading("Detached sessions", idleTimeoutCopy(panel));
-  view.detachedNote = detachedHeading.querySelector(".section-subtitle");
-  const groupHost = make("div", "detached-groups");
-  view.currentGroup = make("section", "detached-group current");
-  view.currentGroupTitle = make("h3");
-  view.currentGroupRows = make("div", "detached-group-rows");
-  view.currentGroup.append(view.currentGroupTitle, view.currentGroupRows);
-  view.otherGroups = make("details", "other-workspace-sessions");
-  view.otherSummary = make("summary");
-  view.otherGroupList = make("div", "other-group-list");
-  view.otherGroups.append(view.otherSummary, view.otherGroupList);
-  view.detachedEmpty = make("p", "detached-empty",
-    "Nothing is detached. Alt+D puts a terminal here without stopping it.");
-  groupHost.append(view.currentGroup, view.otherGroups, view.detachedEmpty);
-  detachedSection.append(detachedHeading, groupHost);
-  root.append(detachedSection);
-
-  view.rowSpec = {
-    key: (entry) => entry.session.id,
-    create: () => createSessionRow(panel),
-    update: (row, entry) => updateSessionRow(row, entry),
-  };
-  view.groupSpec = {
-    key: (group) => group.name,
-    create: () => createSessionGroup(),
-    update: (section, group) => {
-      const parts = groupParts.get(section);
-      setText(parts.heading, workspaceLabel(group.name));
-      patchList(parts.rows, group.sessions, view.rowSpec);
-    },
-  };
-
-  // Quick launch -----------------------------------------------------------
-  const lower = make("div", "dashboard-lower");
-  const profileCard = make("section", "dashboard-list-card");
-  profileCard.append(panel._sectionHeading("Quick launch", "Your terminal profiles"));
-  view.profileList = make("div", "quick-profile-list");
-  view.profileEmpty = make("p", "quiet-empty",
-    "No saved terminals or connections.");
-  profileCard.append(view.profileList, view.profileEmpty);
-  lower.append(profileCard);
-  root.append(lower);
-
-  view.profileSpec = {
-    key: (profile) => profile.name,
-    create: () => createProfileRow(panel),
-    update: (row, profile) => {
-      const parts = profileParts.get(row);
-      setText(parts.mark, (profile.name || "> ").slice(0, 2).toUpperCase());
-      setText(parts.name, profile.name);
-      setText(parts.detail, panel._terminalLabel(profile));
-    },
-  };
-
   return view;
 }
 
-function idleTimeoutCopy(panel) {
-  const seconds = panel.app.idleTimeoutSeconds ?? 300;
-  if (seconds <= 0) return "Untouched background shells are never expired automatically.";
-  return `Untouched background shells expire after ${Math.max(1, Math.round(seconds / 60))} quiet minutes; used or busy sessions are kept.`;
+function applyBoard(view) {
+  // A card being dragged keeps its place until the drop; the next refresh
+  // after it catches up.
+  if (view.drag?.moving) return;
+  const cards = boardCards(view.workspaces, {
+    sessions: view.sessions, owners: view.owners, attached: view.attached,
+  });
+  for (const column of boardColumns(cards, view.status, queryFor(view, "workspaces"))) {
+    const node = view.columns.get(column.id);
+    const { count, list, empty } = columnParts.get(node);
+    setText(count, String(column.count));
+    empty.hidden = column.count > 0;
+    patchList(list, column.cards, view.cardSpec);
+  }
 }
 
-function applyDashboard(view, data) {
-  const panel = this;
-  // A failed fetch keeps the last good picture instead of blanking the panel.
-  // Five seconds with no answer is a blip, not an empty machine, and wiping
-  // the grid for it is the destructive behaviour this rewrite exists to stop.
-  if (data.workspaces) view.workspaces = data.workspaces;
-  if (data.sessions) view.sessions = data.sessions;
-  const workspaces = view.workspaces || [];
-  const sessions = view.sessions || [];
+function createCard(view) {
+  const card = make("article", "board-card");
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  const name = make("h3", "board-card-name");
+  const meta = make("div", "board-card-meta");
+  const repo = make("span", "board-repo");
+  const branch = make("span", "board-branch");
+  const host = make("span", "board-host");
+  const worktree = make("span", "board-worktree", "worktree");
+  meta.append(host, repo, branch, worktree);
+  const lines = make("div", "board-lines");
+  card.append(name, meta, lines);
+  cardParts.set(card, { name, meta, repo, branch, host, worktree, lines });
 
-  const live = sessions.filter((session) => session.alive);
-  const owned = new Set(panel.app.ownedSessionIds ? panel.app.ownedSessionIds() : []);
-  const currentName = (panel.app.currentWorkspace && panel.app.currentWorkspace()) || "scratch";
-  view.ctx = { live, owned, currentName };
-
-  // Hero
-  const currentFolder = panel.app.workspacePath ? panel.app.workspacePath() : null;
-  const folderMissing = Boolean(currentFolder) && panel.app.workspacePathExists
-    && panel.app.workspacePathExists() === false;
-  setText(view.heroTitle, workspaceLabel(panel.app.currentWorkspace()));
-  setText(view.heroText, currentFolder
-    ? `Every terminal here opens in ${currentFolder}${folderMissing ? ", but that folder is missing" : ""}.`
-    : "Open layouts, reattach background terminals, or clean up sessions from one place.");
-  setClass(view.heroText, "warning", folderMissing);
-
-  const measuredMemory = live.reduce((sum, session) =>
-    sum + (session.usage?.available ? session.usage.working_set_bytes || 0 : 0), 0);
-  setText(view.stats.workspaces, padded(workspaces.length));
-  setText(view.stats.current, padded(live.filter((session) => owned.has(session.id)).length));
-  setText(view.stats.live, padded(live.length));
-  setText(view.stats.memory, padded(formatBytes(measuredMemory)));
-
-  // Terminal usage
-  view.killAll.hidden = live.length === 0;
-  view.usageEmpty.hidden = live.length > 0;
-  patchList(view.usageRows, live, view.usageSpec);
-
-  // Workspaces
-  view.gridEmpty.hidden = workspaces.length > 0;
-  patchList(view.grid, workspaces, view.cardSpec);
-
-  // Detached sessions
-  setText(view.detachedNote, idleTimeoutCopy(panel));
-  const groups = detachedGroups(panel, workspaces, sessions, currentName);
-  const currentGroup = groups.find((group) => group.name === currentName);
-  view.currentGroup.hidden = !currentGroup;
-  setText(view.currentGroupTitle, workspaceLabel(currentName));
-  patchList(view.currentGroupRows, currentGroup ? currentGroup.sessions : [], view.rowSpec);
-  const otherGroups = groups.filter((group) => group !== currentGroup);
-  view.otherGroups.hidden = otherGroups.length === 0;
-  const otherCount = otherGroups.reduce((sum, group) => sum + group.sessions.length, 0);
-  setText(view.otherSummary, `Other workspaces · ${otherCount} · explicit move required`);
-  patchList(view.otherGroupList, otherGroups, view.groupSpec);
-  view.detachedEmpty.hidden = groups.length > 0;
-
-  // Quick launch
-  view.profileEmpty.hidden = panel.app.profiles.length > 0;
-  patchList(view.profileList, panel.app.profiles.slice(0, 6), view.profileSpec);
-}
-
-// Which live sessions are detached, and which workspace claims each of them.
-// A session belongs to exactly one group, so the group's facts travel with the
-// row as { session, workspaceName, isCurrent } and the row's listeners read
-// them back from itemFor().
-function detachedGroups(panel, workspaces, sessions, currentName) {
-  const attachedHere = new Set(panel.app.attachedSessionIds ? panel.app.attachedSessionIds() : []);
-  const liveById = new Map(sessions.filter((session) => session.alive).map((session) => [session.id, session]));
-  const claimed = new Set();
-  const groups = [];
-  const entries = (ids, workspaceName, isCurrent) => [...ids]
-    .map((sid) => liveById.get(sid))
-    .filter((session) => session && !(session.attachments > 0))
-    .map((session) => ({ session, workspaceName, isCurrent }));
-
-  for (const workspace of workspaces) {
-    if (!workspace.data) continue;
-    const layoutIds = layoutSessionIds(workspace.data.layout);
-    const owned = new Set(workspace.data.session_ids || []);
-    for (const sid of layoutIds) owned.add(sid);
-    if (workspace.name === currentName && panel.app.ownedSessionIds) {
-      for (const sid of panel.app.ownedSessionIds()) owned.add(sid);
+  card.addEventListener("click", () => {
+    if (view.suppressClick) {
+      view.suppressClick = false;
+      return;
     }
-    for (const sid of owned) claimed.add(sid);
-    const detached = entries(
-      [...owned].filter((sid) => !layoutIds.has(sid) && !attachedHere.has(sid)),
-      workspace.name,
-      workspace.name === currentName,
-    );
-    if (detached.length) groups.push({ name: workspace.name, sessions: detached });
-  }
-  if (!workspaces.some((workspace) => workspace.name === currentName) && panel.app.ownedSessionIds) {
-    const owned = new Set(panel.app.ownedSessionIds());
-    for (const sid of owned) claimed.add(sid);
-    const detached = entries(
-      [...owned].filter((sid) => !attachedHere.has(sid)),
-      currentName,
-      true,
-    );
-    if (detached.length) groups.push({ name: currentName, sessions: detached });
-  }
-  const unassigned = sessions
-    .filter((session) => session.alive && !(session.attachments > 0) && !claimed.has(session.id))
-    .map((session) => ({ session, workspaceName: UNASSIGNED, isCurrent: false }));
-  if (unassigned.length) groups.push({ name: UNASSIGNED, sessions: unassigned });
-  return groups;
-}
-
-function createUsageRow() {
-  const row = make("div", "usage-row");
-  const identity = make("div", "usage-identity");
-  const name = make("strong");
-  const scope = make("small");
-  identity.append(name, scope);
-  const values = make("div", "usage-values");
-  const metrics = {};
-  for (const [id, label] of [["ram", "RAM"], ["cpu", "CPU"], ["processes", "processes"], ["uptime", "uptime"]]) {
-    const cell = make("span", "usage-value");
-    const value = make("strong");
-    cell.append(value, make("small", "", label));
-    values.append(cell);
-    metrics[id] = value;
-  }
-  row.append(identity, values);
-  usageParts.set(row, { name, scope, metrics });
-  return row;
-}
-
-function updateUsageRow(row, session, ctx) {
-  const parts = usageParts.get(row);
-  const usage = session.usage || {};
-  setText(parts.name, session.name || session.id);
-  const ownership = ctx.owned.has(session.id)
-    ? "this workspace"
-    : session.workspace ? `workspace ${session.workspace}` : "unassigned";
-  // A WSL session's Linux side lives in the distro's VM, so the host figures
-  // describe only part of it. Say so rather than under-reporting silently.
-  const state = session.attention
-    ? `needs you: ${attentionText(session.attention)}`
-    : session.activity?.background_output_bytes > 0 ? "new background output" : (session.attachments > 0 ? "open" : "background");
-  const folder = sessionFolder(session);
-  setText(parts.scope, usage.scope === "host-process-tree-partial-wsl"
-    ? "host side only · WSL workload excluded"
-    : `${ownership} · ${state} · ${session.profile || "terminal"}${folder ? ` · ${shortPath(folder)}` : ""}`);
-  setClass(row, "attention", Boolean(session.attention));
-  setAttrs(parts.scope, { title: folder || null });
-  const cpu = usage.cpu_percent == null ? "Sampling…" : `${usage.cpu_percent.toFixed(1)}%`;
-  setText(parts.metrics.ram, usage.available ? formatBytes(usage.working_set_bytes) : "Unavailable");
-  setText(parts.metrics.cpu, usage.available ? cpu : "Unavailable");
-  setText(parts.metrics.processes, String(usage.process_count || 0));
-  setText(parts.metrics.uptime, formatUptime(usage.uptime_seconds));
-}
-
-function createWorkspaceCard(panel, index) {
-  const card = make("article", "workspace-card");
-  card.style.setProperty("--card-index", index);
-
-  const top = make("div", "workspace-card-top");
-  const logo = make("img", "workspace-card-logo");
-  logo.alt = "";
-  logo.hidden = true;
-  const title = make("h3", "workspace-card-title");
-  const badge = make("span", "workspace-badge");
-  top.append(logo, title, badge);
-
-  const folderLine = make("p", "workspace-card-folder");
-  const preview = layoutPreview(null);
-
-  const actions = make("div", "workspace-card-actions");
-  const open = panel._button("Open workspace", "card-open-button");
-  open.addEventListener("click", () => {
-    panel.close();
-    panel.app.loadWorkspace(itemFor(card).name);
+    openCard(view, card);
   });
-  const editFolder = panel._button("Settings", "text-button compact");
-  editFolder.title = "Workspace folder and logo";
-  editFolder.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openFolderEditor(panel, card, editFolder);
+  card.addEventListener("keydown", (event) => {
+    if (event.target !== card) return;
+    if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      event.stopPropagation();
+      const name = itemFor(card)?.name;
+      if (!name) return;
+      const next = movedStatus(statusOf(name, view.status), event.key === "ArrowLeft" ? -1 : 1);
+      moveCard(view, name, next, { refocus: true });
+    } else if (!event.altKey && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openCard(view, card);
+    } else if (!event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const sibling = event.key === "ArrowDown" ? card.nextElementSibling : card.previousElementSibling;
+      sibling?.focus();
+    }
   });
-  const remove = panel._button("", "text-button danger-text");
-  remove.append(icon("trash", 13), make("span", "", "Delete"));
-  remove.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const name = itemFor(card).name;
-    panel._confirmNear(remove, `Delete workspace "${name}" and stop its detached sessions?`, "Delete", async () => {
-      const deleted = panel.app.deleteWorkspace
-        ? await panel.app.deleteWorkspace(name)
-        : await api.deleteWorkspace(name).then(() => true).catch(() => false);
-      if (!deleted) throw new Error("Workspace could not be deleted.");
-      await panel._leave(card);
-      if (panel.open === "dashboard") panel._dashboard();
-    });
-  });
-  actions.append(open, editFolder, remove);
-
-  card.append(top, folderLine, preview, actions);
-  card.addEventListener("dblclick", () => open.click());
-  cardParts.set(card, { logo, title, badge, folderLine, preview, actions, editFolder, layout: undefined });
+  card.addEventListener("pointerdown", (event) => startDrag(view, card, event));
   return card;
 }
 
-function updateWorkspaceCard(panel, card, workspace, index) {
+function updateCard(card, data) {
   const parts = cardParts.get(card);
-  card.style.setProperty("--card-index", index);
-  const layout = workspace.data && workspace.data.layout;
-  const isCurrent = Boolean(panel.app.currentWorkspace)
-    && panel.app.currentWorkspace() === workspace.name;
-  setClass(card, "current", isCurrent);
+  setText(parts.name, data.name);
+  setText(parts.repo, data.repo);
+  parts.repo.hidden = !data.repo;
+  setText(parts.branch, data.branch);
+  parts.branch.hidden = !data.branch;
+  setText(parts.host, data.host ? `@${data.host}` : "");
+  parts.host.hidden = !data.host;
+  parts.worktree.hidden = !data.worktree;
+  setAttrs(parts.worktree, { title: data.worktree || false });
+  parts.meta.hidden = !data.repo && !data.branch && !data.host;
+  const live = data.lines.length;
+  setAttrs(card, {
+    title: data.path ? `${data.host ? `${data.host}:` : ""}${data.path}` : false,
+    "aria-label": `${data.name}${data.repo ? `, ${data.repo}` : ""}${data.branch ? ` on ${data.branch}` : ""}, `
+      + `${live} terminal${live === 1 ? "" : "s"}. Enter shows it, Alt+Left or Alt+Right moves it.`,
+  });
+  patchList(parts.lines, data.lines, {
+    key: (line) => line.id,
+    create: createLine,
+    update: updateLine,
+  });
+}
 
-  // Every view of this window counts, not only the active one.
-  const shown = (panel.app.openWorkspaces?.() || []).some((view) => (view?.workspace ?? view) === workspace.name);
-  const panes = countPanes(layout);
-  setText(parts.badge, isCurrent || shown ? "Open now" : `${panes} pane${panes === 1 ? "" : "s"}`);
-  setText(parts.title, workspaceLabel(workspace.name));
+function createLine() {
+  const node = make("div", "board-line");
+  const row = make("div", "board-line-row");
+  const dot = make("span", "board-dot");
+  const glyph = make("span", "board-glyph");
+  const label = make("span", "board-line-label");
+  const age = make("span", "board-line-age");
+  row.append(dot, glyph, label, age);
+  const subs = make("div", "board-sublines");
+  node.append(row, subs);
+  lineParts.set(node, { dot, glyph, label, age, subs });
+  return node;
+}
 
-  const logo = workspace.data && workspace.data.logo;
-  if (logo) {
-    setAttrs(parts.logo, { src: api.assetUrl(logo) });
-    parts.logo.hidden = false;
-  } else {
-    parts.logo.hidden = true;
-  }
+function updateLine(node, line) {
+  const parts = lineParts.get(node);
+  parts.dot.className = `board-dot state-${line.state}`;
+  setText(parts.glyph, line.glyph);
+  parts.glyph.hidden = !line.glyph;
+  setText(parts.label, line.label);
+  setText(parts.age, line.age);
+  parts.subs.hidden = line.subagents.length === 0;
+  patchList(parts.subs, line.subagents, {
+    key: (sub) => sub.id,
+    create: () => make("div", "board-subline"),
+    update: (sub, item) => setText(sub, item.label),
+  });
+}
 
-  const folder = workspace.data && workspace.data.path;
-  const missing = Boolean(folder) && workspace.data.path_exists === false;
-  setClass(parts.folderLine, "warning", missing);
-  setText(parts.folderLine, folder
-    ? (missing ? `${shortPath(folder)} · folder missing` : shortPath(folder))
-    : isScratchWorkspace(workspace.name)
-      ? "Disposable · gone when the app quits"
-      : "No folder yet · terminals open in your home folder");
-  setAttrs(parts.folderLine, { title: folder || false });
+function openCard(view, card) {
+  const name = itemFor(card)?.name;
+  if (!name) return;
+  view.panel.close();
+  view.panel.app.openWorkspace?.(name);
+}
 
-  // The preview is a pure function of the layout tree and holds nothing
-  // focusable, so it is rebuilt only when that tree actually changed.
-  const signature = JSON.stringify(layout ?? null);
-  if (parts.layout !== signature) {
-    parts.layout = signature;
-    const next = layoutPreview(layout);
-    card.replaceChild(next, parts.preview);
-    parts.preview = next;
+async function moveCard(view, name, status, { refocus = false } = {}) {
+  if (statusOf(name, view.status) === status) return;
+  const previous = view.status[name];
+  view.status = { ...view.status, [name]: status };
+  view.pending = { ...view.pending, [name]: status };
+  view.note.hidden = true;
+  applyBoard(view);
+  if (refocus) cardNode(view, name)?.focus();
+  try {
+    await api.setBoardStatus(name, status);
+  } catch (error) {
+    const restored = { ...view.status };
+    if (previous === undefined) delete restored[name];
+    else restored[name] = previous;
+    view.status = restored;
+    view.note.hidden = false;
+    setText(view.note, error?.detail || `"${name}" could not be moved.`);
+    applyBoard(view);
+  } finally {
+    if (view.pending[name] === status) {
+      view.pending = { ...view.pending };
+      delete view.pending[name];
+    }
   }
 }
 
-// Editing in place: no modal, no navigation, and Escape puts the row back
-// exactly as it was. The card is marked as being edited for as long as the
-// editor is open, so the 5 s refresh leaves this row completely alone.
-function openFolderEditor(panel, card, editFolder) {
-  if (card.querySelector(".workspace-folder-editor")) return;
-  const workspace = itemFor(card);
-  const editor = make("div", "workspace-folder-editor");
-  const input = panel._textInput((workspace.data && workspace.data.path) || "", "Folder for this workspace");
-  const control = folderPickerControl(input, { label: `Choose the folder for ${workspace.name}` });
-  holdRefreshWhilePicking(panel, control);
-  let logo = workspace.data?.logo || null;
-  const appearance = panel._logoPicker({
-    title: "Workspace logo", value: logo, hint: "Overrides the app logo for this workspace.",
-    onChange: async (assetId) => { logo = assetId; },
-  });
-  const apply = panel._button("Save", "secondary-button compact");
-  const cancel = panel._button("Cancel", "text-button compact");
-  const dismiss = () => {
-    editor.remove();
-    markEditing(card, false);
-    editFolder.disabled = false;
-    editFolder.focus();
+function cardNode(view, name) {
+  for (const column of view.columns.values()) {
+    for (const node of columnParts.get(column).list.children) {
+      if (itemFor(node)?.name === name) return node;
+    }
+  }
+  return null;
+}
+
+function columnAt(view, x, y) {
+  for (const [id, column] of view.columns) {
+    const rect = column.getBoundingClientRect();
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return id;
+  }
+  return null;
+}
+
+// Pointer drag, the pane drag's feel: nothing happens for the first few
+// pixels, then a ghost with the name follows the pointer and the column under
+// it lights up. Escape cancels.
+function startDrag(view, card, down) {
+  if (down.button !== 0 || view.drag) return;
+  const name = itemFor(card)?.name;
+  if (!name) return;
+  const drag = { moving: false, target: null, ghost: null };
+  view.drag = drag;
+  const mark = (id) => {
+    for (const [status, column] of view.columns) setClass(column, "drop-target", status === id);
   };
-  apply.addEventListener("click", async () => {
-    apply.disabled = true;
-    const saved = await panel.app.setWorkspaceAppearance(workspace.name, input.value, logo);
-    apply.disabled = false;
-    if (!saved) return;
-    dismiss();
-    if (panel.open === "dashboard") panel._dashboard();
-  });
-  cancel.addEventListener("click", dismiss);
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") apply.click();
-    else if (event.key === "Escape") { event.stopPropagation(); dismiss(); }
-  });
-  editor.append(control, appearance, apply, cancel);
-  editFolder.disabled = true;
-  markEditing(card, true);
-  card.append(editor);
-  input.focus();
-}
-
-function createSessionGroup() {
-  const section = make("section", "detached-group");
-  const heading = make("h3");
-  const rows = make("div", "detached-group-rows");
-  section.append(heading, rows);
-  groupParts.set(section, { heading, rows });
-  return section;
-}
-
-function createSessionRow(panel) {
-  const row = make("div", "detached-session-row");
-  const copy = make("div", "detached-session-copy");
-  const name = make("strong");
-  const detail = make("small");
-  copy.append(name, detail);
-  const actions = make("div", "detached-session-actions");
-  const attach = panel._button("Attach", "secondary-button compact");
-  attach.addEventListener("click", async () => {
-    const { session, workspaceName, isCurrent } = itemFor(row);
-    panel.close();
-    // Moving a session between workspaces is never implicit: the button in a
-    // foreign group says so, and only that button moves it.
-    if (isCurrent) panel.app.attachSession(session);
-    else await panel.app.moveSessionHere(session, workspaceName === UNASSIGNED ? null : workspaceName);
-  });
-  const kill = panel._button("Kill", "text-button danger-text");
-  kill.addEventListener("click", () => {
-    const { session, workspaceName } = itemFor(row);
-    panel._confirmNear(kill, `Stop terminal "${session.name || session.id}"?`, "Kill", async () => {
-      const stopped = await panel.app.killWorkspaceSession(
-        session, workspaceName === UNASSIGNED ? null : workspaceName,
-      );
-      if (!stopped) throw new Error("Terminal could not be stopped.");
-      if (panel.open === "dashboard") panel._dashboard();
-    });
-  });
-  actions.append(attach, kill);
-  row.append(copy, actions);
-  rowParts.set(row, { name, detail, attach });
-  return row;
-}
-
-function updateSessionRow(row, entry) {
-  const parts = rowParts.get(row);
-  const { session, isCurrent } = entry;
-  setText(parts.name, session.name || session.id);
-  const unreadBytes = session.activity?.background_output_bytes || 0;
-  const activity = session.attention
-    ? `Needs you: ${attentionText(session.attention)} · ${formatUptime(session.attention.age_seconds || 0)} ago`
-    : unreadBytes > 0
-      ? `New output ${formatBytes(unreadBytes)} · ${formatUptime(session.activity?.background_output_age_seconds || 0)} ago`
-      : `Quiet ${formatUptime(session.activity?.idle_seconds || 0)} · ${session.id}`;
-  const folder = sessionFolder(session);
-  setText(parts.detail, `${session.profile || "terminal"} · ${activity}${folder ? ` · ${shortPath(folder)}` : ""}`);
-  setAttrs(parts.detail, { title: folder || null });
-  setClass(row, "attention", Boolean(session.attention));
-  setText(parts.attach, isCurrent ? "Attach" : "Move here & attach");
-}
-
-function createProfileRow(panel) {
-  const row = make("button", "quick-profile");
-  row.type = "button";
-  const mark = make("span", "profile-mark");
-  const copy = make("span", "quick-profile-copy");
-  const name = make("strong");
-  const detail = make("small");
-  copy.append(name, detail);
-  const arrow = make("span", "profile-arrow");
-  arrow.append(icon("arrow-up-right", 13));
-  row.append(mark, copy, arrow);
-  row.addEventListener("click", () => {
-    panel.close();
-    panel.app.runProfile(itemFor(row));
-  });
-  profileParts.set(row, { mark, name, detail });
-  return row;
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", stop);
+    window.removeEventListener("keydown", key, true);
+    view.drag = null;
+    if (!drag.moving) return;
+    try { card.releasePointerCapture(down.pointerId); } catch (_) { /* already released */ }
+    document.body.classList.remove("dragging");
+    setClass(card, "dragging", false);
+    drag.ghost.remove();
+    mark(null);
+    // The click that follows a drag is not a click on the card.
+    view.suppressClick = true;
+    setTimeout(() => { view.suppressClick = false; }, 0);
+  };
+  const move = (event) => {
+    if (!drag.moving) {
+      if (Math.hypot(event.clientX - down.clientX, event.clientY - down.clientY) < DRAG_START_PX) return;
+      drag.moving = true;
+      try { card.setPointerCapture(down.pointerId); } catch (_) { /* old WebView */ }
+      document.body.classList.add("dragging");
+      setClass(card, "dragging", true);
+      drag.ghost = make("div", "board-drag-ghost", name);
+      document.body.append(drag.ghost);
+    }
+    const ghost = drag.ghost;
+    ghost.style.left = `${Math.max(0, Math.min(event.clientX + 12, window.innerWidth - ghost.offsetWidth - 4))}px`;
+    ghost.style.top = `${Math.max(0, Math.min(event.clientY + 12, window.innerHeight - ghost.offsetHeight - 4))}px`;
+    drag.target = columnAt(view, event.clientX, event.clientY);
+    mark(drag.target);
+  };
+  const up = () => {
+    const target = drag.moving ? drag.target : null;
+    stop();
+    if (target) moveCard(view, name, target);
+    else applyBoard(view);
+  };
+  const key = (event) => {
+    if (event.key !== "Escape" || !drag.moving) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stop();
+    applyBoard(view);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", stop);
+  window.addEventListener("keydown", key, true);
 }

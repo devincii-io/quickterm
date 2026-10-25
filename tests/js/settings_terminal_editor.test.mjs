@@ -129,8 +129,8 @@ function profile(fields) {
 }
 
 // A Panels stand-in with the real field helpers and the list wiring.
-function render(profiles, { focus = profiles[0]?.name, defaultProfile = profiles[0]?.name || "" } = {}) {
-  const draft = { default_profile: defaultProfile, summon_hotkey: "ctrl+alt+grave", profiles };
+function render(profiles, { focus = profiles[0]?.name } = {}) {
+  const draft = { shell: "powershell", summon_hotkey: "ctrl+alt+grave", profiles };
   const host = new El("div");
   globalThis.document.body.append(host);
   const panel = {
@@ -220,22 +220,20 @@ test("removing an environment variable keeps the keyboard in the editor", () => 
   assert.equal(globalThis.document.activeElement.textContent, "Add variable");
 });
 
-test("removing the default terminal clears default_profile", async () => {
-  const first = profile({ name: "First", cmd: "pwsh.exe", terminal_type: "powershell-core" });
-  const second = profile({ name: "Second", cmd: "cmd.exe", terminal_type: "command-prompt" });
-  const { draft, host } = render([first, second], { defaultProfile: "First" });
+test("removing a terminal takes it out of the draft and nothing else", async () => {
+  const first = profile({ name: "First", cmd: "pwsh.exe", terminal_type: "powershell-core", start_command: "npm run dev" });
+  const second = profile({ name: "Second", cmd: "cmd.exe", terminal_type: "command-prompt", start_command: "dir" });
+  const { draft, host } = render([first, second]);
   const remove = byClass(host, "config-row-remove")[0];
   remove.fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(draft.profiles.map((item) => item.name), ["Second"]);
-  // 3.x handed the default to the first profile left; 4.0 clears it, which
-  // the General tab shows as "First saved local terminal".
-  assert.equal(draft.default_profile, "");
+  assert.equal(draft.shell, "powershell");
 });
 
 test("renaming one terminal onto another's name marks both rows, and renaming back clears both", () => {
-  const a = profile({ name: "A", cmd: "pwsh.exe", terminal_type: "powershell-core" });
-  const b = profile({ name: "Git Bash", cmd: "bash.exe", terminal_type: "git-bash" });
+  const a = profile({ name: "A", cmd: "pwsh.exe", terminal_type: "powershell-core", start_command: "npm run dev" });
+  const b = profile({ name: "Git Bash", cmd: "bash.exe", terminal_type: "git-bash", start_command: "make" });
   const { host, type } = render([a, b]);
   const marked = () => byClass(host, "config-row").map((row) => row.classList.contains("has-problem"));
   type("Name", "Git Bash");

@@ -11,6 +11,7 @@ export function createWorkspaceSwitch({
   api, workspace, state, layout,
   claimWorkspaceFor, discardScratch, ownedSessionIds, usableWorkspacePath,
   spawnInto, spawnSpecInto, spawnDefaultInto, profileTerminalType, restartSavedPane, resumeClaudePane,
+  allProfiles = () => state.profiles,
   cancelWorkspaceSave, scheduleWorkspaceSave, buildLauncher, refreshStatusSoon, showError, clearError,
 }) {
   async function restoreWorkspace(name) {
@@ -23,6 +24,7 @@ export function createWorkspaceSwitch({
     const savedLayout = saved.layout || null;
     state.workspaceLogo = saved.logo || null;
     state.workspacePath = saved.path || null;
+    state.workspaceHost = saved.host || null;
     state.workspaceRoots.set(name, state.workspacePath);
     state.workspacePathExists = saved.path ? saved.path_exists !== false : true;
     if (saved.path && saved.path_exists === false) {
@@ -47,8 +49,8 @@ export function createWorkspaceSwitch({
         pane.markUnavailable({
           exitCode: typeof prior?.exit_code === "number" ? prior.exit_code : null,
           onRestart: () => restartSavedPane(pane),
-          onResumeClaude: claudeProfileForPane(state.profiles, pane) ? () => resumeClaudePane(pane) : null,
-          onPickClaude: claudeProfileForPane(state.profiles, pane) ? () => resumeClaudePane(pane, "resume") : null,
+          onResumeClaude: claudeProfileForPane(allProfiles(), pane) ? () => resumeClaudePane(pane) : null,
+          onPickClaude: claudeProfileForPane(allProfiles(), pane) ? () => resumeClaudePane(pane, "resume") : null,
         });
       } else if (pane.profileName) {
         // With a workspace folder the root is authoritative: move the

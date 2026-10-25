@@ -98,7 +98,8 @@ class FakeConfig:
     update_check: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
     scratch_dir: str = ""
-    default_profile: str = "powershell"
+    shell: str = "cmd"
+    agents: dict = field(default_factory=real_config._default_agents)
     profiles: list = field(default_factory=list)
     snippets: list = field(default_factory=list)
     voice: FakeVoiceConfig = field(default_factory=FakeVoiceConfig)
@@ -176,10 +177,10 @@ class FakeSessionManager:
         return info
 
     def spawn(self, *, name=None, profile=None, cmd, args=(), cwd=None,
-              env=(), cols=120, rows=30, workspace=None, agent=None) -> FakeSessionInfo:
+              env=(), cols=120, rows=30, workspace=None, agent=None, wrap=None) -> FakeSessionInfo:
         self.last_spawn = {"name": name, "profile": profile, "cmd": cmd,
                            "args": list(args), "cwd": cwd, "env": dict(env),
-                           "workspace": workspace, "agent": agent}
+                           "workspace": workspace, "agent": agent, "wrap": wrap}
         return self.add_session(name=name or "s", profile=profile, cols=cols,
                                 rows=rows, workspace=workspace)
 
@@ -327,7 +328,10 @@ def client(manager, cfg) -> TestClient:
 
 
 @pytest.fixture
-def fake_workspace(monkeypatch):
+def fake_workspace(monkeypatch, tmp_path):
+    # The workspace routes also keep the board file current; it must land here,
+    # never in the real %APPDATA%.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     mod = types.ModuleType("quickterm.workspace")
 
     @dataclass
@@ -794,8 +798,39 @@ def test_spawn_unknown_profile_404(client):
     assert client.post("/api/sessions", json={"profile": "nope"}).status_code == 404
 
 
-def test_spawn_requires_cmd_or_profile(client):
-    assert client.post("/api/sessions", json={}).status_code == 400
+def test_spawn_without_profile_or_cmd_starts_the_configured_shell(client, manager, cfg, tmp_path):
+    response = client.post("/api/sessions", json={"cwd": str(tmp_path)})
+    assert response.status_code == 200
+    assert manager.last_spawn["cmd"].casefold().endswith("cmd.exe") or os.name != "nt"
+    assert manager.last_spawn["cwd"] == str(tmp_path)
+    assert manager.last_spawn["name"] == ("Command Prompt" if os.name == "nt" else manager.last_spawn["name"])
+    assert manager.last_spawn["wrap"] is None
+
+
+def test_spawn_takes_a_shell_of_its_own_and_refuses_one_with_a_profile(client, manager):
+    assert client.post("/api/sessions", json={"shell": "bogus"}).status_code == 400
+    assert client.post("/api/sessions", json={"shell": "cmd", "cmd": "cmd.exe"}).status_code == 400
+    assert client.post("/api/sessions", json={"shell": "powershell"}).status_code == 200
+    if os.name == "nt":
+        assert manager.last_spawn["args"] == ["-NoLogo"]
+
+
+def test_an_agent_by_kind_starts_from_the_agent_settings_inside_the_shell(
+    client, manager, cfg, tmp_path
+):
+    cfg.agents["claude-code"] = real_config.AgentSettings(
+        cmd="claude.exe", agent_mode="new", agent={"model": "haiku"},
+    )
+    response = client.post("/api/sessions", json={"profile": "claude-code", "cwd": str(tmp_path)})
+    assert response.status_code == 200
+    spawn = manager.last_spawn
+    assert (spawn["cmd"], spawn["args"], spawn["profile"]) == (
+        "claude.exe", ["--model=haiku"], "claude-code"
+    )
+    assert spawn["name"] == "Claude Code"
+    assert spawn["agent"] == "claude"
+    assert spawn["wrap"].cli == "claude"
+    assert spawn["wrap"].value == ("cmd" if os.name == "nt" else "")
 
 
 def test_spawn_returns_conflict_when_live_terminal_limit_is_reached(client, manager, monkeypatch):
@@ -982,7 +1017,8 @@ def test_profiles_are_listed_and_snippets_ride_on_the_config(client):
 def test_config_endpoint(client, cfg):
     body = client.get("/api/config").json()
     assert body["font_family"] == cfg.font_family
-    assert body["default_profile"] == "powershell"
+    assert body["shell"] == "cmd"
+    assert set(body["agents"]) == {"claude-code", "codex"}
     assert [p["name"] for p in body["profiles"]] == ["powershell", "claude"]
     assert body["snippets"][0]["name"] == "greet"
     assert body["voice_available"] is False  # voice module absent in tests
@@ -1013,7 +1049,7 @@ def fake_config_mod(monkeypatch, cfg):
             raise ValueError("bad font")
         parsed = FakeConfig()
         for k, v in raw.items():
-            if k in {"font_family", "default_profile", "max_sessions", "port",
+            if k in {"font_family", "shell", "max_sessions", "port",
                      "host", "summon_hotkey", "scratch_dir", "font_size"}:
                 setattr(parsed, k, v)
             elif k == "window":
@@ -1028,7 +1064,7 @@ def fake_config_mod(monkeypatch, cfg):
     mod.load_config = lambda: dataclasses.replace(mod.disk_config)
 
     def save_config(new_cfg):
-        if new_cfg.default_profile == "save-explode":
+        if new_cfg.shell == "save-explode":
             raise ValueError("bad profile folder")
         saved.append(new_cfg)
 
@@ -1060,7 +1096,7 @@ def test_put_config_invalid_400(client, fake_config_mod):
 
 
 def test_put_config_maps_save_validation_to_400(client, fake_config_mod):
-    response = client.put("/api/config", json={"default_profile": "save-explode"})
+    response = client.put("/api/config", json={"shell": "save-explode"})
     assert response.status_code == 400
     assert "bad profile folder" in response.json()["detail"]
     assert not fake_config_mod
@@ -1078,7 +1114,7 @@ def test_workspace_crud(client, fake_workspace):
     ws = client.get("/api/workspaces/dev").json()
     assert ws == {
         "name": "dev", "layout": layout, "logo": None, "path": None,
-        "session_ids": [], "path_exists": False, "temporary": False, "git": None,
+        "session_ids": [], "path_exists": False, "temporary": False, "git": None, "host": None,
     }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
@@ -1246,51 +1282,7 @@ def test_asset_upload_is_bounded_before_storage(client, monkeypatch):
     assert saved == []
 
 
-# --- update endpoints ---------------------------------------------------------
-
-
-def _stub_update_module(monkeypatch, **attrs):
-    mod = types.ModuleType("quickterm.update")
-    for name, value in attrs.items():
-        setattr(mod, name, value)
-    monkeypatch.setitem(sys.modules, "quickterm.update", mod)
-
-
-def test_update_check_endpoint(client, monkeypatch):
-    payload = {"current": "0.2.0", "latest": "0.3.0", "update_available": True,
-               "url": "https://github.com/devincii-io/quickterm/releases", "notes": "",
-               "installable": True}
-    _stub_update_module(monkeypatch, check=lambda force=False: payload)
-    r = client.get("/api/update")
-    assert r.status_code == 200
-    assert r.json() == payload
-
-
-def test_update_check_maps_failure_to_502(client, monkeypatch):
-    def boom(force=False):
-        raise OSError("offline")
-
-    _stub_update_module(monkeypatch, check=boom)
-    r = client.get("/api/update")
-    assert r.status_code == 502
-
-
-def test_update_install_endpoint(client, monkeypatch):
-    _stub_update_module(
-        monkeypatch, download_and_run=lambda: {"launched": True, "version": "0.3.0"}
-    )
-    r = client.post("/api/update/install")
-    assert r.status_code == 200
-    assert r.json()["launched"] is True
-
-
-def test_update_install_value_error_is_400(client, monkeypatch):
-    def nope():
-        raise ValueError("not on this platform")
-
-    _stub_update_module(monkeypatch, download_and_run=nope)
-    r = client.post("/api/update/install")
-    assert r.status_code == 400
+# Update endpoints: tests/test_update_routes.py
 
 
 # --- open endpoint (terminal Ctrl+click links) --------------------------------
@@ -2251,7 +2243,7 @@ def test_a_partial_config_put_keeps_every_omitted_setting(client, cfg, monkeypat
     monkeypatch.setenv("APPDATA", str(tmp_path))
     real_config.save_config(real_config.AppConfig(
         theme="dusk",
-        profiles=[real_config.Profile(name="work", cmd="sh")],
+        profiles=[real_config.Profile(name="work", cmd="sh", terminal_type="custom")],
     ))
 
     assert client.put("/api/config", json={"font_size": 15}).status_code == 204

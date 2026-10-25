@@ -21,8 +21,12 @@ from tests.test_server import FakeConfig, FakeSessionManager
 TOKEN = "s3cret"
 BASE = "http://127.0.0.1:8620"
 # The complete list of API answers that need no token: the liveness probe, and
-# workspace logos, which <img> loads and cannot attach a header to.
-EXEMPT = {("GET", "/api/health"), ("GET", "/api/assets/{asset_id}")}
+# workspace logos and the file view's images, which <img> loads and cannot
+# attach a header to. A file view image answers only to a random key that the
+# token-gated file route handed out for that one file.
+EXEMPT = {
+    ("GET", "/api/health"), ("GET", "/api/assets/{asset_id}"), ("GET", "/api/assets/ws-file/{key}"),
+}
 # Gated too, but by either token, and it answers 401 so a hook can tell a
 # stale hook token from a refused origin.
 HOOK_ROUTE = ("POST", "/api/sessions/{sid}/agent-event")

@@ -11,7 +11,10 @@ import { PaneAttachProtocol } from "./pane_protocol.js";
 import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
 import { RealInputGate } from "./broadcast.js";
 import { findInBuffer } from "./buffer_search.js";
-import { agentLabel, agentNewlineFor, continueCommand, isAgentType, pickerCommand } from "./agent_profile.js";
+import { PaneFind, terminalText } from "./pane_find.js";
+import {
+  AGENT_EXIT_MARK, AGENT_EXIT_OSC, agentLabel, agentNewlineFor, continueCommand, isAgentType, pickerCommand,
+} from "./agent_profile.js";
 
 const ENC = new TextEncoder();
 // Written between a dead session's last output and its restart, which
@@ -194,6 +197,14 @@ export class Pane {
     this._closeArmTimer = null;
 
     this.session = null;
+    // Claude Code and Codex run inside the shell (4.3): the pane outlives
+    // the agent and is then a shell prompt. Set from the session poll.
+    this._agentSeen = false;
+    this.agentGone = false;
+    // An agent in WSL reports no state and its processes are out of
+    // sight; the wrap prints an exit marker (OSC 7770) after it instead.
+    this.agentByMarker = false;
+    this._agentExitMarked = false;
     this.state = "empty"; // empty | attached | exited
     this.term = null;
     this.fit = null;
@@ -221,6 +232,7 @@ export class Pane {
     this._stateBeforeSpawn = null;
     this._pendingReveal = null; // a search hit to show once the replay is in
     this._inputGate = new RealInputGate();
+    this._find = null; // the Ctrl+Shift+F field, built on first use
 
     const el = document.createElement("div");
     el.className = "pane";
@@ -437,12 +449,23 @@ export class Pane {
     }
   }
 
+  // A title someone typed wins; then the backend's current name, which
+  // follows the agent's own conversation title once there is one.
   displayName() {
     return this.title
+      || this.liveName
       || (this.session && this.session.name)
       || this.profileName
       || (this.launchSpec && this.launchSpec.name)
       || "terminal";
+  }
+
+  // The session list's name for this pane's terminal (main.js noteSessions).
+  noteName(name) {
+    const text = String(name || "").trim() || null;
+    if (text === this.liveName) return;
+    this.liveName = text;
+    this._renderTab();
   }
 
   // Stable hue from the name so the same terminal keeps its color everywhere.
@@ -462,7 +485,7 @@ export class Pane {
   _renderActivity() {
     const el = this.tabActivityEl;
     if (!el) return;
-    if (!isAgentType(this.terminalType) || this.state !== "attached") {
+    if (!isAgentType(this.terminalType) || this.state !== "attached" || this._agentLeft()) {
       el.hidden = true;
       this._stopActivityTicker();
       return;
@@ -579,6 +602,30 @@ export class Pane {
     this.exitBar.hidden = false;
     const live = document.getElementById("live-status");
     if (live) live.textContent = text.replace(/^\[|\]$/g, "");
+  }
+
+  // What the session list says about this pane's agent: running while the
+  // shell has a child or hooks report a state. Gone only after it was seen,
+  // so the moment before the shell starts the agent does not count.
+  // `byMarker`: the session runs its agent in WSL (`agent_shell`); it is
+  // present from launch until the wrap's exit marker.
+  noteAgent(present, { byMarker = false } = {}) {
+    this.agentByMarker = byMarker;
+    if (present) this._agentSeen = true;
+    const gone = this._agentSeen && !present;
+    if (gone === this.agentGone) return;
+    this.agentGone = gone;
+    this._renderActivity();
+  }
+
+  noteAgentExit() {
+    this._agentExitMarked = true;
+    this._renderActivity();
+  }
+
+  _agentLeft() {
+    if (this.agentByMarker) return this._agentExitMarked;
+    return this.agentGone;
   }
 
   requestRestart() {
@@ -957,6 +1004,53 @@ export class Pane {
     if (match) this.revealMatch(match);
   }
 
+  // Ctrl+Shift+F: the find field at the top right (pane_find.js).
+  openFind() {
+    if (!this.term) return false;
+    if (!this._find) this._find = new PaneFind(this);
+    return this._find.open();
+  }
+
+  closeFind() {
+    this._find?.close();
+  }
+
+  get findOpen() {
+    return Boolean(this._find?.isOpen);
+  }
+
+  // The palette's "reset terminal": what a restart writes between two
+  // sessions, done in place. Only the screen and its modes are reset here;
+  // the process gets nothing, so this never counts as input.
+  resetTerminal() {
+    if (!this.term) return false;
+    this.term.reset();
+    this.term.write(RESTART_RESET);
+    this.flashNotice("[terminal reset]");
+    return true;
+  }
+
+  // The palette's "copy terminal text": the whole buffer as plain text. The
+  // palette runs in the shell document, which holds the keypress that asked
+  // for it, so its clipboard is tried before this document's.
+  copyAllText() {
+    if (!this.term) return false;
+    const { text, lines, truncated } = terminalText(this.term.buffer.active);
+    if (!text) {
+      this.flashNotice("[nothing to copy]");
+      return false;
+    }
+    const ok = () => this.flashNotice(truncated
+      ? `[copied the last ${lines} lines, 2 MB]`
+      : `[copied ${lines} line${lines === 1 ? "" : "s"}]`);
+    const fallback = () => this._writeClipboard(text, ok, () => this.flashNotice("[copy failed]"));
+    let top = null;
+    try { top = window.top !== window ? window.top.navigator?.clipboard : null; } catch (_) { top = null; }
+    if (top?.writeText) top.writeText(text).then(ok, fallback);
+    else fallback();
+    return true;
+  }
+
   // Every real input (a key, a native paste, sendText, a drop) comes through
   // here. It tells the backend once per connection, because the session's
   // `touched` flag keeps it from the idle reaper and keeps the app in the tray,
@@ -1001,6 +1095,12 @@ export class Pane {
     this.endSpawn();
     clearTimeout(this._reconnectTimer);
     this._teardownWs();
+    if (this.session?.id !== info.id) {
+      this._agentSeen = false;
+      this.agentGone = false;
+      this.agentByMarker = false;
+      this._agentExitMarked = false;
+    }
     this.session = info;
     this.savedSessionId = info.id;
     if (info.profile) this.profileName = info.profile;
@@ -1047,6 +1147,8 @@ export class Pane {
     this._pendingReveal = null;
     if (nativeDropPane === this) nativeDropPane = null;
     this.cancelConfirmation();
+    this._find?.dispose();
+    this._find = null;
     this._ro.disconnect();
     if (this._linkProvider) { try { this._linkProvider.dispose(); } catch (e) {} this._linkProvider = null; }
     if (this._webgl) { try { this._webgl.dispose(); } catch (e) {} this._webgl = null; }
@@ -1068,7 +1170,9 @@ export class Pane {
     }
     // Shift+Enter in Claude Code or Codex is a newline in the prompt. The
     // keypress and keyup are swallowed too, or xterm would still send its CR.
-    const newline = agentNewlineFor(e, this.terminalType);
+    // Once the agent has left, this is a shell prompt, where ESC CR would
+    // erase the typed line (PSReadLine) instead of adding a newline.
+    const newline = this._agentLeft() ? null : agentNewlineFor(e, this.terminalType);
     if (newline) {
       if (e.type === "keydown") this._typeSequence(newline);
       e.preventDefault();
@@ -1076,6 +1180,13 @@ export class Pane {
     }
     if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
     const key = e.key.toLowerCase();
+    // Ctrl+Shift+F finds in this terminal. Ctrl+F stays readline's
+    // forward-char.
+    if (e.shiftKey && (key === "f" || e.code === "KeyF")) {
+      e.preventDefault();
+      this.openFind();
+      return false;
+    }
     if (key === "c") {
       const selection = this.term.getSelection();
       if (!selection) return true;
@@ -1234,6 +1345,11 @@ export class Pane {
       };
       this.term.parser.registerOscHandler(7, (data) => trackCwd(7, data));
       this.term.parser.registerOscHandler(9, (data) => trackCwd(9, data));
+      // The WSL agent wrap's exit marker: swallowed, never drawn.
+      this.term.parser.registerOscHandler(AGENT_EXIT_OSC, (data) => {
+        if (data === AGENT_EXIT_MARK) this.noteAgentExit();
+        return true;
+      });
     } catch (e) { /* shell integration is optional */ }
     // Right-click copies the current selection (the Windows Terminal
     // convention) with a visible confirmation. Paste stays native on Ctrl+V.

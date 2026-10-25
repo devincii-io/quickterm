@@ -36,6 +36,56 @@ class Workspace:
     # removes it from `layout` but its live session remains here for reattach.
     session_ids: list[str] = field(default_factory=list)
     temporary: bool = False
+    # The name of an OpenSSH profile when the workspace lives on that host;
+    # `path` is then a POSIX path there. None is a local workspace.
+    host: str | None = None
+
+
+MAX_HOST_CHARS = 200
+
+
+def normalize_host(value: object) -> str | None:
+    """A stored host: the name of an SSH profile, or None for local."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("host must be a string or null")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > MAX_HOST_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise ValueError("host must be the name of an SSH profile")
+    return text
+
+
+def normalize_remote_root(value: object) -> str | None:
+    """A folder on an SSH host: an absolute POSIX path, `~` or `~/...`.
+
+    Kept as typed apart from a trailing slash; it is never resolved against
+    this computer. NUL, newlines and other control characters are refused,
+    because the path goes into a remote shell command.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("workspace folder must be a string or null")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > MAX_PATH_CHARS:
+        raise ValueError("workspace folder path is too long")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise ValueError("workspace folder path contains control characters")
+    if not (text.startswith("/") or text == "~" or text.startswith("~/")):
+        raise ValueError("a folder on an SSH host must start with / or ~/")
+    while len(text) > 1 and text.endswith("/"):
+        text = text[:-1]
+    return text
+
+
+def normalize_folder(value: object, host: str | None) -> str | None:
+    """`normalize_root` for a local workspace, `normalize_remote_root` on a host."""
+    return normalize_remote_root(value) if host else normalize_root(value)
 
 
 def normalize_root(value: object) -> str | None:
@@ -290,10 +340,15 @@ def _workspace_from(raw: dict, name: str) -> Workspace:
         # Backward compatibility: older workspace files expressed ownership
         # only through panes in the saved layout.
         session_ids = sorted(layout_session_ids(raw.get("layout", {})))
+    # A hand-edited file must not make the workspace unloadable.
     try:
-        path = normalize_root(raw.get("path"))
+        host = normalize_host(raw.get("host"))
     except ValueError:
-        path = None  # a hand-edited file must not make the workspace unloadable
+        host = None
+    try:
+        path = normalize_folder(raw.get("path"), host)
+    except ValueError:
+        path = None
     return Workspace(
         name=raw.get("name", name),
         layout=raw.get("layout", {}),
@@ -301,6 +356,7 @@ def _workspace_from(raw: dict, name: str) -> Workspace:
         path=path,
         session_ids=[sid for sid in session_ids if isinstance(sid, str) and sid],
         temporary=raw.get("temporary") is True,
+        host=host,
     )
 
 
@@ -310,20 +366,26 @@ def save_workspace(ws: Workspace) -> None:
     # absolute folder, whatever the caller passed (env vars, ~, a relative
     # path). A value we cannot make sense of is dropped, not persisted.
     try:
-        root = normalize_root(ws.path)
+        host = normalize_host(getattr(ws, "host", None))
+    except ValueError:
+        host = None
+    try:
+        root = normalize_folder(ws.path, host)
     except ValueError:
         root = None
-    text = json.dumps(
-        {
-            "name": ws.name,
-            "layout": ws.layout,
-            "logo": ws.logo,
-            "path": root,
-            "session_ids": sorted(set(ws.session_ids)),
-            "temporary": ws.temporary,
-        },
-        indent=2,
-    )
+    document = {
+        "name": ws.name,
+        "layout": ws.layout,
+        "logo": ws.logo,
+        "path": root,
+        "session_ids": sorted(set(ws.session_ids)),
+        "temporary": ws.temporary,
+    }
+    if host:
+        # Only remote workspaces carry the key, so a local file reads the
+        # same to an older build.
+        document["host"] = host
+    text = json.dumps(document, indent=2)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:

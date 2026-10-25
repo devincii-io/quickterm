@@ -1,0 +1,66 @@
+/* Find in the terminal (js/pane_find.js): one small field in the pane's top
+   right corner, under the header when the pane has one, clear of xterm's
+   scrollbar. Never a bar across the pane. */
+.pane-find {
+  position: absolute;
+  z-index: 10;
+  top: 28px;
+  right: 18px;
+  max-width: calc(100% - 30px);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 3px 3px 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-sm);
+  font: 11px var(--mono);
+  animation: pane-find-in .1s ease-out both;
+}
+.pane-find[hidden] { display: none; }
+@keyframes pane-find-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+#grid > .pane > .pane-find { top: 8px; }
+.pane-find-input {
+  width: 170px;
+  min-width: 60px;
+  flex: 1 1 auto;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  outline: 0;
+  background: var(--field);
+  color: var(--text);
+  caret-color: var(--accent);
+  font: inherit;
+}
+.pane-find-input:focus { border-color: var(--accent-border); }
+.pane-find.invalid .pane-find-input { border-color: var(--danger); }
+.pane-find-count {
+  flex: none;
+  min-width: 44px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-align: right;
+  white-space: nowrap;
+}
+.pane-find.invalid .pane-find-count { color: var(--danger); }
+.pane-find button {
+  flex: none;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.pane-find button:hover { background: var(--surface-soft); color: var(--text); }
+.pane-find-toggle.on { border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent-text); }

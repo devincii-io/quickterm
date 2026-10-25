@@ -38,7 +38,11 @@ def test_load_config_writes_default_file(fake_appdata):
     # personal profiles are user-created only; system shells come from the
     # live inventory, so a fresh config starts empty
     assert cfg.profiles == []
-    assert cfg.default_profile == ""
+    assert cfg.shell == "powershell"
+    assert cfg.agents == {"claude-code": cfgmod.AgentSettings(), "codex": cfgmod.AgentSettings()}
+    assert not hasattr(cfg, "default_profile")
+    # A fresh config is not a migration: no pre-4.3 copy.
+    assert not (fake_appdata / "quickterm" / cfgmod.PRE_43_BACKUP).exists()
     assert cfg.theme == "graphite"
     assert cfg.custom_theme == {}
     assert cfg.logo is None
@@ -49,7 +53,7 @@ def test_load_config_writes_default_file(fake_appdata):
 
 
 def test_save_load_roundtrip(fake_appdata):
-    cfg = AppConfig(port=9999, default_profile="cmd")
+    cfg = AppConfig(port=9999, shell="wsl:Ubuntu")
     cfg.profiles.append(Profile(
         name="ubuntu",
         cmd="wsl.exe",
@@ -61,7 +65,7 @@ def test_save_load_roundtrip(fake_appdata):
     save_config(cfg)
     loaded = load_config()
     assert loaded.port == 9999
-    assert loaded.default_profile == "cmd"
+    assert loaded.shell == "wsl:Ubuntu"
     ubuntu = next(p for p in loaded.profiles if p.name == "ubuntu")
     assert ubuntu.autostart is True
     assert ubuntu.terminal_type == "wsl"
@@ -69,50 +73,184 @@ def test_save_load_roundtrip(fake_appdata):
     assert ubuntu.start_command == "source .venv/bin/activate"
 
 
-def test_claude_profile_roundtrip_and_launch_mode_validation(fake_appdata):
-    cfg = AppConfig(profiles=[Profile(
-        name="project-agent",
-        cmd="claude.exe",
-        terminal_type="claude-code",
-        agent_mode="resume",
-        agent={"model": "opus", "permission_mode": "plan"},
-    )])
+def test_agent_settings_round_trip_and_launch_mode_validation(fake_appdata):
+    cfg = AppConfig()
+    cfg.agents["claude-code"] = cfgmod.AgentSettings(
+        cmd="claude.exe", agent_mode="resume", agent={"model": "opus", "permission_mode": "plan"},
+    )
     save_config(cfg)
 
-    loaded = load_config().profiles[0]
-    assert loaded.terminal_type == "claude-code"
+    loaded = load_config().agents["claude-code"]
     assert loaded.agent_mode == "resume"
     assert loaded.agent == {"model": "opus", "permission_mode": "plan"}
-    assert not hasattr(loaded, "claude_mode")
+    assert load_config().agents["codex"] == cfgmod.AgentSettings()
 
-    loaded.agent_mode = "guess"
-    with pytest.raises(ValueError, match="Claude launch mode"):
-        save_config(AppConfig(profiles=[loaded]))
-    loaded.agent_mode = "fork"  # a Codex mode
-    with pytest.raises(ValueError, match="Claude launch mode"):
-        save_config(AppConfig(profiles=[loaded]))
-
-    # A Claude profile carries no folder at all. The workspace root supplies
-    # one, and the spawn path refuses only when nothing resolves.
-    loaded.agent_mode = "continue"
-    save_config(AppConfig(profiles=[loaded]))
-    assert not hasattr(load_config().profiles[0], "cwd")
+    for mode in ("guess", "fork"):  # fork is a Codex mode
+        cfg.agents["claude-code"].agent_mode = mode
+        with pytest.raises(ValueError, match="Claude Code: Claude launch mode"):
+            save_config(cfg)
 
 
-def test_a_pre_4_0_claude_mode_becomes_agent_mode_and_is_still_written(fake_appdata):
+def _write_raw(fake_appdata, raw):
     path = fake_appdata / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
-    (path / "config.json").write_text(json.dumps({"profiles": [
-        {"name": "agent", "cmd": "claude", "terminal_type": "claude-code", "claude_mode": "agents"},
-        {"name": "fresh", "cmd": "claude", "terminal_type": "claude-code",
-         "agent_mode": "new", "claude_mode": "resume"},
-    ]}), encoding="utf-8")
-    loaded = load_config()
-    assert [p.agent_mode for p in loaded.profiles] == ["agents", "new"]
-    save_config(loaded)
-    stored = json.loads((path / "config.json").read_text(encoding="utf-8"))["profiles"]
-    # An older build reads only claude_mode, so a downgrade keeps the mode.
-    assert [(p["agent_mode"], p["claude_mode"]) for p in stored] == [("agents", "agents"), ("new", "new")]
+    (path / "config.json").write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def test_the_real_4_2_shape_migrates_to_agents_and_ssh_profiles_only(fake_appdata):
+    ssh = [
+        {"name": f"server {n}", "cmd": "", "terminal_type": "ssh", "ssh_host": f"h{n}"}
+        for n in range(3)
+    ]
+    raw = {
+        "default_profile": "Claude New",
+        "profiles": [
+            {"name": "Claude New", "cmd": "", "terminal_type": "claude-code", "agent_mode": "new",
+             "claude_mode": "new", "agent": {}},
+            {"name": "codex", "cmd": "powershell.exe", "terminal_type": "windows-powershell",
+             "start_command": "codex"},
+            {"name": "Windows PowerShell", "cmd": "powershell.exe",
+             "terminal_type": "windows-powershell"},
+            *ssh,
+        ],
+    }
+    path = _write_raw(fake_appdata, raw)
+    before = (path / "config.json").read_text(encoding="utf-8")
+
+    cfg = load_config()
+
+    assert [p.name for p in cfg.profiles] == ["server 0", "server 1", "server 2"]
+    assert cfg.agents["claude-code"].agent_mode == "new"
+    # The "codex" shell that only ran codex becomes the Codex settings.
+    assert cfg.agents["codex"] == cfgmod.AgentSettings(agent_mode="new")
+    assert cfg.shell == "powershell"
+    # The file as it was, next to the migrated one, which is saved at once.
+    assert (path / cfgmod.PRE_43_BACKUP).read_text(encoding="utf-8") == before
+    stored = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    assert "default_profile" not in stored and "agents" in stored
+    # Once: the next load changes nothing and keeps the first copy.
+    (path / cfgmod.PRE_43_BACKUP).write_text("first", encoding="utf-8")
+    assert load_config() == cfg
+    assert (path / cfgmod.PRE_43_BACKUP).read_text(encoding="utf-8") == "first"
+
+
+def test_migration_names_what_it_dropped_and_keeps_start_arguments(fake_appdata):
+    raw = {"profiles": [
+        {"name": "Claude New", "cmd": "", "terminal_type": "claude-code", "agent_mode": "new",
+         "keybinding": "ctrl+alt+c", "autostart": True},
+        {"name": "yolo", "cmd": "pwsh.exe", "terminal_type": "powershell-core",
+         "start_command": "codex --yolo --model o3", "env": {"K": "v"}},
+        {"name": "again", "cmd": "bash", "terminal_type": "git-bash", "start_command": "claude -c"},
+        {"name": "Windows PowerShell", "cmd": "powershell.exe", "terminal_type": "windows-powershell",
+         "keybinding": "ctrl+alt+p"},
+    ]}
+    notes = []
+    out = cfgmod.migrate_agents(raw, notes)
+    assert out["profiles"] == []
+    assert out["agents"]["codex"] == {
+        "cmd": "", "args": ["--yolo", "--model", "o3"], "agent_mode": "new", "agent": {}, "env": {"K": "v"},
+    }
+    assert out["agents"]["claude-code"]["agent_mode"] == "new"
+    assert notes == [
+        'Terminal "Claude New" became the Claude Code settings (its shortcut ctrl+alt+c and its '
+        "autostart not kept).",
+        'Terminal "yolo" became the Codex settings.',
+        'Terminal "again" was removed: Claude Code starts from Settings > Agents.',
+        'Terminal "Windows PowerShell" was removed: the shell is in the + menu (its shortcut '
+        "ctrl+alt+p not kept).",
+    ]
+    path = _write_raw(fake_appdata, raw)
+    cfg = load_config()
+    assert cfg.agents["codex"].args == ["--yolo", "--model", "o3"]
+    assert (path / cfgmod.PRE_43_BACKUP).exists()
+    # The notes wait in a file for whichever process shows the window.
+    load_config()
+    notice = cfgmod.take_migration_notice()
+    assert notice.startswith("Settings moved to QuickTerm 4.3: ")
+    assert 'Terminal "yolo" became the Codex settings.' in notice
+    assert not (path / cfgmod.MIGRATION_NOTES).exists()
+    assert cfgmod.take_migration_notice() is None, "once"
+
+
+def test_the_backend_shows_what_the_launcher_migrated(fake_appdata, monkeypatch):
+    import sys
+
+    from quickterm import app
+
+    _write_raw(fake_appdata, {"profiles": [
+        {"name": "Windows PowerShell", "cmd": "powershell.exe", "terminal_type": "windows-powershell"},
+    ]})
+    seen = {}
+    monkeypatch.setattr(app, "_harden_program_lookup", lambda: None)
+    monkeypatch.setattr(app, "_check_windows_build", lambda: None)
+    monkeypatch.setattr(app, "_setup_logging", lambda *a: None)
+    monkeypatch.setattr(app, "_run_launcher", lambda cfg, **kw: seen.setdefault("launcher", cfg.launch_error) and 0)
+    monkeypatch.setattr(app, "_run_backend", lambda cfg, **kw: seen.setdefault("backend", cfg.launch_error) and 0)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # Plain QuickTerm.exe: the launcher loads, and so migrates, the config.
+    monkeypatch.setattr(sys, "argv", ["QuickTerm"])
+    app.main()
+    assert seen["launcher"] is None, "the launcher shows no window and leaves the notice"
+    assert (fake_appdata / "quickterm" / cfgmod.MIGRATION_NOTES).exists()
+
+    # The backend it starts loads a config that is already migrated.
+    monkeypatch.setattr(sys, "argv", ["QuickTerm", "--serve"])
+    app.main()
+    assert seen["backend"] == (
+        "Settings moved to QuickTerm 4.3: Terminal \"Windows PowerShell\" was removed: "
+        "the shell is in the + menu."
+    )
+    assert not (fake_appdata / "quickterm" / cfgmod.MIGRATION_NOTES).exists()
+
+
+def test_migration_keeps_the_first_agent_of_each_kind_and_special_profiles():
+    raw = {"profiles": [
+        {"name": "c1", "cmd": "", "terminal_type": "claude-code", "claude_mode": "agents",
+         "agent": {"model": "opus"}, "args": ["--verbose"], "env": {"A": "1"}},
+        {"name": "c2", "cmd": "", "terminal_type": "claude-code", "agent_mode": "resume"},
+        {"name": "x1", "cmd": "codex", "terminal_type": "codex"},
+        {"name": "dev", "cmd": "pwsh.exe", "terminal_type": "powershell-core",
+         "start_command": "npm run dev"},
+        {"name": "agent shell", "cmd": "bash", "terminal_type": "git-bash",
+         "start_command": "claude.exe --continue"},
+        {"name": "untyped shell", "cmd": r"C:\Windows\System32\cmd.exe"},
+        {"name": "tool", "cmd": "htop"},
+        {"name": "db", "cmd": "", "terminal_type": "docker", "connection": {"container": "db"}},
+    ]}
+    cfg = cfgmod.config_from_dict(raw)
+    assert [p.name for p in cfg.profiles] == ["dev", "tool", "db"]
+    claude = cfg.agents["claude-code"]
+    assert (claude.agent_mode, claude.agent, claude.args, claude.env) == (
+        "agents", {"model": "opus"}, ["--verbose"], {"A": "1"}
+    )
+    assert cfg.agents["codex"].cmd == "codex"
+
+
+@pytest.mark.parametrize("profile", [
+    Profile(name="a", cmd="claude", terminal_type="claude-code"),
+    Profile(name="a", cmd="codex", terminal_type="codex"),
+    Profile(name="a", cmd="pwsh.exe", terminal_type="powershell-core"),
+    Profile(name="a", cmd="bash", terminal_type="git-bash", start_command="codex"),
+    Profile(name="a", cmd="pwsh.exe"),
+])
+def test_a_profile_of_a_removed_kind_is_refused_on_save(fake_appdata, profile):
+    with pytest.raises(ValueError, match='Terminal profile "a": profiles are for connections and '
+                       "custom commands; set the shell or the agents instead"):
+        save_config(AppConfig(profiles=[profile]))
+
+
+@pytest.mark.parametrize("value", ["powershell", "cmd", "git-bash", "wsl", "wsl:Ubuntu-22.04", ""])
+def test_shell_values_that_save(fake_appdata, value):
+    save_config(AppConfig(shell=value))
+    assert load_config().shell == value
+
+
+@pytest.mark.parametrize("value", ["bash", "pwsh", "wsl:", "wsl:-d", "wsl:a b", None, 3])
+def test_shell_values_that_are_refused(fake_appdata, value):
+    with pytest.raises(ValueError, match="shell must be one of powershell, cmd, git-bash, wsl"):
+        save_config(AppConfig(shell=value))
 
 
 def _parse_3x(binding):
@@ -146,8 +284,8 @@ def test_a_4_0_shortcut_never_makes_the_config_unreadable_for_3_x(fake_appdata, 
         _parse_3x(f"ctrl+alt+{key}")
     save_config(AppConfig(
         summon_hotkey=f"ctrl+alt+{key}",
-        profiles=[Profile(name="a", cmd="cmd.exe", keybinding=f"ctrl+shift+{key}"),
-                  Profile(name="b", cmd="cmd.exe", keybinding="ctrl+alt+1")],
+        profiles=[Profile(name="a", cmd="cmd.exe", terminal_type="custom", keybinding=f"ctrl+shift+{key}"),
+                  Profile(name="b", cmd="cmd.exe", terminal_type="custom", keybinding="ctrl+alt+1")],
     ))
     stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
 
@@ -175,16 +313,6 @@ def test_a_legacy_shortcut_is_stored_where_3_x_reads_it(fake_appdata):
     assert "summon_hotkey_v4" not in stored
 
 
-def test_only_claude_profiles_carry_the_legacy_key(fake_appdata):
-    save_config(AppConfig(profiles=[
-        Profile(name="cx", cmd="codex", terminal_type="codex", agent_mode="fork"),
-        Profile(name="sh", cmd="cmd.exe"),
-    ]))
-    stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
-    assert all("claude_mode" not in p for p in stored["profiles"])
-    assert stored["profiles"][0]["agent_mode"] == "fork"
-
-
 @pytest.mark.parametrize(("agent", "message"), [
     ({"colour": "blue"}, "unknown agent option: colour"),
     ({"model": "x y"}, "model"),
@@ -193,9 +321,23 @@ def test_only_claude_profiles_carry_the_legacy_key(fake_appdata):
 ])
 def test_agent_options_are_checked_on_save(fake_appdata, agent, message):
     kind = "codex" if "bypass" in agent else "claude-code"
-    profile = Profile(name="a", cmd="", terminal_type=kind, agent=agent)
-    with pytest.raises(ValueError, match=f'Terminal profile "a": .*{message}'):
-        save_config(AppConfig(profiles=[profile]))
+    cfg = AppConfig()
+    cfg.agents[kind] = cfgmod.AgentSettings(agent=agent)
+    label = cfgmod.AGENT_LABELS[kind]
+    with pytest.raises(ValueError, match=f"{label}: .*{message}"):
+        save_config(cfg)
+
+
+def test_agent_env_is_protected_at_rest(fake_appdata, monkeypatch):
+    monkeypatch.setattr(cfgmod.secret_store, "protection_available", lambda: True)
+    monkeypatch.setattr(cfgmod.secret_store, "protect", lambda data: b"sealed:" + data)
+    monkeypatch.setattr(cfgmod.secret_store, "unprotect", lambda data: data.removeprefix(b"sealed:"))
+    cfg = AppConfig()
+    cfg.agents["codex"].env = {"OPENAI_API_KEY": "secret"}
+    save_config(cfg)
+    stored = (fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8")
+    assert "secret" not in stored
+    assert load_config().agents["codex"].env == {"OPENAI_API_KEY": "secret"}
 
 
 def test_window_and_overlay_default_and_round_trip(fake_appdata):
@@ -213,6 +355,14 @@ def test_window_and_overlay_default_and_round_trip(fake_appdata):
     loaded = load_config()
     assert loaded.window.width == 1600
     assert (loaded.overlay.enabled, loaded.overlay.edge, loaded.overlay.monitor) == (True, "bottom", "primary")
+
+
+def test_update_auto_download_defaults_on_and_round_trips(fake_appdata):
+    cfg = load_config()
+    assert cfg.update_auto_download is True
+    cfg.update_auto_download = False
+    save_config(cfg)
+    assert load_config().update_auto_download is False
 
 
 def test_a_config_from_before_window_settings_loads_with_defaults(fake_appdata):
@@ -313,7 +463,7 @@ def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
     path = fake_appdata / "quickterm"
     path.mkdir()
     legacy = {
-        "profiles": [{"name": "secure", "cmd": "cmd.exe", "env": {"API_TOKEN": "secret"}}]
+        "profiles": [{"name": "secure", "cmd": "cmd.exe", "terminal_type": "custom", "env": {"API_TOKEN": "secret"}}]
     }
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
@@ -356,6 +506,7 @@ def test_a_stored_profile_folder_is_dropped_on_load(fake_appdata):
             "name": "Standard",
             "cmd": "powershell.exe",
             "terminal_type": "windows-powershell",
+            "start_command": "npm run dev",
             "cwd": str(fake_appdata / "does-not-exist"),
             "subpath": "../escape",
         }],
@@ -431,7 +582,7 @@ def test_unknown_keys_ignored(fake_appdata):
     data = {
         "port": 7000,
         "totally_unknown": {"nested": 1},
-        "profiles": [{"name": "x", "cmd": "cmd.exe", "mystery_key": True}],
+        "profiles": [{"name": "x", "cmd": "cmd.exe", "terminal_type": "custom", "mystery_key": True}],
         "voice": {"model_size": "base", "bogus": "yes"},
     }
     (path / "config.json").write_text(json.dumps(data), encoding="utf-8")
@@ -473,7 +624,7 @@ def config_text(fake_appdata, name="config.json"):
 def test_save_keeps_the_previous_config_as_a_backup(fake_appdata):
     # A partial PUT used to replace every profile and snippet with nothing to
     # go back to.
-    save_config(AppConfig(profiles=[Profile(name="work", cmd="cmd.exe")]))
+    save_config(AppConfig(profiles=[Profile(name="work", cmd="cmd.exe", terminal_type="custom")]))
     before = config_text(fake_appdata)
     save_config(AppConfig())
 
@@ -503,7 +654,7 @@ def test_a_save_that_changes_nothing_keeps_the_backup_even_with_secrets(
     monkeypatch.setattr(
         cfgmod.secret_store, "unprotect", lambda data: data.split(b":", 1)[1],
     )
-    profiles = [Profile(name="work", cmd="cmd.exe", env={"API_TOKEN": "secret"})]
+    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"API_TOKEN": "secret"})]
     save_config(AppConfig(profiles=profiles, font_size=12))
     save_config(AppConfig(profiles=profiles, font_size=15))
     save_config(AppConfig(profiles=profiles, font_size=15))
@@ -537,7 +688,7 @@ def test_the_backup_never_keeps_secrets_the_save_is_encrypting(fake_appdata, mon
     )
     path = fake_appdata / "quickterm"
     path.mkdir()
-    legacy = {"profiles": [{"name": "secure", "cmd": "cmd.exe", "env": {"API_TOKEN": "secret"}}]}
+    legacy = {"profiles": [{"name": "secure", "cmd": "cmd.exe", "terminal_type": "custom", "env": {"API_TOKEN": "secret"}}]}
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
     load_config()  # migrates the plaintext value to a protected one
@@ -607,7 +758,7 @@ def test_a_config_without_descriptions_still_loads(fake_appdata):
     path = fake_appdata / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
     legacy = {
-        "profiles": [{"name": "Standard", "cmd": "powershell.exe", "terminal_type": "windows-powershell"}],
+        "profiles": [{"name": "Standard", "cmd": "htop"}],
         "snippets": [{"name": "git status", "text": "git status\r"}],
     }
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
@@ -625,6 +776,7 @@ def test_descriptions_survive_save_and_reload(fake_appdata):
     cfg.profiles.append(Profile(
         name="Dev shell",
         cmd="pwsh.exe",
+        start_command="npm run dev",
         description="PowerShell 7 with the project's dev server already running.",
     ))
     cfg.snippets.append(Snippet(
@@ -646,7 +798,7 @@ def test_descriptions_survive_save_and_reload(fake_appdata):
 
 
 @pytest.mark.parametrize("payload, message", [
-    ({"profiles": [{"name": "x", "cmd": "cmd.exe", "description": 5}]}, "description must be a string"),
+    ({"profiles": [{"name": "x", "cmd": "cmd.exe", "terminal_type": "custom", "description": 5}]}, "description must be a string"),
     ({"snippets": [{"name": "x", "text": "x\r", "description": []}]}, "description must be a string"),
 ])
 def test_save_rejects_non_string_descriptions(fake_appdata, payload, message):
@@ -657,7 +809,7 @@ def test_save_rejects_non_string_descriptions(fake_appdata, payload, message):
 
 def test_save_rejects_conflicting_global_shortcuts(fake_appdata):
     cfg = AppConfig(profiles=[
-        Profile(name="Conflict", cmd="cmd.exe", keybinding=cfgmod.AppConfig().summon_hotkey),
+        Profile(name="Conflict", cmd="cmd.exe", terminal_type="custom", keybinding=cfgmod.AppConfig().summon_hotkey),
     ])
     with pytest.raises(ValueError, match="conflicts"):
         save_config(cfg)
@@ -668,8 +820,9 @@ def test_save_rejects_conflicting_global_shortcuts(fake_appdata):
     [
         ("font_family", 123, "Font family"),
         ("logo", {"id": "logo.png"}, "Logo"),
-        ("default_profile", [], "Default profile"),
+        ("shell", [], "shell must be one of"),
         ("update_check", "false", "Update check"),
+        ("update_auto_download", 1, "Automatic update download"),
     ],
 )
 def test_save_rejects_wrong_global_field_types(fake_appdata, field, value, message):
@@ -695,7 +848,7 @@ def test_save_rejects_wrong_global_field_types(fake_appdata, field, value, messa
 def test_save_rejects_profile_fields_that_would_break_runtime(
     fake_appdata, field, value, message
 ):
-    profile = Profile(name="Broken", cmd="cmd.exe")
+    profile = Profile(name="Broken", cmd="cmd.exe", terminal_type="custom")
     setattr(profile, field, value)
     with pytest.raises(ValueError, match=message):
         save_config(AppConfig(profiles=[profile]))

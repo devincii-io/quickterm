@@ -1,0 +1,95 @@
+/* Agent usage and resources (js/usage_footer.js): one quiet line above the
+   sidebar icons, and the two popovers it opens. Full sidebar only. */
+
+.launcher.sidebar > .usage-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px 1px;
+  border-top: 1px solid var(--line);
+}
+.launcher.sidebar > .usage-footer[hidden] { display: none; }
+.usage-footer.single { justify-content: flex-start; }
+.usage-footer-part {
+  min-width: 0;
+  overflow: hidden;
+  padding: 1px 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font: 10px var(--mono);
+  text-overflow: ellipsis;
+  white-space: pre;
+  cursor: pointer;
+}
+.usage-footer-part[hidden] { display: none; }
+.usage-footer-memory { flex: none; }
+.usage-footer-part:hover,
+.usage-footer-part[aria-expanded="true"] { background: var(--surface-raised); color: var(--text); }
+.usage-footer-part:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+body.sidebar-collapsed .launcher.sidebar > .usage-footer,
+body.sidebar-hidden .launcher.sidebar > .usage-footer { display: none; }
+
+/* The popovers sit where a menu would (menu.css) and talk like one. */
+.usage-popover {
+  position: fixed;
+  z-index: 130;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font: 11px var(--mono);
+  outline: 0;
+  animation: qt-menu-in .12s ease-out both;
+}
+.usage-empty { margin: 4px 2px; color: var(--muted); }
+
+.usage-block + .usage-block { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line-strong); }
+.usage-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 2px 4px; }
+.usage-block-title { font-weight: 600; }
+.usage-block-updated { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.usage-window { margin: 0 2px 6px; }
+.usage-window-line { display: flex; justify-content: space-between; gap: 8px; }
+.usage-window-percent { font-variant-numeric: tabular-nums; }
+.usage-bar { height: 3px; margin: 3px 0 2px; overflow: hidden; border-radius: 2px; background: var(--surface-soft); }
+.usage-bar-fill { display: block; height: 100%; background: var(--accent); }
+.usage-window.high .usage-bar-fill { background: var(--danger); }
+.usage-window-reset { color: var(--muted); font-size: 9px; }
+
+.usage-resource {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 46px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 20px;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.usage-resource.head { grid-template-columns: minmax(0, 1fr) auto; margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--line-strong); border-radius: 0; font-weight: 600; }
+.usage-resource.group { margin-top: 4px; color: var(--muted); }
+.usage-resource.terminal { padding-left: 14px; cursor: pointer; }
+.usage-resource.terminal:hover,
+.usage-resource.terminal:focus-visible { background: var(--surface-soft); outline: 0; }
+.usage-resource-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-resource-memory,
+.usage-resource-cpu,
+.usage-resource-total { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.usage-resource-total { color: var(--text); font-weight: 400; }
+@media (forced-colors: active) {
+  .usage-popover { border-color: CanvasText; }
+  .usage-bar-fill { background: Highlight; }
+}

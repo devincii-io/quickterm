@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 
 import pytest
@@ -114,7 +115,8 @@ def test_subagents_come_and_go():
     assert [s.id for s in state.subagents] == ["a1", "a2"]
     out = describe(state, now)
     assert out["subagents"][0] == {"id": "a1", "type": "Explore", "description": None,
-                                   "age_seconds": int(now - state.subagents[0].started)}
+                                   "age_seconds": int(now - state.subagents[0].started),
+                                   "waiting": False}
     state, _, _ = run([("SubagentStop", {"agent_id": "a1"})], start=state, t0=now)
     assert [s.id for s in state.subagents] == ["a2"]
 
@@ -146,7 +148,12 @@ def test_codex_turn_complete_is_done_with_its_message():
 def test_describe_matches_the_contract():
     state, _, now = run([("UserPromptSubmit", {"prompt": "p"}), ("PreToolUse", {"tool_name": "Read"})])
     out = describe(state, now)
-    assert set(out) == {"kind", "state", "prompt", "message", "tool", "subagents", "age_seconds"}
+    assert set(out) == {
+        "kind", "state", "prompt", "message", "tool", "subagents", "age_seconds",
+        # Round 2: the board's card and the resume command.
+        "last_prompt", "last_answer", "last_event_at", "event_age_seconds", "board",
+        "conversation_id", "cwd", "title",
+    }
     assert out["tool"] == "Read" and out["kind"] == "claude"
     stopped, _, _ = run([("Stop", {})], start=state, t0=now)
     assert describe(stopped, now)["tool"] is None
@@ -226,7 +233,7 @@ def test_codex_chains_the_users_own_notify(tmp_path, monkeypatch):
     (home / "config.toml").write_text('notify = ["C:/x/mine.exe", "turn-ended"]\n', encoding="utf-8")
     args = agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base)
     assert args[0] == "-c" and args[2:] == ["--cd", "x"]
-    notify = json.loads(args[1].split("=", 1)[1])
+    notify = tomllib.loads("v=" + args[1].split("=", 1)[1])["v"]
     flag = notify.index("--codex-notify")
     assert notify[flag + 1:] == ["C:/x/mine.exe", "turn-ended"]
     assert notify[0] == sys.executable
@@ -270,7 +277,8 @@ def test_codex_gets_the_curl_notify_without_one_of_its_own(tmp_path, monkeypatch
     assert args[0] == "-c" and args[2:] == ["resume", "--last"]
     key, value = args[1].split("=", 1)
     assert key == "notify"
-    assert json.loads(value)[1:] == ["-K", (base / "codex-notify.curl").as_posix(), "--data-binary"]
+    assert '"' not in value, "no double quote for PowerShell 5.1 or cmd to lose"
+    assert tomllib.loads("v=" + value)["v"][1:] == ["-K", (base / "codex-notify.curl").as_posix(), "--data-binary"]
     assert agent_hooks.launch_args("codex", "codex.cmd", ["--cd", "x"], None, base) == ["--cd", "x"]
     assert agent_hooks.launch_args("codex", "codex.exe", ["agents"], None, base) == ["agents"]
 

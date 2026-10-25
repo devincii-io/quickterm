@@ -106,21 +106,36 @@ class AppConfig:
     idle_timeout_s: int = 300
     max_sessions: int = 0                    # 0 = unlimited; otherwise 1..100 live
     update_check: bool = True               # UI probes GitHub releases when on
+    update_auto_download: bool = True       # a found update downloads in the background
     summon_hotkey: str = "ctrl+alt+grave"   # summon/hide; with the overlay, the drop-down
     scratch_dir: str = ""                   # "" = <system temp>/QuickTerm/scratch
-    default_profile: str = ""                # a profile name or a shell id ("git-bash")
+    shell: str = "powershell"               # powershell | cmd | git-bash | wsl | wsl:<distro> | "" (POSIX)
+    agents: dict[str, AgentSettings] = ...  # always both "claude-code" and "codex"
     profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
     voice: VoiceConfig = ...
     window: WindowConfig = ...
     overlay: OverlayConfig = ...
 
+@dataclass
+class AgentSettings:                        # what an agent profile held for the launch
+    cmd: str = ""; args: list[str] = []; agent_mode: str | None = None
+    agent: dict[str, str] = {}; env: dict[str, str] = {}   # env DPAPI-protected like a profile's
+
+def agent_profile(cfg, kind) -> Profile      # the settings as a Profile named after the kind
+def migrate_agents(raw: dict) -> dict        # the 4.3 migration, pure; config_from_dict runs it
+                                            # when "agents" is missing
 def config_dir() -> Path
 def default_cwd() -> str
 def scratch_root(configured: str = "") -> str
 def config_from_dict(raw: dict) -> AppConfig
 def validate_config(cfg: AppConfig) -> None
-def load_config() -> AppConfig
+def load_config() -> AppConfig               # a migrating load copies the file to
+                                            # config.pre-4.3.json (once), saves at once and
+                                            # writes its notes to migration-4.3.txt
+def take_migration_notice() -> str | None   # those notes, prefixed, read once and deleted;
+                                            # only a backend calls it (app.take_migration_notice
+                                            # logs them and sets launch_error, the banner)
 def save_config(cfg: AppConfig) -> None      # keeps config.prev.json
 def validate_environment(env: object) -> dict[str, str]
 def replace_file(source, target) -> None     # os.replace, retried on Windows sharing errors
@@ -517,6 +532,7 @@ class Workspace:
     path: str | None = None   # root folder every session in this workspace starts in
     session_ids: list[str] = field(default_factory=list)  # includes detached
     temporary: bool = False   # disposable scratch-view layout, deleted between runs
+    host: str | None = None   # an OpenSSH profile's name; `path` is then a POSIX path there
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
@@ -530,7 +546,15 @@ def referenced_session_ids() -> set[str]       # every file's layout + session_i
 def normalize_root(value: object) -> str | None      # expands ~/env vars, absolutizes
 def resolve_start_dir(root: str | None) -> str | None # the root if it exists, else None
 def root_exists(root: str | None) -> bool
+def normalize_host(value: object) -> str | None         # a profile name, or None
+def normalize_remote_root(value: object) -> str | None  # "/..." or "~" or "~/...", kept as typed
+def normalize_folder(value: object, host: str | None) -> str | None
 ```
+
+Only a remote workspace's file carries `"host"`; a local file reads as it
+did before hosts existed. A remote folder is never resolved against this
+computer, and NUL, line breaks and other control characters are refused
+because it goes into a remote shell command.
 
 File names: a lowercase name that needs no sanitizing is stored as
 `<name>.json`; anything else gets a digest suffix (`<safe>--<sha256[:10]>.json`)
@@ -663,7 +687,7 @@ write lock), installs `api.guard.LocalGuard`, calls `register(app, ctx)` on
 every route module and mounts the frontend last. The routes live in
 `quickterm/api/`: `sessions`, `launches`, `windows`, `workspaces`, `config`,
 `system` (health, profiles, terminal inventory, elevate, update, open, file,
-folder browser), `assets`, and `attach` (the WebSocket route, the replay
+folder browser), `assets`, `usage` (agent usage limits), and `attach` (the WebSocket route, the replay
 handshake, the output and input pumps and the close codes). `api.common`
 holds the shared request helpers (bounded JSON bodies, `resolve_request`).
 Route modules load `workspace`, `config`, `opener`, `update`, `assets`,
@@ -725,14 +749,14 @@ REST (JSON, under `/api`):
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
 | GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. With `?challenge=<nonce>` (`[A-Za-z0-9_-]{16,64}`, else 400) it adds `proof`, the hex HMAC-SHA256 of the nonce keyed with the token: a local client proves it found this user's QuickTerm before it sends the token, and the proof of a caller-chosen nonce reveals nothing about the token. |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, agent_mode?, agent_session?, claude_mode?, workspace?}` → `SessionInfo` (profile name resolves from config; a bounded `start_command` override supports shell-profile recovery; explicit cmd overrides). `agent_mode` is valid only for a `claude-code` or `codex` profile (400 "agent_mode requires a Claude Code or Codex profile") and must be in that type's mode set. `claude_mode` stays an accepted alias; when both are given and differ, 400 "agent_mode and claude_mode disagree". The legacy messages "claude_mode requires a Claude Code profile" and "claude_mode must be new, continue, resume, or agents" stay byte-identical for `claude_mode`. `agent_session` must match `^[0-9a-fA-F-]{36}$` (400 "agent_session must be a session id") and is valid only with mode null (implies resume), `resume`, or `fork` (codex only), else 400 "agent_session needs resume or fork". Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to the OpenSSH or PuTTY argv in the launch.py section; 400 when the chosen client is missing ("OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client." for OpenSSH). |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, agent_mode?, agent_session?, claude_mode?, workspace?, shell?, prompt?}` → `SessionInfo` (no profile and no cmd starts the configured shell, or `shell` when given (4.3); profile name resolves from config, and `claude-code`/`codex` from the agent settings; a bounded `start_command` override supports shell-profile recovery; explicit cmd overrides). `agent_mode` is valid only for a `claude-code` or `codex` profile (400 "agent_mode requires a Claude Code or Codex profile") and must be in that type's mode set. `claude_mode` stays an accepted alias; when both are given and differ, 400 "agent_mode and claude_mode disagree". The legacy messages "claude_mode requires a Claude Code profile" and "claude_mode must be new, continue, resume, or agents" stay byte-identical for `claude_mode`. `agent_session` must match `^[0-9a-fA-F-]{36}$` (400 "agent_session must be a session id") and is valid only with mode null (implies resume), `resume`, or `fork` (codex only), else 400 "agent_session needs resume or fork". `prompt` (4.3) is the agent's first message, passed as its last positional argument (also over SSH): a string of at most 16000 characters, no NUL, not starting with `-`, without `"` (Windows PowerShell 5.1 splits a native argument at an embedded quote), valid only for a `claude-code` or `codex` profile without `cmd`/`args` and not in the `agents` mode; blank means none; 400 with the reason otherwise. Under the `cmd` shell a prompt with characters cmd.exe re-parses fails the spawn like any such argument, and under the `cmd` shell or through a `.cmd`/`.bat` agent a prompt over 7000 characters is refused (400 `prompt is too long for cmd.exe: at most 7000 characters`; cmd.exe ends a command line at 8191). On an SSH host the prompt's lines are joined with ` | `, since a line break cannot be quoted through every remote shell. Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to the OpenSSH or PuTTY argv in the launch.py section; 400 when the chosen client is missing ("OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client." for OpenSSH). |
 | POST | /api/connections/{name}/open | Opens a saved RDP/VNC profile in its external client, off the event loop. Returns `{pid, profile, type, external: true}`; 404 for an unknown profile, 400 for a terminal profile or unavailable/invalid client. No session is registered and no credentials are stored. Token-gated. |
-| PATCH | /api/workspaces/{name} | `{path?, logo?}` metadata-only edit under the workspace write lock. Preserves the latest layout, session ownership and temporary flag; 404 if missing; 400 for an empty body, unknown fields, or invalid metadata. Layout autosaves omit durable-workspace metadata so stale viewers cannot undo a folder/logo edit. |
+| PATCH | /api/workspaces/{name} | `{path?, logo?, host?}` metadata-only edit under the workspace write lock. Preserves the latest layout, session ownership and temporary flag; 404 if missing; 400 for an empty body, unknown fields, or invalid metadata. Layout autosaves omit durable-workspace metadata so stale viewers cannot undo a folder/logo edit. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
 | POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
-| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's shell runs the launch loop: a workspace is focused when a view of this window already shows it, else opened as a new view (never switched into another view in place); a profile starts in the given folder or the workspace root, in the named workspace's view or the active one; a folder alone opens a new scratch view there. Route and payload shapes are unchanged from 3.x. |
+| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's shell runs the launch loop: a workspace is shown when a view of this window already has it open, else opened as a new view (never switched into another view in place); a profile starts in the given folder or the workspace root, in the named workspace's view or the shown one; a folder alone starts a terminal there in the window's scratch view. Route and payload shapes are unchanged from 3.x. |
 | GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued handoff → the queued item (`{cwd?, profile?, workspace?}`, as POST /api/launches validated it) or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` window's shell should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
 | GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, parent, idle_seconds, age_seconds}]}`, oldest window first |
 | POST | /api/windows | `{id?, workspace?, title?, primary?, parent?}` → `{id, workspace, title, primary, parent}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. `parent` is the shell window's id for an embedded workspace view; once set it stays. Forgetting a window (DELETE, a native close) forgets every entry whose `parent` it is, and only an entry without a parent is ever primary. 409 on a claimed workspace or too many windows, 400 on a junk name |
@@ -745,10 +769,13 @@ REST (JSON, under `/api`):
 | DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id (also when `kill` raises `KeyError` because the id vanished during the call), 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
 | GET | /api/profiles | → `[Profile]` |
 | GET | /api/workspaces | → `[name]` |
-| GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool` |
-| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?}` → 204. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
-| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. |
-| GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, default_profile, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it), as `"<binding> is in use by another program"` (several: `"<a>, <b> are in use by other programs"`, a profile key written `"<binding> (<profile>)"`), or null. It reflects the latest registration, at startup or after a live rebind; Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the shell shows it in the error banner. |
+| GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool`, `git` and `host`. For a remote workspace both `path_exists` and `git` come from the last background check over ssh and never wait for one (unknown counts as present, git as null until the first answer). |
+| POST | /api/workspaces/remote-check | `{host, path}` → `{ok, message}`: `ssh -o BatchMode=yes <profile args> <host> test -d <path>`. `message` is ssh's last stderr lines, or "<path> is not a folder on <host>" when `test -d` exits 1. 400 for an unknown host, a PuTTY profile ("remote workspaces need an OpenSSH profile") or a bad folder. |
+| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?, host?}` → 204. `host` is three-valued like `path` and must name an OpenSSH SSH profile (400 otherwise); with a host, `path` is read as a folder on it. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
+| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. Also removes the workspace's board entry (`board.forget_workspace`). |
+| GET | /api/board | → `{status: {"<workspace>": "todo"\|"in-progress"\|"in-review"\|"done"}}`, stored entries of existing workspaces only; a workspace without one is `"in-progress"`. From `%APPDATA%\quickterm\board.json` (`quickterm/board.py`), off the loop. |
+| PUT | /api/board/{name:path} | `{status}` → 204. 400 for anything but the four statuses (checked first), 404 for an unknown workspace; the check and the write run under the workspace write lock, so a concurrent DELETE cannot leave an entry behind. The file is written atomically (temp file, fsync, replace) under a process lock. `board.rename_workspace(old, new)` moves an entry; no route renames a workspace yet. |
+| GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, shell, agents, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, update_auto_download, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it), as `"<binding> is in use by another program"` (several: `"<a>, <b> are in use by other programs"`, a profile key written `"<binding> (<profile>)"`), or null. It reflects the latest registration, at startup or after a live rebind; Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the shell shows it in the error banner. |
 | GET | /api/config/history | → `[{id, saved_at, summary}]`, newest first: the last 20 configs a save replaced (`<config dir>/history/`, same DPAPI protection as `config.json`; a save that changes nothing adds none). `summary` names the top-level settings that differ from the next newer version, or from the current config for the newest. |
 | POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry), except the new-shortcut rule `validate_new_bindings`: its keys were accepted when it was saved, and a 3.x plain key such as `f12` must not refuse a recovery → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
@@ -758,7 +785,7 @@ REST (JSON, under `/api`):
 | GET | /api/system/ssh-hosts | → `{path, exists, openssh: path\|null, hosts: [{alias, hostname, user, port, identity_file, proxy_jump}]}` from the static `~/.ssh/config` parser (`quickterm/ssh_config.py`), off the loop. |
 | GET | /api/system/ssh-hosts/{alias} | → `{alias, hostname, user, port, identity_files: [..], proxy_jump}` from `ssh.exe -G <alias>` (CREATE_NO_WINDOW, 3 s timeout, off the loop), falling back to the parser. 400 when the alias starts with `-` or does not match `^[A-Za-z0-9._@:%-]{1,255}$`; 404 when the parsed ssh_config has no literal `Host` entry for it (`ssh -G` exits 0 for any name and prints defaults, so it runs only for a known alias). |
 | GET | /api/agent-sessions?type=claude-code\|codex&workspace=<name>&limit=20 | → `{sessions: [{id, title, updated_at, cwd}]}`, newest first, for the workspace folder (or `cwd=<path>` instead of `workspace`). Claude from `~/.claude/projects/<slug>/*.jsonl`, titled by the last `custom-title` (`/rename`, `--name`), else the last `ai-title`, else the first prompt. Codex from `$CODEX_HOME/session_index.jsonl` joined with each rollout's `session_meta` (first 8 KB only), titled by `thread_name`, else the first message the user typed (bounded read; AGENTS.md and `<...>` context blocks skipped), else `session <last 12 id characters>` (UUIDv7 ids share their leading timestamp), listing interactive threads only: no `parent_thread_id`, and `source` absent, `cli` or `vscode` (subagent threads and `exec` runs are hidden, as Codex's own picker hides them). `limit` is clamped to 1..100. 400 for a bad type, 404 for an unknown workspace; an unreadable store answers `[]`. Off the loop. |
-| GET | /api/system/terminals | → detected terminal types and WSL distributions, plus `{id: "codex", label: "Codex CLI", executable, available}`. The `ssh`/`sftp` entries are `{id, label: "SSH"/"SFTP", executable, available, openssh: path\|null, putty: path\|null}`, `available` when either client exists. PuTTY is the bundled tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`), OpenSSH is `%SystemRoot%\System32\OpenSSH\ssh.exe` or `shutil.which`. The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions, plus `{id: "codex", label: "Codex CLI", executable, available}`. The `ssh`/`sftp` entries are `{id, label: "SSH"/"SFTP", executable, available, openssh: path\|null, putty: path\|null}`, `available` when either client exists. PuTTY is the bundled tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`), OpenSSH is `%SystemRoot%\System32\OpenSSH\ssh.exe` or `shutil.which`. The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. `shells` (4.3) is `[{value, label, available}]`: PowerShell and Command Prompt always on Windows, Git Bash when installed, one `wsl:<distro>` per listed distribution; on POSIX one entry `""` named after `$SHELL`. The 4.3 section calls this route the terminal options inventory. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
@@ -767,8 +794,11 @@ REST (JSON, under `/api`):
 | POST | /api/sessions/{id}/export | Write that terminal's scrollback as plain text to `<Downloads or home>/QuickTerm/<name>-<YYYYmmdd-HHMMSS>.txt` (UTC; `-2`, `-3` instead of overwriting) → `{path}`; 404 unknown id, 500 when the write fails. Only on this explicit request does terminal output reach the disk. |
 | GET | /api/file?path=... | → `{path, size, truncated, text}`. Read-only file viewer backend. Strips surrounding quotes and expands `~` like `/api/open`. Max 512 KiB read; decode utf-8 `errors="replace"`; 404 if missing, 400 if a directory or unreadable (`cannot read <path>: <reason>`). |
 | GET | /api/fs/dirs?path=... | → `{path, name, parent, dirs, roots, truncated}`. Backs the in-app folder browser (`quickterm/browse.py`). One level of sub-**directories** only; files are never reported. `path` defaults to the home folder and accepts `~`/`%VAR%`; the answer is always resolved and absolute. `parent` is `null` at a root (drive, `/`, UNC share), which is when the client offers `roots`: mounted drive letters on Windows, `/` plus home on POSIX. `dirs` are `{name, path, is_git}` sorted case-insensitively; hidden entries (dot prefix, Windows HIDDEN attribute) are skipped, but a `.git` child is reported as `is_git` on its parent row. At most 2000 entries, then `truncated: true`. 404 when the path does not exist, 400 when it is not a directory or cannot be read (permission denied); never a traceback. The scan is blocking and runs via `asyncio.to_thread`. |
-| GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. |
-| POST | /api/update/install | download latest Setup asset, verify against the release's SHA256SUMS.txt, launch installer → `{launched, version}`. Windows only (else 400). |
+| GET | /api/update | → `{current, latest, update_available, url, notes, installable}`. Probes the pinned GitHub repo's latest release (cached 6 h; `?force=true` bypasses). 502 on network failure. When the result is installable, `update_check` and `update_auto_download` are on, the platform is Windows and this is not the elevated instance, it also starts (or joins) the background download. |
+| GET | /api/update/status | → `{state, version, received, total, error, notes_url, can_restart}`; `state` is `idle`, `available`, `downloading`, `verifying`, `ready`, `installing`, `installed` or `failed`. `installed` means Setup returned 0 but this backend was kept (the hand-over was declined); the card then says "QuickTerm v<version> is installed. Restart QuickTerm to use it." and offers Restart now only when `can_restart` is true. Always `idle` in the elevated instance. |
+| POST | /api/update/download | starts or joins the background download of the Setup asset (streamed, SHA-256 checked against SHA256SUMS.txt) → 204. 400 when no installable update exists, on POSIX, or in the elevated instance; 502 when the check behind it fails. |
+| POST | /api/update/install | requires `ready`; writes the hand-over script, opens it and the installer with read sharing only (no writer, rename or delete until Setup is over), re-verifies both through those handles, starts Setup `/SILENT` through the script (which starts the installed launcher only when Setup returned 0), and only then stands the backend down (`pty_host.begin_update()`) → `{launched, version}`. The backend waits for the script's process (at most 30 minutes); if it is still running afterwards, exit code 0 (hand-over declined) gives `installed` and removes the installer, while a non-zero code (Setup failed, UAC cancelled) or the timeout goes back to `ready`, or to `failed` with "Setup did not finish" when the file no longer matches. 409 when not ready or when the re-check fails (state becomes `failed`); 400 on POSIX or in the elevated instance; 500 when Setup cannot be started. |
+| POST | /api/update/restart | requires `installed` with a known launcher; starts the installed `QuickTerm.exe` (found before Setup ran), which replaces this backend at once when no terminal is busy or touched and asks otherwise, as after any install → `{started}`. 409 otherwise; 400 on POSIX or in the elevated instance; 500 when it cannot be started. |
 | POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. With `app` (`explorer` \\| `vscode`), `{target, app}` opens the existing folder `target` in that app → `{action: app}`: unknown app or not a folder → 400, missing folder → 404, VS Code not installed → 404 with a `detail` naming that. VS Code is launched from `Code.exe`, never the `code.cmd` shim (cmd.exe re-parses batch arguments, and the folder comes from an OSC 7 report). |
 
 JSON bodies for session creation, elevation, and full-config updates are capped
@@ -968,8 +998,8 @@ def remove_foreground_watcher() -> None
 - Optional positional `path` arg (Explorer "Open QuickTerm here"): if it is a
   directory, a first launch carries `?cwd=<dir>` in the window URL. A later
   ordinary process posts the folder to the authenticated `/api/launches` queue,
-  summons the existing native viewer, and exits. The viewer opens it in a new
-  scratch view.
+  summons the existing native viewer, and exits. The viewer starts a terminal
+  there in its scratch view.
 - Right after reading its arguments (the launch folder is captured by then),
   Windows changes to the home folder: "Open QuickTerm here" starts the process
   in the folder the user clicked, and CreateProcess and `shutil.which` search
@@ -1099,13 +1129,17 @@ class LaunchError(ValueError):  status: int; label: str | None
 class LaunchSpec:
     cmd: str; args: list[str]; cwd: str | None; env: dict[str, str]
     name: str | None; profile: str | None; label: str
+    agent: str | None          # "claude" | "codex": add the hooks
+    wrap: shells.Wrap | None   # the shell an agent runs inside
+    terminal_type: str | None  # a plain shell launch's pane type
     def spawn_kwargs(self) -> dict
 
 def resolve(cfg, *, profile=None, cmd=None, args=None, env=None, name=None,
             start_command=None, agent_mode=None, agent_session=None,
             claude_mode=None, request_cwd=None,
-            workspace_root=None, append_tools=True) -> LaunchSpec
+            workspace_root=None, append_tools=True, shell=None) -> LaunchSpec
             # claude_mode is the legacy alias of agent_mode
+def find_profile(cfg, name) -> Profile   # "claude-code"/"codex" fall back to the agent settings
 def resolve_profile(prof, cwd=None, *, agent_mode=None,
                     agent_session=None) -> tuple[str, list[str], str | None]
 def validate_dir(value: str, label: str | None = None) -> str
@@ -1129,6 +1163,47 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]
   need a folder and raise without one.
 - The bundled PuTTY tools directory is appended to the child's PATH (its key
   matched case-insensitively), so a user-installed plink still wins.
+- No profile and no `cmd` (and no `args`) starts the shell: the request's
+  `shell` when given (validated like the config value; it cannot be combined
+  with `profile` or `cmd`), else `cfg.shell`, through `shells.interactive`
+  (PowerShell `-NoLogo`, cmd bare, Git Bash and POSIX `-l`, WSL
+  `[-d <distro>] --cd <folder or ~>`). The session is named after the shell
+  ("PowerShell") unless the request names it. `shells.program` resolves
+  PowerShell to `pwsh.exe` on PATH or under Program Files, else
+  `powershell.exe`; a missing Git Bash or WSL is a 400.
+- `profile` `"claude-code"` or `"codex"` names the agent from `cfg.agents`
+  unless a saved profile has that exact name; the session's `profile` is the
+  kind and its name "Claude Code" or "Codex". An agent launch carries
+  `wrap = shells.Wrap(<effective shell>, <its program>, "claude"|"codex")`;
+  `SessionManager._build` adds the hooks to the agent's argv first (none for
+  WSL) and then wraps it with `shells.wrap` (the argv per shell is in 4.3,
+  "One shell"). cmd's text after `/k` is passed verbatim by
+  `conpty.command_line` only in that form (the one argument after `/c` or
+  `/k` already in a pair of quotes); every other cmd.exe line keeps
+  list2cmdline. Every word of the cmd wrap is refused when it holds
+  `" & | < > ^ % !` or CR/LF. In PowerShell, a word that is empty, holds a
+  double quote, or holds whitespace and ends in a backslash switches the
+  `-Command` text to a form that checks how PowerShell passes native
+  arguments: the legacy way (Windows PowerShell 5.1, pwsh before 7.3) gets
+  the C-runtime command line in `$env:QUICKTERM_AGENT_ARGS` and runs
+  `& '<exe>' --% %QUICKTERM_AGENT_ARGS%`, which passes it untouched; 7.3 and
+  later get `& '<exe>' @('<arg>',...)`. Otherwise it is `& '<exe>' '<arg>'...`. Codex's `-c notify` value is
+  a TOML array of literal strings (`['...','...']`), so it holds no double
+  quote. WSL runs the bare CLI name through `--exec`, so no shell of the
+  distribution reads the words, and passes the workspace folder argument as
+  `.`.
+- A wrapped session whose shell has no child process left loses its agent
+  state at the next busy snapshot, since Codex reports no end. For a wrapped
+  agent in Git Bash, busy is judged from the shell at the end of the chain
+  of only-child MSYS shells under the launcher (`process_usage.shell_at_prompt`);
+  a plain Git Bash shell keeps the launcher's reading. POST /api/elevate
+  wraps an agent the same way before it hands the spec over.
+- `SessionInfo.agent_shell` (in `GET /api/sessions`) is the wrap's shell value,
+  or null. A WSL agent reports no state and its processes are out of sight,
+  so the WSL wrap prints `ESC ] 7770 ; quickterm-agent-exit BEL` after the
+  agent (`shells.AGENT_EXIT_PRINTF`). The pane swallows that OSC and treats
+  a WSL agent as present from launch until it arrives: the Shift+Enter
+  newline and the activity label hold until then.
 
 ### SSH and SFTP
 
@@ -1158,12 +1233,81 @@ the first entry with `~` expanded, and key files are never read.
 `resolve(alias)` runs `ssh.exe -G <alias>` (CREATE_NO_WINDOW, 3 s) and falls
 back to the parser.
 
+### Terminals of a workspace on an SSH host (as built, 4.3)
+
+`api/common.resolve_request` reads `launch.workspace_target(name)` and hands
+it to `launch.resolve(..., remote=RemoteTarget(host, path))`. Without an
+explicit `cmd`, a plain terminal, an agent or a remote-capable profile
+becomes `LaunchSpec(cmd=ssh, args=..., remote=RemoteLaunch(...))`; a request
+`shell` is ignored there (the shell setting does not apply on a host), and a
+connection profile still starts on this computer. `launch.openssh_args(prof,
+options)` is the one OpenSSH argv builder (`_openssh`), shared with
+`ws_exec`.
+
+- ssh options: `-t`, the profile's port, key, ProxyJump and own arguments,
+  the target, then one remote command. Every folder and argument is
+  POSIX-quoted (`ws_exec.posix_quote`, which refuses NUL and line breaks); a
+  leading `~` stays unquoted so the host expands it.
+- Plain: `cd <folder>; exec "$SHELL" -l`. A remote-capable profile (`bash`,
+  `zsh`, `fish` or `git-bash` with a start command, or `custom` whose
+  program is not a Windows path, `launch.remote_start`): `cd <folder>;
+  <start>; exec "$SHELL" -l`.
+- Agent: the CLI name (or the settings' `cmd` when it is a POSIX path) with
+  the same arguments as a local launch, run through `"${SHELL:-/bin/sh}" -lc`
+  so the login PATH applies, then `exec "$SHELL" -l`.
+- With hooks (an agent, and the backend has a hook port and token),
+  `SessionManager._build` rebuilds the argv with the session id:
+  `-o ExitOnForwardFailure=no -R /tmp/quickterm-<16 hex>.sock:127.0.0.1:<port>`
+  before the target, and `exec sh -c '<script>'` that cds, turns echo off,
+  prints `ESC ] 7770 ; quickterm-hook ; <nonce> BEL`, reads lines until one
+  contains `<nonce>:` (anything typed before it is dropped) and keeps what
+  follows as `QUICKTERM_HOOK_TOKEN`, exports it with `QUICKTERM_SESSION_ID`
+  and `QUICKTERM_HOOK_SOCKET`, traps `EXIT HUP TERM` to remove the socket,
+  posts `{"agent", "event": "quickterm-agent-start", "payload": {}}`, runs the
+  agent, posts `quickterm-agent-exit`, then runs the login shell (not
+  `exec`, so the trap runs). Before all that the script prints
+  `ESC ] 7770 ; quickterm-ready ; <nonce> BEL`: ssh has logged in. The
+  session manager types `<nonce>:<token>` and Enter into the PTY the first
+  time the hook marker appears in its output and never again. From the
+  ready marker until that answer, at most 10 s counted from the ready
+  marker, input to that session is held in one queue, in order, escape
+  sequences and paste included, and follows the answer; past 64 KiB the
+  queue goes out at once, still in order. Only xterm's replies to the
+  device-attributes and cursor-position queries (`ESC [ ? ... c`,
+  `ESC [ n ; m R`) pass at once. Input before the ready marker (a password
+  or a host-key answer at ssh's prompt) is never held. The token so reaches the host only through the
+  terminal's input; it is in no argv on either side and in no file, and the
+  `QUICKTERM_DEBUG_IO` input log shows it as `<hook token>`
+  (`PtyBase.write_secret`).
+- `quickterm-agent-start` sets an idle state of that agent unless it already
+  reported one; `quickterm-agent-exit` sets `agent` to null, for Claude and
+  Codex alike. They exist because the process check sees only ssh here. A
+  remote session's `GET /api/sessions` item carries `host` (the profile
+  name; null locally), and the frontend's `agentPresent` judges a remote
+  agent pane by `agent` alone, so Shift+Enter stops sending ESC CR once the
+  agent has left.
+- Claude's hooks are one inline `--settings` (no status line); each command
+  is `[ -S "$QUICKTERM_HOOK_SOCKET" ] && command -v curl ... && { exec 4<&0;
+  printf 'X-QuickTerm-Hook-Token: %s\n' "$QUICKTERM_HOOK_TOKEN" | curl
+  --unix-socket "$QUICKTERM_HOOK_SOCKET" -sS -m 2 -o /dev/null -H @- -H
+  'Content-Type: application/json' --data-binary @/dev/fd/4
+  "http://127.0.0.1:<port>/api/sessions/$QUICKTERM_SESSION_ID/agent-event?agent=claude"; }; exit 0`.
+  The URL names the backend's port so the Host header passes the guard. A
+  launch that passes its own `--settings` gets no hooks (the file lives on
+  the host). Codex gets `-c notify=["sh","-c",<same with --data-binary "$1">,"quickterm-notify"]`
+  only when the local Codex config has no notify.
+- `SessionInfo.cwd` of a remote session is the folder on the host; the ssh
+  process itself starts in the home folder here.
+
 ### Agent profiles
 
-`terminal_type` `claude-code` or `codex`. The mode is `agent_mode` from the
-request, else the profile's `agent_mode`, else the type default (claude-code
-`continue`, codex `new`). `agents.validate` checks `Profile.agent` on save;
-`launch.resolve` stays the only launch path.
+Since 4.3 these are the agent settings (`cfg.agents`, launched as profile
+`"claude-code"` or `"codex"`); a saved profile of an agent type is refused.
+The mode is `agent_mode` from the request, else the settings' `agent_mode`,
+else the type default (claude-code `continue`, codex `new`).
+`agents.validate` checks the options on save; `launch.resolve` stays the only
+launch path. `GET /api/system/agents` serves each option's `flag` too, for the
+command line Settings shows.
 
 Executables: Claude is `profile.cmd`, else `shutil.which("claude")`. Codex is
 `profile.cmd`; otherwise on Windows, when `shutil.which("codex")` is the npm
@@ -1319,16 +1463,71 @@ ALL voice imports guarded: module exposes `voice_available() -> bool`;
 missing deps must never break startup. Hotkey toggle: first press start
 recording, second press stop → transcribe → `manager.write(focused, text.encode())`.
 
+## quickterm/usage.py and quickterm/statusline_chain.py
+
+The backend half of the sidebar's usage line (the 4.3 section below has the
+shapes). Both modules are stdlib only.
+
+```python
+# usage.py
+CLAUDE_EVENT = "QuickTermRateLimits"
+class ClaudeLimits:                          # one per app, on app.state
+    def record(self, rate_limits) -> bool    # False keeps the previous numbers
+    def snapshot(self) -> dict | None        # the "claude" value of GET /api/usage
+class CodexReader:                           # one per app, on app.state
+    def read(self) -> dict | None            # blocking; the "codex" value
+def read_rollout_tail(path, tail=256 * 1024) -> dict | None
+
+# statusline_chain.py
+FLAG = "--statusline"
+def run(argv: list[str]) -> int             # argv ignored; always 0
+def user_command(status: dict) -> str | None
+```
+
+- `ClaudeLimits.record` keeps `five_hour` and `seven_day` windows whose
+  `used_percentage` is a number; `resets_at` may be epoch seconds or an ISO
+  string. A report with no such window changes nothing.
+- `CodexReader` walks `<CODEX_HOME or ~/.codex>/sessions` for
+  `rollout-*.jsonl`, takes the newest by mtime and falls back to the next
+  two when the newest has no limits yet (a session that just started). A
+  window without `resets_at` but with `resets_in_seconds` (older Codex)
+  counts from the event's timestamp. Answers are cached by path and mtime.
+- `GET /api/usage` (`api/usage.py`) reads Codex through `asyncio.to_thread`.
+  The agent-event route answers a `QuickTermRateLimits` event from `claude`
+  by storing the numbers (404 for an unknown session) and never calls
+  `SessionManager.agent_event`.
+- `agent_hooks` adds `statusLine` to the same `--settings` file as the hooks,
+  so it follows every rule for when hooks are added. Frozen, the command is
+  `"<exe>" --statusline`; from source it is `"<python>" -P -c "<import
+  statusline_chain and run>" --statusline`, because importing the whole app
+  takes over a second and Claude runs the command on every status update.
+  A `--settings` value of the profile's own that sets `statusLine` keeps it
+  for that launch, and that launch reports no Claude numbers.
+- `statusline_chain.run` resolves the user's command itself from
+  `<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`, then
+  `<project>/.claude/settings.json` and `settings.local.json`, where the
+  project is the status JSON's `workspace.project_dir`, else its `cwd`. It
+  never reads QuickTerm's merged file, skips a command that carries
+  `--statusline` and mentions QuickTerm, and sets
+  `QUICKTERM_STATUSLINE_CHAIN=1` for the child; a chain started with that
+  variable set does nothing. On Windows the command runs in Git Bash
+  (`CLAUDE_CODE_GIT_BASH_PATH`, else next to `git` on PATH), as Claude Code
+  runs it, else in the platform shell; it gets 10 s. The post runs on a
+  thread while the user's command runs, and the chain waits for it at most
+  2 s after printing.
+
 ## frontend/
 
 - `index.html`, `css/`, `js/` (ES modules, no build step), `vendor/` with
   pinned xterm: `@xterm/xterm@6.0.0`, `@xterm/addon-fit@0.11.0`,
   `@xterm/addon-webgl@0.19.0`, `@xterm/addon-web-links@0.12.0`,
-  `@xterm/addon-unicode11@0.9.0` (the UMD `lib/*.js` builds and `css/xterm.css`,
-  committed). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
+  `@xterm/addon-unicode11@0.9.0`, `@xterm/addon-search@0.16.0` (the release
+  published with xterm 6.0.0; its MIT licence is `vendor/addon-search.LICENSE`)
+  (the UMD `lib/*.js` builds and `css/xterm.css`, committed; `vendor/` is in
+  `.gitignore` for PuTTY, so a new file here needs `git add -f`). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
   and since 1.22 ConPTY does not repaint after a resize, so the terminal must
   reflow as ConPTY does, which 5.x did not.
-- The top-level document is the shell (see **Shell and equal views** below);
+- The top-level document is the shell (see **Shell and the stage** below);
   each workspace view runs the app described here in its own iframe document.
 - `main.js` is the composition root (about 400 lines): it builds the modules
   below in order and hands each the dependencies it uses. State more than one
@@ -1348,8 +1547,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `tests/js/main_modules.test.mjs` builds every factory from dependencies
   that throw when called, because `node --check` cannot see a closure
   variable that stopped resolving.
-- `panels.js` owns only panel lifecycle and shared controls. Dashboard, help,
-  settings sections, and DOM-free helpers live in `panel_*.js` modules. Keep
+- `panels.js` owns only panel lifecycle and shared controls. The workspace
+  board (`panel_dashboard.js`, its pure model in `board_model.js`), workspace
+  settings (`panel_workspace.js`), help, settings sections, and DOM-free
+  helpers live in their own modules. Keep
   new tabs/large sections out of the coordinator.
 - `pane_protocol.js` is the DOM-free attach/replay/backpressure state machine
   used by `pane.js`; `node --test tests/js/*.test.mjs` verifies replay gating,
@@ -1364,97 +1565,130 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   The rule it exists to enforce: two windows must never own one workspace,
   because the layout autosaves on every pane change and the loser's panes would
   be overwritten in silence.
-- `split_tree.js` is the binary split tree under both the panes and the
-  workspace views: `insertBeside` (a new leaf takes half of its anchor),
-  `removeLeaf` (the split collapses into the sibling), `layoutRects` (pixel
-  boxes for every leaf and divider) and `dwindleDir` (cut along the longer
-  side, so repeated opens spiral inward like a tiling window manager).
-  `pane_move.js` builds its drag surgery on it and serves both kinds of leaf.
+- `split_tree.js` is the binary split tree under the panes of a workspace:
+  `dwindleDir` (cut along the longer side, so repeated opens spiral inward
+  like a tiling window manager) and the tree helpers `pane_move.js` builds
+  its drag surgery on. Workspace views are not tiled (see **Shell and the
+  stage** below).
   A new terminal with no direction of its own (`Alt+N`, attach, run profile)
   uses `LayoutManager.autoDir`, which is dwindle. Splits, closes, moves and
   rebalances slide: app.css transitions `flex-grow` on the children of a
   split carrying `.sliding`, never during a splitter drag, and
   `prefers-reduced-motion` turns it off.
-- **Shell and equal views.** The top-level document of a native window is the
+- **Shell and the stage.** The top-level document of a native window is the
   shell. It hosts no workspace, no LayoutManager, no autosave and no
   terminals. It owns the sidebar, palette, panels, launch loop, global
   settings watcher, theme, update check, setup tour and `launch_error`
-  banner, plus the tiled stage of workspace views. Every workspace, scratch
-  included, is a same-origin iframe view running the app on one workspace,
-  with its own registry id, claim, LayoutManager, autosave, focus ownership
-  and heartbeat. There is no primary view.
+  banner, plus the stage, which shows one workspace view at a time. Every
+  workspace, scratch included, is a same-origin iframe view running the app
+  on one workspace, with its own registry id, claim, LayoutManager,
+  autosave, focus ownership and heartbeat. There is no primary view.
   - `workspace_views.js` (`window.quicktermViews` in the shell; the stored
-    arrangement, its parsing and restore plan live in `view_arrangement.js`
-    and are re-exported) tiles the
-    views. `open(name|null, {anchorWindow?, cwd?, first?}) -> Promise<view|false>`
-    resolves once the view's `window.quicktermView` exists; `focusWorkspace`,
-    `close`, `viewForWorkspace`, `viewForSession`, `appFor`, `views`,
-    `list() -> [{workspace, label, color, active, window}]`, `activate`,
-    `nameOf` and `zoom` complete it. `companionUrl(path, workspace, id, token,
-    {cwd, first})` builds a view URL (`?workspace=<name>&window=<id>&embedded=1`,
-    authentication in `#t=`); the view reserves its registry id first.
-  - Views are leaves of a `split_tree.js` tree and share the pane rules: a new
-    view takes half of the active view, cut along its longer side; a header
-    drag docks it beside another view or swaps the two; each divider drags,
-    answers arrow keys and Home/End, and double-clicks to balance, keeping
-    15-85 % of its split and at least 160 px per side where there is room;
-    **zoom** shows one view alone and again brings the rest back. Every view
-    has its own colour. Views are never re-parented: an iframe that moves in
-    the DOM reloads, so every view and divider is absolutely positioned and a
-    layout change only writes its box, which is also what the slide animation
-    transitions. Borders and headers appear from two views up.
+    list of open workspaces, its parsing, the one-time migration and the
+    restore plan live in `open_views.js` and are re-exported) owns the
+    stage. `open(name|null, {cwd?, first?}) -> Promise<view|false>` shows
+    that workspace, opening it first when it is not open, and resolves once
+    the view's `window.quicktermView` exists; `focusView`, `focusWorkspace`,
+    `focusSession`, `cycle(delta)`, `close`, `viewForWorkspace`,
+    `scratchView`, `viewForSession`, `appFor`, `views`, `active` (the shown
+    view), `list() -> [{workspace, label, color, active, window}]`,
+    `activate`, `nameOf`, `ready`, `whenReady`, `restoreSaved` and
+    `releaseLeftovers` complete it. `companionUrl(path, workspace, id,
+    token, {cwd, first})` builds a view URL
+    (`?workspace=<name>&window=<id>&embedded=1`, authentication in `#t=`);
+    the view reserves its registry id first.
+  - The stage shows exactly one view, at the full stage rect: no view
+    header, no frame, no close or maximize button on the view, no divider,
+    no view drag. Every view element is absolutely positioned with `inset:
+    0` and appended to the stage once; an iframe that moves in the DOM
+    reloads, so showing another workspace only toggles `.shown` on the
+    elements. A hidden view keeps its box (`visibility: hidden`, never
+    `display: none`, so xterm keeps its size), is `inert`, is suspended, and
+    is told `quicktermView.setHidden(true)`, so its panes drop WebGL after
+    the 5 s grace. A view still booting learns it from `ready()`.
   - A view stays on one workspace for its whole life. The sidebar, palette,
-    dashboard and launch loop open or focus a view; they never switch a view
-    in place. `switchWorkspace` remains for the restore inside a view,
-    promoting a scratch to a named workspace (rename in place) and a deleted
-    workspace.
-  - Opening a workspace already shown in this window focuses its view (zoom
-    aware). One claimed by another native window is refused with the existing
-    text in `#app-error` and nothing is drawn.
-  - Every view has a close button and every close works the same way: wait
-    for a successful save, mark every owned terminal retained, release the
-    registry entry, remove the iframe. Nothing is killed; a failed save keeps
-    the view open. Deleting a workspace that is open closes its view first,
-    then calls `DELETE /api/workspaces/{name}`.
+    workspace board and launch loop show a view, opening it when needed; they
+    never switch a view in place. `switchWorkspace` remains for the restore
+    inside a view, promoting a scratch to a named workspace (rename in
+    place) and a deleted workspace.
+  - Opening a workspace already open in this window shows its view. One
+    claimed by another native window is refused with the existing text in
+    `#app-error` and nothing is drawn.
+  - Closing is on the sidebar row's close button and in the palette. Every
+    close works the same way: wait for a successful save, mark every owned
+    terminal retained, release the registry entry, remove the iframe.
+    Nothing is killed; a failed save keeps the view open and shown. Closing
+    the shown view shows the most recently shown remaining one. Deleting a
+    workspace that is open closes its view first, then calls `DELETE
+    /api/workspaces/{name}`.
   - Closing the last view leaves an empty stage with one centred block, "No
     workspace open. Open one from the sidebar." and a **New scratch** button.
     It is content, not a chrome bar.
-  - **New scratch** always opens a new view `scratch-view-<registry id>`
-    (`temporary: true`). It never replaces another layout.
-  - Arrangement: the shell stores `quickterm.workspaceViews` in localStorage,
-    `version: 2`, the split tree of `{workspace, window}` leaves plus the
-    active and zoomed view. A v1 arrangement migrates: its `{primary: true}`
-    leaf becomes `{workspace: <remembered workspace>}`, or is dropped for
-    scratch or a missing name.
-  - Shell boot: restore the stored arrangement (release each stored registry
-    id, claim again, drop scratch, missing and refused views). "Missing"
-    needs a workspace list: when `GET /api/workspaces` failed at boot every
-    stored view counts as existing and its own claim and restore decide, so
-    one failed request never persists an empty arrangement. With `?cwd=`
-    (Explorer "Open QuickTerm here") also open a scratch view there and focus
-    it. If nothing was restored, open `quickterm.activeWorkspace` when it still
-    exists (read once, for migration), else one scratch view flagged `first=1`.
-    Only that first scratch view adopts an existing "Administrator - …"
-    session, the elevated first terminal.
+  - Scratch: one scratch view per window, `scratch-view-<registry id>`
+    (`temporary: true`), labelled `scratch`. **New scratch**, the sidebar's
+    **Scratch** and the palette's **open scratch** show it, opening it when
+    it is not open. A closed scratch view gives its label back, so terminals
+    it kept are listed as `scratch <id>`.
+  - Persistence: the primary window stores `quickterm.openViews.v1` in
+    localStorage, `{"version":1,"open":[<name or "" for scratch>...],
+    "shown":<same or null>}`, in opening order, written on every open,
+    close and switch. A second window neither restores nor writes it. On
+    the first boot after 4.2 the tiling record `quickterm.workspaceViews`
+    (version 2, or version 1 with a 3.x `{primary: true}` leaf that becomes
+    the remembered workspace) is read once for its leaves in tree order,
+    its active leaf becoming `shown`, and removed.
+  - Shell boot: release every registry entry a previous page of this window
+    left under `parent: <this window>` (`releaseLeftovers`; their goodbye on
+    pagehide rarely leaves in time, and the registry would refuse the new
+    claims for the TTL). Then restore the stored list: claim each workspace
+    in order, drop missing and refused ones, show the stored shown one (else
+    the first). "Missing" needs a workspace list: when `GET /api/workspaces`
+    failed at boot every stored workspace counts as existing and its own
+    claim and restore decide, so one failed request never persists an empty
+    list. With `?cwd=` (Explorer "Open QuickTerm here") start a terminal at
+    that folder in the scratch view, opening the scratch view there first
+    when it is not open. If nothing was restored, open
+    `quickterm.activeWorkspace` when it still exists (read once, for
+    migration), else the scratch view flagged `first=1`. Only that first
+    scratch view adopts an existing "Administrator - …" session, the
+    elevated first terminal.
   - `window.quicktermChrome` (shell) holds `{palette, panels, saveState(text,
     status), showError, clearError, ownsKeyboard(), refreshSoon(),
     settingsEvents, selectedTerminal, scratchLabels, launcherView (getter),
     windowId (getter, the shell's registry id), onConfigSaved(),
     onWorkspacesChanged(), deleteWorkspace(name)}`. `onConfigSaved()` and
-    `onWorkspacesChanged()` are how a view's Settings or Dashboard reaches
+    `onWorkspacesChanged()` are how Settings or Workspace settings reaches
     every other view; `deleteWorkspace(name)` closes this window's view of it
     first (its on-screen terminals are taken out of the file, so the server
     spares them as unassigned), then calls DELETE /api/workspaces/{name}, and
     throws `{detail}` on failure. Every view registers with
     `parent: windowId`. `window.quicktermView`
-    (each view) holds `{workspace(), app, suspend, close, syncConfig,
-    syncWorkspaces, previewTheme, whenRestored}`. A view app adds
+    (each view) holds `{workspace(), app, suspend, setHidden, close,
+    syncConfig, syncWorkspaces, previewTheme, whenRestored}`. A view app adds
     `killSessionById(id)`, `detachSessionById(id)` and `hereState()`.
   - Keyboard: `keys.js` runs in the shell and in every view. The shell routes
-    its actions to the active view's app; Alt+N with no view opens a scratch
+    its actions to the shown view's app; Alt+N with no view opens the scratch
     view. Native window focus (summon hotkey, taskbar) lands on the shell,
-    which forwards it to the active view's focused pane. Views respect the
-    shell's overlays through `parent.quicktermChrome.ownsKeyboard()`.
+    which forwards it to the shown view's focused pane. A pointer press or a
+    focus inside a view releases its suspension only while it is the shown
+    one. Views respect the shell's overlays through
+    `parent.quicktermChrome.ownsKeyboard()`. Next and previous workspace walk
+    the open ones in sidebar order (saved workspaces by name, scratch last)
+    and wrap; since 4.3 they are also Alt+PageDown/PageUp. The keys that
+    concern the window (Ctrl+Shift+1..9, Alt+PageDown/PageUp, Ctrl+Tab and the
+    release of Ctrl) are answered by the shell: it passes them to its own
+    `initKeys`, and a view's `keys.js` reaches the same functions through
+    `parent.quicktermChrome.windowKeys` (`showWorkspace(n)`,
+    `cycleWorkspace(delta)`, `recentTerminals(delta)`, `ctrlReleased()`).
+    `recentTerminals` answers false when nothing is listed or a shell overlay
+    holds the keyboard, and keys.js then leaves the key alone. Alt+Shift+n
+    counts the workspace groups the sidebar draws (`sidebar.groups()`,
+    `workspaceSlots` in workspace_views.js): saved workspaces and the open
+    scratch view, never Unassigned or a closed scratch's leftovers; a sidebar
+    not grouped by workspace counts the open views instead. The shell records
+    the focused terminal on every `quicktermChrome.refreshSoon()`
+    (`recent_terminals.js`, at most 8) and draws the list (`switcher.js`,
+    focus owner `"switcher"`).
 - Panes: an exited pane shows `[exited · code N]` with a Restart action
   (button, Enter in the pane, "restart terminal" in the palette) when it knows
   its launch (a profile or a launch spec; an attached terminal started
@@ -1504,19 +1738,21 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   workspace's view retains every terminal it owns.
 - The sidebar footer is built from the `chrome` array the shell passes to
   `initLauncher`, each entry `[label, onClick, shortcut?]`, with the labels
-  "new window", "dashboard", "settings" and "help". `launcher.js` maps
-  the label to a glyph in `navIcons`; an unmapped label falls back to the
-  terminal icon, so a new entry needs one line there as well.
+  "new window", "workspace board", "settings" and "help". `launcher.js` maps
+  the label to a glyph through `NAV_ICONS` in `sidebar_model.js`; an
+  unmapped label falls back to the terminal icon, so a new entry needs one
+  line there as well.
 - `render.js` is the keyed reconciler behind every live panel. A refresh must
-  patch, never rebuild: the dashboard reloads every 5 s and recreating its DOM
-  destroyed half-typed input and the folder picker's captured field. Nodes are
+  patch, never rebuild: the workspace board reloads every 5 s, and recreating
+  the old dashboard's DOM destroyed half-typed input and the folder picker's
+  captured field. Nodes are
   reused per key and never moved when already in place, because detaching a
   node blurs a focused control inside it.
 - `focus.js` decides who owns the keyboard. A pane re-asserts `term.focus()`
   immediately, on a frame, and on a timeout, so an overlay that focuses its own
   control must claim first and release before handing back.
   `WorkspaceViews.focusView(view)` asks it too: while any shell owner holds
-  the keyboard it only activates the view and keeps it as `pendingFocus`,
+  the keyboard it only shows the view and keeps it as `pendingFocus`,
   and the overlay's own hand-back focuses it. In the shell any claim stands
   the plain Alt actions down (`paletteOpen: () => focusOwners().length > 0`),
   and the palette and panel toggles (shell and view) first close an open
@@ -1537,8 +1773,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   Focusing a pane the zoom hides unzooms first. Alt+Z on a lone pane only
   flashes "[only one pane]".
 - Sidebar (`launcher.js` builds the DOM; `sidebar_model.js` holds its pure
-  model: modes, width, groups, row states, terminal choices and their
-  storage, re-exported from `launcher.js`). The shell calls `initLauncher(el, {actions, chrome,
+  model: modes, width, groups, row states, the "+" menu rows
+  (`newTerminalMenu`, `defaultShellRow`) and their storage, re-exported from
+  `launcher.js`). `cycleTerminal` opens the "+" menu since 4.3; there is no
+  selected choice. Each view app answers `noteSessions(list)` from the
+  sidebar's poll, so an agent pane knows when its agent has left the shell
+  (`pane.agentGone`: no Shift+Enter newline, no working label). The shell calls `initLauncher(el, {actions, chrome,
   elevated})` once and gets `{update(partialModel), updateHere(here),
   cycleTerminal, mode, setMode, cycleMode}`; every data change goes through
   `update`, which patches groups keyed `group:<key>` and rows keyed
@@ -1552,34 +1792,38 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
      opens setup.
   2. A **Workspaces** label with three buttons: search (`actions.search`,
      opens the palette on `@`), the view menu (`menu.js`, see below) and a
-     `+` menu: **New scratch view**, **Workspace here: <name>** when the
-     active view offers it, **Open in new window…**.
+     `+` menu: **Scratch** (shows the window's scratch view, opening it
+     when needed), **Workspace here: <name>** when the shown view offers
+     it, **Open in new window…**.
   3. One group per saved workspace in case-insensitive alphabetical order;
      scratch groups next, ordered by label; then **Unassigned**. By default
      a workspace with no listed terminal that is not open in this window is
      hidden (`visibleGroups(groups, view)`), and a **Show N empty workspaces**
      line under the list turns the view's `empty` option on. A group head is
      a button with the fold chevron (always drawn: down while its rows show,
-     right when folded or empty), a colour dot (the view colour when open,
+     right when folded or empty), a colour dot (the workspace's colour when open,
      hollow when closed), the label and the count pill (hidden at 0); its
      rows hang under it on a guide line. Its title is the folder path, with
-     `.warning` when the folder is missing. A click opens or focuses the view;
-     Left and Right fold. Hover and focus-within actions: **Close view** (`x`,
+     `.warning` when the folder is missing. A click shows the workspace on the
+     stage, opening it when needed; the **active** group is the shown one and
+     its head is highlighted (raised surface, accent edge, `aria-current`).
+     Left and Right fold. Hover and focus-within actions: **Close** (`x`,
      only when open; saves and retains) and a kebab menu with Open in new
-     window, Workspace settings (the Dashboard workspace editor) and Delete
+     window, Workspace settings (folder, logo and saved layout preview in
+     its own small sheet, `Panels#showWorkspace`) and Delete
      workspace… (confirm popover: "Delete workspace <name>? Detached
      terminals it owns are killed; attached ones keep running."). The
      **active** group keeps one head row: the folder name after the label
      (hidden when it equals the label), the one `#sb-save` dot after the
      count (same id and `data-state` contract, driven by `feedback.js`), and
-     Explorer and VS Code in the hover tray before Close view (`openFolder`;
-     also Alt+Shift+E / Alt+Shift+C and two palette rows). Only the
+     Explorer and VS Code in the hover tray before Close (`openFolder`;
+     also Alt+Shift+C and two palette rows). Only the
      **workspace here** button takes a line below the head, and only while
      it is offered. A terminal row is one line too: past `SIDEBAR_WIDE_AT`
      its folder follows the name, and under a workspace only when it differs
      from the workspace folder (for scratch, from where the terminal
      started).
-  4. The footer: new window, dashboard, settings, help, centred, and the
+  4. The footer: new window, workspace board, settings, help, centred, and the
      collapse chevron on the right edge.
 
   The view menu (per window, `quickterm.sidebarView`, normalised by
@@ -1610,7 +1854,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   owner workspace's open view and attaches it there (a finished row through
   `finishedAttachRecord`); else opens the owner workspace's view, whose
   restore attaches it; an Unassigned row attaches into the active view, or
-  into a new scratch view when none is open. Every click marks the session
+  into the scratch view when none is open. Every click marks the session
   seen. Hover and focus-within actions: **Detach** (icon `unplug`, title
   "Detach <name>: keeps running"), only while the terminal is attached in a
   view of this window, and **Kill** (`.danger`, icon `stop`, title and
@@ -1627,7 +1871,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   focused row, the context menu opened from the keyboard) focuses Kill, and
   Enter or Alt+W completes (the box opens with `acceptsAltW`, and the shell's
   key layer calls `acceptConfirm()` before it stands down for an overlay; a
-  Dashboard delete or kill-all box never takes Alt+W). Escape cancels; Tab
+  sheet's confirmation box never takes Alt+W). Escape cancels; Tab
   stays between Kill and Cancel. In rail mode the row's actions have no box,
   so the row itself is the trigger. While open, the trigger stays visible and
   disabled, the popover is clamped inside the viewport and follows its row
@@ -1650,7 +1894,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (`removeSessionFromLayout`). Deleting a workspace releases its on-screen
   terminals in one save and aborts before the DELETE when that save fails.
   The pure decisions are `rowAction` and `killRoute` in `shell_routing.js`.
-- Kill all (Dashboard) is a shell member, `killAllSessions()` in
+- Kill all (the palette's kill list: "kill all terminals…", shown with two or
+  more live terminals, then a confirmation row with the kill selected) is a
+  shell member, `killAllSessions()` in
   `shell_routing.js`, whichever view is active. Only the backend's
   `killed_ids` travel: the sidebar forgets those rows at once, every view of
   the window runs `app.dropKilledSessions(ids)` (close the panes on them,
@@ -1662,12 +1908,19 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (`localStorage["quickterm.killedSessions"]`, whose storage event reaches
   only them), where `dropKilledEverywhere(ids)` closes and
   forgets them in every view without another backend call.
-- Dashboard: dense saved-workspace rows, global/current ownership and resource
-  statistics, detached-session management, and quick profile launch.
+- Workspace board (the panel view still named `"dashboard"`, Alt+G, the footer
+  button and the palette's "workspace board"): see "Workspace board replaces
+  the dashboard" in 4.3. Scratch is never a card. A card's terminals are the
+  live sessions whose owner (`liveTerminals()`, the sidebar's rule) is that
+  workspace. A move is shown at once and sent with `PUT /api/board/{name}`;
+  a failure puts the card back and says so above the columns. The search box
+  sits in the panel head (`Panels#headTools`); Escape clears it first, then
+  closes the board. Cards: Enter or Space shows the workspace, Up and Down
+  walk a column, Alt+Left and Alt+Right move it and keep it focused.
 - Workspaces: named workspaces autosave layout and session IDs and restore the
   exact live sessions; the shell's arrangement remembers which views were
-  open. Every scratch view uses `scratch-view-<registry id>` with
-  `temporary: true`, displayed as `scratch N`, autosaves and survives a view
+  open. The window's scratch view uses `scratch-view-<registry id>` with
+  `temporary: true`, displayed as `scratch`, autosaves and survives a view
   close within a run. Startup/shutdown delete the legacy scratch file and
   flagged temporary workspace files, never the scratch folder contents or
   unrelated workspaces. Names `scratch`, `scratch-view-*`, and dot-prefixed
@@ -1675,8 +1928,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   durable workspace in place.
 - The sidebar lists every live terminal on the backend in its owner's group.
   Chips appear only for needs you, new output, busy and open elsewhere.
-  Dashboard has separate **this workspace** / **all live** statistics plus
-  explicit Unassigned ownership, and says "open workspace" for its rows.
+  Per-terminal CPU and memory are the sidebar footer's Resources popover.
 - Settings, with no raw JSON editor. Tabs (`settingsTab` ids):
   - `general` "General": appearance, font, default terminal
   - `window` "Window": size presets through `configChoice` (1280×800,
@@ -1696,9 +1948,9 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 
   `Panels#showSetting(id)`, `Panels#showConfig("terminal"|"snippet",
   name|null)` and `Panels#settingEntries()` are the entry points for the
-  palette and search. `Panels#showWorkspace(name)` opens the Dashboard with
-  that workspace's folder and logo editor open (the sidebar's "Workspace
-  settings"). Every chooser is `configChoice` (a `menu.js` menu);
+  palette and search. `Panels#showWorkspace(name)` opens the
+  `"workspace"` sheet for that workspace (the sidebar's "Workspace
+  settings"): folder, logo and the saved layout's preview, Save and Cancel. Every chooser is `configChoice` (a `menu.js` menu);
   `Panels._select` and every native `<select>` are gone. Every field stamps
   `data-setting=<id>`.
 - Master and detail (`config_list.js`): on the left a filter input (always
@@ -1808,12 +2060,12 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   top-level fields and rejects stale conflicting edits. Unrelated config saves
   never reset pane-local font zoom. Theme preview/cancel covers all views in
   the editing window; a committed theme reaches other native windows.
-  Sidebar mode/width, folded groups, launch choice, focused view and view zoom
+  Sidebar mode/width, folded groups, launch choice, the open and shown workspaces
   belong to the native window. Workspace roots/logos/layout/session ownership
   belong to a workspace. Text zoom, cursor, input, terminal output and terminal
   lifecycle belong to a pane/session. Workspace-catalog changes refresh other
   views without replacing their layouts or moving their terminals.
-  Workspace folder/logo controls live in Dashboard's workspace Settings editor,
+  Workspace folder/logo controls live in the Workspace settings sheet,
   separate from global Settings, and commit together on Save. Replaced uploaded
   images are not deleted while a saved config or history entry may reference
   them; cancelling a draft cannot erase the previous logo.
@@ -1871,8 +2123,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   profiles / actions (new terminal, split h/v, zoom, detach, kill, open folder
   in Explorer / VS Code, open file viewer) / snippets / recent sessions, plus:
   - `open workspace: <name>` → `app.openWorkspace(name)` (replaces "load
-    workspace" and "show workspace beside…"), `close workspace view: <name>`
-    for open views, `new scratch view`
+    workspace" and "show workspace beside…"; its hint says `shown` or
+    `open`), `close workspace: <name>` for open views, `next workspace` and
+    `previous workspace` (`app.cycleWorkspace(±1)`, a shell member) while
+    two or more are open, `open scratch`
   - `go to terminal: <name>` for every listed terminal on the backend (hint:
     workspace label and state) → `app.activateTerminal(session)`
   - `kill terminal…`, a sub-mode listing live terminals. Choosing one shows
@@ -1895,15 +2149,21 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
     terminals, `#` settings and configs, `!` snippets; a prefix alone lists
     that kind
 
-  Sub-modes: kill, search, new window. There is no free-text workspace
-  prompt, because a typo used to tear the whole layout down silently; saving
-  is owned by the Dashboard, which validates the name and shows the error.
+  Sub-modes: kill (with "kill all terminals…"), search, new window, save
+  workspace as. There is no free-text prompt that opens or loads a
+  workspace, because a typo used to tear the whole layout down silently.
+  "save workspace as…" names the shown layout through `saveWorkspace(name,
+  folder)`: a scratch layout passes `suggestedWorkspaceFolder()`, a named one
+  keeps its folder, an existing other workspace's name is refused instead of
+  overwritten, and a refusal shows as a row under the input with the typed
+  name kept.
   Snippet rows carry the command text and the destination pane, and a
   multi-line snippet is confirmed in the pane before it runs. Pane sizing is
   not duplicated here; it lives on the splitter.
-- App object seen by the palette, panels and dashboard (the shell wires it;
-  shell members win over the active view's app): `openWorkspace(name)`,
-  `loadWorkspace(name)` (alias), `closeWorkspaceView(name)`, `newScratchView()`,
+- App object seen by the palette and the panels (the shell wires it;
+  shell members win over the shown view's app): `openWorkspace(name)`,
+  `loadWorkspace(name)` (alias), `closeWorkspaceView(name)`, `newScratchView()`
+  (shows the scratch view), `cycleWorkspace(delta)`,
   `openWorkspaces()`, `liveTerminals() -> [{session, workspace, label,
   attachedIn}]`, `activateTerminal`, `killTerminal`, `killAllSessions`,
   `detachTerminal`,
@@ -1913,7 +2173,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   `agentSessionFolder()`, with the aliases `runClaudeMode` and
   `splitClaudeAgentView`. Per view, from the pane commands:
   `dropKilledSessions(ids)` for the shell's kill-all.
-- Split actions launch the selected terminal choice in the source pane's
+- Split actions start the configured shell (4.3) in the source pane's
   best-known directory. Panes track only OSC 7 and OSC 9;9 shell-integration
   signals, falling back to their launch folder; prompt text is never parsed.
   An OSC 7 `file://<host>/path` is a local path on a non-Windows client
@@ -1922,12 +2182,13 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   UNC path.
   Sidebar Open and Alt+N use the workspace root. Remote and container splits
   also use that root instead of borrowing a shell's signalled directory. An
-  agent split (Claude Code or Codex) always uses its workspace's project
-  folder and runs a normal conversation (`continue`) when that profile's mode
-  is `agents`; the palette's explicit **split agent view: <profile>** opens
-  the agent manager (`claude agents --cwd <project>`, `codex agents`).
+  agent launch (Claude Code or Codex) always uses its workspace's project
+  folder; the palette's explicit **split agent view** opens the agent
+  manager (`claude agents --cwd <project>`, `codex agents`).
 - Keybindings (in addition to palette; `keys.js SHORTCUTS` is the one table):
-  Alt+N opens a new default terminal (a scratch view when no view is open),
+  Alt+N opens a new default terminal (a scratch view when no view is open)
+  in the focused pane's `bestKnownCwd()` when that lies inside the workspace
+  folder (`sameFolderCwd` in spawner.js), else in the workspace folder,
   Alt+Shift+Right/Down split (H/V aliases), Alt+Shift+S cycles the sidebar
   (full, rail, hidden), Alt+Z zoom, Alt+D detaches and
   retains the process, Alt+W always opens confirmation before a process-tree
@@ -1939,15 +2200,22 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   (readline/PSReadLine undo) reach the shell on ANSI layouts.
   Alt+Shift+Left/Up cycle the previous/next new-terminal profile. Ctrl+Left/Right
   remain untouched for PowerShell/readline word navigation.
-  Alt+Shift+E / Alt+Shift+C open the focused terminal's folder (its OSC 7
-  directory, else its launch folder, else the workspace folder) in Explorer /
-  VS Code through `POST /api/open`; plain Alt+E and Alt+C stay with the shell
-  (Alt+C is readline's capitalize-word).
+  Alt+Shift+C opens the focused terminal's folder (its OSC 7 directory, else
+  its launch folder, else the workspace folder) in VS Code through
+  `POST /api/open`; Explorer is the palette row and the sidebar button.
+  Alt+Shift+E toggles the right panel (4.3), also while the panel or its file
+  view holds the keyboard. Plain Alt+E and Alt+C stay with the shell (Alt+C
+  is readline's capitalize-word).
+  Ctrl+Shift+F in a pane opens its find field (`pane_find.js`, focus owner
+  `"pane-find"`, claimed only while the field has focus, so a click back into
+  the terminal leaves the matches marked and the terminal focused). Ctrl+Tab
+  is the recent-terminals list; Ctrl+Shift+1..9 and Alt+PageDown/PageUp are
+  the workspace keys (see the shell's keyboard notes).
 - A second ordinary QuickTerm process never creates another native viewer.
   It authenticates to the existing loopback backend, queues an optional Explorer
   folder through `/api/launches`, and restores/focuses the one existing window.
   The primary window's shell atomically claims folder requests and opens each
-  in a new scratch view.
+  in the window's scratch view.
 - Destructive UI actions use an in-app confirmation placed by the triggering
   control: `confirm_popover.js` (the sidebar calls it directly, and
   `Panels._confirmNear` delegates to it with owner `"confirm"`), or the kill
@@ -1969,9 +2237,10 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   is a separate, visually divided, text-labelled `.danger` control, in the pane
   header and on the sidebar row alike. Detach and kill must never be adjacent
   unlabelled glyphs.
-- Clicking an open workspace in the sidebar focuses its view; clicking a
-  closed one opens a view. No click on a workspace replaces a layout or kills
-  a running terminal; New scratch always opens a separate view.
+- Clicking an open workspace in the sidebar shows its view; clicking a
+  closed one opens a view and shows it. No click on a workspace replaces a
+  layout or kills a running terminal; New scratch shows the window's one
+  scratch view and never replaces another layout.
 - One visible failure path: every gesture-triggered error goes to the
   dismissible `#app-error` banner (drawn above `.panel-overlay`) or to the
   focused pane's notice. `#sb-save` is reserved for the saving/saved lifecycle;
@@ -1998,7 +2267,7 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Pane focus is reasserted after creation, attach, and replay completion only
   while that pane is still selected; a late callback may never steal focus from
   a pane the user subsequently selected. Closing a full-screen Settings,
-  Dashboard, Help, or similar panel returns focus to the selected terminal
+  workspace board, Help, or similar panel returns focus to the selected terminal
   before considering the control that originally opened the panel.
 - Workspace restore attaches only matching live session IDs. A missing process
   restores as a transcript-free unavailable pane with explicit replacement and,
@@ -2037,6 +2306,18 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
 - Design tokens: compact, flat workbench chrome derives restrained semantic
   surfaces and focus colors from the selected palette; terminal ANSI colors
   remain separate. Reduced-motion and forced-colors modes are supported.
+- `js/usage_footer.js` and `css/usage.css`: the usage line. `launcher.js`
+  calls `mountUsageFooter(el, {signal, handBack, actions, mode, groups})` once
+  and the module owns the rest. The line asks `GET /api/usage` and
+  `GET /api/sessions` (with metrics) 1.5 s after boot and then every 60 s,
+  only while the sidebar is full and the document visible; the resources
+  popover asks `/api/sessions` every 5 s while open. Both popovers are
+  `role="dialog"`, claim the keyboard as `"usage"` in `focus.js`, close on
+  Escape, Tab, an outside press, a window resize or blur, and toggle on a
+  second press of their trigger; Escape hands the keyboard back to the
+  terminal. Arrow keys move between the terminal rows. Lists patch through
+  `render.js`. The model functions (`footerParts`, `agentSummary`,
+  `usageBlocks`, `resourceRows` and the formatters) are pure and exported.
 
 ## Agent state, git worktrees and the PTY host (4.2, frozen 2026-10-24)
 
@@ -2129,6 +2410,21 @@ SessionEnd sets `agent` back to null. Codex's turn-complete notification is
 done (message). `mark_seen` turns done and failed into idle; typing never
 changes the state. The process exiting sets `agent` to null. "waiting" also
 raises the existing attention with kind `"notify"` when nothing else did.
+
+### Worktrees removed (4.3, decided 2026-10-25)
+
+The user does not want worktree features. 4.3 removes everything below that
+creates, lists or nests worktrees: `POST /api/workspaces/worktree`,
+`quickterm/worktree.py`, the "new worktree..." palette row and row-menu entry
+with its setup command, and the nesting of worktree workspaces under their
+main checkout in the sidebar and on the board. `git_info` keeps `branch`,
+`head`, `worktree` and `main_path`: a workspace whose folder is a linked
+worktree is an ordinary workspace, listed like any other, and only says what
+it is: its row and board card show the branch followed by a muted
+`worktree` word, with the main checkout's folder in the tooltip. A workspace
+is local or on an SSH host; nothing else. Workspace names may still contain `/`, so
+the name routes stay `{name:path}`. The 4.2 text that follows is kept as
+history.
 
 ### Git info and worktree workspaces
 
@@ -2250,6 +2546,714 @@ window and nothing at risk, and is not asked again. Uvicorn's graceful
 shutdown is bounded to 3 s, so terminals stop promptly after the port closes.
 Each role logs to its own file (`quickterm.log`, `viewer.log`,
 `launcher.log`).
+
+## One workspace at a time, and one shell (4.3, frozen 2026-10-25)
+
+Frozen before the 4.3 round so the stage part and the shell part can be built
+in parallel. The model: the sidebar lists the workspaces, the content
+area shows exactly one of them, and every terminal starts in the user's shell.
+Changing anything here goes through the integrator.
+
+### The stage shows one workspace
+
+- The content area shows exactly one workspace view, full size: no view
+  header, no coloured frame, no maximize or close button on the view, no
+  divider, no view drag, dock or swap. A lone workspace looks the same as
+  today's single view minus its frame.
+- Clicking a workspace row in the sidebar shows that workspace. If it is not
+  open yet it opens; if it is open it becomes the shown one. The previously
+  shown view stays loaded but hidden (`display: none` is not allowed: hidden
+  views keep their box and use `visibility: hidden` plus `inert`, so xterm
+  keeps its size), and `window.quicktermView.setHidden(true)` is called on
+  it so its panes drop WebGL after the 5 s grace, as in 4.2.
+- Iframes are never re-parented (they would reload). Every view is absolutely
+  positioned at the full stage rect.
+- "Open" means loaded in this window. The sidebar marks open workspaces (as
+  today) and highlights the shown one. Closing stays on the sidebar row's
+  close button and the palette; closing the shown view shows the most recently
+  shown remaining one, or the empty stage.
+- Scratch: one scratch view per window, labelled `scratch`. "Open QuickTerm
+  here" from Explorer opens a terminal at that folder in the scratch view
+  (opening the scratch view first if needed) instead of a new scratch view.
+- Persistence: localStorage key `quickterm.openViews.v1` holds
+  `{"version":1,"open":[<workspace name or "" for scratch>...],"shown":<same>}`
+  for the primary window, written on every open, close and switch. On first
+  boot after the upgrade, the old tiling arrangement key is read once for its
+  leaves (open list, in tree order; the active leaf becomes `shown`), then
+  removed.
+- Keys: the existing shortcuts that moved focus between views move to the
+  next and previous open workspace in sidebar order. Shortcuts that only made
+  sense for tiling (swap, move, resize a view) are removed from keys.js, the
+  help panel and the palette.
+- Every member in `SHELL_MEMBERS` keeps its name and meaning; `activeApp()` is
+  the shown view's app.
+
+### One shell
+
+- Config gains `shell: str`, default `"powershell"`. Allowed values:
+  `"powershell"` (`pwsh.exe` when found on PATH, else `powershell.exe`),
+  `"cmd"`, `"git-bash"`, `"wsl"` (default distribution) and `"wsl:<distro>"`
+  (name as listed by the inventory). On POSIX the only value used is `""`,
+  meaning the login shell from `$SHELL`; a Windows value there falls back to
+  `""`. Unknown values fail validation with `shell must be one of ...`.
+  Existing configs without the key load as `"powershell"`.
+- `GET /api/system/terminals` (the inventory) keeps its shape and adds
+  `"shells": [{"value": "...", "label": "PowerShell"|"Command Prompt"|"Git Bash"|"WSL: <distro>", "available": bool}]`.
+  Git Bash and WSL entries appear only when installed.
+- A new terminal with no profile (the "+" button's main click, the
+  new-terminal hotkey, `quickterm new` without a profile) starts `shell` in
+  the workspace folder.
+- Claude Code and Codex run inside the shell. The PTY's program is the shell,
+  started so it runs the agent command once and then stays interactive:
+  - PowerShell: `-NoLogo -NoExit -Command & '<exe>' '<arg>'...` with every
+    single quote doubled inside the quoted words.
+  - cmd: `/k` followed by the command line built with
+    `subprocess.list2cmdline`, guarded by the existing batch-shim guard.
+  - Git Bash: `-lc "<posix-quoted command>; exec bash -l"` (the existing
+    start-command pattern).
+  - WSL: `wsl.exe [-d <distro>] --cd <folder> --exec bash -lc "<command>; exec bash -l"`
+    with the Linux `claude`/`codex` on that distro's PATH. Agent hooks are
+    skipped for WSL (the Windows curl and env do not reach it); the agent
+    then reports no state, as an agent launched outside QuickTerm does.
+  - POSIX: `$SHELL -lc "<command>; exec $SHELL -l"`.
+- The session keeps `terminal_type` `"claude-code"` / `"codex"` and the
+  agent's label, so agent state, Shift+Enter, the sidebar chips, resume and
+  kill behave as in 4.2. Hook env vars and the `--settings` / `-c notify`
+  arguments are still added to the agent command, not to the shell.
+  When the agent exits, the pane stays open at the shell prompt; the session's
+  agent state returns to none.
+- A profile's own `cmd` override for an agent still names the agent
+  executable; it is wrapped in the shell the same way.
+
+### The "+" menu
+
+The sidebar's new-terminal button:
+
+- Main click: a new terminal in `shell`.
+- Its menu (menu.js, no native select), in this order: one row per entry of
+  `shells` that is available ("PowerShell", "Command Prompt", "Git Bash",
+  "WSL: Ubuntu"...), the default one marked; a separator; "Claude Code" and
+  "Codex" when installed; then the user's saved profiles other than the
+  built-in ones, if any; a separator; "Terminal settings…". The old "SAVED
+  TERMINALS" heading goes.
+- The palette's new-terminal items list the same entries.
+- Settings gets one "Shell" row (menu.js picker over `shells`) that writes
+  `shell`.
+
+### Agents are settings, profiles are for special terminals (added 2026-10-25)
+
+Shells and agents stop being profiles. Profiles remain only for terminals that
+need their own target or command: SSH, SFTP, the other connection types
+(telnet, serial, docker, podman, kubernetes, rdp, vnc), `custom`, and a shell
+profile that carries a `start_command` (for example "PowerShell running
+`npm run dev`").
+
+- Config gains `agents: {"claude-code": AgentSettings, "codex": AgentSettings}`
+  where `AgentSettings` holds exactly what an agent profile held for the
+  launch: `cmd` (executable override, may be empty), `args`, `agent_mode`,
+  `agent` (the option dict validated by `agents.validate`), `env`. Both keys
+  always exist (empty defaults). Settings gets an "Agents" section:
+  one row per agent showing the resulting command line, expanding to
+  the existing option editor (the fields from `GET /api/system/agents`).
+- Launching Claude Code or Codex (the "+" menu, the palette, the CLI
+  `quickterm new claude-code|codex`, an exited-pane restart, a resume from the
+  sidebar or palette) uses these settings; a launch may still pass a one-off
+  mode or session id as today.
+- Migration on load, once, with the pre-migration file copied to
+  `config.pre-4.3.json` next to `config.json` before the first save:
+  - the first `claude-code` profile and the first `codex` profile (config
+    order) become `agents[...]`; every agent profile is removed;
+  - a shell profile (`powershell-core`, `windows-powershell`, `cmd`,
+    `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nushell`, or a type inferred as
+    one) without a `start_command` is removed, since the "+" menu covers it;
+  - a shell profile whose `start_command`'s first word is `claude`, `claude.exe`,
+    `codex` or `codex.exe` is removed; when no agent profile of that kind
+    exists it becomes `agents[...]` with the start command's other words as
+    `args`, its `env`, and `agent_mode` `"new"` (added at the integrator's
+    request with the review fixes);
+  - every other profile stays unchanged;
+  - `default_profile` is dropped; `shell` takes over (default `"powershell"`).
+- A saved profile of a removed kind is rejected on save with
+  `profiles are for connections and custom commands; set the shell or the agents instead`.
+- The profile editor offers only the kept types and only their fields.
+
+### Agent usage and resources in the sidebar footer (added 2026-10-25)
+
+Agent usage and a resource view. QuickTerm has
+no status bar, so both live in one quiet line at the bottom of the sidebar
+(full mode only; the rail and hidden modes show nothing new), each opening a
+menu.js-style popover.
+
+- Footer line: `✳ 32% · 4d` for Claude (the higher of the 5 h and 7 d used
+  percent, with the time until that window resets) and `◎ 0% · 29d` for
+  Codex, each only when its data exists, followed by the total memory of all
+  QuickTerm terminals (`2.2 GB`). No line at all when none of the three exists.
+- Usage popover: per agent, each window (Claude: 5 hours, 7 days; Codex:
+  primary and secondary, named from `window_minutes`) with used percent, a
+  thin bar and "resets in 4d 14h"; plus "updated 3m ago". Read-only.
+- Resources popover: open workspaces, then their terminals, each with CPU and
+  memory, from the existing `GET /api/sessions` metrics (`usage`), polled
+  every 5 s only while the popover is open; total at the top. Clicking a
+  terminal shows its workspace and focuses it. Nothing else (no disk scan, no
+  clean-up).
+
+Backend:
+
+- `GET /api/usage` (full API token) returns
+  ```
+  {"claude": {"windows": [{"id": "five_hour"|"seven_day", "used_percent": float,
+                           "resets_at": epoch_s|null}], "updated_at": epoch_s} | null,
+   "codex":  {"windows": [{"id": "primary"|"secondary", "used_percent": float,
+                           "window_minutes": int|null, "resets_at": epoch_s|null}],
+              "plan": str|null, "updated_at": epoch_s} | null}
+  ```
+- Claude's numbers come from Claude Code's status line input
+  (`rate_limits.five_hour` / `rate_limits.seven_day`, each with
+  `used_percentage` and `resets_at`). QuickTerm's per-launch `--settings` file
+  sets `statusLine` to its own command, `<QuickTerm> --statusline`, which
+  reads the JSON from stdin, POSTs
+  `{"hook_event_name": "QuickTermRateLimits", "rate_limits": {...}}` to
+  `/api/sessions/{sid}/agent-event` with the hook token (same route, token and
+  2 s no-proxy timeout as `codex_notify.py`), then runs the user's own
+  `statusLine.command` from their merged Claude settings (user, then project,
+  then local) with the same stdin and prints its stdout unchanged. With no
+  user status line it prints nothing. It always exits 0 and never blocks the
+  status line longer than the user's own command plus 2 s. The backend keeps
+  only the latest Claude numbers in memory (not per session, not on disk).
+  `agent_events` ignore this event for agent state.
+- Codex's numbers come from the newest `rollout-*.jsonl` under
+  `~/.codex/sessions` (respecting `CODEX_HOME`): the last line with
+  `"rate_limits"` in a `token_count` event, read from the end of the file
+  (at most the last 256 KB), cached by file path and mtime. Never written.
+- Nothing is sent off the machine, and no credentials are read.
+
+### Workspace board replaces the dashboard (added 2026-10-25)
+
+A workspace board, in place of today's dashboard panel (the same sidebar
+footer button and palette entry open it; the button's tooltip becomes
+"Workspace board").
+
+- Four columns: Todo, In progress, In review, Done, each with its count.
+  Every saved workspace is one card in exactly one column. A card shows the
+  workspace name, its repo and branch (from the 4.2 git info), and its live
+  terminals as lines with the agent state dot and label, subagent lines
+  under an agent as in the sidebar.
+- Drag a card to another column to set its status (pointer drag with the
+  same feel as the sidebar; keyboard: focus a card, Alt+Left/Right moves it
+  one column). Click a card to show that workspace and close the board.
+  A search field at the top filters cards by name, repo and branch.
+  Empty columns say "Empty". No pins, no per-column "+" button, no settings.
+- Everything the old dashboard did that the board does not cover (workspace
+  rename, delete, folder change, layout preview) moves to the workspace row's
+  menu in the sidebar or the palette if it is not there already; nothing is
+  lost silently. Name what moved in the report.
+- Status store: `%APPDATA%\quickterm\board.json`,
+  `{"version": 1, "status": {"<workspace name>": "todo"|"in-progress"|"in-review"|"done"}}`,
+  written atomically (temp file plus replace) under a lock. Not in the
+  workspace files, so layout autosave can never overwrite it.
+  A workspace without an entry is "in-progress". Renaming a workspace moves
+  its entry; deleting removes it.
+- `GET /api/board` returns `{"status": {...}}` for existing workspaces only.
+  `PUT /api/board/{name:path}` with `{"status": "<one of the four>"}` sets it;
+  404 for an unknown workspace, 400 for an unknown status.
+
+### Workspaces on an SSH host (added 2026-10-25)
+
+People code on a remote machine over SSH. A workspace can live there, and it
+works the same way a local one does: the "+" menu, Claude Code and Codex with
+agent state, Shift+Enter, the sidebar branch, the board.
+
+- A workspace gains `host: str | null`: the name of an SSH profile using the
+  OpenSSH client. `path` is then a POSIX path on that host. `null` means
+  local, so every existing workspace is unchanged. A PuTTY profile cannot back a
+  workspace: `remote workspaces need an OpenSSH profile`.
+- Creating one: "new workspace on host…" in the palette and in the sidebar
+  "+" (next to the local "new workspace"), asking for the host (menu of
+  OpenSSH profiles) and the folder (text, checked with
+  `ssh -o BatchMode=yes <profile args> <host> test -d <path>`; a failed check
+  says what ssh printed and still lets the user save).
+- Every terminal of a remote workspace is an OpenSSH session with `-t`, the
+  profile's port/user/key/ProxyJump, and a remote command that `cd`s into
+  the folder (POSIX-quoted) and then:
+  - plain terminal: `exec "$SHELL" -l`;
+  - Claude Code / Codex: runs the agent command with the agents settings, then
+    `exec "$SHELL" -l`, so exiting the agent leaves the remote shell. The
+    `shell` setting does not apply on a remote host.
+  - The "+" menu of a remote workspace lists "Shell on <host>", Claude Code,
+    Codex and the user's custom profiles that make sense remotely (none of the
+    local shells or WSL).
+- Agent state over SSH: the session's ssh gets
+  `-R <remote socket>:127.0.0.1:<backend port>` with a Unix socket
+  `/tmp/quickterm-<random 16 hex>.sock` (sshd creates it owner-only by
+  default, StreamLocalBindMask 0177) and `-o ExitOnForwardFailure=no`, so a
+  server without stream forwarding still opens the shell, just without
+  agent state. The remote command exports `QUICKTERM_SESSION_ID`,
+  `QUICKTERM_HOOK_TOKEN` and `QUICKTERM_HOOK_SOCKET`, and removes the socket
+  file when the shell exits. Claude gets its hooks as an inline
+  `--settings '<json>'` whose commands are POSIX `curl --unix-socket
+  "$QUICKTERM_HOOK_SOCKET" -sS -m 2 -H @- ... http://localhost/api/sessions/$QUICKTERM_SESSION_ID/agent-event`
+  with the token read from the environment, never written into the command
+  line or a file. No curl on the host means no agent state, nothing else.
+  Codex gets the same through `-c notify=[...]` only when the user's local
+  Codex config has no notify of its own (QuickTerm cannot read the remote
+  config before the launch); the status line chain is not used remotely.
+  The hook token never leaves through anything but the forwarded socket and
+  the session's environment.
+- Git: the branch and repo for the sidebar and board come from
+  `ssh -o BatchMode=yes ... git -C <path> rev-parse --abbrev-ref HEAD --show-toplevel --git-common-dir`,
+  cached 60 s per workspace and run off the request path; failure means no
+  branch shown.
+- Windows' OpenSSH has no ControlMaster, so each terminal is its own
+  connection. Key or agent auth is expected; with a password, each terminal
+  asks in the terminal itself, and the background git call fails quietly
+  (BatchMode).
+- The sidebar row of a remote workspace shows `@<host>` after its name in
+  the muted colour; nothing else changes.
+
+### Round 2: more agent and git features (added 2026-10-25)
+
+Picked from a survey of agent IDEs, minus what QuickTerm already
+had. UX rule for all of it: nothing new is visible until it is needed. No
+status bar, no badges, no toolbar rows; a panel that is closed takes no space.
+
+#### Running a command in a workspace's folder
+
+`quickterm/ws_exec.py` is the one way backend code runs a program in a
+workspace's folder, local or on its SSH host:
+
+```python
+def run(ws: Workspace, argv: list[str], *, timeout: float = 10.0,
+        input: str | None = None) -> subprocess.CompletedProcess[str]
+def exists(ws: Workspace) -> bool
+```
+
+Local: `subprocess.run(argv, cwd=ws.path, ...)` with `CREATE_NO_WINDOW`,
+text mode, UTF-8, no shell. Remote: OpenSSH with `-o BatchMode=yes` and the
+profile's args, the remote command `cd <path> && <argv POSIX-quoted>`.
+Git info, the right panel and the board use it. The
+integrator commits a local-only version first; the remote part owns it after.
+
+#### The right panel
+
+One panel on the right of the content area, closed by default. Alt+Shift+E
+(also the palette, "files", "changes", "pull request") opens or closes it;
+its width is dragged at its left edge and remembered per machine; it belongs
+to the window, and it always shows the shown workspace. Three icon tabs at
+its top, nothing else in that row: Files, Changes, Pull request.
+
+- **Files**: the workspace folder as a lazy tree (one level per request),
+  folders first, natural sort, gitignored entries dimmed and listed after,
+  `.git` hidden. New and modified files tinted with the theme's git colours.
+  A filter field on top searches names (whole tree, `git ls-files` plus
+  untracked, falling back to a walk capped at 20000 entries); a "Contents"
+  toggle searches file contents with `git grep -n -I` (or a capped walk
+  without git) and lists `path:line  text`. Click a file (or a search
+  result) to open it in the file view. Alt+click pastes its quoted path into
+  the focused terminal (the same rules as a file drop). Right click: open,
+  paste path into terminal, copy path, copy relative path, open in editor,
+  reveal in Explorer (local only).
+- **File view**: opens over the stage like the diff (terminals stay loaded
+  behind it), one file at a time; opening another replaces it, Esc closes.
+  Head: the path relative to the workspace, a "Changes" toggle (shown when
+  git reports the file modified; it switches to the diff view of that file),
+  and "Open in editor" (VS Code through `code` when it is on PATH, else the
+  Windows default program via the existing `POST /api/open`; remote
+  workspaces: hidden). Body: read-only text with line numbers and syntax
+  colours from highlight.js (vendored, the common-languages build, licence
+  next to it, colours mapped to theme tokens), Ctrl+F find with match count,
+  `Ctrl+G` go to line, the clicked search result's line scrolled into view
+  and marked. Files over 2 MB or binary (a NUL in the first 8 KB) show
+  "binary file" or "file too large (N MB)" with "Open in editor"; images
+  (png, jpg, gif, webp, svg as an image) show the image. No editing in
+  QuickTerm.
+  `GET /api/ws/{name:path}/file?path=` → `{"text"|null, "binary":bool, "size":int, "image_url"?:str, "language":str|null}`
+  with the same path rules as the other routes; `image_url` is a token-free
+  same-origin URL valid for that file only.
+- **Changes** (source control, kept small):
+  - Head: the branch, `→ <upstream or origin default branch>`, commits
+    ahead/behind (`↑1 ↓0`) and the branch's added lines against its base
+    (`+220`).
+  - A commit message field (two lines, grows to six) and one primary button
+    whose label follows the state: "Stage all" while nothing is staged,
+    "Commit" while something is staged and a message is typed, "Push" (or
+    "Publish branch" without upstream) when the branch is ahead and nothing
+    is staged, "Pull" when only behind. Its menu holds the other actions:
+    commit and push, amend (asks first when the commit is already pushed),
+    pull, push. Ctrl+Enter in the message field commits. No force push.
+    Hook failures and git errors show their output under the button with
+    "Fix with Claude" (a new Claude Code terminal in the workspace with the
+    error, the message and the staged files, told not to bypass hooks, commit
+    or push).
+  - Sections, each collapsible with its count: Staged, Changes (with
+    Untracked), and Committed on branch (files changed between the merge base
+    with the base branch and HEAD). Rows show the file name, its folder dimmed,
+    `+n -m` and the status letter. Hover actions per row: stage / unstage,
+    discard (asks with the existing confirm popover). Section actions: stage
+    all, unstage all, discard all (asks).
+  - Clicking a file opens the diff over the stage (the terminals stay
+    loaded behind it, like the board): unified by default with a side-by-side
+    toggle, theme-token colours, line numbers, prev/next change arrows and
+    `n`/`p` keys, the file path in the head, Esc closes. At most 5000 lines,
+    then "diff too large" with the line count.
+- **Pull request**: the PR of the workspace's branch via the `gh` CLI
+  (`gh pr view --json number,title,state,isDraft,url,mergeStateStatus,reviewDecision,headRefName,baseRefName`,
+  `gh pr checks --json name,state,bucket,link,workflow,startedAt,completedAt`).
+  Shows `#249  OPEN`, the title, checks grouped failing / pending / passing
+  with their names and a link each, and a merge split button
+  (merge commit / squash / rebase, from what the repo allows; hidden for
+  draft, closed or conflicting PRs; asks before merging). A failing check
+  expands to the tail of its log (`gh run view <id> --log-failed`, last 200
+  lines). "Fix with Claude" on a failing check (and on the group) opens a
+  new Claude Code terminal in the workspace with a prompt naming the failed
+  checks, their links and the log tails, telling it to fix the cause and not
+  to push or merge. Without `gh` or without a PR it says so in one line with
+  the command to run (`gh auth login`, `gh pr create`). Refreshes every 30 s
+  while visible, never while closed.
+- Remote workspaces: Files and Changes work through `ws_exec`; Pull request
+  runs `gh` locally against the repo's remote URL read through `ws_exec`
+  (`git remote get-url origin`), so `gh` needs no install on the host.
+- API (full token), all scoped to a saved workspace by name:
+  `GET /api/ws/{name:path}/files?dir=<rel>` → `{"entries":[{"name","dir":bool,"ignored":bool,"git":"M"|"A"|"?"|null}]}`;
+  `GET /api/ws/{name:path}/files/search?q=&contents=0|1` → `{"results":[{"path","line":int|null,"text":str|null}],"truncated":bool}`;
+  `GET /api/ws/{name:path}/changes` → `{"branch","upstream","base","ahead","behind","branch_added","files":[{"path","group":"staged"|"changes"|"untracked"|"committed","status","added","removed"}]}`;
+  `GET /api/ws/{name:path}/diff?path=&group=staged|changes|committed` → `{"text","truncated","lines"}`;
+  `POST /api/ws/{name:path}/changes` `{"action":"stage"|"unstage"|"discard","paths":[...]}`;
+  `POST /api/ws/{name:path}/git` `{"action":"commit"|"amend"|"push"|"pull"|"publish","message":str|null}` → `{"ok":bool,"output":str}`
+  (commit runs the repo's hooks; the output is git's, trimmed to 20000 chars);
+  `GET /api/ws/{name:path}/pr` → `{"gh": "ok"|"missing"|"unauthenticated", "pr": {...}|null, "checks": [...]}`;
+  `GET /api/ws/{name:path}/pr/log?run=<id>` → `{"text"}`;
+  `POST /api/ws/{name:path}/pr/merge` `{"method":"merge"|"squash"|"rebase"}`.
+  Every `path`/`dir` is relative, normalised, and refused (400) if it leaves
+  the workspace folder or names `.git`.
+
+#### Agents
+
+- **Agents tab on the board**: the board panel gets two tabs, "Workspaces"
+  and "Agents". Agents: columns Needs you, Working, Done, Idle (Idle hidden
+  behind a "show idle" toggle in the column row). One card per agent session:
+  agent icon and label, the last prompt (`You …`, one line), the start of the
+  agent's last answer (two lines), workspace and branch, PR number when the
+  right panel knows one, time since the last event, subagents folded under a
+  "N subagents" line. Click: show that terminal. Search filters by text.
+  A session with no event for 30 minutes and not waiting counts as Idle.
+  A parent whose subagent waits for permission counts as Needs you.
+- Backend: the agent-event route stores per session `last_prompt`
+  (UserPromptSubmit `prompt`, first 300 chars) and `last_answer` (from the
+  Stop hook's `last_assistant_message` when present, else the last assistant
+  text in `transcript_path`, read from the end, first 300 chars) and
+  `last_event_at`; `GET /api/sessions` includes them under `agent`. Codex:
+  the notify payload's `input-messages` last entry and `last-assistant-message`.
+- **Pane title follows the agent's conversation**: a pane with no manual
+  title shows the agent session's own title (Claude's `customTitle`/summary or
+  Codex's thread name, as `agent_sessions.py` already reads them), refreshed
+  on Stop events. A manual rename wins.
+- **Finished and needs-you notifications**: a finished turn (Stop / Codex
+  notify) of an agent whose terminal is not on screen raises the same
+  balloon or taskbar flash as "needs you" today. Settings → Notifications:
+  "When an agent needs you" and "When an agent finishes", each Off / Flash /
+  Notify (default Notify and Flash), and "Sound" On/Off (default Off; plays
+  the Windows notification sound via `winsound.MessageBeep`).
+- **Keep awake**: config `keep_awake: "agents"|"always"|"off"`, default
+  `"agents"`: while any agent session is working, the backend holds
+  `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` (display may
+  sleep) and releases it when none is. Settings row under General.
+- **Palette**: "copy resume command" for an agent terminal
+  (`claude --resume <id>` / `codex resume <id>`, with the folder) and on
+  each "resume … session" row as a secondary action (Shift+Enter).
+
+#### Terminal and keys
+
+- **Find in terminal**: Ctrl+Shift+F in a pane opens a small find field at
+  the pane's top right (no bar across the pane): match count `3/17`, Enter
+  and Shift+Enter next and previous, Alt+C case, Alt+R regex, Esc closes and
+  hands the keyboard back. Uses the official `@xterm/addon-search` vendored
+  like the other addons (exact version matching xterm 6, licence file next
+  to it). The palette's "search all terminals" stays.
+- **Reset terminal**: palette row for the focused pane; writes the reset
+  sequence locally (`term.reset()` plus the mode resets of `RESTART_RESET`)
+  without touching the process.
+- **Copy terminal text**: palette row; copies the pane's whole buffer as
+  plain text (trailing blank lines trimmed, capped at 2 MB) to the clipboard.
+- **New terminal in the same folder**: Alt+N and the "+" main click open
+  in the focused pane's `bestKnownCwd()` when it lies inside the workspace
+  folder; otherwise the workspace folder as today.
+- **Workspace keys**: Ctrl+Shift+1..9 shows the nth workspace in sidebar order
+  (match `code` Digit1..9 with Ctrl and Shift, so the layout's shifted symbol
+  does not matter; changed from Alt+Shift after review, which took readline's
+  M-! M-@ M-$ completion bindings); Alt+PageDown / Alt+PageUp next and previous open
+  workspace. Added to AGENTS.md's claimed keys and the help panel.
+- **Recent terminals**: Ctrl+Tab opens a small centred list of the last 8
+  focused terminals across workspaces (most recent first, current one second
+  selected), Tab / Shift+Tab move while Ctrl is held, releasing Ctrl shows
+  that terminal; Esc cancels. The order is frozen while the list is open.
+  A single Ctrl+Tab tap therefore flips between the last two.
+
+### Agents round 2, as built (added 2026-10-25)
+
+What the "Agents" part of round 2 settled beyond the frozen text above.
+
+`GET /api/sessions` items: `agent` gains, beside the 4.2 fields,
+
+```
+"last_prompt":  str | null,   # first 300 chars, control characters out, whitespace collapsed
+"last_answer":  str | null,   # same; cleared by the next UserPromptSubmit
+"last_event_at": str,         # ISO 8601 UTC, "2026-10-25T12:00:00Z"
+"event_age_seconds": int,     # the same moment as an age, for the card
+"board": "needs-you" | "working" | "done" | "idle",
+"conversation_id": str | null,  # Claude session_id or Codex thread-id, [0-9A-Za-z_-]{1,100}
+"cwd": str | null,            # the folder the hook payload names
+"title": str | null           # the conversation's own title
+```
+
+and each subagent gains `"waiting": bool` (a PermissionRequest or permission
+Notification carrying its `agent_id`, cleared by its next tool event or its
+SubagentStop).
+
+- Every Claude event the state machine knows stamps `last_event_at`, except a
+  straggler it drops, a compaction SessionStart and a non-permission
+  Notification (Claude's `idle_prompt` is not activity). Codex: each
+  `agent-turn-complete`.
+- `board`: "needs-you" while the state is waiting or any subagent waits,
+  however long; else "idle" after 30 minutes without an event; else
+  "working" for working; "done" for done or failed, and for an idle agent
+  that finished a turn (seen turns stay in Done until the 30 minutes pass);
+  else "idle". The frontend also puts an agent terminal with `attention` in
+  Needs you.
+- On `Stop` and `agent-turn-complete` the route reads, off the loop, the
+  transcript's last 256 KB when the hook carried no `last_assistant_message`
+  (only an absolute path ending in `.jsonl`), and the title: Claude's last
+  `custom-title`, else its last `ai-title` or `summary` (never the first
+  prompt); Codex's `thread_name` from `session_index.jsonl`. Claude writes a
+  new conversation's `ai-title` just after its first Stop hook, so a turn
+  that finds no title looks again after 3 and 10 seconds.
+- The session's `name` follows `agent.title` until `PATCH
+  /api/sessions/{sid}` names it; when the agent goes (SessionEnd, the agent
+  leaving the shell) an unnamed session gets its spawn name back. Panes show
+  the polled name unless they carry a typed title.
+- Notifications: the attention listener also hears kind `"done"` (never
+  stored as attention). `notify(sid, name, kind, text, mode=, sound=)`;
+  config `notifications: {"needs_you": "off"|"flash"|"notify" = "notify",
+  "finished": ... = "flash", "sound": bool = false}`. "On screen" is
+  QuickTerm's window in front: nothing then. Flash flashes the visible
+  primary window; Notify also shows the tray notification, or only that when
+  every window is in the tray. Balloons are silent (`NIIF_NOSOUND`); Sound
+  plays `MessageBeep(MB_ICONASTERISK)` once. Throttled per session and kind,
+  30 s.
+- Keep awake: config `keep_awake: "agents"|"always"|"off"`. "agents" holds
+  while any live session's agent state is `working` (not the 30-minute
+  rule: a long tool run is still work). `SessionManager` calls
+  `SetThreadExecutionState` on the loop thread only, on agent events, agent
+  exits, a Settings save and a 15 s tick, and releases on `shutdown()`.
+- Palette: "copy resume command: <terminal>" rows (quiet, listed once
+  something is typed) and a `secondary` action on resume rows run by
+  Shift+Enter. The line is `Set-Location -LiteralPath '<folder>'; <cmd>` for
+  PowerShell, `cd /d "<folder>" && <cmd>` for cmd (no folder when it holds a
+  `"`), `cd '<folder>' && <cmd>` otherwise.
+- The board remembers its tab (`quickterm.boardTab`) and the idle toggle
+  (`quickterm.boardShowIdle`) in localStorage. No PR number on the cards yet;
+  `GET /api/board` now carries the one the right panel last saw (below).
+
+### The right panel, as built (added 2026-10-25)
+
+What the frozen "The right panel" part left open, as implemented.
+
+- Modules: `ws_files.py` (path rules, `LocalFolder`, `HostFolder`,
+  `folder_for`), `ws_git.py`, `ws_pr.py`, routes in `api/ws.py`; frontend
+  `right_panel.js` (frame, tabs, width, overlay host), `rp_files.js`,
+  `rp_changes.js`, `rp_pr.js`, `file_view.js`, `diff_view.js`,
+  `right_panel_model.js` (pure), `rp_dom.js`, `ws_api.js`,
+  `css/right_panel.css`, `vendor/highlight.min.js` (highlight.js 11.11.1,
+  common build, `vendor/highlight-LICENSE.txt`).
+- Path rules (`ws_files.clean_rel`): backslashes read as slashes, `.` and
+  empty parts dropped, `..` folded and refused when it climbs out; refused
+  are a leading `/` or `\` (UNC too), a drive letter, any `:` (alternate
+  data streams), control characters, a part that is all dots or spaces, and
+  any part that is `.git` as Windows reads it (`.GIT`, `.git.`, and its 8.3
+  short name `GIT~1`, any `git~<digits>`). The local reader then follows
+  links (`realpath`, junctions included) and refuses a result outside the
+  folder or inside `.git`; every path handed to git (stage, unstage,
+  discard, diff) is resolved that way first for a local workspace. On a host
+  the same check runs in the host's shell (`realpath -e`). Git gets paths
+  with `--literal-pathspecs`.
+- No program a repository's config names runs on the panel's reads: every
+  git call passes `-c core.fsmonitor=false -c diff.external=`, every diff
+  `--no-ext-diff --no-textconv`. Every read first lists the filter drivers
+  (`git config --name-only --get-regexp '^filter\.'`, which runs nothing)
+  and passes `-c filter.<x>.clean= -c filter.<x>.smudge= -c
+  filter.<x>.process= -c filter.<x>.required=false` for each, so git reads
+  the content unfiltered (a file a filter stores as a pointer can then show
+  as changed). Stage, discard, commit, push and pull keep the filters, since
+  they store or check out what the filters make; commit runs the hooks, and
+  push and pull run theirs as git always does.
+- Reads: a local workspace is read directly (`LocalFolder`, the one place
+  for direct reads); a workspace with `host` through `ws_exec` (one POSIX
+  script per request). On a host, images read as binary (no local file to
+  serve), "Open in editor" and "Reveal in Explorer" are hidden (501 if
+  called), untracked files carry no `+n`, and the contents search without
+  git is one `grep -rnIiF` there.
+- Extra answers: `GET /api/ws/{name}/changes` is 409 `not a git repository`
+  outside one, 503 when git is missing, 502 when the host is unreachable.
+  `files` and `committed` are each capped at 5000 entries, and the answer
+  adds `"truncated": bool`. `GET .../files` adds `"truncated"` when a folder
+  holds more than 5000 entries; the name search reads at most 100000 paths
+  and `git grep` stops at 20 matches per file. Without an
+  upstream, `ahead` counts the commits since the merge base with `base` and
+  `behind` is 0. `base` is origin's default branch (`origin/HEAD`), else
+  `origin/main`, `origin/master`, `main`, `master`.
+- `GET /api/ws/{name}/file`'s `image_url` is
+  `/api/assets/ws-file/<random key>`: GET under `/api/assets/` is token-free
+  (an `<img>` cannot send the token), the key names one file for an hour
+  (at most 256 keys), and the answer carries `Content-Security-Policy:
+  ... sandbox` and `nosniff`. `tests/test_routes_auth.py` names the route.
+- `POST /api/ws/{name}/changes` and `/git` answer `{"ok", "output"}`; git's
+  output keeps its last 20000 characters. Stage is `git add -A`, unstage
+  `git restore --staged` (`git rm --cached` before the first commit), discard
+  `git restore --worktree` for tracked files and `git clean -f` for untracked
+  ones (never ignored files). Pull is `--ff-only`; publish pushes `HEAD` with
+  `-u` to `origin`, else the only remote, and answers `ok: false` on a
+  detached HEAD or a remote name outside `[A-Za-z0-9_][A-Za-z0-9._/-]*`.
+  Commit runs the hooks with a 300 s limit, push and pull 120 s.
+- `POST /api/ws/{name}/open` `{"path", "app": "editor"|"explorer"}` (added):
+  editor runs Code.exe (never the `code.cmd` shim) on the file, else the
+  default program through `opener.open_target`; explorer opens the
+  containing folder.
+- `GET /api/ws/{name}/pr` adds `"reason"` (why `pr` is null) and, on the PR,
+  `merge_methods` from `gh repo view`; each check adds `run_id` and `job_id`
+  parsed from its link; the PR carries `headRefOid`. A folder outside git
+  answers `reason: "not a git repository"` without asking gh. `GET
+  .../pr/log` takes an optional `job`. `gh` runs on this machine with
+  `-R <host>/<owner>/<repo>` from `origin`'s URL, through `ws_exec` with the
+  home folder. The PR is found with `gh pr list --head=<branch> --state all`
+  (an open one wins over older ones), never `gh pr view <branch>`, which
+  reads an all-digit branch as a PR number; a branch starting with `-` has
+  no PR. `POST .../pr/merge` takes `{"method", "number", "head_sha"}`, the PR
+  the confirmation showed: 400 without them, 409 when the branch's PR is now
+  another one or has a newer head, and `gh pr merge` gets
+  `--match-head-commit <head_sha>`.
+- The scratch view: the reserved name `.scratch` (no saved workspace can
+  take it, names starting with a dot are refused) maps to the configured
+  `scratch_dir`, else `<temp>/QuickTerm/scratch`, with the same path rules.
+  Outside git, Changes and Pull request say "Not a git repository.".
+- `GET /api/board` adds `"pr": {"<workspace>": {"number", "state", "url"}}`:
+  the PR the right panel last saw for that workspace, in memory only.
+- Frontend: `quickterm.rightPanel.v1` in localStorage holds `{width, tab}`
+  (width clamped to 240 px and 60% of the window); `quickterm.diffLayout.v1`
+  the diff layout; `quickterm.rightPanelMode` the mode (full, rail, hidden;
+  default hidden). `#app` always has three columns (sidebar.css:
+  `--sidebar-col`, the stage, `--rp-col`), 0px for a hidden side, so every
+  mode change on either side is the same `grid-template-columns` slide. Each
+  side keeps its own width pinned to its inner edge while its column moves
+  (`justify-self`, `#app` clips), so nothing reflows, and turns `visibility:
+  hidden` once the slide ends; hidden from the rail keeps the rail's layout
+  (`sidebar-collapsed` stays set; `rp-mode-was-rail`). The body carries
+  `rp-mode-full|rail|hidden`. The right rail is the three tab icons with
+  dots (Changes: the tree has changes; Pull request: the checks' colour) and
+  polls Changes and Pull request for them. Alt+Shift+E and the left footer's
+  "right panel" icon (`aria-pressed` while the panel shows, also in the left
+  rail) open to full and close from full; the chevron steps full and rail,
+  as the left one does. The terminals refit once, on the grid's
+  `transitionend` (or 260 ms without one). Full refreshes the visible tab on
+  open, on a tab click, on window focus and on a timer (Files and Changes
+  10 s, Pull request 30 s); hidden polls nothing. It follows the shown workspace through the
+  shell's `refresh`. A poll tick is skipped while the last one waits, a
+  Files poll re-lists the tree but does not rerun a search, and the file
+  view's Changes toggle reuses the Changes tab's answer while it is under
+  10 s old. A Changes action (and its output, its Fix with Claude) belongs
+  to the workspace it ran in; a switch meanwhile neither frees that
+  workspace's button nor shows the result elsewhere. While the keyboard is in the
+  panel it is a focus owner (`right-panel`), the file view and diff
+  `rp-viewer`; Esc in either hands the keyboard back to the shown terminal.
+  The shell member `showRightPanel(tab)` backs the palette rows;
+  `quicktermChrome.windowKeys.toggleRightPanel` backs the key.
+- Fix with Claude: `POST /api/sessions` with `profile: "claude-code"`,
+  `agent_mode: "new"`, `prompt` and the workspace, then the terminal is
+  attached in that workspace's view (scratch: `cwd` is the scratch folder).
+  The prompt swaps `"` for `'` and keeps each log's tail so the whole fits
+  16000 characters; when the spawn fails on cmd.exe it is built again for
+  7000 characters, logs trimmed first, and sent with newlines and cmd's
+  special characters flattened.
+
+### Both sidebars slide and look the same (added 2026-10-25)
+
+The left sidebar and the right panel are one design, mirrored.
+
+- **Modes**: both have full, rail and hidden. The left keeps Alt+Shift+S and
+  its stored mode; the right panel's mode is stored per machine the same way
+  (`quickterm.rightPanelMode`, try/catch), default hidden. Alt+Shift+E on
+  the right: hidden or rail goes to full, full goes to hidden (the key opens
+  and closes; the chevron steps through rail).
+- **Rail**: the same width token (`--sidebar-rail`) on both sides. The right
+  rail shows the three tab icons stacked (files, changes, pull request);
+  a click opens the panel full on that tab. Its icons carry the same small
+  state dots the left rail uses where there is something to say (Changes:
+  a dot when the tree has changes; Pull request: the check state colour).
+- **Look**: same surface token, a 1px line on the inner edge only, the same
+  header row height as the left's top row, the same icon-button component
+  and size, the same footer row height. A collapse chevron sits in the
+  outer bottom corner of each footer (left: bottom right of the left
+  sidebar, pointing left; right: bottom left of the right panel, pointing
+  right). It steps full, rail, hidden like the left one does today.
+- **Show button**: the left sidebar's footer icon row gains a "right panel"
+  toggle (a panel-right icon) beside board, settings and help, highlighted
+  while the panel is not hidden. In the left rail it is one of the rail's
+  footer icons too. With both sidebars hidden, the keys and the palette
+  bring them back (the existing floating "+" stays as it is).
+- **Motion**: both slide with the same transition (the left's current
+  duration and easing), the panel's content does not reflow during the
+  slide (fixed inner width, clipped), `prefers-reduced-motion` turns it
+  off, and the terminals refit once when the transition ends (not on every
+  frame).
+- **Resize**: both full widths are dragged on the inner edge with the same
+  grip look and stored per machine.
+
+### Updates download in the background, with a progress card (added 2026-10-25)
+
+Today an update is a quiet "up" pill that opens Settings > About, where
+"Install" blocks on one request while the whole installer downloads, then
+starts Setup with its full wizard. 4.3 replaces that flow:
+
+- **Download**: when the update check finds a newer installable release and
+  `update_auto_download` (new config bool, default true) is on, the backend
+  downloads the Setup asset in the background: streamed in chunks to a file
+  in a fresh `quickterm-update-*` temp folder, SHA-256 computed while it
+  streams, then checked against the release's `SHA256SUMS.txt`. The trust
+  model stays exactly as in update.py: https only, the pinned repo's release
+  payload, the allowed GitHub hosts re-checked after redirects, the size caps,
+  no install without a matching checksum. One download at a time per backend;
+  a second request joins the running one. With the setting off, the card
+  offers "Download".
+- **State**: `GET /api/update/status` → `{"state": "idle"|"available"|"downloading"|"verifying"|"ready"|"installing"|"failed", "version": str|null, "received": int, "total": int|null, "error": str|null, "notes_url": str|null}`.
+  `POST /api/update/download` starts or joins the download (204; 400 when no
+  installable update exists, on POSIX, or in the elevated instance).
+  `POST /api/update/install` requires `ready`, re-verifies the file's hash,
+  then hands over exactly as `download_and_run` does today (stand-down via
+  `pty_host.begin_update()`, detached Setup), with Setup's `/SILENT` flag so
+  only its progress window shows (UAC still asks for an all-users install).
+  409 when not ready. The old one-shot `download_and_run` path is removed or
+  becomes download + install.
+- **Card**: a small card at the bottom right of the window (over the stage,
+  above the terminals, 320 px wide at most, theme tokens, short slide-in, not
+  in the elevated instance, not when `update_check` is off):
+  - downloading: title "Downloading update", "QuickTerm v4.3.1 is
+    downloading.", a "Release notes" link (opens `notes_url` through the
+    existing `POST /api/open`), a thin progress bar and "Downloading… 30%"
+    (or the size so far when the total is unknown); a "–" button top right.
+  - ready: title "Update ready", "QuickTerm v4.3.1 is ready to install. Your
+    terminals keep running.", "Release notes", buttons "Install now"
+    (primary) and "Later".
+  - available with auto download off: "Update available", "QuickTerm v4.3.1
+    is available.", "Release notes", "Download" and "Later".
+  - failed: "Update failed", the error in one line, "Retry" and "Later".
+  - "–" collapses the card into the sidebar footer pill, which then shows the
+    percentage while downloading ("30%"), "up" when ready, and reopens the
+    card on click. "Later" hides the card until the next app start or the
+    next version; the pill stays.
+  - The card polls `/api/update/status` every 500 ms while downloading or
+    verifying, never otherwise. Esc on the focused card collapses it;
+    keyboard focus goes back to the terminal (focus.js).
+- **Settings > About** keeps "Check for updates", shows the same state in
+  words with the same actions, and gains the "Download updates
+  automatically" switch.
 
 ## Testing
 

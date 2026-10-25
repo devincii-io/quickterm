@@ -6,6 +6,7 @@
 
 import { AGENT_MODES, agentLabel, agentModeOf, agentTypeOf, modeLabel } from "./agent_profile.js";
 import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
+import { configuredShell, resumeCommand } from "./resume_command.js";
 
 export function fuzzyScore(query, text) {
   if (!query) return 1;
@@ -70,6 +71,7 @@ function viewName(view) {
 export function workspaceRows(app, names = [], details = new Map()) {
   const open = list(app?.openWorkspaces?.());
   const openNames = new Set(open.map(viewName).filter(Boolean));
+  const shownName = viewName(open.find((view) => view?.active)) || null;
   const rows = [];
   // Same order as the sidebar: by name, ignoring case, numbers as numbers.
   const sorted = [...list(names)].sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true }));
@@ -82,7 +84,7 @@ export function workspaceRows(app, names = [], details = new Map()) {
     rows.push({
       kind: "workspace",
       label: `open workspace: ${name}`,
-      hint: [openNames.has(name) ? "open" : "", folder].filter(Boolean).join(" · "),
+      hint: [name === shownName ? "shown" : openNames.has(name) ? "open" : "", folder].filter(Boolean).join(" · "),
       run: () => app?.openWorkspace?.(name),
     });
   }
@@ -92,15 +94,22 @@ export function workspaceRows(app, names = [], details = new Map()) {
     const label = (typeof view === "object" && view.label) || workspaceLabel(name);
     rows.push({
       kind: "workspace",
-      label: `close workspace view: ${label}`,
+      label: `close workspace: ${label}`,
       hint: "saves it; its terminals keep running",
       run: () => app?.closeWorkspaceView?.(name),
     });
   }
+  // The stage shows one workspace; these walk the open ones in sidebar order.
+  if (open.length > 1) {
+    rows.push(
+      { kind: "workspace", label: "next workspace", hint: "the next open one in the sidebar · Alt+PgDn", run: () => app?.cycleWorkspace?.(1) },
+      { kind: "workspace", label: "previous workspace", hint: "the previous open one in the sidebar · Alt+PgUp", run: () => app?.cycleWorkspace?.(-1) },
+    );
+  }
   rows.push({
     kind: "workspace",
-    label: "new scratch view",
-    hint: "a disposable layout beside the others",
+    label: "open scratch",
+    hint: "this window's disposable workspace",
     run: () => app?.newScratchView?.(),
   });
   return rows;
@@ -214,6 +223,35 @@ export function configRows(app) {
   return [...terminals, ...snippets];
 }
 
+// The "+" menu's entries as palette rows (CONTRACTS 4.3): every shell, then
+// Claude Code and Codex with their modes. Saved profiles have their own
+// "open terminal" rows, and Terminal settings is the "terminals and
+// connections" action, so neither repeats here.
+export function newTerminalRows(app) {
+  const rows = [];
+  for (const row of app?.newTerminalMenu?.() || []) {
+    if (row.kind === "remote-shell") {
+      rows.push({ kind: "terminal", label: `new terminal: ${row.label}`, hint: "Alt+N", run: () => app?.newTerminal?.() });
+    } else if (row.kind === "shell") {
+      rows.push({
+        kind: "terminal",
+        label: `new terminal: ${row.label}`,
+        hint: row.isDefault ? "the default shell · Alt+N" : "shell",
+        run: () => app?.runSystemTerminal?.({ kind: "shell", shell: row.value, label: row.label }),
+      });
+    } else if (row.kind === "agent") {
+      rows.push({
+        kind: "terminal",
+        label: `new terminal: ${row.label}`,
+        hint: "in the shell, from Settings > Agents",
+        run: () => app?.runProfile?.(row.profile),
+      });
+      rows.push(...agentRows(row.profile, app));
+    }
+  }
+  return rows;
+}
+
 // One row per launch mode the agent type has, plus the split that opens its
 // agent manager beside the focused pane. The profile's own mode leads, so
 // typing its name and Enter does what the Open button does.
@@ -224,16 +262,18 @@ export function agentRows(profile, app) {
   const project = app?.workspacePath?.() || "workspace folder";
   const own = agentModeOf(profile);
   const modes = [...AGENT_MODES[type]].sort((a, b) => (b === own) - (a === own));
+  // The agents from Settings are one each, so their name adds nothing.
+  const suffix = profile.builtin ? "" : `: ${profile.name}`;
   return [
     ...modes.map((mode) => ({
       kind: "agent",
-      label: `${agent} ${modeLabel(mode)}: ${profile.name}`,
+      label: `${agent} ${modeLabel(mode)}${suffix}`,
       hint: project,
       run: () => (app?.runAgentMode ?? app?.runClaudeMode)?.(profile, mode),
     })),
     {
       kind: "agent",
-      label: `split agent view: ${profile.name}`,
+      label: `split agent view${suffix || `: ${agent}`}`,
       hint: `${agent} agent manager beside this pane`,
       run: () => (app?.splitAgentView ?? app?.splitClaudeAgentView)?.(profile),
     },
@@ -253,35 +293,53 @@ export function agentSessionTarget(app) {
 }
 
 // "resume Claude session: <title>" rows from GET /api/agent-sessions.
-export function agentSessionRows(profile, sessions, app) {
+// Shift+Enter (`secondary`) copies the command that resumes it instead, for
+// a terminal somewhere else; `copy(text)` writes the clipboard.
+export function agentSessionRows(profile, sessions, app, copy = null) {
   const type = agentTypeOf(profile);
   if (!type) return [];
   const agent = agentLabel(type);
-  return list(sessions).filter((session) => session?.id).map((session) => ({
-    kind: "agent",
-    label: `resume ${agent} session: ${session.title || session.id}`,
-    // The id's tail keeps two conversations with the same first prompt apart.
-    hint: [
-      profile.name,
-      session.updated_at ? String(session.updated_at).slice(0, 16).replace("T", " ") : "",
-      String(session.id).slice(-6),
-    ].filter(Boolean).join(" · "),
-    search: `resume ${agent} session: ${session.title || ""} ${session.id}`,
-    run: () => app?.resumeAgentSession?.(profile, session.id),
-  }));
+  const shell = copy ? configuredShell(app) : null;
+  return list(sessions).filter((session) => session?.id).map((session) => {
+    const command = copy ? resumeCommand({ kind: type, id: session.id, folder: session.cwd, shell }) : null;
+    return {
+      kind: "agent",
+      label: `resume ${agent} session: ${session.title || session.id}`,
+      // The id's tail keeps two conversations with the same first prompt apart.
+      hint: [
+        profile.name,
+        session.updated_at ? String(session.updated_at).slice(0, 16).replace("T", " ") : "",
+        String(session.id).slice(-6),
+        command && copy ? "Shift+Enter copies" : "",
+      ].filter(Boolean).join(" · "),
+      search: `resume ${agent} session: ${session.title || ""} ${session.id}`,
+      run: () => app?.resumeAgentSession?.(profile, session.id),
+      ...(command && copy ? { secondary: () => copy(command) } : {}),
+    };
+  });
 }
 
-// The workspaces a worktree can start from: saved ones whose folder is a git
-// checkout (GET /api/workspaces/{name} carries `git`), the one in front first,
-// the rest by name.
-export function worktreeSources(details = new Map(), current = null) {
-  const rows = [];
-  for (const [name, saved] of details) {
-    if (isScratchWorkspace(name) || !saved?.git) continue;
-    rows.push({ name, branch: saved.git.branch || saved.git.head || "", path: saved.path || "" });
-  }
-  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
-  return rows.sort((a, b) => (b.name === current) - (a.name === current) || byName(a, b));
+// "copy resume command: <terminal>" for every running agent whose hooks
+// named its conversation. Listed once something is typed, like the other
+// rows nobody needs every day.
+export function resumeCopyRows(app, copy) {
+  const shell = configuredShell(app);
+  return disambiguate(list(app?.liveTerminals?.())
+    .filter((entry) => entry?.session?.agent?.conversation_id)
+    .map((entry) => {
+      const agent = entry.session.agent;
+      const command = resumeCommand({ kind: agent.kind, id: agent.conversation_id, folder: agent.cwd, shell });
+      return command && {
+        kind: "action",
+        quiet: true,
+        label: `copy resume command: ${terminalName(entry)}`,
+        hint: command,
+        search: `copy resume command: ${terminalName(entry)} ${terminalPlace(entry)} ${agent.conversation_id}`,
+        terminal: entry,
+        run: () => copy(command),
+      };
+    })
+    .filter(Boolean));
 }
 
 // The kill sub-mode's list. The palette adds what choosing a row does: a

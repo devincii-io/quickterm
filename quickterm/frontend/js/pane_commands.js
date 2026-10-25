@@ -7,6 +7,7 @@
 import { broadcastNotice, broadcastTargets } from "./broadcast.js";
 import { terminalMayFocus } from "./focus.js";
 import { displaySnippet, sessionAlreadyGone } from "./panel_shared.js";
+import { sameFolderCwd } from "./spawner.js";
 
 export function createPaneCommands({
   api, state, layout,
@@ -26,11 +27,30 @@ export function createPaneCommands({
       const pane = layout.splitFocused("v");
       if (pane) spawnSplitInto(pane, source);
     },
+    // Alt+N and the "+": in the focused terminal's folder when that lies
+    // inside the workspace folder, else in the workspace folder.
     newTerminal: () => {
-      let pane = layout.focused || layout.init();
+      const source = layout.focused;
+      const cwd = sameFolderCwd(source?.bestKnownCwd?.() || null, state.workspacePath);
+      let pane = source || layout.init();
       if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-      if (pane) spawnDefaultInto(pane);
+      if (pane) spawnDefaultInto(pane, cwd);
     },
+    // The palette's terminal rows: the focused pane's screen reset in place,
+    // and its whole buffer copied as text.
+    resetTerminal: () => {
+      const pane = layout.focused;
+      if (pane?.resetTerminal()) return true;
+      showError("Focus a terminal first. Reset clears the focused terminal's screen.");
+      return false;
+    },
+    copyTerminalText: () => {
+      const pane = layout.focused;
+      if (pane?.term) return pane.copyAllText();
+      showError("Focus a terminal first. Its text is what gets copied.");
+      return false;
+    },
+    findInTerminal: () => Boolean(layout.focused?.openFind()),
     // Renaming from the sidebar row; a pane showing the terminal takes the
     // new name too, and the workspace autosaves it like a header rename.
     renameSession: async (sessionId, name) => {

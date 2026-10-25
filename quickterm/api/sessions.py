@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from quickterm import agent_hooks, launch
+from quickterm import agent_hooks, launch, usage
+from quickterm.api import usage as api_usage
 from quickterm.api.common import (
     asdict,
     bounded_int,
@@ -28,6 +29,21 @@ if TYPE_CHECKING:
 # state is not throttled; only the flash and the balloon are.
 NOTIFY_INTERVAL_S = 30.0
 AGENT_EVENT_MAX_BYTES = 256 * 1024
+# When a finished turn's conversation has no title yet, look again after these
+# pauses (seconds, one after the other).
+TITLE_RETRY_S = (3.0, 10.0)
+
+
+def notice_setting(cfg: Any, kind: str) -> tuple[str, bool]:
+    """``(mode, sound)`` for an attention of ``kind`` from Settings >
+    Notifications: an agent's finished turn ("done") follows "When an agent
+    finishes", everything else "When an agent needs you"."""
+    notifications = getattr(cfg, "notifications", None)
+    if kind == "done":
+        mode = getattr(notifications, "finished", "flash")
+    else:
+        mode = getattr(notifications, "needs_you", "notify")
+    return str(mode), bool(getattr(notifications, "sound", False))
 
 
 def _wire_notifier(ctx: ApiContext) -> None:
@@ -39,15 +55,29 @@ def _wire_notifier(ctx: ApiContext) -> None:
     throttle = NotifyThrottle(NOTIFY_INTERVAL_S)
 
     def on_attention(info: Any, record: Any) -> None:
-        if throttle.allow(info.id):
-            notify(info.id, info.name, record.kind, record.text)
+        mode, sound = notice_setting(ctx.cfg, record.kind)
+        if mode == "off":
+            return
+        # A finished turn and a question are throttled apart: "done" right
+        # after "may I?" is a second piece of news.
+        category = "done" if record.kind == "done" else "attention"
+        if throttle.allow(f"{info.id}:{category}"):
+            notify(info.id, info.name, record.kind, record.text, mode=mode, sound=sound)
 
     listen(on_attention)
+
+
+def _wire_keep_awake(ctx: ApiContext) -> None:
+    """Keep-awake reads the live config, so a Settings save applies at once."""
+    configure = getattr(ctx.manager, "set_keep_awake", None)
+    if configure is not None:
+        configure(lambda: getattr(ctx.cfg, "keep_awake", "agents"))
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
     manager = ctx.manager
     _wire_notifier(ctx)
+    _wire_keep_awake(ctx)
 
     @app.post("/api/connections/{name}/open")
     async def open_desktop_connection(name: str) -> dict:
@@ -108,11 +138,49 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             agent_name, event, payload = agent_hooks.parse_body(json.loads(raw), agent)
         except (ValueError, RecursionError) as exc:
             raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "bad body") from None
+        if agent_name == "claude" and event == usage.CLAUDE_EVENT:
+            # Rate limits from the status line: numbers for the footer, never
+            # agent state.
+            if manager.get(sid) is None:
+                raise HTTPException(404, "no such session")
+            api_usage.claude_limits(request.app).record(payload.get("rate_limits"))
+            return Response(status_code=204)
+        title = None
+        # An agent on an SSH host has its files there: paths in its hooks are
+        # never read here, only what the payload itself carries.
+        local = not getattr(manager, "is_remote", lambda _sid: False)(sid)
+        if local and event in ("Stop", agent_hooks.CODEX_TURN_COMPLETE):
+            # The answer may only be in the transcript, and the title is in
+            # the agent's own files: both are file reads, off the loop.
+            payload, title = await asyncio.to_thread(
+                agent_hooks.turn_details, agent_name, event, payload
+            )
         try:
             manager.agent_event(sid, agent_name, event, payload)
         except KeyError:
             raise HTTPException(404, "no such session") from None
+        set_title = getattr(manager, "set_agent_title", None)
+        if title and set_title is not None:
+            set_title(sid, title)
+        elif local and set_title is not None and event in ("Stop", agent_hooks.CODEX_TURN_COMPLETE):
+            # Claude writes a new conversation's title a moment after its
+            # first turn ends, so the Stop hook usually arrives before it.
+            task = asyncio.ensure_future(_title_later(sid, agent_name, event, payload))
+            title_tasks.add(task)
+            task.add_done_callback(title_tasks.discard)
         return Response(status_code=204)
+
+    title_tasks: set[asyncio.Future[None]] = set()
+
+    async def _title_later(sid: str, agent_name: str, event: str, payload: dict) -> None:
+        for delay in TITLE_RETRY_S:
+            await asyncio.sleep(delay)
+            if manager.get(sid) is None:
+                return
+            _, title = await asyncio.to_thread(agent_hooks.turn_details, agent_name, event, payload)
+            if title:
+                manager.set_agent_title(sid, title)
+                return
 
     @app.post("/api/sessions")
     async def spawn_session(request: Request) -> dict:
@@ -170,6 +238,10 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if not name:
             raise HTTPException(400, "body must be {'name': <non-empty string>}")
         session.info.name = name[:80]
+        # A name a person gave wins over the agent's conversation title.
+        mark_named = getattr(manager, "mark_named", None)
+        if mark_named is not None:
+            mark_named(sid)
         return asdict(session.info)
 
     @app.post("/api/sessions/cleanup")

@@ -44,7 +44,7 @@ def test_invalid_connection_fields_are_rejected_before_saving(kind, options):
 
 
 def test_connection_settings_round_trip_and_legacy_profiles_still_load():
-    cfg = config_from_dict({"profiles": [{"name": "Pod", "cmd": "kubectl", "terminal_type": "kubernetes", "connection": {"target": "api"}}, {"name": "Legacy", "cmd": "cmd.exe"}]})
+    cfg = config_from_dict({"profiles": [{"name": "Pod", "cmd": "kubectl", "terminal_type": "kubernetes", "connection": {"target": "api"}}, {"name": "Legacy", "cmd": "htop"}]})
     assert cfg.profiles[0].connection == {"target": "api"}
     assert cfg.profiles[1].connection == {}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -78,7 +79,7 @@ def test_attention_reaches_the_native_notifier_once_per_interval(real_manager, m
     monkeypatch.setattr(session_routes, "NotifyThrottle",
                         lambda interval: _ClockThrottle(interval, now))
     heard = []
-    create_app(real_manager, FakeConfig(), notify=lambda *args: heard.append(args))
+    create_app(real_manager, FakeConfig(), notify=lambda *args, **kw: heard.append(args))
     info = real_manager.spawn(cmd="x.exe", name="claude")
     pty = _RecordingPty.last
     pty.on_output(b"\x1b]777;notify;Claude;waiting\x07")
@@ -88,6 +89,50 @@ def test_attention_reaches_the_native_notifier_once_per_interval(real_manager, m
     pty.on_output(b"\x07")
     assert heard[-1] == (info.id, "claude", "bell", None)
     assert len(heard) == 2
+
+
+def _notifications(needs_you="notify", finished="flash", sound=False):
+    cfg = FakeConfig()
+    cfg.notifications = SimpleNamespace(needs_you=needs_you, finished=finished, sound=sound)
+    return cfg
+
+
+def test_each_kind_follows_its_own_setting(real_manager):
+    heard = []
+    cfg = _notifications(sound=True)
+    create_app(real_manager, cfg, notify=lambda *args, **kw: heard.append((args[2], kw)))
+    info = real_manager.spawn(cmd="claude.exe", name="claude")
+    real_manager.agent_event(info.id, "claude", "UserPromptSubmit", {"prompt": "p"})
+    real_manager.agent_event(info.id, "claude", "PermissionRequest", {"tool_name": "Bash"})
+    real_manager.agent_event(info.id, "claude", "Stop", {"last_assistant_message": "All done."})
+    # The finished turn is not throttled behind the question just before it.
+    assert heard == [
+        ("notify", {"mode": "notify", "sound": True}),
+        ("done", {"mode": "flash", "sound": True}),
+    ]
+    # Never stored as attention: the sidebar shows "done" by itself.
+    assert real_manager.session_attention(info.id)["kind"] == "notify"
+
+
+def test_off_tells_the_desktop_nothing(real_manager):
+    heard = []
+    create_app(real_manager, _notifications(needs_you="off", finished="off"),
+               notify=lambda *args, **kw: heard.append(args))
+    info = real_manager.spawn(cmd="claude.exe", name="claude")
+    _RecordingPty.last.on_output(b"\x07")
+    real_manager.agent_event(info.id, "claude", "Stop", {"last_assistant_message": "ok"})
+    assert heard == []
+    # The state itself is unchanged: off silences the desktop, not the sidebar.
+    assert real_manager.session_attention(info.id)["kind"] == "bell"
+    assert real_manager.session_agent(info.id)["state"] == "done"
+
+
+def test_settings_default_to_notify_and_flash():
+    assert session_routes.notice_setting(FakeConfig(), "notify") == ("notify", False)
+    assert session_routes.notice_setting(FakeConfig(), "done") == ("flash", False)
+    cfg = _notifications(needs_you="flash", finished="notify", sound=True)
+    assert session_routes.notice_setting(cfg, "bell") == ("flash", True)
+    assert session_routes.notice_setting(cfg, "done") == ("notify", True)
 
 
 def test_no_desktop_shell_means_no_listener(real_manager):

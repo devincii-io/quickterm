@@ -59,6 +59,39 @@ def pids_with_children(identities: "list[tuple[int, int]] | None" = None) -> set
     return {parent for _pid, parent in identities if parent}
 
 
+# Git for Windows' bin\bash.exe is a launcher that keeps usr\bin\bash.exe as
+# its child for its whole life, and MSYS fork and exec leave a bash parent
+# behind each one; none of them is work the user started.
+MSYS_SHELLS = frozenset({"bash.exe", "sh.exe"})
+
+
+def shell_at_prompt(
+    identities: "list[tuple[int, int]]", names: "dict[int, str]", root: int
+) -> int:
+    """The process that stands for ``root`` when deciding busy.
+
+    For an MSYS shell root, follow the chain of only children that are MSYS
+    shells too and stop at the last one: its children are the work. Any
+    other root is itself.
+    """
+    if names.get(root, "").casefold() not in MSYS_SHELLS:
+        return root
+    children: dict[int, list[int]] = {}
+    for pid, parent in identities:
+        if parent:
+            children.setdefault(parent, []).append(pid)
+    current, seen = root, {root}
+    while True:
+        kids = children.get(current, [])
+        if len(kids) != 1 or kids[0] in seen:
+            return current
+        kid = kids[0]
+        if names.get(kid, "").casefold() not in MSYS_SHELLS:
+            return current
+        seen.add(kid)
+        current = kid
+
+
 def descendants(identities: "list[tuple[int, int]]", root: int) -> set[int]:
     """Every process below ``root`` (the root itself excluded)."""
     return reachable_pids(identities, {root}) - {root}
@@ -221,6 +254,25 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(ctypes.c_void_p(handle))
 
+    def process_names() -> dict[int, str]:
+        """pid -> image name, from one Toolhelp snapshot (no process handles)."""
+        snap = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == _INVALID_HANDLE:
+            return {}
+        names: dict[int, str] = {}
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            ref = ctypes.byref(entry)
+            if _k32.Process32FirstW(ctypes.c_void_p(snap), ref):
+                while True:
+                    names[int(entry.th32ProcessID)] = str(entry.szExeFile)
+                    if not _k32.Process32NextW(ctypes.c_void_p(snap), ref):
+                        break
+        finally:
+            _k32.CloseHandle(ctypes.c_void_p(snap))
+        return names
+
     def process_identities() -> list[tuple[int, int]]:
         """(pid, parent_pid) for every process, from one Toolhelp snapshot.
 
@@ -276,6 +328,10 @@ else:
         # pid (comm) state ppid ...; comm may contain spaces and parentheses,
         # so split after the LAST ')'.
         return raw[raw.rfind(b")") + 2 :].split()
+
+    def process_names() -> dict[int, str]:
+        """No MSYS launcher outside Windows, so no names are needed."""
+        return {}
 
     def process_identities() -> list[tuple[int, int]]:
         """(pid, parent_pid) for every process in /proc; empty without /proc."""

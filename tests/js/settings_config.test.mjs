@@ -63,7 +63,7 @@ test("the agent mode reads agent_mode, then the legacy claude_mode, then the typ
 });
 
 test("a profile reports the problem that would stop it from starting", () => {
-  const ok = { name: "Dev", cmd: "pwsh.exe", terminal_type: "powershell-core", env: {} };
+  const ok = { name: "Dev", cmd: "pwsh.exe", terminal_type: "powershell-core", start_command: "npm run dev", env: {} };
   assert.deepEqual(connectionProblems(ok, [ok]), []);
   assert.match(connectionProblems({ name: "", cmd: "x", terminal_type: "custom", env: {} }, [])[0], /Enter a name/);
   assert.match(connectionProblems({ name: "a", cmd: "", terminal_type: "custom", env: {} }, [])[0], /client executable/);

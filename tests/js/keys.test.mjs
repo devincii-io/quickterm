@@ -34,7 +34,12 @@ async function captureHandler({ paletteOpen = false, acceptKill = undefined } = 
     fontReset: () => calls.push("fontReset"),
     toggleSidebar: () => calls.push("toggleSidebar"),
     openExplorer: () => calls.push("openExplorer"),
+    toggleRightPanel: () => calls.push("toggleRightPanel"),
     openEditor: () => calls.push("openEditor"),
+    showWorkspace: (n) => calls.push(`showWorkspace:${n}`),
+    cycleWorkspace: (delta) => calls.push(`cycleWorkspace:${delta}`),
+    recentTerminals: (delta) => calls.push(`recentTerminals:${delta}`),
+    ctrlReleased: () => calls.push("ctrlReleased"),
   });
   return { handler, calls };
 }
@@ -169,7 +174,7 @@ test("Alt+Shift+S cycles the sidebar; plain Alt+S is still Settings and Alt+B is
   assert.deepEqual(calls, ["toggleSidebar", "toggleSettings"]);
 });
 
-test("Alt+Shift+E and Alt+Shift+C open the folder; plain Alt+E and Alt+C stay with the shell", async () => {
+test("Alt+Shift+E toggles the right panel, Alt+Shift+C opens VS Code; plain Alt+E and Alt+C stay with the shell", async () => {
   const { handler, calls } = await captureHandler();
 
   const explorer = keyEvent({ key: "E", altKey: true, shiftKey: true });
@@ -185,7 +190,7 @@ test("Alt+Shift+E and Alt+Shift+C open the folder; plain Alt+E and Alt+C stay wi
     handler(event);
     assert.equal(event.defaultPrevented, false, `Alt+${key} must reach the shell`);
   }
-  assert.deepEqual(calls, ["openExplorer", "openEditor"]);
+  assert.deepEqual(calls, ["toggleRightPanel", "openEditor"]);
 });
 
 test("Ctrl+_ is readline's undo, not a zoom, on the Minus key it shares with -", async () => {
@@ -208,12 +213,14 @@ test("Ctrl+_ is readline's undo, not a zoom, on the Minus key it shares with -",
 test("Ctrl+* is not a zoom key, from the digit row or the numpad", async () => {
   const { handler, calls } = await captureHandler();
 
-  for (const code of ["Digit8", "NumpadMultiply", "BracketRight"]) {
+  for (const code of ["NumpadMultiply", "BracketRight"]) {
     const event = keyEvent({ key: "*", code, ctrlKey: true, shiftKey: code !== "NumpadMultiply" });
     handler(event);
     assert.equal(event.defaultPrevented, false, `Ctrl+* on ${code} must reach the shell`);
   }
-  assert.deepEqual(calls, []);
+  // On the digit row Ctrl+Shift+8 is the eighth workspace, never a zoom.
+  handler(keyEvent({ key: "*", code: "Digit8", ctrlKey: true, shiftKey: true }));
+  assert.deepEqual(calls, ["showWorkspace:8"]);
 });
 
 test("a physical code zooms only when the layout named no character", async () => {
@@ -256,6 +263,7 @@ const US = {
   Digit5: ["5", "%"], Digit6: ["6", "^"], Digit7: ["7", "&"], Digit8: ["8", "*"], Digit9: ["9", "("],
   Minus: ["-", "_"], Equal: ["=", "+"], ArrowLeft: ["ArrowLeft", "ArrowLeft"], ArrowRight: ["ArrowRight", "ArrowRight"],
   ArrowUp: ["ArrowUp", "ArrowUp"], ArrowDown: ["ArrowDown", "ArrowDown"],
+  Tab: ["Tab", "Tab"], PageUp: ["PageUp", "PageUp"], PageDown: ["PageDown", "PageDown"],
 };
 for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") US[`Key${letter}`] = [letter.toLowerCase(), letter];
 
@@ -303,4 +311,155 @@ test("Ctrl+0 resets on AZERTY, where the 0 key types a grave-accented a unshifte
   handler(other);
   assert.equal(other.defaultPrevented, false);
   assert.deepEqual(calls, ["fontReset"]);
+});
+
+test("Ctrl+Shift+digit shows a workspace by its physical key, on US and QWERTZ alike", async () => {
+  const { handler, calls } = await captureHandler();
+  // What each layout reports for Ctrl+Shift+1/2/3: the shifted symbol, never
+  // the digit.
+  const layouts = {
+    us: [["!", "Digit1"], ["@", "Digit2"], ["#", "Digit3"]],
+    qwertz: [["!", "Digit1"], ["\"", "Digit2"], ["§", "Digit3"]],
+  };
+  for (const presses of Object.values(layouts)) {
+    for (const [key, code] of presses) {
+      const event = keyEvent({ key, code, ctrlKey: true, shiftKey: true });
+      handler(event);
+      assert.equal(event.defaultPrevented, true, `Ctrl+Shift+${code}`);
+    }
+  }
+  assert.deepEqual(calls, [
+    "showWorkspace:1", "showWorkspace:2", "showWorkspace:3",
+    "showWorkspace:1", "showWorkspace:2", "showWorkspace:3",
+  ]);
+});
+
+test("a Ctrl+Shift+digit that types a plus sign stays the zoom key", async () => {
+  const { handler, calls } = await captureHandler();
+  // Swiss German: Shift+1 is "+", so Ctrl+Shift+1 is Ctrl++.
+  const event = keyEvent({ key: "+", code: "Digit1", ctrlKey: true, shiftKey: true });
+  handler(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(calls, ["fontBigger"]);
+});
+
+test("plain Alt+digit, Alt+Shift+digit, Ctrl+Shift+0 and AltGr digits stay with the shell", async () => {
+  const { handler, calls } = await captureHandler();
+  const passing = [
+    keyEvent({ key: "2", code: "Digit2", altKey: true }), // readline digit argument
+    keyEvent({ key: "!", code: "Digit1", altKey: true, shiftKey: true }), // readline M-! completion
+    keyEvent({ key: "@", code: "Digit2", altKey: true, shiftKey: true }), // readline M-@ completion
+    keyEvent({ key: ")", code: "Digit0", ctrlKey: true, shiftKey: true }),
+    keyEvent({ key: "²", code: "Digit2", altKey: true, ctrlKey: true }), // AltGr on QWERTZ
+    keyEvent({ key: "{", code: "Digit7", altKey: true, ctrlKey: true, shiftKey: true }),
+    keyEvent({ key: "@", code: "Numpad2", ctrlKey: true, shiftKey: true }),
+  ];
+  for (const event of passing) {
+    handler(event);
+    assert.equal(event.defaultPrevented, false, `${event.code} must reach the shell`);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("Alt+PgDn and Alt+PgUp walk the open workspaces", async () => {
+  const { handler, calls } = await captureHandler();
+  for (const key of ["PageDown", "PageUp"]) {
+    const event = keyEvent({ key, code: key, altKey: true });
+    handler(event);
+    assert.equal(event.defaultPrevented, true);
+  }
+  const shifted = keyEvent({ key: "PageDown", code: "PageDown", altKey: true, shiftKey: true });
+  handler(shifted);
+  assert.equal(shifted.defaultPrevented, false);
+  assert.deepEqual(calls, ["cycleWorkspace:1", "cycleWorkspace:-1"]);
+});
+
+test("the workspace keys stand down while the palette or a panel has the keyboard", async () => {
+  const { handler, calls } = await captureHandler({ paletteOpen: true });
+  handler(keyEvent({ key: "@", code: "Digit2", ctrlKey: true, shiftKey: true }));
+  handler(keyEvent({ key: "PageDown", code: "PageDown", altKey: true }));
+  assert.deepEqual(calls, []);
+});
+
+function listeners() {
+  const found = {};
+  return {
+    found,
+    addEventListener(type, fn) { found[type] = fn; },
+  };
+}
+
+test("Ctrl+Tab steps the recent terminals and releasing Ctrl ends the list", async () => {
+  const win = listeners();
+  globalThis.window = win;
+  const { initKeys } = await import("../../quickterm/frontend/js/keys.js");
+  const calls = [];
+  let answer = true;
+  initKeys({
+    paletteOpen: () => false,
+    recentTerminals: (delta) => { calls.push(`recent:${delta}`); return answer; },
+    ctrlReleased: () => calls.push("released"),
+  });
+  const { keydown, keyup } = win.found;
+  const forward = keyEvent({ key: "Tab", code: "Tab", ctrlKey: true });
+  keydown(forward);
+  const back = keyEvent({ key: "Tab", code: "Tab", ctrlKey: true, shiftKey: true });
+  keydown(back);
+  assert.equal(forward.defaultPrevented, true);
+  assert.equal(back.defaultPrevented, true);
+  keyup(keyEvent({ key: "Control", code: "ControlLeft" }));
+  keyup(keyEvent({ key: "Shift", code: "ShiftLeft" }));
+  // Nothing to list (or another overlay has the keyboard): the key is left alone.
+  answer = false;
+  const refused = keyEvent({ key: "Tab", code: "Tab", ctrlKey: true });
+  keydown(refused);
+  assert.equal(refused.defaultPrevented, false);
+  // Plain Tab is completion.
+  const plain = keyEvent({ key: "Tab", code: "Tab" });
+  keydown(plain);
+  assert.equal(plain.defaultPrevented, false);
+  assert.deepEqual(calls, ["recent:1", "recent:-1", "released", "recent:1"]);
+});
+
+test("a view document reaches the window keys through the shell", async () => {
+  const calls = [];
+  const win = listeners();
+  win.parent = {
+    quicktermChrome: {
+      windowKeys: {
+        showWorkspace: (n) => calls.push(`show:${n}`),
+        cycleWorkspace: (delta) => calls.push(`cycle:${delta}`),
+        recentTerminals: (delta) => { calls.push(`recent:${delta}`); return true; },
+        ctrlReleased: () => calls.push("released"),
+      },
+    },
+  };
+  globalThis.window = win;
+  const { initKeys } = await import("../../quickterm/frontend/js/keys.js");
+  initKeys({ paletteOpen: () => false });
+  win.found.keydown(keyEvent({ key: "\"", code: "Digit2", ctrlKey: true, shiftKey: true }));
+  win.found.keydown(keyEvent({ key: "PageUp", code: "PageUp", altKey: true }));
+  win.found.keydown(keyEvent({ key: "Tab", code: "Tab", ctrlKey: true }));
+  win.found.keyup(keyEvent({ key: "Control", code: "ControlRight" }));
+  assert.deepEqual(calls, ["show:2", "cycle:-1", "recent:1", "released"]);
+
+  // A top-level document with nothing wired claims nothing.
+  const bareWindow = listeners();
+  globalThis.window = bareWindow;
+  initKeys({ paletteOpen: () => false });
+  for (const event of [
+    keyEvent({ key: "@", code: "Digit2", ctrlKey: true, shiftKey: true }),
+    keyEvent({ key: "Tab", code: "Tab", ctrlKey: true }),
+  ]) {
+    bareWindow.found.keydown(event);
+    assert.equal(event.defaultPrevented, false);
+  }
+});
+
+test("Alt+Shift+E closes the right panel while the panel holds the keyboard", async () => {
+  const { handler, calls } = await captureHandler({ paletteOpen: true });
+  const event = keyEvent({ key: "E", altKey: true, shiftKey: true });
+  handler(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(calls, ["toggleRightPanel"]);
 });

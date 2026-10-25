@@ -24,57 +24,6 @@ export function validateWorkspaceName(name) {
   return null;
 }
 
-const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// A new branch in its own folder, saved as a workspace (POST
-// /api/workspaces/worktree), then opened like any other: its own view, whose
-// restore starts the default terminal in the new folder. The backend only
-// names the setup command (uv sync, npm ci, ...); it is typed into that
-// terminal with Enter, so the person watches it run. A refusal from the
-// backend (bad name, no git folder, branch or folder taken) is thrown with its
-// `detail` for the input that asked; anything after the worktree exists goes
-// to the banner, because the worktree is there either way.
-const NOT_LOCAL_SHELL = new Set(["claude-code", "codex", "ssh", "sftp", "wsl", "custom"]);
-
-export async function createWorktreeWorkspace({
-  api, from, branch, openView, appFor, onWorkspacesChanged, showError, tries = 20, wait = pause,
-}) {
-  const name = String(branch || "").trim();
-  if (!name) throw { detail: "Name the new branch." };
-  const created = await api.createWorktree(from, name);
-  await Promise.resolve(onWorkspacesChanged?.()).catch(() => {});
-  const view = await Promise.resolve(openView(created.workspace)).catch(() => null);
-  if (!view) {
-    showError(`Worktree ${created.workspace} is ready in ${created.path}, but its view did not open. Open it from the sidebar.`);
-    return created;
-  }
-  const command = created.setup?.command;
-  if (!command) return created;
-  let sessionId = null;
-  for (let attempt = 0; attempt < tries && !sessionId; attempt++) {
-    sessionId = appFor(view)?.focusedSessionId?.() || null;
-    if (!sessionId) await wait(250);
-  }
-  if (!sessionId) {
-    showError(`No terminal started in ${created.workspace}. Run ${command} there yourself.`);
-    return created;
-  }
-  // The default terminal can be an agent (the command would become a prompt),
-  // a remote shell (it would run on the server) or WSL (a Linux install in a
-  // Windows folder). Only a local shell gets it typed.
-  const type = appFor(view)?.focusedTerminalType?.() || null;
-  if (NOT_LOCAL_SHELL.has(type)) {
-    showError(`Worktree ${created.workspace} is ready. Run ${command} in a local shell there.`);
-    return created;
-  }
-  try {
-    await api.sendInput(sessionId, command, true);
-  } catch (error) {
-    showError(error?.detail || `${command} could not be typed into the new terminal. Run it there yourself.`);
-  }
-  return created;
-}
-
 export function createWorkspaceActions({
   api, workspace, state, layout,
   claimWorkspaceFor, listWindowsSafe, ensureScratchWorkspace, attachSession, hereState,
@@ -94,12 +43,12 @@ export function createWorkspaceActions({
     if (!here || state.transitioning) return false;
     const { folder, name } = here;
     if (here.action === "clash") {
-      showError(`A workspace named "${name}" already exists with a different folder. Name this one in the Dashboard.`);
+      showError(`A workspace named "${name}" already exists with a different folder. Name this one with "save workspace as" in the palette.`);
       return false;
     }
     const problem = validateWorkspaceName(name);
     if (problem) {
-      showError(`"${name}" cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it in the Dashboard.`);
+      showError(`"${name}" cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it with "save workspace as" in the palette.`);
       return false;
     }
     const holder = workspaceHolder(await listWindowsSafe(), state.windowId, name);
@@ -427,7 +376,7 @@ export function createWorkspaceActions({
 
   // Repointing a workspace at a different folder is a plain, reversible
   // edit: nothing running is touched, and the next terminal opens there.
-  // Any saved workspace can be repointed from the Dashboard, not just the
+  // Any saved workspace can be repointed from Workspace settings, not just the
   // one that happens to be open.
   async function setWorkspaceFolder(name, folder) {
     if (!name || name === state.currentWorkspace) return setWorkspacePath(folder);

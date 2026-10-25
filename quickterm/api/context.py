@@ -29,11 +29,12 @@ class ApiContext:
     allowed_hosts: set[str]
     allowed_origins: set[str]
     launches: LaunchQueue
-    # `notify(session_id, name, kind, text)`: tell the desktop shell a session
-    # wants the user (flash the taskbar, or a tray balloon while every window
-    # is hidden). Called on the loop thread, so it must return at once. None
-    # without a desktop shell; the sidebar still shows the state.
-    notify: Callable[[str, str, str, str | None], None] | None = None
+    # `notify(session_id, name, kind, text, mode=, sound=)`: tell the desktop
+    # shell a session wants the user, or an agent finished (kind "done"):
+    # mode "flash" flashes the taskbar, "notify" also shows a notification.
+    # Called on the loop thread, so it must return at once. None without a
+    # desktop shell; the sidebar still shows the state.
+    notify: Callable[..., None] | None = None
     # Global hotkeys, from app.py. `rebind_hotkeys(cfg)` registers exactly the
     # keys `cfg` names and sets `cfg.hotkey_error`; `suspend_hotkeys(flag)`
     # releases them for a key capture (auto-resumed after 20 s). Both wait for
