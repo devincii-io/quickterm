@@ -2080,8 +2080,12 @@ last wins), so a profile's own `settings` option is read, QuickTerm's hooks are
 appended, and the result is written to `hooks/claude-settings-<hash>.json` and
 passed as the only `--settings`; unreadable user settings leave the launch
 without hooks. Codex gets `-c notify=[curl, -K, codex-notify.curl,
---data-binary]` before any subcommand, and nothing when its `config.toml`
-already sets `notify` (a per-launch `notify` replaces the user's). Codex hooks
+--data-binary]` before any subcommand. A per-launch `notify` replaces the
+user's, so when `config.toml` sets one (a list of strings) the launch gets
+`notify=[<this program>, --codex-notify, <their argv>...]` instead:
+`codex_notify.py` (handled first in `app.main`) starts their program with the
+JSON as Codex would, then posts it to `?agent=codex`; it always exits 0. A
+`notify` that cannot be read or is not a list of strings gets no hook. Codex hooks
 are not used: each must be trusted in `/hooks` before it runs. No hooks in
 the elevated backend, a backend whose `host` is not `127.0.0.1`, `localhost`
 or `0.0.0.0` (the configs post to 127.0.0.1), or when `curl --version` is

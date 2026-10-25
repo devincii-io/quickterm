@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__, cli, launch, pty_host
+from quickterm import __version__, cli, codex_notify, launch, pty_host
 from quickterm.server import client_host, create_app
 from quickterm.windows import (
     WindowInfo,
@@ -197,6 +197,10 @@ class _DesktopApi:
 
 def main() -> None:
     argv = sys.argv[1:]
+    # Codex's chained notify (codex_notify.py): before anything that could
+    # parse its JSON argument as an option or a folder.
+    if argv[:1] == [codex_notify.FLAG]:
+        sys.exit(codex_notify.run(argv[1:]))
     # A verb (`quickterm ls`, `new`, `open`, `send`) drives the running app and
     # exits; nothing below runs for it. `new` with no app running starts this
     # program again, detached, with --handoff.

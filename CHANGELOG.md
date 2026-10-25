@@ -26,7 +26,8 @@ Not released yet.
 - In the palette's `@` list, terminals that need you come first. The sidebar
   order does not change.
 - Hovering a terminal row shows how long it has been quiet.
-- Codex reports only when its `config.toml` has no `notify` of its own.
+- When your Codex `config.toml` has a `notify` program of its own, it still
+  runs: QuickTerm starts it with the same message and then reports the turn.
 
 ### Worktrees
 

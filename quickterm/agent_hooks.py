@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -328,29 +329,54 @@ def claude_args(cmd: str, args: list[str], cwd: str | None, base: Path) -> list[
     return [*out, arg]
 
 
-def _codex_user_notify() -> bool:
+def _codex_user_notify() -> list[str] | None:
+    """The user's own ``notify`` argv; [] when none is set; None when it
+    cannot be read or is not a list of strings (then QuickTerm stays out)."""
     from quickterm.agents import codex_home
 
     try:
         data = tomllib.loads((codex_home() / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
     except (OSError, ValueError, UnicodeError):
-        return False
-    return bool(data.get("notify"))
+        return None
+    notify = data.get("notify")
+    if not notify:
+        return []
+    if not isinstance(notify, list) or not all(isinstance(part, str) and part for part in notify):
+        return None
+    return notify
+
+
+def _self_command() -> list[str]:
+    """How a child process starts this program (codex_notify.py's entry)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, "-c", "from quickterm.app import main; main()"]
 
 
 def codex_args(cmd: str, args: list[str], base: Path) -> list[str]:
     """``args`` with a per-launch ``notify`` that reports each finished turn.
 
-    ``-c notify`` replaces the user's own notify program for the launch, so a
-    user who configured one keeps it and QuickTerm gets no Codex state. Codex
-    hooks are not used: each hook definition must be trusted in ``/hooks``
-    before it runs, and bypassing that would bypass it for every hook.
+    ``-c notify`` replaces the user's own notify program for the launch, so
+    when they have one, QuickTerm's program runs theirs first and then reports
+    (``codex_notify.py``). Codex hooks are not used: each hook definition
+    must be trusted in ``/hooks`` before it runs, and bypassing that would
+    bypass it for every hook.
     """
-    if args[:1] == ["agents"] or _is_batch(cmd) or _codex_user_notify():
+    if args[:1] == ["agents"] or _is_batch(cmd):
         return args
-    notify = [curl_program(), "-K", (base / CODEX_CURL_FILE).as_posix(), "--data-binary"]
-    # Codex appends the notification JSON as the last argument, which
-    # becomes the --data-binary body.
+    user = _codex_user_notify()
+    if user is None:
+        return args
+    if user:
+        from quickterm.codex_notify import FLAG
+
+        notify = [*_self_command(), FLAG, *user]
+    else:
+        # Codex appends the notification JSON as the last argument, which
+        # becomes the --data-binary body.
+        notify = [curl_program(), "-K", (base / CODEX_CURL_FILE).as_posix(), "--data-binary"]
     return ["-c", "notify=" + json.dumps(notify), *args]
 
 

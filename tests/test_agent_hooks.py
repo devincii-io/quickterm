@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 import pytest
@@ -217,7 +218,50 @@ def test_unreadable_user_settings_and_agents_mode_stay_as_they_are(tmp_path):
         assert agent_hooks.launch_args("claude", "claude.exe", args, str(tmp_path), tmp_path) == args
 
 
-def test_codex_gets_notify_unless_the_user_has_one(tmp_path, monkeypatch):
+def test_codex_chains_the_users_own_notify(tmp_path, monkeypatch):
+    home = tmp_path / "codex"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    base = tmp_path / "hooks"
+    (home / "config.toml").write_text('notify = ["C:/x/mine.exe", "turn-ended"]\n', encoding="utf-8")
+    args = agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base)
+    assert args[0] == "-c" and args[2:] == ["--cd", "x"]
+    notify = json.loads(args[1].split("=", 1)[1])
+    flag = notify.index("--codex-notify")
+    assert notify[flag + 1:] == ["C:/x/mine.exe", "turn-ended"]
+    assert notify[0] == sys.executable
+    # A notify that is not a list of strings is left to Codex untouched.
+    (home / "config.toml").write_text('notify = "mine.exe"\n', encoding="utf-8")
+    assert agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base) == ["--cd", "x"]
+    (home / "config.toml").write_text("notify = [\n", encoding="utf-8")
+    assert agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base) == ["--cd", "x"]
+
+
+def test_codex_notify_runs_theirs_then_reports(monkeypatch):
+    from quickterm import codex_notify
+
+    started, posted = [], []
+    monkeypatch.setattr(codex_notify.subprocess, "Popen", lambda argv, **kw: started.append(argv))
+
+    class Opener:
+        def open(self, request, timeout):
+            posted.append((request.full_url, request.get_header("X-quickterm-hook-token"), request.data))
+            raise OSError("down")  # a QuickTerm that is gone must not fail the notifier
+
+    monkeypatch.setattr(codex_notify.urllib.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setenv("QUICKTERM_SESSION_ID", "abc")
+    monkeypatch.setenv("QUICKTERM_PORT", "8642")
+    monkeypatch.setenv("QUICKTERM_HOOK_TOKEN", "tok")
+    payload = '{"type":"agent-turn-complete"}'
+    assert codex_notify.run(["mine.exe", "turn-ended", payload]) == 0
+    assert started == [["mine.exe", "turn-ended", payload]]
+    assert posted == [("http://127.0.0.1:8642/api/sessions/abc/agent-event?agent=codex", "tok", payload.encode())]
+    monkeypatch.delenv("QUICKTERM_SESSION_ID")
+    assert codex_notify.run([payload]) == 0
+    assert len(posted) == 1 and len(started) == 1
+
+
+def test_codex_gets_the_curl_notify_without_one_of_its_own(tmp_path, monkeypatch):
     home = tmp_path / "codex"
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
@@ -229,8 +273,6 @@ def test_codex_gets_notify_unless_the_user_has_one(tmp_path, monkeypatch):
     assert json.loads(value)[1:] == ["-K", (base / "codex-notify.curl").as_posix(), "--data-binary"]
     assert agent_hooks.launch_args("codex", "codex.cmd", ["--cd", "x"], None, base) == ["--cd", "x"]
     assert agent_hooks.launch_args("codex", "codex.exe", ["agents"], None, base) == ["agents"]
-    (home / "config.toml").write_text('notify = ["mine.exe"]\n', encoding="utf-8")
-    assert agent_hooks.launch_args("codex", "codex.exe", ["--cd", "x"], None, base) == ["--cd", "x"]
 
 
 def test_merged_settings_files_do_not_pile_up(tmp_path):
