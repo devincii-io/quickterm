@@ -13,14 +13,18 @@ from __future__ import annotations
 import posixpath
 import re
 import subprocess
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from quickterm import ws_exec, ws_files
 
+T = TypeVar("T")
+
 GIT = "git"
 # Read-only calls; a status in a large repository can take a few seconds.
-READ_TIMEOUT = 20.0
+READ_TIMEOUT = 30.0
 # Commit runs the repository's hooks, which may run a test suite.
 COMMIT_TIMEOUT = 300.0
 NETWORK_TIMEOUT = 120.0
@@ -156,12 +160,56 @@ class TreeMarks:
     changed: dict[str, str] = field(default_factory=dict)  # path -> "M" | "A" | "?"
 
 
+class _Flight:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.value: Any = None
+        self.error: BaseException | None = None
+
+
+_flights: dict[tuple[Any, ...], _Flight] = {}
+_flights_lock = threading.Lock()
+
+
+def _together(key: tuple[Any, ...], compute: Callable[[], T]) -> T:
+    """`compute()` once for every caller that asks for `key` while it runs.
+
+    The Files tab lists each open folder in its own request, all at once;
+    they share one filter listing and one prefix instead of one each. A
+    caller that arrives after the call finished starts a new one, so
+    nothing is read from an earlier refresh."""
+    with _flights_lock:
+        flight = _flights.get(key)
+        leader = flight is None
+        if flight is None:
+            flight = _flights[key] = _Flight()
+    if not leader:
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        return flight.value
+    try:
+        flight.value = compute()
+        return flight.value
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        with _flights_lock:
+            _flights.pop(key, None)
+        flight.done.set()
+
+
+def _tree_setup(ws: Any) -> str:
+    refresh_filters(ws)
+    return prefix(ws)
+
+
 def tree_marks(ws: Any, rel: str) -> TreeMarks:
     """Git's view of one directory of the tree; empty outside a repository."""
     marks = TreeMarks()
     try:
-        refresh_filters(ws)
-        pre = prefix(ws)
+        pre = _together(("tree", *_ws_key(ws)), lambda: _tree_setup(ws))
     except GitError:
         return marks
     result = _git(ws, [
@@ -400,17 +448,32 @@ def _numstat(output: str) -> dict[str, tuple[int | None, int | None]]:
     return counts
 
 
+_BASE_CANDIDATES = (
+    ("refs/remotes/origin/main", "origin/main"),
+    ("refs/remotes/origin/master", "origin/master"),
+    ("refs/heads/main", "main"),
+    ("refs/heads/master", "master"),
+)
+
+
 def base_branch(ws: Any) -> str | None:
     """The branch the workspace's branch is measured against: origin's
-    default branch, else origin/main, origin/master, main or master."""
-    head = _git(ws, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
-    if head.returncode == 0 and head.stdout.strip():
-        return head.stdout.strip()
-    for candidate in ("origin/main", "origin/master", "main", "master"):
-        check = _git(ws, ["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"])
-        if check.returncode == 0:
-            return candidate
-    return None
+    default branch, else origin/main, origin/master, main or master. One
+    `git for-each-ref` for all five, so an SSH or WSL workspace pays one
+    round trip, not up to five."""
+    result = _git(ws, [
+        "for-each-ref", "--format=%(refname)%00%(symref:short)", "refs/remotes/origin/HEAD",
+        *(ref for ref, _ in _BASE_CANDIDATES),
+    ])
+    if result.returncode != 0:
+        return None
+    found: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        ref, _, target = line.partition("\0")
+        found[ref] = target
+    if found.get("refs/remotes/origin/HEAD"):
+        return found["refs/remotes/origin/HEAD"]
+    return next((short for ref, short in _BASE_CANDIDATES if ref in found), None)
 
 
 def changes(ws: Any) -> dict:
@@ -433,22 +496,22 @@ def changes(ws: Any) -> dict:
     on_base = bool(base and base == status.branch)
     committed: list[dict] = []
     branch_added = 0
-    merge_base = None
+    has_merge_base = False
     if base and not on_base:
-        found = _git(ws, ["merge-base", base, "HEAD"])
-        merge_base = found.stdout.strip() if found.returncode == 0 else None
-    if merge_base:
-        numbers = _numstat(_git(ws, ["diff", *_NO_PROGRAMS, "--numstat", "-z", "--relative", merge_base, "HEAD"]).stdout)
-        letters = _name_status(_git(ws, ["diff", *_NO_PROGRAMS, "--name-status", "-z", "--relative", merge_base, "HEAD"]).stdout)
-        for path, letter in letters.items():
-            added, removed = numbers.get(path, (None, None))
-            committed.append({"path": path, "group": "committed", "status": letter,
-                              "added": added, "removed": removed})
-            branch_added += added or 0
+        # `base...HEAD` diffs from the merge base: letters and counts of the
+        # branch's commits in one call (it fails when there is no merge base).
+        found = _git(ws, ["diff", *_NO_PROGRAMS, "--raw", "--numstat", "-z", "--relative", f"{base}...HEAD", "--"])
+        has_merge_base = found.returncode == 0
+        if has_merge_base:
+            letters, numbers = _raw_numstat(found.stdout)
+            for path, letter in letters.items():
+                added, removed = numbers.get(path, (None, None))
+                committed.append({"path": path, "group": "committed", "status": letter,
+                                  "added": added, "removed": removed})
+                branch_added += added or 0
     ahead, behind = status.ahead, status.behind
-    if status.upstream is None and merge_base:
-        counted = _git(ws, ["rev-list", "--count", f"{merge_base}..HEAD"])
-        ahead = int(counted.stdout.strip()) if counted.stdout.strip().isdigit() else 0
+    if status.upstream is None and base and has_merge_base:
+        ahead = commits_since(ws, base) or 0
         behind = 0
     return {
         "branch": status.branch,
@@ -492,24 +555,28 @@ def commits_since(ws: Any, base: str) -> int | None:
     return int(text) if result.returncode == 0 and text.isdigit() else None
 
 
-def _name_status(output: str) -> dict[str, str]:
+def _raw_numstat(output: str) -> tuple[dict[str, str], dict[str, tuple[int | None, int | None]]]:
+    """`git diff --raw --numstat -z` as (path -> letter, path -> counts):
+    the raw records (`:<modes> <ids> <letter>`, then the path, or the old
+    and the new one for a rename or copy) come first, then the numstat ones."""
     letters: dict[str, str] = {}
     items = output.split("\0")
     index = 0
-    while index < len(items):
-        code = items[index]
+    while index < len(items) and (not items[index] or items[index].startswith(":")):
+        head = items[index]
         index += 1
-        if not code:
+        if not head:
             continue
-        if code[0] in "RC":
+        letter = head.rsplit(" ", 1)[-1][:1]
+        if letter in ("R", "C"):
             path = items[index + 1] if index + 1 < len(items) else ""
             index += 2
         else:
             path = items[index] if index < len(items) else ""
             index += 1
         if path:
-            letters[path] = code[0]
-    return letters
+            letters[path] = letter
+    return letters, _numstat("\0".join(items[index:]))
 
 
 def _count_untracked(ws: Any, entries: list[dict]) -> None:
@@ -555,10 +622,12 @@ def diff(ws: Any, rel: str, group: str) -> dict:
             text = result.stdout
     else:
         base = base_branch(ws)
-        found = _git(ws, ["merge-base", base, "HEAD"]) if base else None
-        if found is None or found.returncode != 0:
+        found = _git(ws, [*_DIFF, f"{base}...HEAD", "--", rel], literal=True) if base else None
+        if found is None or (found.returncode != 0 and "no merge base" in (found.stderr or "").lower()):
             return {"text": "", "truncated": False, "lines": 0}
-        text = _ok(ws, [*_DIFF, found.stdout.strip(), "HEAD", "--", rel], literal=True)
+        if found.returncode != 0:
+            raise GitError(500, _trim((found.stderr or found.stdout).strip()) or "git failed")
+        text = found.stdout
     lines = text.count("\n")
     if lines > DIFF_LINE_CAP or len(text) > DIFF_BYTE_CAP:
         return {"text": "", "truncated": True, "lines": lines}

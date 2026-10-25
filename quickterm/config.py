@@ -158,6 +158,9 @@ class AppConfig:
     # Codex run inside (shells.py). Replaced `default_profile` in 4.3.
     shell: str = "powershell"
     agents: dict[str, AgentSettings] = field(default_factory=_default_agents)
+    # Ask api.anthropic.com for each signed-in Claude account's current
+    # limits with Claude Code's own sign-in (usage_accounts.py).
+    usage_online: bool = True
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
@@ -724,6 +727,8 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("Update check must be true or false")
     if not isinstance(cfg.update_auto_download, bool):
         raise ValueError("Automatic update download must be true or false")
+    if not isinstance(cfg.usage_online, bool):
+        raise ValueError("Asking Anthropic for usage limits must be true or false")
     _validate_attention(cfg)
     if not isinstance(cfg.custom_theme, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)

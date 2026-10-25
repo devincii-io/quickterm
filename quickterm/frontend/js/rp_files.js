@@ -41,6 +41,8 @@ export function createFilesTab(ctx) {
   let expanded = new Set();
   // Folders whose listing a cap cut short.
   const cut = new Set();
+  // Folders whose listing is on its way: their row shows a spinner.
+  const loading = new Set();
   let generation = 0;
   let searchTimer = 0;
   let searchAbort = null;
@@ -49,8 +51,11 @@ export function createFilesTab(ctx) {
   const name = () => ctx.workspace();
   const searching = () => input.value.trim().length > 0;
 
-  function showNote(text) {
-    setText(note, text || "");
+  function showNote(text, busy = false) {
+    // Replaced, not prepended: a refresh while loading adds no second spinner.
+    if (busy) note.replaceChildren(icon("spinner", 12), text);
+    else setText(note, text || "");
+    setClass(note, "busy", busy);
     note.hidden = !text;
   }
 
@@ -67,6 +72,11 @@ export function createFilesTab(ctx) {
       return true;
     } catch (error) {
       if (run !== generation) return false;
+      if (children.has(dir)) {
+        // A slow or failed refresh keeps what was listed last.
+        if (!dir) showNote(`${error.detail || "Could not refresh"}. Showing the last listing.`);
+        return false;
+      }
       if (!dir) {
         children.set("", []);
         showNote(error.detail || "Could not list this folder.");
@@ -108,7 +118,10 @@ export function createFilesTab(ctx) {
     const { entry, depth, open } = item;
     row.style.setProperty("--depth", String(depth));
     const [chevron, label, mark] = row.children;
-    chevron.replaceChildren(entry.dir ? icon(open ? "chevron-down" : "chevron-right", 12) : document.createTextNode(""));
+    const busy = loading.has(item.path);
+    chevron.replaceChildren(busy ? icon("spinner", 12)
+      : entry.dir ? icon(open ? "chevron-down" : "chevron-right", 12) : document.createTextNode(""));
+    setClass(row, "loading", busy);
     setText(label, entry.name);
     const git = gitMark(entry.git);
     setText(mark, git.text);
@@ -128,8 +141,12 @@ export function createFilesTab(ctx) {
   async function toggle(path, open) {
     if (open) {
       expanded.add(path);
-      renderTree();
-      if (!children.has(path)) await load(path);
+      if (!children.has(path)) {
+        loading.add(path);
+        renderTree();
+        await load(path);
+        loading.delete(path);
+      }
     } else {
       expanded.delete(path);
     }
@@ -319,7 +336,9 @@ export function createFilesTab(ctx) {
       return;
     }
     const dirs = ["", ...[...expanded].sort()];
+    if (!children.has("")) showNote("Loading files…", true);
     const loaded = await Promise.all(dirs.map((dir) => load(dir, run)));
+    if (run === generation && children.has("") && note.classList.contains("busy")) showNote("");
     if (run !== generation) return;
     if (loaded[0] === false && !children.has("")) return;
     renderTree();
@@ -331,6 +350,7 @@ export function createFilesTab(ctx) {
     children = new Map();
     expanded = new Set();
     cut.clear();
+    loading.clear();
     focusedPath = null;
     input.value = "";
     scheduleSearch();

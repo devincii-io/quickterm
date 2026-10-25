@@ -22,6 +22,9 @@ export const CODEX_GLYPH = "◎";
 export const FOOTER_REFRESH_MS = 60_000;
 export const FOOTER_FIRST_MS = 1_500;
 export const RESOURCES_REFRESH_MS = 5_000;
+// The open usage popover asks again this often; the backend answers from its
+// cache and asks Anthropic at most every two minutes per account.
+export const USAGE_POPOVER_REFRESH_MS = 10_000;
 
 const MINUTE = 60;
 const HOUR = 3600;
@@ -139,8 +142,54 @@ export function footerParts(usage, sessions, nowS) {
   return parts;
 }
 
-// The usage popover's rows: one block per agent that has data.
+const PLAN_LABELS = {
+  claude_max: "Max", claude_pro: "Pro", claude_team: "Team", claude_enterprise: "Enterprise",
+  max: "Max", pro: "Pro", team: "Team", enterprise: "Enterprise", plus: "Plus", go: "Go", free: "Free",
+};
+
+// Where numbers that are not live came from, short enough for the head line.
+const SOURCE_LABELS = { "Claude Code": "cached", "status line": "status line", "session log": "session log" };
+
+export function planLabel(plan) {
+  if (typeof plan !== "string" || !plan) return null;
+  return PLAN_LABELS[plan.toLowerCase()] || plan.replace(/_/g, " ");
+}
+
+// One block per signed-in account (GET /api/usage `accounts`, CONTRACTS 4.6),
+// Claude Code first, the account closest to a limit first within each.
+export function accountBlocks(accounts, nowS) {
+  const order = { claude: 0, codex: 1 };
+  const top = (entry) => Math.max(-1, ...(entry.windows || []).map((w) => w.used_percent).filter(Number.isFinite));
+  return (accounts || [])
+    .filter((entry) => entry && (entry.agent === "claude" || entry.agent === "codex"))
+    .sort((a, b) => (order[a.agent] - order[b.agent]) || (top(b) - top(a)))
+    .map((entry) => {
+      const plan = planLabel(entry.plan);
+      const title = `${entry.agent === "claude" ? "Claude Code" : "Codex"}${plan ? ` · ${plan}` : ""}`;
+      const who = [entry.email, (entry.where || []).join(", ")].filter(Boolean).join(" · ");
+      const windows = (entry.windows || []).filter((window) => Number.isFinite(window?.used_percent));
+      const source = entry.source && entry.source !== "live" ? ` · ${SOURCE_LABELS[entry.source] || entry.source}` : "";
+      return {
+        agent: `${entry.agent}:${entry.key}`,
+        title,
+        who,
+        note: entry.note || (windows.length ? "" : "No limits known yet."),
+        updated: entry.updated_at ? `${updatedAgo(entry.updated_at, nowS).replace(/^updated /, "")}${source}` : "",
+        windows: windows.map((window) => ({
+          id: window.id,
+          label: window.label || windowLabel(entry.agent, window),
+          percent: formatPercent(window.used_percent),
+          fill: Math.min(100, Math.max(0, window.used_percent)),
+          resets: resetsIn(window.resets_at, nowS) || "",
+        })),
+      };
+    });
+}
+
+// The usage popover's rows: one block per account when the backend lists
+// them, else one per agent that has data (an older backend).
 export function usageBlocks(usage, nowS) {
+  if (Array.isArray(usage?.accounts) && usage.accounts.length) return accountBlocks(usage.accounts, nowS);
   const blocks = [];
   for (const [agent, title] of [["claude", "Claude Code"], ["codex", "Codex"]]) {
     const entry = usage?.[agent];
@@ -208,7 +257,7 @@ const nowSeconds = () => Date.now() / 1000;
 let openPopover = null;
 
 // A popover under the menu.js rules, opened above the footer line.
-function showPopover({ anchor, trigger, label, className, body, onClose }) {
+function showPopover({ anchor, trigger, label, className, body, onClose, width: wanted = 0 }) {
   closeMenu("replaced");
   if (openPopover) openPopover.close("replaced");
   const root = make("div", `usage-popover ${className}`);
@@ -267,7 +316,7 @@ function showPopover({ anchor, trigger, label, className, body, onClose }) {
   document.body.append(root);
   const place = () => {
     const anchorRect = anchor.getBoundingClientRect();
-    const width = Math.max(240, Math.min(320, anchorRect.width));
+    const width = Math.min(window.innerWidth - 16, Math.max(wanted, 240, Math.min(320, anchorRect.width)));
     root.style.width = `${width}px`;
     const natural = root.getBoundingClientRect();
     const spot = menuPosition(anchorRect, { width, height: natural.height },
@@ -301,18 +350,25 @@ function patchUsage(body, usage) {
     create: (block) => {
       const node = make("section", "usage-block");
       if (block.agent === "none") {
-        node.append(make("p", "usage-empty", "No agent has reported its usage yet."));
+        node.append(make("p", "usage-empty", "No Claude Code or Codex sign-in found on this computer yet."));
         return node;
       }
       const head = make("div", "usage-block-head");
       head.append(make("span", "usage-block-title"), make("span", "usage-block-updated"));
-      node.append(head, make("div", "usage-windows"));
+      node.append(head, make("div", "usage-block-who"), make("div", "usage-block-note"), make("div", "usage-windows"));
       return node;
     },
     update: (node, block) => {
       if (block.agent === "none") return;
       setText(node.querySelector(".usage-block-title"), block.title);
       setText(node.querySelector(".usage-block-updated"), block.updated);
+      const who = node.querySelector(".usage-block-who");
+      setText(who, block.who || "");
+      who.hidden = !block.who;
+      setAttrs(who, { title: block.who || false });
+      const note = node.querySelector(".usage-block-note");
+      setText(note, block.note || "");
+      note.hidden = !block.note;
       patchList(node.querySelector(".usage-windows"), block.windows, {
         key: (window) => window.id,
         create: () => {
@@ -432,11 +488,13 @@ export function mountUsageFooter(el, { signal, groups = () => [], actions = {}, 
     const body = make("div", "usage-popover-body");
     const handle = showPopover({
       anchor: line, trigger: agents, label: "Agent usage", className: "usage-limits", body,
-      onClose: onPopoverClose,
+      onClose: onPopoverClose, width: 300,
     });
     popover = { handle, update: () => { patchUsage(body, usage); handle.place(); } };
     popover.update();
-    fetchUsage().then(() => { if (popover?.handle === handle) { render(); popover.update(); } });
+    const poll = () => fetchUsage().then(() => { if (popover?.handle === handle) { render(); popover.update(); } });
+    poll();
+    resourceTimer = setInterval(poll, USAGE_POPOVER_REFRESH_MS);
   };
 
   const openResources = () => {

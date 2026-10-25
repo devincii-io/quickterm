@@ -128,10 +128,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if agent_name == "claude" and event == usage.CLAUDE_EVENT:
             # Rate limits from the status line: numbers for the footer, never
             # agent state.
-            if manager.get(sid) is None:
+            session = manager.get(sid)
+            if session is None:
                 raise HTTPException(404, "no such session")
             store = api_usage.claude_limits(request.app)
-            if store.record(payload.get("rate_limits")) and store.needs_save():
+            if store.record(payload.get("rate_limits"), usage.report_origin(session.info, payload.get("config_dir"))) and store.needs_save():
                 await asyncio.to_thread(store.save)
             return Response(status_code=204)
         title = None

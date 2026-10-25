@@ -15,7 +15,7 @@ from quickterm import workspace as workspace_mod
 from quickterm.board import Branch, Git, Pr, Terminal, derive
 from quickterm.server import create_app
 from tests.test_server import FakeConfig, FakeSessionManager
-from tests.test_ws_pr import CHECKS, PR, FakeExec
+from tests.test_ws_pr import CHECKS, ORIGIN, PR, FakeExec, answer_git
 
 
 @pytest.fixture(autouse=True)
@@ -157,10 +157,7 @@ def test_no_repository_means_no_git_facts(monkeypatch):
 @pytest.fixture
 def gh(monkeypatch):
     fake = FakeExec()
-    fake.on(["git", "rev-parse", "--is-inside-work-tree"], out="true\n")
-    fake.on(["git", "remote", "get-url", "origin"], out="git@github.com:acme/app.git\n")
-    fake.on(["git", "remote", "get-url", "--push", "origin"], out="git@github.com:acme/app.git\n")
-    fake.on(["git", "rev-parse", "--abbrev-ref", "HEAD"], out="feature\n")
+    answer_git(fake, "feature", ORIGIN)
     fake.on(["gh", "pr", "list"], out=json.dumps([PR]))
     fake.on(["gh", "pr", "checks"], code=1, out=json.dumps(CHECKS))
     fake.on(["gh", "repo", "view"], out="{}")
@@ -187,12 +184,12 @@ def test_gh_is_not_asked_for_the_base_branch_or_without_github(gh):
     ws = SimpleNamespace(name="x", path="/x", host=None)
     assert board.read_branch(ws, Git("main", "origin/main", 0, 0, 0)) == Branch("main", base="main")
     assert not [argv for _path, argv in gh.calls if argv[0] == "gh"]
-    gh.on(["git", "remote", "get-url", "origin"], out="C:/repos/bare.git\n")
+    answer_git(gh, "feature", ("remote.origin.url", "C:/repos/bare.git"))
     info = board.read_branch(ws, CLEAN)
     assert info.pr is None and info.checked is False
     assert not [argv for _path, argv in gh.calls if argv[0] == "gh"]
     gh.gh_missing = True
-    gh.on(["git", "remote", "get-url", "origin"], out="git@github.com:acme/app.git\n")
+    answer_git(gh, "feature", ORIGIN)
     assert board.read_branch(ws, CLEAN).checked is False
 
 
@@ -257,12 +254,12 @@ def test_the_first_answer_is_from_the_empty_cache_and_starts_one_refresh():
     assert answer["git"] == {"branch": "feature", "dirty": 0, "ahead": 0, "behind": 0}
 
 
-def test_git_is_read_again_after_20_s_and_the_pull_request_after_120_s():
+def test_git_is_read_again_after_30_s_and_the_pull_request_after_120_s():
     clock, readers = Clock(), Readers()
     cards, _ = make_board(clock, readers)
     cards.card("api", WS, [])
     assert (readers.git_calls, readers.branch_calls) == (1, 1)
-    clock.now += 19
+    clock.now += 29
     cards.card("api", WS, [])
     assert (readers.git_calls, readers.branch_calls) == (1, 1)
     clock.now += 2
@@ -281,16 +278,16 @@ def test_a_new_branch_asks_for_its_pull_request_at_once_and_never_shows_the_old_
     cards.card("api", WS, [])
     assert cards.card("api", WS, [])["pr"]["number"] == 7
     readers.git = Git("other", "origin/other", 0, 0, 0)
-    clock.now += 21
+    clock.now += 31
     cards.card("api", WS, [])
     # The refresh read the new branch and asked for its pull request with it.
     assert readers.branch_calls == 2
     readers.info = None
-    clock.now += 21
+    clock.now += 31
     cards.card("api", WS, [])
     # Git moved on again but the branch facts are for "other": the old PR is gone.
     readers.git = Git("third", "origin/third", 0, 0, 0)
-    clock.now += 21
+    clock.now += 31
     cards = board.Board(clock=clock, submit=lambda fn, *a: None,
                         git_reader=readers.read_git, branch_reader=readers.read_branch)
     cards._git[("", "")] = (clock.now, readers.git)
@@ -325,7 +322,7 @@ def test_a_failing_reader_leaves_the_board_answering():
     cards = board.Board(clock=clock, submit=lambda fn, *a: fn(*a), git_reader=broken,
                         branch_reader=lambda ws, git: None)
     assert cards.card("api", WS, [])["status"] == "idle"
-    clock.now += 21
+    clock.now += 31
     assert cards.card("api", WS, [])["status"] == "idle"
 
 

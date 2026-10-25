@@ -273,6 +273,12 @@ export function createPrTab(ctx) {
       ctx.notePr?.(workspace, answer);
     } catch (error) {
       if (run !== generation) return;
+      if (data?.pr) {
+        // Keep the pull request on screen; the next poll tries again.
+        loading = false;
+        render();
+        return;
+      }
       data = { gh: "ok", pr: null, checks: [], reason: error.detail || "Could not ask GitHub." };
       loading = false;
       render();

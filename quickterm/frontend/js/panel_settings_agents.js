@@ -9,6 +9,7 @@ import { AGENT_NAMES, AGENT_TYPES, agentCommandLine, agentInstalled } from "./ag
 import { icon } from "./icons.js";
 import { make } from "./panel_shared.js";
 import { renderAgentFields } from "./panel_agent_fields.js";
+import { configToggle } from "./panel_settings_kit.js";
 
 // The option schema (GET /api/system/agents), read once per opening of
 // Settings; Settings never waits for it.
@@ -31,6 +32,16 @@ export function renderAgentSettings(host) {
   const section = make("div", "settings-group agent-settings");
   host.append(section);
   for (const kind of AGENT_TYPES) section.append(agentRow.call(this, kind, cfg.agents[kind]));
+  const limits = make("div", "settings-group");
+  limits.append(make("h3", "settings-group-title", "Usage limits"), configToggle({
+    id: "usage_online",
+    label: "Ask Anthropic for each Claude account's current limits",
+    checked: cfg.usage_online !== false,
+    onChange: (checked) => { cfg.usage_online = checked; },
+  }).el, make("p", "field-hint",
+    "Uses Claude Code's own sign-in on this computer, sent only to api.anthropic.com and never stored. "
+    + "Off: limits come from Claude Code's status line and its last /usage."));
+  host.append(limits);
 }
 
 function agentRow(kind, settings) {

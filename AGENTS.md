@@ -407,8 +407,11 @@ because the `.iss` relaunch entry is `skipifsilent`.
   `QUICKTERM_HOOK_TOKEN` and `QUICKTERM_CURL/p`, so the same curl configs
   serve it and the token stays out of every command line.
   Hooks run Windows' curl async: a Python process per PreToolUse would slow
-  every tool call. Claude's usage limits reach QuickTerm only through the
-  per-launch `statusLine` (`statusline_chain.py`), which must keep running
+  every tool call. Claude's usage limits come from `usage_accounts.py`
+  (every sign-in on this PC and in running WSL distributions, grouped by
+  account; the live route with Claude Code's own token, which must never be
+  stored, logged, returned or refreshed, and only from a background thread)
+  and from the per-launch `statusLine` (`statusline_chain.py`), which must keep running
   the user's own status line and must never resolve its own command again;
   it is the one per-update Python process, so it imports nothing but itself
   from source. The latest limits are kept in `claude-usage.json`, written

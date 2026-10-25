@@ -80,6 +80,7 @@ class FakeConfig:
     voice: FakeVoiceConfig = field(default_factory=FakeVoiceConfig)
     window: FakeWindowConfig = field(default_factory=FakeWindowConfig)
     overlay: FakeOverlayConfig = field(default_factory=FakeOverlayConfig)
+    usage_online: bool = True
 
 
 @dataclass
@@ -802,7 +803,7 @@ def fake_config_mod(monkeypatch, cfg):
         parsed = FakeConfig()
         for k, v in raw.items():
             if k in {"font_family", "shell", "max_sessions", "port",
-                     "host", "summon_hotkey", "scratch_dir", "font_size"}:
+                     "host", "summon_hotkey", "scratch_dir", "font_size", "usage_online"}:
                 setattr(parsed, k, v)
             elif k == "window":
                 parsed.window = FakeWindowConfig(**v)
@@ -1884,6 +1885,12 @@ def test_window_settings_apply_live(client, cfg, fake_config_mod):
     window = {"width": 1600, "height": 1000, "remember_bounds": False}
     assert client.put("/api/config", json={"window": window}).status_code == 204
     assert cfg.window == FakeWindowConfig(**window)
+
+
+def test_turning_usage_limits_off_applies_at_once(client, cfg, fake_config_mod):
+    # Off must stop the request to Anthropic now, not after a restart.
+    assert client.put("/api/config", json={"usage_online": False}).status_code == 204
+    assert cfg.usage_online is False
 
 
 def test_overlay_settings_apply_live(client, cfg, fake_config_mod):

@@ -2,6 +2,50 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.6.0
+
+Released 2026-10-25.
+
+### Usage limits for every account
+
+- The usage popover lists every Claude Code and Codex account signed in on
+  this computer and in running WSL distributions, one block per account
+  with its plan, email and where it is signed in. The same account in
+  several places is one block.
+- Claude's limits are current without a Claude running in QuickTerm:
+  QuickTerm asks Anthropic with Claude Code's own sign-in, at most every
+  two minutes, and shows model-scoped weekly limits too. The token is not
+  stored or refreshed. Settings > Agents > Usage limits turns this off;
+  the status line and Claude Code's last `/usage` still answer then.
+- Limits belong to the account, so the same account used in WSL or over
+  SSH shows once with its current numbers. An account signed in only on an
+  SSH host is not shown.
+- Status-line reports are kept per place, so a report no longer lands on
+  the wrong account.
+- The footer shows the account closest to a limit; the open popover
+  refreshes every 10 seconds.
+
+### Right panel and workspaces
+
+- New terminals show their prompt about ten times sooner: 0.3 s instead of
+  3.4 s for a WSL shell and 0.6 s instead of 5 s for PowerShell, and Claude
+  Code and Codex start without the same wait. ConPTY waited for an answer
+  to its startup question that the window could not give in time; the
+  backend now answers it.
+- The Pull request tab says why there is no pull request: no remote, a
+  remote that is a folder or on another host (Azure DevOps, GitLab), a
+  detached HEAD, or git not answering. It finds GitHub through the branch's
+  upstream, `upstream`, the push remote or any GitHub remote, and through
+  SSH aliases and `insteadOf` rules.
+- Each refresh starts fewer git processes (Pull request 2 instead of up to
+  7, Changes 7 instead of up to 12), which matters most over SSH and WSL.
+- A slow or failing git keeps the last listing or result on screen with a
+  note; folders show a spinner while they load, in the right panel and the
+  folder browser. Git reads may take 30 seconds.
+- "Run setup" is now a menu row that names what it starts ("Start dev
+  server, Claude Code") and only appears when the workspace has a Start
+  with list.
+
 ## QuickTerm 4.5.0
 
 Released 2026-10-25.

@@ -14,6 +14,7 @@ import {
 } from "./sidebar_model.js";
 import { createViewControls } from "./sidebar_view_menu.js";
 import { mountUsageFooter } from "./usage_footer.js";
+import { startupMenuLabel } from "./workspace_setup.js";
 import { fromKeyboard, iconButton, make, patchSubagents, setLabel, wireFloat } from "./sidebar_dom.js";
 
 // The pure half lives in sidebar_model.js; its public names stay importable
@@ -532,7 +533,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     }
     items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
     if (group.kind === "workspace") {
-      items.push({ label: "Run setup", icon: "terminal", run: () => actions.runWorkspaceSetup?.(group.name) });
+      const again = startupMenuLabel(group.startup);
+      if (again) items.push({ label: again, title: again, icon: "terminal", run: () => actions.runWorkspaceSetup?.(group.name) });
       items.push({ separator: true }, {
         label: "Delete workspace…", icon: "trash", danger: true,
         run: () => openConfirm(`group:${group.key}`, node, kebab, {

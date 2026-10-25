@@ -141,7 +141,22 @@ def run_user(command: str, stdin: bytes) -> bytes:
     return done.stdout or b""
 
 
-def report(rate_limits: Any) -> None:
+def config_dir(status: Any) -> str | None:
+    """The Claude config folder this status line runs from: the part of its
+    transcript path before ``projects``, so the backend can tell two
+    accounts used on one computer apart."""
+    path = status.get("transcript_path") if isinstance(status, dict) else None
+    if not isinstance(path, str) or not path:
+        return None
+    parts = path.replace("\\", "/").split("/")
+    if "projects" not in parts:
+        return None
+    at = len(parts) - 1 - parts[::-1].index("projects")
+    folder = "/".join(parts[:at])
+    return folder or None
+
+
+def report(rate_limits: Any, folder: str | None = None) -> None:
     """Post the limits the way the hook curl configs post their events."""
     if not isinstance(rate_limits, dict):
         return
@@ -154,7 +169,7 @@ def report(rate_limits: Any) -> None:
         f"http://127.0.0.1:{int(port)}/api/sessions/"
         f"{urllib.parse.quote(sid, safe='')}/agent-event?agent=claude"
     )
-    body = json.dumps({"hook_event_name": EVENT, "rate_limits": rate_limits})
+    body = json.dumps({"hook_event_name": EVENT, "rate_limits": rate_limits, "config_dir": folder})
     request = urllib.request.Request(
         url,
         data=body.encode("utf-8"),
@@ -196,7 +211,7 @@ def run(argv: list[str]) -> int:
     except (OSError, ValueError, AttributeError):
         data = b""
     status = _parse(data)
-    poster = threading.Thread(target=report, args=(status.get("rate_limits"),), daemon=True)
+    poster = threading.Thread(target=report, args=(status.get("rate_limits"), config_dir(status)), daemon=True)
     poster.start()
     try:
         command = user_command(status)

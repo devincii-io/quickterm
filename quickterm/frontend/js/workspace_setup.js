@@ -130,6 +130,17 @@ export function startupItems(value) {
     }));
 }
 
+// "Start dev server, Claude Code": the menu row that starts the Start with
+// list again, naming what it starts; null without a list (the row is hidden).
+export function startupMenuLabel(items) {
+  const names = (Array.isArray(items) ? items : [])
+    .filter((item) => item && KIND_IDS.includes(item.kind))
+    .map((item) => (typeof item.name === "string" && item.name.trim()) || startupKindLabel(item.kind));
+  if (!names.length) return null;
+  const shown = names.slice(0, 3).join(", ");
+  return `Start ${shown}${names.length > 3 ? ` +${names.length - 3}` : ""}`;
+}
+
 export function canAddStartup(items) {
   return (items || []).length < STARTUP_MAX;
 }

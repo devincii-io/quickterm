@@ -3,6 +3,7 @@ import hashlib
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -480,3 +481,25 @@ async def test_cancelled_spawn_async_still_registers_its_session(monkeypatch):
     await _wait_for(lambda: len(mgr.list()) == 1)
     assert mgr._spawning == 0
     mgr._sessions.clear()
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ConPTY is Windows only")
+def test_conptys_startup_question_is_answered_once_and_dropped():
+    # ConPTY holds all output until its device-attributes question is
+    # answered; a viewer only sees it as replayed history and cannot.
+    from quickterm import pty_session
+
+    written, delivered = [], []
+    pty = SimpleNamespace(write=written.append)
+    answer = pty_session._AnswersStartupQuery(pty, delivered.append)
+    answer(b"\x1b[1t\x1b[c\x1b[?1004h")
+    assert written == [b"\x1b[?1;2c"]
+    assert delivered == [b"\x1b[1t\x1b[?1004h"], "no viewer gets the question to answer again"
+    answer(b"vim asks \x1b[c later")
+    assert written == [b"\x1b[?1;2c"] and delivered[-1] == b"vim asks \x1b[c later"
+
+    late = pty_session._AnswersStartupQuery(SimpleNamespace(write=written.append), delivered.append)
+    late(b"x" * 5000)
+    late(b"\x1b[c")
+    assert len(written) == 1, "only at start"

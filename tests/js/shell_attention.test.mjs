@@ -98,8 +98,8 @@ test("the sidebar model lists saved workspaces with their folders, the views and
     logoUrl: "/logo",
   });
   assert.deepEqual(model.workspaces, [
-    { name: "api", path: "/work/api", pathExists: false, host: null, git: null },
-    { name: "docs", path: null, pathExists: null, host: null, git: null },
+    { name: "api", path: "/work/api", pathExists: false, host: null, startup: [], git: null },
+    { name: "docs", path: null, pathExists: null, host: null, startup: [], git: null },
   ], "scratch is never a saved workspace, and an unread folder is unknown, not missing");
   assert.deepEqual(model.views, [{ workspace: "api", label: "api", color: "#fff", active: true }]);
   assert.equal(model.sessions, sessions);

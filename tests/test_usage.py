@@ -279,25 +279,27 @@ def _run_chain(monkeypatch, stdin: bytes):
 def test_the_chain_reports_and_passes_the_users_output_through(claude_home, tmp_path, monkeypatch):
     _settings(claude_home, "settings.json", "theirs")
     posted, ran = [], []
-    monkeypatch.setattr(statusline_chain, "report", posted.append)
+    monkeypatch.setattr(statusline_chain, "report", lambda limits, folder=None: posted.append((limits, folder)))
 
     def fake_user(command, data):
         ran.append((command, data))
         return b"\x1b[36mmodel\x1b[0m \xe2\x97\x8f 5h 32%\n"
 
     monkeypatch.setattr(statusline_chain, "run_user", fake_user)
-    stdin = json.dumps({"cwd": str(tmp_path), "rate_limits": LIMITS}).encode()
+    transcript = r"C:\Users\me\.claude-work\projects\C--code\abc.jsonl"
+    stdin = json.dumps({"cwd": str(tmp_path), "rate_limits": LIMITS, "transcript_path": transcript}).encode()
     assert _run_chain(monkeypatch, stdin) == b"\x1b[36mmodel\x1b[0m \xe2\x97\x8f 5h 32%\n"
     assert ran == [("theirs", stdin)]
-    assert posted == [LIMITS]
+    # The config folder tells two accounts on this PC apart.
+    assert posted == [(LIMITS, "C:/Users/me/.claude-work")]
 
 
 def test_the_chain_prints_nothing_without_a_status_line_and_survives_junk(claude_home, monkeypatch):
     posted = []
-    monkeypatch.setattr(statusline_chain, "report", posted.append)
+    monkeypatch.setattr(statusline_chain, "report", lambda limits, folder=None: posted.append((limits, folder)))
     monkeypatch.setattr(statusline_chain, "run_user", lambda *a: pytest.fail("ran a command"))
     assert _run_chain(monkeypatch, b"not json") == b""
-    assert posted == [None]
+    assert posted == [(None, None)]
 
 
 def test_the_chain_stops_inside_its_own_child(claude_home, monkeypatch):
@@ -336,7 +338,8 @@ def test_report_posts_the_event_with_the_hook_token(monkeypatch):
     [(request, timeout)] = sent
     assert request.full_url == "http://127.0.0.1:8701/api/sessions/s%201/agent-event?agent=claude"
     assert request.get_header("X-quickterm-hook-token") == "hook"
-    assert json.loads(request.data) == {"hook_event_name": "QuickTermRateLimits", "rate_limits": LIMITS}
+    assert json.loads(request.data) == {"hook_event_name": "QuickTermRateLimits", "rate_limits": LIMITS,
+                                        "config_dir": None}
     assert timeout == statusline_chain.POST_TIMEOUT_S
     monkeypatch.delenv("QUICKTERM_SESSION_ID")
     statusline_chain.report(LIMITS)

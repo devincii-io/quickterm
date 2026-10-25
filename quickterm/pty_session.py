@@ -176,6 +176,41 @@ def _open_captured(pid: int, captured_at: int) -> int | None:
     return handle
 
 
+# ConPTY's startup question and xterm's answer to it (VT100 with advanced
+# video), and how much output may come before it.
+DA1_QUERY = b"\x1b[c"
+DA1_ANSWER = b"\x1b[?1;2c"
+STARTUP_QUERY_WINDOW = 4096
+
+
+class _AnswersStartupQuery:
+    """ConPTY asks its terminal for the device attributes (``ESC[c``) once,
+    at start, and holds every byte of output until it gets an answer or
+    gives up 3 to 5 seconds later. No viewer can answer in time: it attaches
+    after the spawn, so the question reaches it as replayed history, whose
+    answers pane.js rightly drops. This answers as xterm would and drops the
+    question from the output, so nothing answers it twice: a second answer
+    would reach the shell as typed text."""
+
+    def __init__(self, pty: "PtySession", deliver: Callable[[bytes], None]) -> None:
+        self._pty = pty
+        self._deliver = deliver
+        self._seen: int | None = 0
+
+    def __call__(self, data: bytes) -> None:
+        if self._seen is not None:
+            at = data.find(DA1_QUERY)
+            if at >= 0:
+                self._seen = None
+                self._pty.write(DA1_ANSWER)
+                data = data[:at] + data[at + len(DA1_QUERY):]
+            else:
+                self._seen += len(data)
+                if self._seen > STARTUP_QUERY_WINDOW:
+                    self._seen = None
+        self._deliver(data)
+
+
 class PtySession(PtyBase):
     def __init__(
         self,
@@ -189,7 +224,7 @@ class PtySession(PtyBase):
         on_output: Callable[[bytes], None],
         on_exit: Callable[[int], None],
     ) -> None:
-        super().__init__(loop, on_output, on_exit)
+        super().__init__(loop, _AnswersStartupQuery(self, on_output), on_exit)
         self._exit_code: int | None = None
         self._proc_exit_code: int | None = None
         self._proc_dead = threading.Event()

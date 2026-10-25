@@ -152,6 +152,7 @@ export async function bootShell() {
         path: saved?.path || null, pathExists: saved ? saved.path_exists !== false : null,
         // A remote workspace's git facts come with it (cached over ssh).
         host: saved?.host || null, git: saved?.host ? saved.git || null : null,
+        startup: Array.isArray(saved?.startup) ? saved.startup : [],
       }];
     }));
     folders.clear();

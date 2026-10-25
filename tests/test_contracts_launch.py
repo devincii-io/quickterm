@@ -364,8 +364,8 @@ def test_a_view_with_nothing_alive_runs_its_start_list():
     start = shell.index("export const SHELL_MEMBERS")
     members = shell[start:shell.index("]);", start)]
     assert '"runWorkspaceSetup"' in members and '"saveWorkspaceSetup"' in members
-    assert 'label: "Run setup"' in launcher
-    assert 'label: "run workspace setup"' in palette
+    assert "startupMenuLabel(group.startup)" in launcher
+    assert 'label: "start the Start with terminals"' in palette
     assert "a.openThemeSwitcher?.()" in palette
     # The sidebar's module stays under its size limit.
     assert launcher.count("\n") < 900
