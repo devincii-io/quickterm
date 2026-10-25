@@ -179,7 +179,7 @@ def test_a_verb_stays_a_verb_beside_a_folder_of_that_name(tmp_path, monkeypatch)
     # folder must not turn `quickterm new` into "open the folder new".
     (tmp_path / "new").mkdir()
     monkeypatch.chdir(tmp_path)
-    assert cli.is_command(["new", "--profile", "x"])
+    assert cli.is_command(["new", "codex"])
     assert not cli.is_command([str(tmp_path / "new")])
 
 
@@ -202,7 +202,7 @@ def test_usage_errors_exit_1(capsys):
 def test_help_exits_0(capsys):
     code, out, _err = _run(capsys, "new", "--help")
     assert code == 0
-    assert "--profile" in out
+    assert "claude-code" in out and "--profile" not in out
 
 
 def test_run_never_raises(monkeypatch, capsys):
@@ -263,7 +263,7 @@ def test_a_port_that_does_not_prove_the_token_gets_nothing(capsys, impostor):
     # right but its proof is not ours, so neither the token nor the text of a
     # send may reach it, and `new` does not start an app that cannot bind.
     port = str(impostor.port)
-    for argv in (["ls"], ["open", "dev"], ["send", "a1", "secret"], ["new", "--profile", "x"]):
+    for argv in (["ls"], ["open", "dev"], ["send", "a1", "secret"], ["new", "codex"]):
         code, _out, err = _run(capsys, *argv, "--port", port)
         assert code == cli.EXIT_NOT_RUNNING, argv
         assert "something else answers" in err
@@ -332,7 +332,7 @@ def test_a_failure_after_quickterm_answered_is_exit_3(capsys, backend):
     # a failed request, and `new` must not start a second app and repeat it
     # (the autouse fixture fails the test if it tries).
     backend.drop_after_health = True
-    for argv in (["ls"], ["new", "--profile", "pwsh"]):
+    for argv in (["ls"], ["new", "codex"]):
         code, _out, err = _run(capsys, *argv, "--port", str(backend.port))
         assert code == cli.EXIT_REFUSED, argv
         assert "the request failed" in err
@@ -357,9 +357,9 @@ def test_new_hands_the_launch_to_the_running_app(capsys, backend, tmp_path, monk
     port = str(backend.port)
     assert _run(capsys, "new", "--port", port)[0] == 0
     assert backend.requests[-1][:3] == ("POST", "/api/launches", {"cwd": str(tmp_path)})
-    assert _run(capsys, "new", "--profile", "pwsh", "--workspace", "dev", "--port", port)[0] == 0
-    # A profile without --cwd starts in the workspace root, not here.
-    assert backend.requests[-1][2] == {"profile": "pwsh", "workspace": "dev"}
+    assert _run(capsys, "new", "codex", "--workspace", "dev", "--port", port)[0] == 0
+    # An agent without --cwd starts in the workspace root, not here.
+    assert backend.requests[-1][2] == {"profile": "codex", "workspace": "dev"}
     (tmp_path / "sub").mkdir()
     assert _run(capsys, "new", "--cwd", "sub", "--workspace", "dev", "--port", port)[0] == 0
     assert backend.requests[-1][2] == {"cwd": str(tmp_path / "sub"), "workspace": "dev"}
@@ -370,7 +370,7 @@ def test_new_starts_an_agent_by_its_kind(capsys, backend, isolated):
     port = str(backend.port)
     assert _run(capsys, "new", "claude-code", "--workspace", "dev", "--port", port)[0] == 0
     assert backend.requests[-1][2] == {"profile": "claude-code", "workspace": "dev"}
-    assert _run(capsys, "new", "codex", "--profile", "x", "--port", port)[0] == cli.EXIT_USAGE
+    assert _run(capsys, "new", "--profile", "x", "--port", port)[0] == cli.EXIT_USAGE
     assert _run(capsys, "new", "bash", "--port", port)[0] == cli.EXIT_USAGE
 
 
@@ -444,7 +444,7 @@ def test_new_with_no_app_starts_one_and_waits_for_it(capsys, tmp_path, monkeypat
 def test_new_reports_an_app_that_never_came_up(capsys, monkeypatch):
     monkeypatch.setattr(cli, "_spawn_app", lambda command: types.SimpleNamespace(poll=lambda: 1))
     monkeypatch.setattr(cli, "_START_POLL_S", 0)
-    code, _out, err = _run(capsys, "new", "--profile", "pwsh", "--port", str(_free_port()))
+    code, _out, err = _run(capsys, "new", "codex", "--port", str(_free_port()))
     assert code == cli.EXIT_NOT_RUNNING
     assert "did not start" in err
 
@@ -565,7 +565,7 @@ async def test_a_launch_the_app_was_started_for_is_queued_once_it_is_up(monkeypa
         return "unknown profile: nope"
 
     monkeypatch.setattr(app_mod.cli, "post_launch", post)
-    cfg = types.SimpleNamespace(port=8655, host="127.0.0.1", profiles=[], launch_error=None)
+    cfg = types.SimpleNamespace(port=8655, host="127.0.0.1", launch_error=None)
     server = types.SimpleNamespace(started=True)
     await app_mod._after_ready(
         server, object(), cfg, launch_window=False, handoff={"profile": "nope"}

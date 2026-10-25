@@ -255,3 +255,57 @@ def test_the_sidebar_honours_reduced_motion_and_forced_colours():
     # Hover actions are reachable from the keyboard too.
     assert ".session-entry:focus-within > .session-actions," in sidebar_css
     assert ".session-group-headline:focus-within > .group-actions," in sidebar_css
+
+
+def test_new_workspace_is_one_dialog_for_every_location():
+    """CONTRACTS 4.5: "New workspace…" opens one dialog (Location, Folder,
+    Name, Create) for this PC, WSL and SSH. The Location is a menu.js menu,
+    the dialog is a bounded sheet that claims the keyboard before it focuses
+    and releases it before handing back, and the old host steps are gone.
+    """
+    dialog = (FRONTEND_JS / "new_workspace_dialog.js").read_text(encoding="utf-8")
+    model = (FRONTEND_JS / "new_workspace.js").read_text(encoding="utf-8")
+    shell = (FRONTEND_JS / "shell.js").read_text(encoding="utf-8")
+    palette = (FRONTEND_JS / "palette.js").read_text(encoding="utf-8")
+    browser_css = (FRONTEND / "css" / "browser.css").read_text(encoding="utf-8")
+    launcher = _launcher()
+
+    assert 'import { toggleMenu } from "./menu.js";' in dialog
+    assert "toggleMenu({" in dialog and "openMenu(" not in dialog
+    assert "<select" not in dialog and '"select"' not in dialog
+    assert dialog.index("claimFocus(OWNER);") < dialog.index("folderInput.focus();")
+    finish = dialog[dialog.index("    function finish(value) {"):]
+    finish = finish[: finish.index("\n    }\n")]
+    assert finish.index("releaseFocus(OWNER);") < finish.index("resolve(value);")
+    assert 'event.key === "Escape"' in dialog
+    assert "openFolderBrowser({" in dialog
+    assert "api.checkRemoteFolder(" in dialog and "Create again to save it anyway." in dialog
+    # The list is read before a save, so a taken name is refused, never overwritten.
+    create = model[model.index("export async function createLocationWorkspace("):]
+    assert create.index("await api.listWorkspaces();") < create.index("api.putLocationWorkspace(")
+    assert "nameTaken(name, names)" in create
+    # A centred, bounded sheet under the folder browser and the menus.
+    overlay = browser_css[browser_css.index(".nw-overlay {"):]
+    overlay = overlay[: overlay.index("}")]
+    assert "z-index: 115;" in overlay and "justify-content: center;" in overlay
+    sheet = browser_css[browser_css.index(".nw {"):]
+    sheet = sheet[: sheet.index("}")]
+    assert "width: min(520px, 94vw);" in sheet and "max-height:" in sheet
+    # Both entry points open the dialog; the host steps are gone.
+    assert "openNewWorkspaceDialog({" in shell
+    assert 'label: "New workspace…"' in launcher and "newRemoteWorkspace" not in launcher
+    assert "on host" not in launcher and "on host" not in palette
+    assert "remoteWorkspaceMode" not in palette and "hostMode" not in palette
+
+
+def test_wsl_and_ssh_workspaces_show_their_location_and_no_local_actions():
+    launcher = _launcher()
+    locations = (FRONTEND_JS / "locations.js").read_text(encoding="utf-8")
+    assert "setText(host, locationTag(group.host));" in launcher
+    assert 'return kind === "wsl" ? locationLabel(host) : `@${host}`;' in locations
+    # Explorer and VS Code are local only: WSL and SSH heads leave them out.
+    assert "const local = !group.host && (group.active || group.path);" in launcher
+    # The + menu: no saved terminals, no settings row, the shell there.
+    assert "Terminal settings" not in launcher and 'kind: "profile"' not in launcher
+    assert "label: `Shell in ${locationLabel(host)}`" in launcher
+    assert "if (admin && !host)" in launcher

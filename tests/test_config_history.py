@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quickterm import config as cfgmod
-from quickterm.config import AppConfig, Profile, config_history, load_history_entry, save_config
+from quickterm.config import AppConfig, config_history, load_history_entry, save_config
 from quickterm.server import create_app
 from tests.test_server import FakeConfig, FakeSessionManager
 
@@ -50,17 +50,22 @@ def test_each_save_that_changes_something_keeps_the_replaced_version(fake_appdat
     assert files[0].read_text(encoding="utf-8") == first
 
 
+def with_secret(**fields) -> AppConfig:
+    cfg = AppConfig(**fields)
+    cfg.agents["codex"].env = {"TOKEN": "secret"}
+    return cfg
+
+
 def test_an_unchanged_save_with_secrets_adds_no_entry(fake_appdata, sealed):
-    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"TOKEN": "secret"})]
-    save_config(AppConfig(profiles=profiles, font_size=12))
-    save_config(AppConfig(profiles=profiles, font_size=13))
-    save_config(AppConfig(profiles=profiles, font_size=13))
+    save_config(with_secret(font_size=12))
+    save_config(with_secret(font_size=13))
+    save_config(with_secret(font_size=13))
     files = history_files(fake_appdata)
     assert len(files) == 1
     # The entry is the stored file: its secret is still protected.
     text = files[0].read_text(encoding="utf-8")
     assert '"secret"' not in text
-    assert json.loads(text)["profiles"][0]["env"]["TOKEN"]["protected"] == "dpapi-v1"
+    assert json.loads(text)["agents"]["codex"]["env"]["TOKEN"]["protected"] == "dpapi-v1"
 
 
 def test_only_the_newest_twenty_are_kept(fake_appdata):
@@ -77,10 +82,10 @@ def test_the_list_is_newest_first_with_what_restoring_would_change(fake_appdata)
     save_config(AppConfig(theme="graphite"))
     saved_theme = os.stat(fake_appdata / "quickterm" / "config.json").st_mtime_ns
     save_config(AppConfig(theme="nord"))
-    save_config(AppConfig(theme="nord", profiles=[Profile(name="work", cmd="cmd.exe", terminal_type="custom")]))
+    save_config(AppConfig(theme="nord", snippets=[]))
 
     entries = config_history()
-    assert [entry["summary"] for entry in entries] == ["profiles", "theme"]
+    assert [entry["summary"] for entry in entries] == ["snippets", "theme"]
     assert entries[0]["id"] > entries[1]["id"]
     for entry in entries:
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", entry["saved_at"])
@@ -91,9 +96,8 @@ def test_the_list_is_newest_first_with_what_restoring_would_change(fake_appdata)
 
 
 def test_summaries_compare_decrypted_values(fake_appdata, sealed):
-    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"TOKEN": "secret"})]
-    save_config(AppConfig(profiles=profiles, font_size=12))
-    save_config(AppConfig(profiles=profiles, font_size=13))
+    save_config(with_secret(font_size=12))
+    save_config(with_secret(font_size=13))
     assert [entry["summary"] for entry in config_history()] == ["font_size"]
 
 
@@ -160,17 +164,14 @@ def test_restoring_goes_through_the_save_path_and_applies_live(client, fake_appd
 def test_restoring_a_version_with_a_3x_plain_key_is_not_refused(client, fake_appdata):
     """A 3.x summon key without Ctrl, Alt or Win was accepted then; the 4.0
     rule for new shortcuts must not lock a recovery out."""
-    from quickterm.config import Profile
-
-    save_config(AppConfig(summon_hotkey="f12", profiles=[Profile(name="kept", cmd="cmd.exe", terminal_type="custom")]))
-    save_config(AppConfig(summon_hotkey="ctrl+grave", profiles=[]))
+    save_config(AppConfig(summon_hotkey="f12"))
+    save_config(AppConfig(summon_hotkey="ctrl+grave"))
     entry_id = client.get("/api/config/history").json()[0]["id"]
 
     response = client.post(f"/api/config/history/{entry_id}/restore")
     assert response.status_code == 204, response.text
     restored = cfgmod.load_config()
     assert restored.summon_hotkey == "f12"
-    assert [p.name for p in restored.profiles] == ["kept"]
 
 
 def test_restoring_a_version_from_before_4_3_migrates_it(client, fake_appdata):
@@ -193,7 +194,8 @@ def test_restoring_a_version_from_before_4_3_migrates_it(client, fake_appdata):
     response = client.post(f"/api/config/history/{entry_id}/restore")
     assert response.status_code == 204, response.text
     restored = cfgmod.load_config()
-    assert [p.name for p in restored.profiles] == ["box"]
+    # The saved terminal that 4.3 kept is gone in 4.5.
+    assert not hasattr(restored, "profiles")
     assert restored.agents["claude-code"].agent_mode == "new"
     assert restored.agents["codex"].args == ["--yolo"]
     assert restored.font_size == 12

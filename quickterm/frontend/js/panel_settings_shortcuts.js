@@ -1,12 +1,11 @@
-// Settings > Shortcuts: the summon key, every saved terminal's global key in
-// one table, and a reference of the keys QuickTerm uses inside the window.
-// Each global key is captured by pressing it (shortcut_input.js) and saved
-// with the footer Save; the server rebinds them at once.
+// Settings > Shortcuts: the summon key and a reference of the keys QuickTerm
+// uses inside the window. The global key is captured by pressing it
+// (shortcut_input.js) and saved with the footer Save; the server rebinds it
+// at once.
 
-import { inferTerminalType, make } from "./panel_shared.js";
+import { make } from "./panel_shared.js";
 import { SHORTCUTS } from "./keys.js";
 import { shortcutInput, shortcutWarnings } from "./shortcut_input.js";
-import { kindLabel } from "./panel_connections.js";
 
 function warningLines(target, rows) {
   target.textContent = "";
@@ -17,9 +16,7 @@ function warningLines(target, rows) {
 export function renderSummonField(hint = "Shows or hides QuickTerm from anywhere in Windows.") {
   const cfg = this.settingsDraft;
   const warnings = make("div", "shortcut-warnings");
-  const refresh = () => warningLines(warnings, shortcutWarnings(cfg.summon_hotkey, {
-    profiles: cfg.profiles || [], selfIndex: -1,
-  }));
+  const refresh = () => warningLines(warnings, shortcutWarnings(cfg.summon_hotkey));
   const input = shortcutInput({
     value: cfg.summon_hotkey,
     label: "Summon shortcut",
@@ -37,59 +34,11 @@ export function renderSummonField(hint = "Shows or hides QuickTerm from anywhere
 }
 
 export function renderShortcutSettings(host) {
-  const cfg = this.settingsDraft;
-  cfg.profiles ||= [];
-  host.append(this._sectionHeading("Shortcuts", "Global keys work anywhere in Windows. Press a key combination to set one."));
+  host.append(this._sectionHeading("Shortcuts", "The global key works anywhere in Windows. Press a key combination to set it."));
 
   const global = make("div", "settings-group");
   global.append(make("h3", "settings-group-title", "Global"));
   global.append(renderSummonField.call(this));
-
-  const table = make("div", "shortcut-table");
-  table.dataset.setting = "terminal_shortcuts";
-  table.setAttribute("role", "table");
-  table.setAttribute("aria-label", "Terminal shortcuts");
-  const rows = [];
-  const refreshAll = () => {
-    for (const { profile, warnings } of rows) {
-      warningLines(warnings, shortcutWarnings(profile.keybinding, {
-        summon: cfg.summon_hotkey, profiles: cfg.profiles, selfIndex: cfg.profiles.indexOf(profile),
-      }));
-    }
-  };
-  for (const profile of cfg.profiles) {
-    const kind = inferTerminalType(profile);
-    const desktop = kind === "rdp" || kind === "vnc";
-    const row = make("div", "shortcut-table-row");
-    row.setAttribute("role", "row");
-    const name = make("div", "shortcut-table-name");
-    name.setAttribute("role", "rowheader");
-    name.append(make("strong", "", profile.name || "Untitled"), make("small", "", kindLabel(kind)));
-    const warnings = make("div", "shortcut-warnings");
-    const input = shortcutInput({
-      value: profile.keybinding,
-      label: `Global shortcut for ${profile.name || "this terminal"}`,
-      disabled: desktop,
-      onChange: (binding) => {
-        profile.keybinding = binding || null;
-        refreshAll();
-      },
-    });
-    const control = make("div", "shortcut-table-control");
-    control.setAttribute("role", "cell");
-    control.append(input.el, warnings);
-    row.append(name, control);
-    table.append(row);
-    rows.push({ profile, warnings });
-  }
-  if (!rows.length) {
-    // An empty table with a loose paragraph in it is not a table.
-    table.removeAttribute("role");
-    table.removeAttribute("aria-label");
-    table.append(make("p", "settings-note", "No saved terminals yet. Add one under Terminals to give it a global key."));
-  }
-  global.append(make("h3", "settings-group-title shortcut-table-title", "Terminals"), table);
-  refreshAll();
   host.append(global);
 
   const inApp = make("div", "settings-group");

@@ -3,6 +3,7 @@
 // sidebar compares it with.
 
 import { SCRATCH_WS } from "./boot_context.js";
+import { locationLabel } from "./locations.js";
 
 // Paths compare the way the file system does: separators unified, a
 // trailing separator ignored, and case folded on Windows drives and shares.
@@ -73,6 +74,10 @@ export function createHere({ api, workspace, state, layout, showError }) {
 
   async function openHere(appName) {
     const label = appName === "vscode" ? "VS Code" : "Explorer";
+    if (state.workspaceHost) {
+      showError(`${label} opens folders on this PC; this workspace is in ${locationLabel(state.workspaceHost)}.`);
+      return false;
+    }
     const folder = hereFolder();
     if (!folder) {
       showError(`Nothing to open in ${label}: focus a terminal or give this workspace a folder.`);
@@ -107,6 +112,8 @@ export function createHere({ api, workspace, state, layout, showError }) {
   // named after the folder. Inside the workspace's own tree there is no
   // offer: every `cd src` would otherwise grow a button.
   function hereState() {
+    // A folder in WSL or over SSH is no folder on this PC to make a workspace of.
+    if (state.workspaceHost) return null;
     const folder = layout.focused?.bestKnownCwd?.() || null;
     if (!folder || samePath(folder, state.scratchRoot)) return null;
     const home = state.currentWorkspace && state.currentWorkspace !== SCRATCH_WS ? usableWorkspacePath() : null;

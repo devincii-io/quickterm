@@ -28,38 +28,17 @@ _DPAPI_SCHEME = "dpapi-v1"
 
 
 @dataclass
-class Profile:
+class AgentProfile:
+    """One agent's settings as the launch code takes them. `name` is the
+    kind ("claude-code" or "codex"), which is also how a request names it."""
+
     name: str
     cmd: str
-    # One line saying what this terminal is for. Every configurable thing
-    # carries its own explanation, so a list of profiles reads as documentation
-    # of the setup rather than a column of bare names. Optional and defaulted,
-    # because a config written by an older build has no such key and `_known()`
-    # only drops unknown fields; a field the older file lacks must fill itself in.
-    description: str = ""
+    terminal_type: str
     args: list[str] = field(default_factory=list)
-    # No folder of any kind. A workspace IS a folder and it is the only thing
-    # that places a terminal, so a profile is portable across every project.
-    # `cwd` and `subpath` used to live here; `_known()` drops both from older
-    # configs on load, and the next save writes them out for good.
     env: dict[str, str] = field(default_factory=dict)
-    keybinding: str | None = None
-    autostart: bool = False
-    terminal_type: str | None = None
-    wsl_distro: str | None = None
-    start_command: str | None = None
-    # Launch mode of an agent profile (claude-code, codex). Configs before 4.0
-    # call it `claude_mode`; config_from_dict carries that over.
     agent_mode: str | None = None
     agent: dict[str, str] = field(default_factory=dict)
-    ssh_host: str | None = None
-    ssh_port: int | None = None
-    ssh_user: str | None = None
-    ssh_key: str | None = None
-    # None means PuTTY, so every profile saved before 4.0 keeps its client.
-    ssh_client: str | None = None
-    ssh_proxy_jump: str | None = None
-    connection: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,8 +67,8 @@ class Snippet:
     text: str
     # What the command does and when to reach for it. The keystrokes alone do
     # not say it: "git status" repeats the name and answers nothing about why
-    # this one is kept. Defaulted for the same reason as `Profile.description`:
-    # older config files simply do not have the key.
+    # this one is kept. Defaulted because older config files do not have the
+    # key, and `_known()` only drops unknown fields.
     description: str = ""
 
 
@@ -132,11 +111,6 @@ class NotificationsConfig:
     needs_you: str = "notify"
     finished: str = "flash"
     sound: bool = False
-
-
-def _default_profiles() -> list[Profile]:
-    # Discovery feeds setup; the launcher exposes saved configurations only.
-    return []
 
 
 def _default_snippets() -> list[Snippet]:
@@ -184,7 +158,6 @@ class AppConfig:
     # Codex run inside (shells.py). Replaced `default_profile` in 4.3.
     shell: str = "powershell"
     agents: dict[str, AgentSettings] = field(default_factory=_default_agents)
-    profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
@@ -199,7 +172,7 @@ def default_cwd() -> str:
 
     A frozen exe's process cwd is the install directory, a poor place to drop
     the user. Prefer the user's home directory, then fall back to the process
-    cwd. WSL profiles separately request their Linux home via ``wsl --cd ~``.
+    cwd. A WSL terminal asks for its Linux folder itself (``wsl --cd``).
     Never let a stat error leak out of a spawn path.
     """
     try:
@@ -286,24 +259,41 @@ def validate_environment(env: object) -> dict[str, str]:
     return env
 
 
+def protect_environment(env: dict[str, str]) -> dict[str, object]:
+    """`env` as stored at rest: each value sealed with DPAPI for this user on
+    Windows, plaintext elsewhere (the files there are user-private)."""
+    if not secret_store.protection_available():
+        return dict(env)
+    return {
+        key: {
+            "protected": _DPAPI_SCHEME,
+            "data": base64.b64encode(secret_store.protect(value.encode("utf-8"))).decode("ascii"),
+        }
+        for key, value in env.items()
+    }
+
+
+def unprotect_value(value: object) -> str:
+    """One stored environment value as text. TypeError for a shape that is
+    not a value, ValueError when it cannot be decrypted for this user."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict) or value.get("protected") != _DPAPI_SCHEME:
+        raise TypeError("environment values must be strings or supported protected values")
+    payload = value.get("data")
+    if not isinstance(payload, str) or not secret_store.protection_available():
+        raise ValueError("protected environment value is unavailable for this OS user")
+    try:
+        ciphertext = base64.b64decode(payload, validate=True)
+        return secret_store.unprotect(ciphertext).decode("utf-8")
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("could not decrypt a protected environment value") from exc
+
+
 def _decode_environment(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise TypeError("environment must be a JSON object")
-    decoded: dict[str, str] = {}
-    for key, value in raw.items():
-        if isinstance(value, str):
-            decoded[key] = value
-            continue
-        if not isinstance(value, dict) or value.get("protected") != _DPAPI_SCHEME:
-            raise TypeError("environment values must be strings or supported protected values")
-        payload = value.get("data")
-        if not isinstance(payload, str) or not secret_store.protection_available():
-            raise ValueError("protected environment value is unavailable for this OS user")
-        try:
-            ciphertext = base64.b64decode(payload, validate=True)
-            decoded[key] = secret_store.unprotect(ciphertext).decode("utf-8")
-        except (OSError, ValueError, UnicodeError) as exc:
-            raise ValueError("could not decrypt a protected environment value") from exc
+    decoded = {key: unprotect_value(value) for key, value in raw.items()}
     return validate_environment(decoded)
 
 
@@ -318,7 +308,6 @@ _LEGACY_NAMED_KEYS = frozenset(
 )
 _LEGACY_F_KEY = re.compile(r"^f([1-9]|1[0-9]|2[0-4])$")
 _SUMMON_V4 = "summon_hotkey_v4"
-_KEYBINDING_V4 = "keybinding_v4"
 
 
 def legacy_binding_ok(binding: str | None) -> bool:
@@ -341,43 +330,22 @@ def _storage_dict(cfg: AppConfig) -> dict:
     if not legacy_binding_ok(stored.get("summon_hotkey")):
         stored[_SUMMON_V4] = stored["summon_hotkey"]
         stored["summon_hotkey"] = ""
-    for profile in stored["profiles"]:
-        # A build before 4.0 reads only `claude_mode`; without it a downgrade
-        # silently turns every Claude profile into "continue".
-        if profile.get("terminal_type") == "claude-code":
-            profile["claude_mode"] = profile.get("agent_mode")
-        if not legacy_binding_ok(profile.get("keybinding")):
-            profile[_KEYBINDING_V4] = profile["keybinding"]
-            profile["keybinding"] = None
     if not secret_store.protection_available():
         return stored
-    for profile in [*stored["profiles"], *stored["agents"].values()]:
-        profile["env"] = {
-            key: {
-                "protected": _DPAPI_SCHEME,
-                "data": base64.b64encode(secret_store.protect(value.encode("utf-8"))).decode(
-                    "ascii"
-                ),
-            }
-            for key, value in profile["env"].items()
-        }
+    for settings in stored["agents"].values():
+        settings["env"] = protect_environment(settings["env"])
     return stored
 
 
 def _has_plaintext_environment(raw: dict) -> bool:
     if not secret_store.protection_available():
         return False
-    profiles = raw.get("profiles")
     agents = raw.get("agents")
-    holders = [
-        *(profiles if isinstance(profiles, list) else []),
-        *(agents.values() if isinstance(agents, dict) else []),
-    ]
     return any(
-        isinstance(profile, dict)
-        and isinstance(profile.get("env"), dict)
-        and any(isinstance(value, str) for value in profile["env"].values())
-        for profile in holders
+        isinstance(settings, dict)
+        and isinstance(settings.get("env"), dict)
+        and any(isinstance(value, str) for value in settings["env"].values())
+        for settings in (agents.values() if isinstance(agents, dict) else [])
     )
 
 
@@ -400,9 +368,6 @@ _SHELL_PROGRAMS = frozenset({
     "pwsh", "powershell", "cmd", "bash", "zsh", "fish", "nu", "wsl", "sh",
 })
 _AGENT_PROGRAMS = frozenset({"claude", "claude.exe", "codex", "codex.exe"})
-PROFILE_KIND_ERROR = (
-    "profiles are for connections and custom commands; set the shell or the agents instead"
-)
 
 
 def _program_name(command: str) -> str:
@@ -410,22 +375,14 @@ def _program_name(command: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
-def is_shell_profile(profile: dict | Profile) -> bool:
-    """A profile that only starts a shell: a shell type, or no type and a
-    shell program as its command (configs from before terminal types)."""
-    get = profile.get if isinstance(profile, dict) else lambda key: getattr(profile, key, None)
-    kind = get("terminal_type")
+def is_shell_profile(profile: dict) -> bool:
+    """A stored profile that only starts a shell: a shell type, or no type and
+    a shell program as its command (configs from before terminal types)."""
+    kind = profile.get("terminal_type")
     if kind in SHELL_TYPES:
         return True
-    command = get("cmd")
+    command = profile.get("cmd")
     return kind is None and isinstance(command, str) and _program_name(command) in _SHELL_PROGRAMS
-
-
-def _starts_agent(start: str) -> bool:
-    words = start.split()
-    return bool(words) and words[0].strip("\"'").casefold().replace("/", "\\").rsplit(
-        "\\", 1
-    )[-1] in _AGENT_PROGRAMS
 
 
 def migrate_agents(raw: dict, notes: list[str] | None = None) -> dict:
@@ -560,20 +517,74 @@ def _parse_agents(raw: object) -> dict[str, AgentSettings]:
     return agents
 
 
-def agent_profile(cfg: AppConfig, kind: str) -> Profile:
-    """The agent's settings as the profile the launch code takes. Its name is
-    the kind, which is also how a request names it."""
+def agent_profile(cfg: AppConfig, kind: str) -> AgentProfile:
+    """The agent's settings as the launch code takes them."""
     settings = cfg.agents.get(kind) or AgentSettings()
-    return Profile(
+    return AgentProfile(
         name=kind,
         cmd=settings.cmd,
-        description=AGENT_LABELS[kind],
+        terminal_type=kind,
         args=list(settings.args),
         env=dict(settings.env),
-        terminal_type=kind,
         agent_mode=settings.agent_mode,
         agent=dict(settings.agent),
     )
+
+
+def ssh_destination(profile: dict) -> str | None:
+    """A stored SSH profile's target as an OpenSSH destination:
+    `ssh://user@host:port` when it had a port, else `[user@]host`."""
+    host = profile.get("ssh_host")
+    user = profile.get("ssh_user")
+    port = profile.get("ssh_port")
+    host = host.strip() if isinstance(host, str) else ""
+    user = user.strip() if isinstance(user, str) else ""
+    if not host:
+        return None
+    target = f"{user}@" if user else ""
+    if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+        bracketed = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        return f"ssh://{target}{bracketed}:{port}"
+    return f"{target}{host}"
+
+
+def migrate_profiles(raw: dict) -> tuple[dict, dict[str, str], dict[str, list[str]], int]:
+    """A 4.4 config without its saved terminals (4.5 has none).
+
+    Returns the config, the location each profile becomes as a workspace
+    host ({profile name: destination}: an SSH destination, `wsl:<distro>`
+    for a WSL terminal, "" for This PC), what of each could not be carried
+    ({profile name: ["its private key", ...]}), and how many profiles went.
+    Pure; the workspace files are changed by load_config.
+    """
+    out = {key: value for key, value in raw.items() if key != "profiles"}
+    profiles = raw.get("profiles")
+    listed = [p for p in profiles if isinstance(p, dict)] if isinstance(profiles, list) else []
+    hosts: dict[str, str] = {}
+    lost: dict[str, list[str]] = {}
+    for profile in listed:
+        name = profile.get("name")
+        if not isinstance(name, str):
+            continue
+        destination = ssh_destination(profile) if profile.get("terminal_type") == "ssh" else None
+        distro = profile.get("wsl_distro")
+        if destination is None and profile.get("terminal_type") == "wsl" and isinstance(distro, str) and distro:
+            destination = f"wsl:{distro}"
+        # Any other terminal named as a workspace host leaves it on this PC.
+        hosts[name] = destination or ""
+        dropped = [
+            label for key, label in (
+                ("ssh_key", "private key"), ("ssh_proxy_jump", "ProxyJump"), ("args", "extra arguments"),
+                ("env", "environment variables"), ("start_command", "start command"),
+            )
+            if profile.get(key)
+        ]
+        port = profile.get("ssh_port")
+        if destination and port is not None and not (isinstance(port, int) and 1 <= port <= 65535):
+            dropped.append(f"port {str(port)[:12]}")
+        if dropped:
+            lost[name] = dropped
+    return out, hosts, lost, len(listed)
 
 
 def config_from_dict(raw: dict) -> AppConfig:
@@ -585,22 +596,6 @@ def config_from_dict(raw: dict) -> AppConfig:
     kwargs["agents"] = _parse_agents(raw.get("agents"))
     if isinstance(raw.get(_SUMMON_V4), str) and raw[_SUMMON_V4]:
         kwargs["summon_hotkey"] = raw[_SUMMON_V4]
-    if "profiles" in kwargs:
-        if not isinstance(kwargs["profiles"], list):
-            raise TypeError("profiles must be a list")
-        profiles = []
-        for profile in kwargs["profiles"]:
-            if not isinstance(profile, dict):
-                raise TypeError("Profile must be a JSON object")
-            parsed = dict(profile)
-            if parsed.get("agent_mode") is None and parsed.get("claude_mode") is not None:
-                parsed["agent_mode"] = parsed["claude_mode"]
-            if isinstance(parsed.get(_KEYBINDING_V4), str) and parsed[_KEYBINDING_V4]:
-                parsed["keybinding"] = parsed[_KEYBINDING_V4]
-            if "env" in parsed:
-                parsed["env"] = _decode_environment(parsed["env"])
-            profiles.append(_parse(Profile, parsed))
-        kwargs["profiles"] = profiles
     if "snippets" in kwargs:
         if not isinstance(kwargs["snippets"], list):
             raise TypeError("snippets must be a list")
@@ -614,45 +609,6 @@ def config_from_dict(raw: dict) -> AppConfig:
     if "notifications" in kwargs:
         kwargs["notifications"] = _parse(NotificationsConfig, kwargs["notifications"])
     return AppConfig(**kwargs)
-
-
-_SSH_UNSAFE = re.compile(r"[\s\x00-\x1f\x7f]")
-_PROXY_JUMP = re.compile(r"^[A-Za-z0-9._@:,\[\]%-]+$")
-
-
-def _validate_ssh(profile: Profile) -> None:
-    """Host, user and jump reach ssh as arguments, so none may pass as an option."""
-    if not isinstance(profile.ssh_host, str) or not profile.ssh_host.strip():
-        raise ValueError("host is required")
-    if profile.ssh_port is not None and (
-        isinstance(profile.ssh_port, bool)
-        or not isinstance(profile.ssh_port, int)
-        or not 1 <= profile.ssh_port <= 65535
-    ):
-        raise ValueError("port must be between 1 and 65535")
-    for field_label, value in (("username", profile.ssh_user), ("private key", profile.ssh_key)):
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"{field_label} must be a string")
-    if profile.ssh_client not in (None, "openssh", "putty"):
-        raise ValueError("SSH client must be openssh or putty")
-    openssh = profile.ssh_client == "openssh"
-    for field_label, value in (("host", profile.ssh_host), ("username", profile.ssh_user)):
-        text = (value or "").strip()
-        if text.startswith("-"):
-            raise ValueError(f"{field_label} must not start with -")
-        # plink takes a saved-session name as its host and Windows account
-        # names may hold a space, so PuTTY profiles from 3.x keep loading.
-        # OpenSSH profiles are new in 4.0 and get the strict rule.
-        if openssh and _SSH_UNSAFE.search(text):
-            raise ValueError(f"{field_label} must not contain spaces or control characters")
-    jump = (profile.ssh_proxy_jump or "").strip()
-    if jump:
-        if jump.startswith("-") or not _PROXY_JUMP.fullmatch(jump):
-            raise ValueError("ProxyJump must be [user@]host[:port], comma separated")
-        if not openssh:
-            raise ValueError("ProxyJump needs the OpenSSH client")
-    if openssh and (profile.ssh_key or "").strip().lower().endswith(".ppk"):
-        raise ValueError("OpenSSH cannot read PuTTY .ppk keys; choose the PuTTY client or an OpenSSH key")
 
 
 def _validate_window(cfg: AppConfig) -> None:
@@ -774,76 +730,11 @@ def validate_config(cfg: AppConfig) -> None:
         for key, value in cfg.custom_theme.items()
     ):
         raise ValueError("Custom theme must contain string color values")
-    if not isinstance(cfg.profiles, list):
-        raise ValueError("Profiles must be a list")
     if not isinstance(cfg.summon_hotkey, str):
         raise ValueError("Summon hotkey must be a string")
-    hotkey_owners: dict[tuple[int, int], str] = {}
     if cfg.summon_hotkey.strip():
-        hotkey_owners[parse_binding(cfg.summon_hotkey)] = "QuickTerm summon shortcut"
+        parse_binding(cfg.summon_hotkey)
     _validate_window(cfg)
-    profile_names: set[str] = set()
-    for profile in cfg.profiles:
-        from .agents import AGENT_TYPES as validate_agent_types
-        from .connections import validate as validate_connection
-
-        name = profile.name.strip() if isinstance(profile.name, str) else ""
-        if not name:
-            raise ValueError("Every terminal profile needs a name")
-        folded = name.casefold()
-        if folded in profile_names:
-            raise ValueError("Terminal profile names must be unique")
-        profile_names.add(folded)
-        if not isinstance(profile.cmd, str):
-            raise ValueError(f'Terminal profile "{name}": command must be a string')
-        if not isinstance(profile.description, str):
-            raise ValueError(f'Terminal profile "{name}": description must be a string')
-        for field_label, value in (
-            ("terminal type", profile.terminal_type),
-            ("WSL distribution", profile.wsl_distro),
-            ("startup command", profile.start_command),
-            ("launch mode", profile.agent_mode),
-            ("SSH client", profile.ssh_client),
-            ("ProxyJump", profile.ssh_proxy_jump),
-        ):
-            if value is not None and not isinstance(value, str):
-                raise ValueError(
-                    f'Terminal profile "{name}": {field_label} must be a string'
-                )
-        if not isinstance(profile.agent, dict):
-            raise ValueError(f'Terminal profile "{name}": agent options must be an object')
-        if not isinstance(profile.autostart, bool):
-            raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
-        start = (profile.start_command or "").strip()
-        if profile.terminal_type in validate_agent_types or (
-            is_shell_profile(profile) and (not start or _starts_agent(start))
-        ):
-            raise ValueError(f'Terminal profile "{name}": {PROFILE_KIND_ERROR}')
-        try:
-            validate_connection(profile)
-            if profile.terminal_type in ("ssh", "sftp"):
-                _validate_ssh(profile)
-        except ValueError as exc:
-            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
-        if profile.terminal_type == "custom" and not profile.cmd.strip():
-            raise ValueError(f'Terminal profile "{name}": executable is required')
-        if not isinstance(profile.args, list) or any(not isinstance(arg, str) for arg in profile.args):
-            raise ValueError(f'Terminal profile "{name}": arguments must be strings')
-        try:
-            validate_environment(profile.env)
-        except ValueError as exc:
-            raise ValueError(f'Terminal profile "{name}": {exc}') from exc
-        if profile.keybinding is not None and not isinstance(profile.keybinding, str):
-            raise ValueError(f'Terminal profile "{name}": shortcut must be a string')
-        if profile.keybinding:
-            parsed = parse_binding(profile.keybinding)
-            if parsed in hotkey_owners:
-                raise ValueError(
-                    f'Terminal profile "{name}": shortcut conflicts with {hotkey_owners[parsed]}'
-                )
-            hotkey_owners[parsed] = f'terminal profile "{name}"'
-        # No folder to validate: a profile has none, and the workspace root is
-        # checked when a session actually spawns.
     if not isinstance(cfg.snippets, list):
         raise ValueError("Snippets must be a list")
     snippet_names: set[str] = set()
@@ -861,10 +752,6 @@ def validate_config(cfg: AppConfig) -> None:
 
 def _global_bindings(cfg: AppConfig) -> list[tuple[str, str]]:
     rows = [("Summon shortcut", cfg.summon_hotkey)]
-    rows += [
-        (f'Terminal profile "{profile.name}": shortcut', profile.keybinding)
-        for profile in cfg.profiles
-    ]
     return [(label, binding) for label, binding in rows if isinstance(binding, str) and binding.strip()]
 
 
@@ -893,11 +780,13 @@ def validate_new_bindings(cfg: AppConfig, previous: AppConfig | None = None) -> 
 
 
 PRE_43_BACKUP = "config.pre-4.3.json"
-# What the 4.3 migration dropped, kept for the backend: on Windows the
-# launcher process loads (and migrates) the config before the backend starts,
-# and neither has logging set up yet when it does.
-MIGRATION_NOTES = "migration-4.3.txt"
-MIGRATION_PREFIX = "Settings moved to QuickTerm 4.3: "
+PRE_45_BACKUP = "config.pre-4.5.json"
+# What a migration dropped, kept for the backend: on Windows the launcher
+# process loads (and migrates) the config before the backend starts, and
+# neither has logging set up yet when it does.
+MIGRATION_NOTES = "migration-notice.txt"
+MIGRATION_PREFIX_43 = "Settings moved to QuickTerm 4.3: "
+MIGRATION_PREFIX_45 = "Saved terminals were removed in QuickTerm 4.5: "
 
 
 def take_migration_notice() -> str | None:
@@ -911,7 +800,62 @@ def take_migration_notice() -> str | None:
         path.unlink()
     except (OSError, UnicodeError):
         return None
-    return MIGRATION_PREFIX + text if text else None
+    return " ".join(text.split("\n")) if text else None
+
+
+def _workspace_files() -> list[Path]:
+    """Every stored workspace file, the elevated instance's included."""
+    folder = config_dir() / "workspaces"
+    try:
+        return sorted([*folder.glob("*.json"), *folder.glob("*/*.json")])
+    except OSError:
+        return []
+
+
+def _retarget_workspaces(hosts: dict[str, str], lost: dict[str, list[str]]) -> list[str]:
+    """Point every workspace whose host named an SSH profile at that profile's
+    destination. Returns one sentence per such host that lost something or
+    could not be carried. Best effort per file."""
+    from .workspace import normalize_host
+
+    used: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for path in _workspace_files():
+        try:
+            document = json.loads(read_text(path))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        name = document.get("host") if isinstance(document, dict) else None
+        if not isinstance(name, str) or name not in hosts:
+            continue
+        try:
+            destination = normalize_host(hosts[name]) if hosts[name] else None
+        except ValueError as exc:
+            refused[name] = str(exc)
+            continue
+        document["host"] = destination
+        try:
+            _atomic_write(path, json.dumps(document, indent=2))
+        except OSError:
+            continue
+        used[name] = hosts[name]
+    notes = []
+    for name, destination in used.items():
+        if not destination:
+            notes.append(f'Workspaces on "{name}" were not on an SSH host or in WSL and now open on this PC.')
+        elif name in lost:
+            where = "now open in" if destination.startswith("wsl:") else "now connect to"
+            fix = (
+                "set them in Workspace settings" if destination.startswith("wsl:")
+                else "put them in ~/.ssh/config or Workspace settings"
+            )
+            notes.append(
+                f'Workspaces on "{name}" {where} {destination}; its '
+                f"{', '.join(lost[name])} could not be kept, so {fix}."
+            )
+    for name, reason in refused.items():
+        notes.append(f'Workspaces on "{name}" could not keep their host ({reason}).')
+    return notes
 
 
 def load_config() -> AppConfig:
@@ -922,21 +866,35 @@ def load_config() -> AppConfig:
         return cfg
     try:
         raw = json.loads(read_text(path))
-        migrating = isinstance(raw, dict) and "agents" not in raw
-        notes: list[str] = []
-        cfg = config_from_dict(migrate_agents(raw, notes) if migrating else raw)
+        migrating_agents = isinstance(raw, dict) and "agents" not in raw
+        notes_43: list[str] = []
+        if migrating_agents:
+            raw = migrate_agents(raw, notes_43)
+        migrating_profiles = isinstance(raw, dict) and "profiles" in raw
+        if migrating_profiles:
+            raw, hosts, lost, removed = migrate_profiles(raw)
+        cfg = config_from_dict(raw)
         validate_config(cfg)
-        if migrating:
-            # 4.3 moves agents out of the profiles and drops the shell
-            # profiles. The file as it was stays next to the new one, written
-            # before the first save that changes it.
-            backup = path.with_name(PRE_43_BACKUP)
-            if not backup.exists():
-                _atomic_write(backup, read_text(path))
+        if migrating_agents or migrating_profiles:
+            # 4.3 moved agents out of the profiles, 4.5 drops the profiles.
+            # The file as it was stays next to the new one, written before
+            # the first save that changes it.
+            original = read_text(path)
+            for wanted, name in ((migrating_agents, PRE_43_BACKUP), (migrating_profiles, PRE_45_BACKUP)):
+                backup = path.with_name(name)
+                if wanted and not backup.exists():
+                    _atomic_write(backup, original)
+            notes = [MIGRATION_PREFIX_43 + " ".join(notes_43)] if notes_43 else []
+            if migrating_profiles:
+                notes_45 = _retarget_workspaces(hosts, lost)
+                if removed:
+                    notes_45.append(f"{removed} saved terminal(s) are kept in {PRE_45_BACKUP} only.")
+                if notes_45:
+                    notes.append(MIGRATION_PREFIX_45 + " ".join(notes_45))
             save_config(cfg)
             if notes:
                 try:
-                    _atomic_write(path.with_name(MIGRATION_NOTES), " ".join(notes) + "\n")
+                    _atomic_write(path.with_name(MIGRATION_NOTES), "\n".join(notes) + "\n")
                 except OSError:
                     pass  # the notice is an extra; the migrated config is saved
             return cfg
@@ -969,13 +927,13 @@ def save_config(cfg: AppConfig) -> None:
 def _keep_previous(path: Path, text: str, cfg: AppConfig) -> tuple[str, int] | None:
     """Copy the config about to be replaced to config.prev.json, best effort.
 
-    A PUT that drops fields (an older or buggy client) replaced every profile
-    and snippet with nothing to go back to. The copy is the stored file as it
-    was, so DPAPI-protected values stay protected in it. A save that changes
-    nothing leaves the backup alone, or saving twice would erase the only
-    older state. "Nothing" is decided on the decrypted settings: DPAPI output
-    differs on every call, so with any profile secret the file text never
-    repeats.
+    A PUT that drops fields (an older or buggy client) replaced every saved
+    setting and snippet with nothing to go back to. The copy is the stored
+    file as it was, so DPAPI-protected values stay protected in it. A save
+    that changes nothing leaves the backup alone, or saving twice would erase
+    the only older state. "Nothing" is decided on the decrypted settings:
+    DPAPI output differs on every call, so with any agent secret the file
+    text never repeats.
 
     Returns ``(previous file text, its mtime in ns)`` when the replaced
     version belongs in the settings history, which save_config records once

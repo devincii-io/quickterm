@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import quickterm.session_manager as session_manager
 from quickterm import agent_hooks, launch
 from quickterm.agent_hooks import LATE_S, apply, describe, parse_body, seen
+from quickterm.config import AgentSettings
 from quickterm.server import create_app
 from quickterm.session_manager import SessionManager
 from tests.test_server import FakeConfig, FakeSessionManager
@@ -370,31 +371,22 @@ def test_a_folder_a_shell_would_rewrite_gets_no_hooks(tmp_path):
 
 
 @dataclass
-class Prof:
-    name: str
-    cmd: str
-    terminal_type: str
-    args: list = field(default_factory=list)
-    env: dict = field(default_factory=dict)
-    agent: dict = field(default_factory=dict)
-    agent_mode: str | None = "new"
-    start_command: str | None = None
-
-
-@dataclass
 class Cfg:
-    profiles: list
+    agents: dict = field(default_factory=lambda: {
+        "claude-code": AgentSettings(cmd="claude.exe", agent_mode="new"),
+        "codex": AgentSettings(cmd="codex.exe", agent_mode="new"),
+    })
+    shell: str = "cmd"
 
 
 def test_resolve_marks_agent_launches_only(tmp_path):
-    cfg = Cfg([Prof("c", "claude.exe", "claude-code"), Prof("x", "codex.exe", "codex"),
-               Prof("sh", "cmd.exe", "command-prompt")])
+    cfg = Cfg()
     folder = str(tmp_path)
-    assert launch.resolve(cfg, profile="c", request_cwd=folder).spawn_kwargs()["agent"] == "claude"
-    assert launch.resolve(cfg, profile="x", request_cwd=folder).agent == "codex"
-    assert launch.resolve(cfg, profile="c", cmd="other.exe", request_cwd=folder).agent is None
-    assert launch.resolve(cfg, profile="c", args=[], request_cwd=folder).agent is None
-    assert "agent" not in launch.resolve(cfg, profile="sh").spawn_kwargs()
+    assert launch.resolve(cfg, profile="claude-code", request_cwd=folder).spawn_kwargs()["agent"] == "claude"
+    assert launch.resolve(cfg, profile="codex", request_cwd=folder).agent == "codex"
+    assert launch.resolve(cfg, profile="claude-code", cmd="other.exe", request_cwd=folder).agent is None
+    assert launch.resolve(cfg, profile="claude-code", args=[], request_cwd=folder).agent is None
+    assert "agent" not in launch.resolve(cfg, request_cwd=folder).spawn_kwargs()
 
 
 # --- the session manager -------------------------------------------------------

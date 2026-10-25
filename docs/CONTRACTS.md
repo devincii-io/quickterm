@@ -24,8 +24,10 @@ first for the architecture, conventions, and packaging rules.
   one save that encrypts a legacy plaintext config). A `config.json` or
   workspace file that cannot be parsed is renamed to
   `<stem>.invalid-<ns>.json` so it can be recovered, never silently overwritten.
-- Windows serializes each profile environment value as a current-user DPAPI
-  object (`{"protected":"dpapi-v1","data":"..."}`); the in-memory/API shape
+- Windows serializes each environment value of the agent settings
+  (`AppConfig.agents[...].env`) and of a workspace (`Workspace.env`, its
+  startup items' `env`) as a current-user DPAPI object
+  (`{"protected":"dpapi-v1","data":"..."}`); the in-memory/API shape
   remains `dict[str, str]`. Plaintext legacy values migrate on load. POSIX
   config/token storage uses user-only permissions (`0700` directory, `0600`
   files).
@@ -33,41 +35,26 @@ first for the architecture, conventions, and packaging rules.
 ## quickterm/config.py
 
 ```python
+# Saved terminal profiles (the `Profile` dataclass, `AppConfig.profiles`,
+# connection types, per-profile hotkeys and autostart) are gone since 4.5;
+# see "Workspace locations, no saved terminals (4.5)".
+
 @dataclass
-class Profile:
-    name: str
-    cmd: str                    # executable, e.g. "powershell.exe" or "claude"
-    description: str = ""       # one line: what this terminal is for. Optional and
-                                # defaulted, so a config written by an older
-                                # build still loads.
+class AgentProfile:                 # one agent's settings as the launch code takes them
+    name: str                       # the kind: "claude-code" | "codex"
+    cmd: str                        # executable override, "" finds the CLI on PATH
+    terminal_type: str              # same as name
     args: list[str] = field(default_factory=list)
-    # No folder field of any kind: the workspace root places every session.
-    env: dict[str, str] = field(default_factory=dict)   # merged over os.environ
-    keybinding: str | None = None   # e.g. "ctrl+alt+1" (global hotkey)
-    autostart: bool = False
-    terminal_type: str | None = None  # powershell-core/windows-powershell/command-prompt/wsl/
-                                      # git-bash/nushell/claude-code/codex/ssh/sftp/custom
-                                      # telnet/serial/docker/podman/kubernetes/rdp/vnc
-                                      # (POSIX adds bash/zsh/fish)
-    wsl_distro: str | None = None
-    start_command: str | None = None  # run inside supported shells, then remain interactive;
-                                      # for ssh: remote command run instead of a shell
-    agent_mode: str | None = None     # agent profiles only (replaces claude_mode, see below)
+    env: dict[str, str] = field(default_factory=dict)
+    agent_mode: str | None = None
     agent: dict[str, str] = field(default_factory=dict)  # typed agent options, allowlisted per type
-    ssh_host: str | None = None       # ssh/sftp only; required for those types
-    ssh_port: int | None = None       # None = 22; validated 1..65535
-    ssh_user: str | None = None
-    ssh_key: str | None = None        # key file path; existence not validated
-    ssh_client: str | None = None     # "openssh" | "putty"; None = putty
-    ssh_proxy_jump: str | None = None # OpenSSH only
-    connection: dict[str, str] = field(default_factory=dict)
 
 @dataclass
 class Snippet:
     name: str
     text: str                   # exact keystrokes, ending in the "\r" that runs the command
     description: str = ""       # one line: what it does and when to reach for it.
-                                # Optional and defaulted, as on Profile.
+                                # Optional and defaulted.
 
 @dataclass
 class VoiceConfig:
@@ -94,6 +81,12 @@ class OverlayConfig:
     animate: bool = True            # ~120 ms slide
 
 @dataclass
+class NotificationsConfig:
+    needs_you: str = "notify"       # "off" | "flash" | "notify"
+    finished: str = "flash"         # same values
+    sound: bool = False
+
+@dataclass
 class AppConfig:
     host: str = "127.0.0.1"
     port: int = 8620
@@ -111,33 +104,43 @@ class AppConfig:
     scratch_dir: str = ""                   # "" = <system temp>/QuickTerm/scratch
     shell: str = "powershell"               # powershell | cmd | git-bash | wsl | wsl:<distro> | "" (POSIX)
     agents: dict[str, AgentSettings] = ...  # always both "claude-code" and "codex"
-    profiles: list[Profile] = ...
     snippets: list[Snippet] = ...
     voice: VoiceConfig = ...
     window: WindowConfig = ...
     overlay: OverlayConfig = ...
+    notifications: NotificationsConfig = ...
+    keep_awake: str = "agents"              # "agents" | "always" | "off"
 
 @dataclass
-class AgentSettings:                        # what an agent profile held for the launch
+class AgentSettings:                        # how Claude Code or Codex starts
     cmd: str = ""; args: list[str] = []; agent_mode: str | None = None
-    agent: dict[str, str] = {}; env: dict[str, str] = {}   # env DPAPI-protected like a profile's
+    agent: dict[str, str] = {}; env: dict[str, str] = {}   # env DPAPI-protected at rest
 
-def agent_profile(cfg, kind) -> Profile      # the settings as a Profile named after the kind
-def migrate_agents(raw: dict) -> dict        # the 4.3 migration, pure; config_from_dict runs it
-                                            # when "agents" is missing
+def agent_profile(cfg, kind) -> AgentProfile  # the settings as the launch code takes them
+def migrate_agents(raw: dict, notes=None) -> dict   # the 4.3 migration, pure; config_from_dict
+                                            # runs it when "agents" is missing
+def migrate_profiles(raw: dict) -> tuple[dict, dict[str, str], dict[str, list[str]], int]
+                                            # the 4.5 migration, pure: the config without
+                                            # "profiles", {SSH profile name: destination},
+                                            # {name: [what could not be carried]}, count removed
+def ssh_destination(profile: dict) -> str | None   # ssh://user@host:port with a port, else [user@]host
 def config_dir() -> Path
 def default_cwd() -> str
 def scratch_root(configured: str = "") -> str
-def config_from_dict(raw: dict) -> AppConfig
+def config_from_dict(raw: dict) -> AppConfig  # ignores keys that are not fields ("profiles")
 def validate_config(cfg: AppConfig) -> None
 def load_config() -> AppConfig               # a migrating load copies the file to
-                                            # config.pre-4.3.json (once), saves at once and
-                                            # writes its notes to migration-4.3.txt
+                                            # config.pre-4.3.json / config.pre-4.5.json (once
+                                            # each), points workspaces at the migrated SSH
+                                            # destinations, saves at once and writes its
+                                            # notes to migration-notice.txt
 def take_migration_notice() -> str | None   # those notes, prefixed, read once and deleted;
                                             # only a backend calls it (app.take_migration_notice
                                             # logs them and sets launch_error, the banner)
 def save_config(cfg: AppConfig) -> None      # keeps config.prev.json
 def validate_environment(env: object) -> dict[str, str]
+def protect_environment(env) -> dict         # DPAPI-sealed values (workspace env uses it too)
+def unprotect_value(value) -> str
 def replace_file(source, target) -> None     # os.replace, retried on Windows sharing errors
 def read_text(path) -> str                   # read, retried the same way
 ```
@@ -145,71 +148,52 @@ def read_text(path) -> str                   # read, retried the same way
 `app.py` sets two attributes on the live `AppConfig` that are not dataclass
 fields and are never persisted: `runtime_overrides: set[str]` (the fields it
 overrode for this run only, today `{"port"}` for `--port` and an elevated
-instance) and `launch_error: str | None` (the latest autostart or global-hotkey
-launch failure). `hotkey_error` follows the same pattern.
+instance) and `launch_error: str | None` (the latest failure of the elevated
+first terminal or a queued launch, or the migration notice). `hotkey_error`
+follows the same pattern.
 
-Saving validates runtime-facing field types (including font family, update
-toggle, profile terminal type, startup command, autostart, and shortcut) so a
-malformed JSON config cannot reach launcher or spawn code and fail there.
-Profiles hold no folder, so there is none to validate here; the workspace root
-is checked when a session actually spawns. `ssh`/`sftp` profiles require a
-non-empty `ssh_host`. Passphrases and passwords are never stored; ssh, sftp,
-plink and psftp prompt interactively inside the terminal.
+Saving validates runtime-facing field types (font family, update toggles,
+agent settings, snippets, shortcut) so a malformed JSON config cannot reach
+launcher or spawn code and fail there. Nothing in the config holds a folder;
+the workspace root is checked when a session actually spawns. Passphrases and
+passwords are never stored; ssh prompts interactively inside the terminal.
 
 Migration and validation added in 4.0:
 
-- `config_from_dict` copies a raw profile's `claude_mode` into `agent_mode`
-  when `agent_mode` is absent. `claude_mode` is no longer a field, so the next
-  save drops it, except that claude-code profiles keep writing `claude_mode`
-  next to `agent_mode` so an older build still reads the mode.
+- A 4.0 to 4.4 config's profiles carried `claude_mode`; `migrate_agents`
+  reads it as `agent_mode` when it turns an agent profile into agent
+  settings.
 - A shortcut that 3.x's `parse_binding` cannot parse (`minus`, `left`,
   `numpad1`, `pagedown`, ...; `config.legacy_binding_ok`) is written as
-  `summon_hotkey_v4` or a profile's `keybinding_v4`, with `summon_hotkey: ""`
-  or `keybinding: null` in the legacy field. 3.x raised on such a name and
-  replaced the whole config with the defaults; now a downgrade only loses that
-  shortcut. `config_from_dict` prefers the `_v4` value when it is a non-empty
-  string.
-- `window` and `overlay` are parsed with `_parse`, like `voice`. Messages follow
-  the existing style: `Window width must be between 760 and 16384`,
-  `Overlay edge must be top or bottom`.
+  `summon_hotkey_v4`, with `summon_hotkey: ""` in the legacy field. 3.x
+  raised on such a name and replaced the whole config with the defaults; now
+  a downgrade only loses that shortcut. `config_from_dict` prefers the `_v4`
+  value when it is a non-empty string.
+- `window`, `overlay` and `notifications` are parsed with `_parse`, like
+  `voice`. Messages follow the existing style: `Window width must be between
+  760 and 16384`, `Overlay edge must be top or bottom`.
 - `agent_mode` must be in the type's mode set or null. claude-code accepts
   `new | continue | resume | agents` (null means `continue`); codex accepts
-  `new | continue | resume | fork | agents` (null means `new`). Profiles that
-  Settings creates start at `new`.
+  `new | continue | resume | fork | agents` (null means `new`).
 - `agent` keys must belong to the type's allowlist ("unknown agent option:
   <key>"), values are strings without NUL, and only `add_dirs` may hold
   newlines. Choices come from their sets with `""` meaning unset; toggles are
-  `"true"`, `"false"` or `""`. Errors read
-  `Terminal profile "<name>": <agent/ssh error>`.
-- `ssh_host` and `ssh_user` must not start with `-` (argument injection,
-  both clients). With OpenSSH they also hold no whitespace or control
-  characters; PuTTY profiles may (plink takes a saved-session name such as
-  "Prod Server" as its host, and a Windows account name may hold a space), so
-  a 3.x config keeps loading. `ssh_proxy_jump`
-  must match `^[A-Za-z0-9._@:,\[\]%-]+$`, must not start with `-`, and with
-  PuTTY is an error: "ProxyJump needs the OpenSSH client". A `.ppk` key with
-  OpenSSH is an error: "OpenSSH cannot read PuTTY .ppk keys; choose the PuTTY
-  client or an OpenSSH key". New ssh profiles default to OpenSSH when it is
-  installed, else PuTTY; old profiles (`ssh_client` null) keep PuTTY.
+  `"true"`, `"false"` or `""`. Errors read `<Claude Code|Codex>: <error>`.
 
-`connection` holds typed connection fields, exposed individually in Settings:
-host/port for Telnet and desktop clients; device/baud/data_bits/parity/stop_bits/flow
-for serial; target/shell/user/context/namespace/container for containers; and
-fullscreen/width/height for RDP. Values are strings, unknown fields are rejected,
-and required targets, numeric bounds and serial enums are validated on save.
-`connections.resolve` builds argv without shell interpolation. Telnet/serial use
-bundled plink; Docker/Podman/Kubernetes use their configured CLI executable.
-RDP/VNC are external desktop windows, never PTYs. They require an explicit open
-and reject autostart/global shortcuts; credentials remain in the client.
+Superseded in 4.5: the 4.0 rules for profile `ssh_*` fields, the PuTTY
+client, and the typed `connection` fields of telnet, serial, container, RDP
+and VNC profiles. Those profiles no longer exist; an SSH workspace names an
+OpenSSH destination (see "Workspace locations, no saved terminals (4.5)").
 
 Environment overrides are limited to 256 pairs / 256 KiB and reject non-string
 pairs, empty names, `=`, control characters, NUL values, and names that collide
 case-insensitively. Both PTY backends merge the validated override over the
 QuickTerm process environment with `pty_base.merge_environment`: on Windows the
-merge is case-insensitive (a profile `Path` replaces the inherited `PATH` and
-keeps its own spelling); on POSIX `TERM=xterm-256color` and
-`COLORTERM=truecolor` are set before the override, so only a profile changes
-them.
+merge is case-insensitive (an override `Path` replaces the inherited `PATH`
+and keeps its own spelling); on POSIX `TERM=xterm-256color` and
+`COLORTERM=truecolor` are set before the override, so only an override
+changes them. What makes up the override (agent settings, workspace, the
+terminal's own) is in "Workspace setup" (4.5 wave 2).
 
 ### Where a session starts
 
@@ -222,8 +206,8 @@ fixed and applies to every spawn path:
    exists degrades to step 3, never to an error;
 3. `default_cwd()`.
 
-Profiles hold no folder, so there is no third source and no way for one to
-point somewhere the workspace does not.
+Neither the agent settings nor a startup item hold a folder, so there is no
+third source and no way for one to point somewhere the workspace does not.
 
 `default_cwd()` prefers the user's home directory, then the process cwd, never
 the install directory, which is where a frozen exe's `os.getcwd()` would
@@ -236,11 +220,10 @@ client can show where a terminal actually opened.
 created on demand, reused across runs, and its contents are never deleted by
 QuickTerm. Scratch terminals start there rather than in the user's home folder.
 
-Agent profiles (Claude Code and Codex) need a project folder and cannot carry
-one, so the workspace root is the only source. `launch.resolve_profile` raises
-when nothing resolves, which surfaces as a 400 on the spawn rather than a
-config-save error. Autostart and global hotkeys have no workspace, so an agent
-profile there fails the same way and the failure is reported as `launch_error`.
+Claude Code and Codex need a project folder and carry none, so the
+workspace root is the only source. `agents.resolve` raises when nothing
+resolves, which surfaces as a 400 on the spawn rather than a config-save
+error.
 
 ## quickterm/pty_session.py and quickterm/pty_posix.py
 
@@ -294,7 +277,7 @@ terminal must not hold an earlier one's master), the fd lock is held for one
 `write(2)` at a time and never across a wait, and the master is closed in one
 place, after reader and writer stopped, so a recycled descriptor number is
 never touched. Children get `TERM=xterm-256color` and `COLORTERM=truecolor`
-unless a profile sets them.
+unless the launch environment sets them.
 
 Kill:
 
@@ -509,16 +492,20 @@ Layout tree (JSON-serializable, shared with the frontend, SAME schema):
 
 ```json
 {"type": "split", "dir": "h", "ratio": 0.5, "children": [node, node]}
-{"type": "pane", "profile": "claude", "cwd": "C:/dev/proj", "session_id": "a1b2c3d4"}
+{"type": "pane", "profile": "claude-code", "cwd": "C:/dev/proj", "session_id": "a1b2c3d4"}
 ```
 
-Pane nodes may also contain `launch_spec` for system terminals opened without a
-saved profile, and profile panes `launch_options: {agent_mode?,
-agent_session?, start_command?, args?}`, the options the pane was started
+`profile` on a pane is `"claude-code"`, `"codex"` or absent (a shell); a
+layout saved before 4.5 may still name a removed saved terminal; starting
+such a pane again answers 404 `unknown profile`. Pane nodes may also contain `launch_spec`
+for system terminals opened by command, and agent panes `launch_options:
+{agent_mode?, agent_session?, args?}`, the options the pane was started
 with, so a restart in place or a workspace restore repeats that launch exactly
 (an agent "new conversation" pane stays "new", a resumed session resumes the
-same id). A legacy `claude_mode` in a stored node is read as `agent_mode`; the
-file format is otherwise unchanged. Layouts without it load as "no options".
+same id). A `start_command` stored by 4.4 or earlier is ignored by the
+backend since 4.5. A legacy `claude_mode` in a stored node is read as
+`agent_mode`; the file format is otherwise unchanged. Layouts without it load
+as "no options".
 `session_id` is preferred when restoring. A missing/dead ID becomes an explicit
 transcript-free unavailable pane; only a user-selected recovery action may
 start a replacement or resume an agent conversation.
@@ -532,7 +519,10 @@ class Workspace:
     path: str | None = None   # root folder every session in this workspace starts in
     session_ids: list[str] = field(default_factory=list)  # includes detached
     temporary: bool = False   # disposable scratch-view layout, deleted between runs
-    host: str | None = None   # an OpenSSH profile's name; `path` is then a POSIX path there
+    host: str | None = None   # the location: None this PC, "wsl:<distro>", or an SSH
+                              # destination; away from this PC `path` is POSIX
+    env: dict[str, str] = field(default_factory=dict)   # DPAPI-sealed in the file (4.5)
+    startup: list[dict] = field(default_factory=list)   # "Start with" items (4.5)
 
 def list_workspaces() -> list[str]
 def load_workspace(name: str) -> Workspace | None
@@ -546,13 +536,21 @@ def referenced_session_ids() -> set[str]       # every file's layout + session_i
 def normalize_root(value: object) -> str | None      # expands ~/env vars, absolutizes
 def resolve_start_dir(root: str | None) -> str | None # the root if it exists, else None
 def root_exists(root: str | None) -> bool
-def normalize_host(value: object) -> str | None         # a profile name, or None
+def normalize_host(value: object) -> str | None         # "wsl:<distro>", an SSH destination, or None
 def normalize_remote_root(value: object) -> str | None  # "/..." or "~" or "~/...", kept as typed
 def normalize_folder(value: object, host: str | None) -> str | None
+def location_kind(host: str | None) -> str              # "local" | "wsl" | "ssh"
+def wsl_distro(host: str | None) -> str | None
+
+# workspace setup (4.5 wave 2)
+def validate_env(value: object) -> dict[str, str]       # ValueError says why not
+def validate_command(value: object) -> str | None       # one line, at most 4096 characters
+def validate_startup(value: object) -> list[dict]       # each item with all seven keys
 ```
 
-Only a remote workspace's file carries `"host"`; a local file reads as it
-did before hosts existed. A remote folder is never resolved against this
+Only a WSL or SSH workspace's file carries `"host"`, and only a workspace
+with a setup carries `"env"` and `"startup"`; a local file without them
+reads as it did before. A remote folder is never resolved against this
 computer, and NUL, line breaks and other control characters are refused
 because it goes into a remote shell command.
 
@@ -686,8 +684,8 @@ Host/Origin allowlists, the launch queue, the inventory cache, the workspace
 write lock), installs `api.guard.LocalGuard`, calls `register(app, ctx)` on
 every route module and mounts the frontend last. The routes live in
 `quickterm/api/`: `sessions`, `launches`, `windows`, `workspaces`, `config`,
-`system` (health, profiles, terminal inventory, elevate, update, open, file,
-folder browser), `assets`, `usage` (agent usage limits), and `attach` (the WebSocket route, the replay
+`system` (health, terminal inventory, locations, elevate, update, open, file,
+folder browser), `board` (the derived workspace board), `assets`, `usage` (agent usage limits), and `attach` (the WebSocket route, the replay
 handshake, the output and input pumps and the close codes). `api.common`
 holds the shared request helpers (bounded JSON bodies, `resolve_request`).
 Route modules load `workspace`, `config`, `opener`, `update`, `assets`,
@@ -705,8 +703,7 @@ exact title.
 
 `rebind_hotkeys(cfg)` and `suspend_hotkeys(flag)` come from `app.py`'s
 hotkey manager and sit on `ApiContext` like `notify`; both are None without
-one. `rebind_hotkeys` registers exactly the summon key and the profile keys
-`cfg` names and sets `cfg.hotkey_error`; `suspend_hotkeys(True)` releases every
+one. `rebind_hotkeys` registers exactly the summon key `cfg` names and sets `cfg.hotkey_error`; `suspend_hotkeys(True)` releases every
 global hotkey until `suspend_hotkeys(False)` or 20 s pass. Both wait for the
 hotkey thread, so the routes call them through `asyncio.to_thread`.
 
@@ -749,14 +746,13 @@ REST (JSON, under `/api`):
 |---|---|---|
 | GET | /api/sessions | → `[SessionInfo + {attachments, busy, usage, activity, attention}]`; `attention` is `{kind: "bell"\|"notify"\|"exit", text, age_seconds}` or null. `busy` is always a boolean; `?metrics=false` still computes it from one process snapshot and skips only the per-process usage sampling, for lightweight sidebar/status polling. `usage` has `{available, working_set_bytes, cpu_percent, process_count, uptime_seconds, scope}`. `activity` has `{idle_seconds, background_output_bytes, background_output_age_seconds}`; background output is counted only after a previously attached viewer detaches and is acknowledged by the next attach. WSL resource scope is explicitly partial. |
 | GET | /api/health | → `{app: "quickterm", version}`. No token; the running-instance probe. With `?challenge=<nonce>` (`[A-Za-z0-9_-]{16,64}`, else 400) it adds `proof`, the hex HMAC-SHA256 of the nonce keyed with the token: a local client proves it found this user's QuickTerm before it sends the token, and the proof of a caller-chosen nonce reveals nothing about the token. |
-| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, start_command?, agent_mode?, agent_session?, claude_mode?, workspace?, shell?, prompt?}` → `SessionInfo` (no profile and no cmd starts the configured shell, or `shell` when given (4.3); profile name resolves from config, and `claude-code`/`codex` from the agent settings; a bounded `start_command` override supports shell-profile recovery; explicit cmd overrides). `agent_mode` is valid only for a `claude-code` or `codex` profile (400 "agent_mode requires a Claude Code or Codex profile") and must be in that type's mode set. `claude_mode` stays an accepted alias; when both are given and differ, 400 "agent_mode and claude_mode disagree". The legacy messages "claude_mode requires a Claude Code profile" and "claude_mode must be new, continue, resume, or agents" stay byte-identical for `claude_mode`. `agent_session` must match `^[0-9a-fA-F-]{36}$` (400 "agent_session must be a session id") and is valid only with mode null (implies resume), `resume`, or `fork` (codex only), else 400 "agent_session needs resume or fork". `prompt` (4.3) is the agent's first message, passed as its last positional argument (also over SSH): a string of at most 16000 characters, no NUL, not starting with `-`, without `"` (Windows PowerShell 5.1 splits a native argument at an embedded quote), valid only for a `claude-code` or `codex` profile without `cmd`/`args` and not in the `agents` mode; blank means none; 400 with the reason otherwise. Under the `cmd` shell a prompt with characters cmd.exe re-parses fails the spawn like any such argument, and under the `cmd` shell or through a `.cmd`/`.bat` agent a prompt over 7000 characters is refused (400 `prompt is too long for cmd.exe: at most 7000 characters`; cmd.exe ends a command line at 8191). On an SSH host the prompt's lines are joined with ` | `, since a line break cannot be quoted through every remote shell. Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the profile name, else `name`, else cmd. When the bundled PuTTY tools are present, their directory is appended (never prepended) to the spawned session's `PATH`, so `plink`/`pscp`/`psftp` are callable from every terminal. `ssh`/`sftp` profiles resolve to the OpenSSH or PuTTY argv in the launch.py section; 400 when the chosen client is missing ("OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client." for OpenSSH). |
-| POST | /api/connections/{name}/open | Opens a saved RDP/VNC profile in its external client, off the event loop. Returns `{pid, profile, type, external: true}`; 404 for an unknown profile, 400 for a terminal profile or unavailable/invalid client. No session is registered and no credentials are stored. Token-gated. |
-| PATCH | /api/workspaces/{name} | `{path?, logo?, host?}` metadata-only edit under the workspace write lock. Preserves the latest layout, session ownership and temporary flag; 404 if missing; 400 for an empty body, unknown fields, or invalid metadata. Layout autosaves omit durable-workspace metadata so stale viewers cannot undo a folder/logo edit. |
+| POST | /api/sessions | `{profile?, cmd?, args?, cwd?, env?, name?, cols?, rows?, agent_mode?, agent?, agent_session?, claude_mode?, workspace?, shell?, prompt?, command?}` → `SessionInfo` (no profile and no cmd starts the configured shell, or `shell` when given (4.3), or in a WSL or SSH workspace that location's shell; `profile` is `claude-code` or `codex` and resolves from the agent settings, any other name is 404 `unknown profile: X` (4.5); explicit cmd overrides). `agent_mode` is valid only for a `claude-code` or `codex` profile (400 "agent_mode requires a Claude Code or Codex profile") and must be in that type's mode set. `agent` (4.5) is an object of agent options merged over the saved ones for this launch only and validated with the same allowlist (400 "agent requires a Claude Code or Codex profile" without one). `command` (4.5) is one line a plain shell runs once before its prompt (at most 4096 characters, no line breaks; 400 "command is for a plain shell and takes no profile, cmd or args" otherwise); under cmd it is refused when it holds `"`, `&`, `|`, `<`, `>`, `^`, `%` or `!` (400 "the command contains characters cmd.exe would reinterpret"). `env` follows the workspace env rules of the 4.5 wave 2 section (400 `invalid env: <reason>`). Environment, later wins: the agent settings' env, the named workspace's env, the request's `env`, and QuickTerm's own variables last (session manager). In WSL the workspace and request names are appended to `WSLENV`, for an agent also the agent settings' names except `PATH`; over SSH the workspace and request variables are exported, POSIX-quoted, by the remote command and the agent settings' env is not sent. `claude_mode` stays an accepted alias; when both are given and differ, 400 "agent_mode and claude_mode disagree". The legacy messages "claude_mode requires a Claude Code profile" and "claude_mode must be new, continue, resume, or agents" stay byte-identical for `claude_mode`. `agent_session` must match `^[0-9a-fA-F-]{36}$` (400 "agent_session must be a session id") and is valid only with mode null (implies resume), `resume`, or `fork` (codex only), else 400 "agent_session needs resume or fork". `prompt` (4.3) is the agent's first message, passed as its last positional argument (also over SSH): a string of at most 16000 characters, no NUL, not starting with `-`, without `"` (Windows PowerShell 5.1 splits a native argument at an embedded quote), valid only for a `claude-code` or `codex` profile without `cmd`/`args` and not in the `agents` mode; blank means none; 400 with the reason otherwise. Under the `cmd` shell a prompt with characters cmd.exe re-parses fails the spawn like any such argument, and under the `cmd` shell or through a `.cmd`/`.bat` agent a prompt over 7000 characters is refused (400 `prompt is too long for cmd.exe: at most 7000 characters`; cmd.exe ends a command line at 8191). On an SSH host the prompt's lines are joined with ` | `, since a line break cannot be quoted through every remote shell. Resolved by `launch.resolve` and started with `spawn_async`. 409 when the live-terminal limit is reached; 400 `Terminal "<label>": <reason>` when the folder does not exist (`starting folder does not exist: <cwd>`) or the process cannot start (`command not found: ...`), where label is the agent's name, else `name`, else cmd. `start_command` (4.4 shell-profile recovery) is no longer read. |
+| PATCH | /api/workspaces/{name} | `{path?, logo?, host?, env?, startup?}` metadata-only edit under the workspace write lock. Preserves the latest layout, session ownership and temporary flag; 404 if missing; 400 for an empty body, unknown fields, or invalid metadata. `env` and `startup` (4.5) follow PUT: absent keeps, `null` clears, a value replaces. Layout autosaves omit durable-workspace metadata so stale viewers cannot undo a folder/logo edit. |
 | PATCH | /api/sessions/{id} | `{name}` → renamed `SessionInfo` |
 | POST | /api/sessions/{id}/input | `{text, enter?}` → type into the session from outside (`quickterm send`): the UTF-8 text, plus `\r` when `enter`, goes to the PTY and marks the session touched → 204; 404 unknown id, 409 exited, 400 for a bad body, text over 64 KiB, a lone surrogate or nothing to send, 503 when the input queue is full |
 | POST | /api/sessions/{id}/seen | The user has seen what the terminal asked for: clears its attention → 204; 404 for an unknown id |
 | POST | /api/sessions/{id}/retain | Mark an explicit detach as user-owned so the untouched-shell reaper cannot end it → `SessionInfo` |
-| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's shell runs the launch loop: a workspace is shown when a view of this window already has it open, else opened as a new view (never switched into another view in place); a profile starts in the given folder or the workspace root, in the named workspace's view or the shown one; a folder alone starts a terminal there in the window's scratch view. Route and payload shapes are unchanged from 3.x. |
+| POST | /api/launches | `{cwd?, profile?, workspace?}`, at least one → the validated item, queued for the existing viewer (Explorer's folder handoff and `quickterm new`/`open`). `profile` is `claude-code` or `codex`. Unknown keys are ignored. 400 for a bad body or a missing folder, 404 `unknown profile: X` / `no such workspace: X`. The primary window's shell runs the launch loop: a workspace is shown when a view of this window already has it open, else opened as a new view (never switched into another view in place); an agent starts in the given folder or the workspace root, in the named workspace's view or the shown one; a folder alone starts a terminal there in the window's scratch view. Route and payload shapes are unchanged from 3.x. |
 | GET | /api/launches/next | Long-poll (20 s) and atomically claim one queued handoff → the queued item (`{cwd?, profile?, workspace?}`, as POST /api/launches validated it) or 204 after timeout; `?wait=false` is the nonblocking probe. Exactly one window gets each handoff, so with several windows open only the `primary` window's shell should poll. A waiter whose client has disconnected (a reload, a closed window) never takes an item, and an item taken just as its client left goes back to the front of the queue. |
 | GET | /api/windows | → `{ttl_seconds, windows: [{id, workspace, title, primary, parent, idle_seconds, age_seconds}]}`, oldest window first |
 | POST | /api/windows | `{id?, workspace?, title?, primary?, parent?}` → `{id, workspace, title, primary, parent}`. Announce a window and optionally claim in one step; a server-side id is minted when `id` is absent. Idempotent for a known id (a reload must not collide with its own claim or be counted twice against the limit). `workspace` is three-valued exactly like `path` on PUT /api/workspaces: **absent preserves**, `null` releases, a string claims. `parent` is the shell window's id for an embedded workspace view; once set it stays. Forgetting a window (DELETE, a native close) forgets every entry whose `parent` it is, and only an entry without a parent is ever primary. 409 on a claimed workspace or too many windows, 400 on a junk name |
@@ -767,25 +763,24 @@ REST (JSON, under `/api`):
 | POST | /api/sessions/cleanup | `{session_ids}` → kill disposable sessions → 204; an id that is already gone counts as stopped; 500 when a process survives |
 | POST | /api/sessions/kill-all | → attempt every live session → `{killed: int, killed_ids: string[], failed_ids: string[]}`. Partial failure remains HTTP 200 so clients remove only verified kills and keep failures visible for retry. |
 | DELETE | /api/sessions/{id} | kill tree → 204; 404 when the registry no longer knows the id (also when `kill` raises `KeyError` because the id vanished during the call), 500 when the process survives. The two are not the same for clients: 500 keeps the pane visible, 404 means there is nothing left to stop and the pane MUST close, or a session the reaper already removed can never be cleared from the layout. `/retain` splits the same way. |
-| GET | /api/profiles | → `[Profile]` |
 | GET | /api/workspaces | → `[name]` |
-| GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool`, `git` and `host`. For a remote workspace both `path_exists` and `git` come from the last background check over ssh and never wait for one (unknown counts as present, git as null until the first answer). |
-| POST | /api/workspaces/remote-check | `{host, path}` → `{ok, message}`: `ssh -o BatchMode=yes <profile args> <host> test -d <path>`. `message` is ssh's last stderr lines, or "<path> is not a folder on <host>" when `test -d` exits 1. 400 for an unknown host, a PuTTY profile ("remote workspaces need an OpenSSH profile") or a bad folder. |
-| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?, host?}` → 204. `host` is three-valued like `path` and must name an OpenSSH SSH profile (400 otherwise); with a host, `path` is read as a folder on it. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
-| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. Also removes the workspace's board entry (`board.forget_workspace`). |
-| GET | /api/board | → `{status: {"<workspace>": "todo"\|"in-progress"\|"in-review"\|"done"}}`, stored entries of existing workspaces only; a workspace without one is `"in-progress"`. From `%APPDATA%\quickterm\board.json` (`quickterm/board.py`), off the loop. |
-| PUT | /api/board/{name:path} | `{status}` → 204. 400 for anything but the four statuses (checked first), 404 for an unknown workspace; the check and the write run under the workspace write lock, so a concurrent DELETE cannot leave an entry behind. The file is written atomically (temp file, fsync, replace) under a process lock. `board.rename_workspace(old, new)` moves an entry; no route renames a workspace yet. |
-| GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, shell, agents, profiles, snippets, voice_available, scratch_dir, elevated, version, update_check, update_auto_download, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when a global hotkey parsed but Windows refused to register it (another program owns it), as `"<binding> is in use by another program"` (several: `"<a>, <b> are in use by other programs"`, a profile key written `"<binding> (<profile>)"`), or null. It reflects the latest registration, at startup or after a live rebind; Settings renders it beside the shortcut field. `launch_error` is the latest autostart or global-hotkey launch failure; the shell shows it in the error banner. |
+| GET | /api/workspaces/{name} | → `Workspace` plus `path_exists: bool`, `git` and `host`, with `env` (decrypted, for the settings editor; the only route that returns the values) and `startup` (4.5). For a WSL or SSH workspace both `path_exists` and `git` come from the last background check and never wait for one (unknown counts as present, git as null until the first answer). |
+| POST | /api/workspaces/remote-check | `{host, path}` → `{ok, message}`: `test -d <path>` through `ws_exec` at a WSL or SSH location (batch-mode OpenSSH, no profile). `message` is what wsl or ssh printed, or "<path> is not a folder on <host>" when `test -d` exits 1. 400 for a missing or invalid host or a bad folder; a missing ssh or wsl.exe answers `ok: false` with the reason. |
+| PUT | /api/workspaces/{name} | `{layout, logo?, session_ids?, path?, host?, env?, startup?}` → 204. `host` is three-valued like `path` and names a location (`wsl:<distro>` or an SSH destination, 4.5; 400 with the reason otherwise); with a host, `path` is read as a POSIX folder there. `path`, `logo` and `session_ids` are three-valued: **absent preserves** the stored value (every layout autosave relies on this; an absent `session_ids` keeps the stored list plus the layout's panes), `null` (or `[]` for `session_ids`) clears it, a value sets it. `env` and `startup` (4.5) are the same: absent keeps, `null` clears, a value replaces. `path` is normalized; its existence is NOT required, so a temporarily missing folder cannot break autosave. 400 on a wrong type or a non-string/oversized/control-character path. Serialized with DELETE under one lock. |
+| DELETE | /api/workspaces/{name} | delete the workspace; kill only detached sessions whose live authoritative owner is still this workspace, spare attached or since-moved sessions, and abort on any verified kill failure → 204. Holds the same lock as PUT for the whole load/kill/delete, so an autosave in flight cannot write the deleted workspace back. |
+| GET | /api/board | → `{workspaces: {name: {status, reason, since, git, pr}}}`, derived (4.5 wave 2, "The board sorts itself"); `quickterm/board.py`, answered from its cache without waiting for git or gh. |
+| GET | /api/config | → `{font_family, font_size, theme, custom_theme, logo, shell, agents, snippets, voice_available, scratch_dir, elevated, version, update_check, update_auto_download, idle_timeout_s, max_sessions, hotkey_error, launch_error}`. `scratch_dir` is the resolved scratch folder. `hotkey_error` is set when the summon key parsed but Windows refused to register it (another program owns it), as `"<binding> is in use by another program"`, or null. It reflects the latest registration, at startup or after a live rebind; Settings renders it beside the shortcut field. `launch_error` is the latest failure of the elevated first terminal or a queued launch, or the one-time migration notice; the shell shows it in the error banner. |
 | GET | /api/config/history | → `[{id, saved_at, summary}]`, newest first: the last 20 configs a save replaced (`<config dir>/history/`, same DPAPI protection as `config.json`; a save that changes nothing adds none). `summary` names the top-level settings that differ from the next newer version, or from the current config for the newest. |
 | POST | /api/config/history/{id}/restore | Restore that version through the same path as PUT /api/config (validation, live apply, a new history entry), except the new-shortcut rule `validate_new_bindings`: its keys were accepted when it was saved, and a 3.x plain key such as `f12` must not refuse a recovery → 204; 404 for an unknown id, 400 when it no longer validates |
 | GET | /api/config/full | → the complete **persisted** `AppConfig`, never the live one: `app.py` rewrites `port` at startup (`--port 0`, and unconditionally for an elevated instance), and Settings PUTs this object straight back. 500 when the persisted config cannot be read, rather than the live values. |
-| PUT | /api/config | `AppConfig` object → 204; 400 for anything else, including a summon or profile key without Ctrl, Alt or Win that is not already saved ("Summon shortcut needs Ctrl, Alt or Win", `config.validate_new_bindings`; a 3.x plain key on disk stays accepted so load and unrelated saves work). The footer Save refuses the same through `settingsProblems(draft, {baseline})`. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe profiles or their secrets. Only `port` and `host` need a restart; everything else applies at once, `scratch_dir`, `window` (the next window), `overlay` (the next summon) and `summon_hotkey` included. When `summon_hotkey` or any profile `keybinding` differs from the live config, the route awaits `asyncio.to_thread(ctx.rebind_hotkeys, cfg)`, which re-registers the global hotkeys and sets `hotkey_error`; a save that leaves the keys alone does not rebind. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
+| PUT | /api/config | `AppConfig` object → 204; 400 for anything else, including a summon key without Ctrl, Alt or Win that is not already saved ("Summon shortcut needs Ctrl, Alt or Win", `config.validate_new_bindings`; a 3.x plain key on disk stays accepted so load and unrelated saves work). The footer Save refuses the same through `settingsProblems(draft, {baseline})`. Omitted top-level keys keep their on-disk values, so a partial body cannot wipe the agent settings or their secrets. Only `port` and `host` need a restart; everything else applies at once, `scratch_dir`, `window` (the next window), `overlay` (the next summon) and `summon_hotkey` included. When `summon_hotkey` differs from the live config, the route awaits `asyncio.to_thread(ctx.rebind_hotkeys, cfg)`, which re-registers the summon key and sets `hotkey_error`; a save that leaves the keys alone does not rebind. For a field in `cfg.runtime_overrides` (the port of a `--port` or elevated run) a submitted value equal to the running one is treated as unedited and the persisted value is kept, so a stale page cannot write an ephemeral port to disk; any other value, a revert included, is saved. |
 | POST | /api/hotkeys/suspend | `{suspended: bool}` → 204; 400 "suspended must be true or false" for any other body. `true` unregisters every global hotkey on the hotkey thread so a Settings key capture records a combination QuickTerm already owns instead of firing it; `false` registers them again, and they come back on their own after 20 s. A no-op without a hotkey manager (browser, POSIX, tests). |
+| GET | /api/locations | → `{locations: [{id, kind, label, detail, browse}]}`: This PC, each installed WSL distribution, each concrete Host alias in `~/.ssh/config` (4.5, "Workspace locations"). Starts no distribution and opens no connection. |
 | GET | /api/system/agents | → `{types: [{id, label, executable, available, modes: [{value, label, detail}], default_mode, options: [{key, label, kind: "choice"\|"combo"\|"text"\|"lines"\|"toggle", choices?: [{value, label, detail?}], hint, advanced: bool, placeholder?}]}]}` for `claude-code` and `codex`. Settings generates the agent editor from it and hardcodes no option list. Cached 60 s in `ctx.inventory_cache`; `?fresh=true` rescans. |
 | GET | /api/system/ssh-hosts | → `{path, exists, openssh: path\|null, hosts: [{alias, hostname, user, port, identity_file, proxy_jump}]}` from the static `~/.ssh/config` parser (`quickterm/ssh_config.py`), off the loop. |
 | GET | /api/system/ssh-hosts/{alias} | → `{alias, hostname, user, port, identity_files: [..], proxy_jump}` from `ssh.exe -G <alias>` (CREATE_NO_WINDOW, 3 s timeout, off the loop), falling back to the parser. 400 when the alias starts with `-` or does not match `^[A-Za-z0-9._@:%-]{1,255}$`; 404 when the parsed ssh_config has no literal `Host` entry for it (`ssh -G` exits 0 for any name and prints defaults, so it runs only for a known alias). |
 | GET | /api/agent-sessions?type=claude-code\|codex&workspace=<name>&limit=20 | → `{sessions: [{id, title, updated_at, cwd}]}`, newest first, for the workspace folder (or `cwd=<path>` instead of `workspace`). Claude from `~/.claude/projects/<slug>/*.jsonl`, titled by the last `custom-title` (`/rename`, `--name`), else the last `ai-title`, else the first prompt. Codex from `$CODEX_HOME/session_index.jsonl` joined with each rollout's `session_meta` (first 8 KB only), titled by `thread_name`, else the first message the user typed (bounded read; AGENTS.md and `<...>` context blocks skipped), else `session <last 12 id characters>` (UUIDv7 ids share their leading timestamp), listing interactive threads only: no `parent_thread_id`, and `source` absent, `cli` or `vscode` (subagent threads and `exec` runs are hidden, as Codex's own picker hides them). `limit` is clamped to 1..100. 400 for a bad type, 404 for an unknown workspace; an unreadable store answers `[]`. Off the loop. |
-| GET | /api/system/terminals | → detected terminal types and WSL distributions, plus `{id: "codex", label: "Codex CLI", executable, available}`. The `ssh`/`sftp` entries are `{id, label: "SSH"/"SFTP", executable, available, openssh: path\|null, putty: path\|null}`, `available` when either client exists. PuTTY is the bundled tools (`quickterm/putty_tools.py`: frozen `_internal/putty/`, dev `vendor/putty/` via `scripts/fetch_putty.py`), OpenSSH is `%SystemRoot%\System32\OpenSSH\ssh.exe` or `shutil.which`. The launcher lists them as profile-only (a hostless plink just prints usage). `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. `shells` (4.3) is `[{value, label, available}]`: PowerShell and Command Prompt always on Windows, Git Bash when installed, one `wsl:<distro>` per listed distribution; on POSIX one entry `""` named after `$SHELL`. The 4.3 section calls this route the terminal options inventory. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
+| GET | /api/system/terminals | → detected terminal types and WSL distributions, plus `{id: "codex", label: "Codex CLI", executable, available}`. Since 4.5 there are no `ssh`/`sftp` entries and no PuTTY; where a workspace can live is `GET /api/locations`. `installs` lists shells one step away: on Windows without PowerShell 7, `{id: "powershell-core", label, cmd, args, url}` with `cmd`/`args` a `winget install --id Microsoft.PowerShell --exact --source winget` (no `--accept-*` flag: the user answers in the terminal), or, without winget, `cmd: null` and `url` the GitHub release page. `shells` (4.3) is `[{value, label, available}]`: PowerShell and Command Prompt always on Windows, Git Bash when installed, one `wsl:<distro>` per listed distribution; on POSIX one entry `""` named after `$SHELL`. The 4.3 section calls this route the terminal options inventory. Cached for 60 s; `?fresh=true` scans again (an install terminal just exited). |
 | POST | /api/assets | raw image body (≤1 MB) → `{id, url}` |
 | GET | /api/assets/{id} | → stored PNG/JPEG/WebP/GIF/SVG/ICO |
 | DELETE | /api/assets/{id} | → 204 |
@@ -800,6 +795,11 @@ REST (JSON, under `/api`):
 | POST | /api/update/install | requires `ready`; writes the hand-over script, opens it and the installer with read sharing only (no writer, rename or delete until Setup is over), re-verifies both through those handles, starts Setup `/SILENT` through the script (which starts the installed launcher only when Setup returned 0), and only then stands the backend down (`pty_host.begin_update()`) → `{launched, version}`. The backend waits for the script's process (at most 30 minutes); if it is still running afterwards, exit code 0 (hand-over declined) gives `installed` and removes the installer, while a non-zero code (Setup failed, UAC cancelled) or the timeout goes back to `ready`, or to `failed` with "Setup did not finish" when the file no longer matches. 409 when not ready or when the re-check fails (state becomes `failed`); 400 on POSIX or in the elevated instance; 500 when Setup cannot be started. |
 | POST | /api/update/restart | requires `installed` with a known launcher; starts the installed `QuickTerm.exe` (found before Setup ran), which replaces this backend at once when no terminal is busy or touched and asks otherwise, as after any install → `{started}`. 409 otherwise; 400 on POSIX or in the elevated instance; 500 when it cannot be started. |
 | POST | /api/open | `{target}` → `{action: "url"\|"opened"\|"revealed"}`. Terminal Ctrl+click. http(s) URLs and allowlisted passive local files open with the OS handler; every other file type is revealed in the file manager, never run (quickterm/opener.py). Other schemes/missing paths → 400/404. With `app` (`explorer` \\| `vscode`), `{target, app}` opens the existing folder `target` in that app → `{action: app}`: unknown app or not a folder → 400, missing folder → 404, VS Code not installed → 404 with a `detail` naming that. VS Code is launched from `Code.exe`, never the `code.cmd` shim (cmd.exe re-parses batch arguments, and the folder comes from an OSC 7 report). |
+
+Removed in 4.5: `GET /api/profiles`, `POST /api/connections/{name}/open`
+(saved terminals and connection launchers) and `PUT /api/board/{name}` (the
+board sorts itself). The right panel (`/api/ws/...`), git info, usage and
+agent-event routes are described in their own sections below.
 
 JSON bodies for session creation, elevation, and full-config updates are capped
 at 1 MiB before buffering. API responses default to `Cache-Control: no-store`;
@@ -1007,8 +1007,8 @@ def remove_foreground_watcher() -> None
   deliberately not used: as an environment variable it would reach every
   terminal and the app relaunched after an update, and change how cmd.exe runs
   programs from its own folder there.
-- load_config → SessionManager → hotkeys thread (summon key, profile keys,
-  overlay focus hook) → `create_app` with `rebind_hotkeys` and
+- load_config → SessionManager → hotkeys thread (summon key, overlay focus
+  hook) → `create_app` with `rebind_hotkeys` and
   `suspend_hotkeys` → uvicorn (asyncio loop) → native Edge WebView2 viewer. `--port` and an elevated instance record
   `{"port"}` in `cfg.runtime_overrides`. Every client URL (window, running
   instance probe, launch handoff) and the free-port probe follow `cfg.host`,
@@ -1024,10 +1024,10 @@ def remove_foreground_watcher() -> None
   spawns arbitrary processes.
 - An elevated instance calls `workspace.set_namespace("elevated")` before it
   serves or discards scratch, so it never touches the normal instance's files.
-- Spawn autostart profiles on startup. Autostart, global hotkeys and the
-  elevated instance's first terminal resolve through `launch.resolve` like a
-  REST spawn; a failure is logged and stored as `cfg.launch_error` instead of
-  being swallowed.
+- The elevated instance's first terminal resolves through `launch.resolve`
+  like a REST spawn; a failure is logged and stored as `cfg.launch_error`
+  instead of being swallowed. (Autostart profiles and per-profile global
+  hotkeys went with the profiles in 4.5.)
 - Clean shutdown: manager.shutdown() on exit.
 
 ### Several windows, one backend
@@ -1088,7 +1088,7 @@ verbs below and not an existing folder, so Explorer's "Open QuickTerm here"
 
 ```
 quickterm ls [--json]                           one line per session
-quickterm new [--profile P] [--cwd D] [--workspace W]
+quickterm new [claude-code|codex] [--cwd D] [--workspace W]   (--profile removed in 4.5)
 quickterm open WORKSPACE
 quickterm send SESSION TEXT... [--enter]        id, id prefix or exact name
 quickterm --version
@@ -1109,7 +1109,7 @@ answered. `new` with no running app starts QuickTerm as a detached process
 (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows, a new session on
 POSIX, no inherited stdio): a folder alone goes as the positional folder,
 anything else as the hidden `--handoff <json>` (a non-empty object of string
-`cwd`, `profile`, `workspace`), which the app queues through `/api/launches`
+`cwd`, `profile` (the agent), `workspace`), which the app queues through `/api/launches`
 once its backend is up, reporting a refusal as `launch_error`. The CLI waits
 up to 20 s for a verified health answer and exits. The frozen build is a GUI-subsystem exe: a verb
 attaches to the parent console and writes to `CONOUT$`; with no console it
@@ -1119,9 +1119,10 @@ wait for a GUI program, so scripts use `start /wait` in cmd.
 ## quickterm/launch.py
 
 Every way of starting a terminal resolves it here: POST /api/sessions, POST
-/api/elevate, autostart, global hotkeys and the elevated instance's first
-terminal. Nothing here touches the session registry, but resolving blocks on
-the file system, so async callers run it in a worker thread.
+/api/elevate, POST /api/launches (through the launch loop) and the elevated
+instance's first terminal. Nothing here touches the session registry, but
+resolving blocks on the file system, so async callers run it in a worker
+thread.
 
 ```python
 class LaunchError(ValueError):  status: int; label: str | None
@@ -1132,52 +1133,55 @@ class LaunchSpec:
     agent: str | None          # "claude" | "codex": add the hooks
     wrap: shells.Wrap | None   # the shell an agent runs inside
     terminal_type: str | None  # a plain shell launch's pane type
+    remote: RemoteLaunch | None  # an SSH workspace's terminal
+    shell: str | None          # integrated shell (PowerShell, cmd, Git Bash)
+    wsl: str | None            # the distribution of a WSL workspace's terminal
+    command: str | None        # what a plain shell runs first
     def spawn_kwargs(self) -> dict
 
 def resolve(cfg, *, profile=None, cmd=None, args=None, env=None, name=None,
-            start_command=None, agent_mode=None, agent_session=None,
-            claude_mode=None, request_cwd=None,
-            workspace_root=None, append_tools=True, shell=None) -> LaunchSpec
+            claude_mode=None, agent_mode=None, agent_session=None,
+            request_cwd=None, workspace_root=None, shell=None, prompt=None,
+            remote=None, command=None, workspace_env=None,
+            agent_options=None) -> LaunchSpec
             # claude_mode is the legacy alias of agent_mode
-def find_profile(cfg, name) -> Profile   # "claude-code"/"codex" fall back to the agent settings
-def resolve_profile(prof, cwd=None, *, agent_mode=None,
-                    agent_session=None) -> tuple[str, list[str], str | None]
+def find_profile(cfg, name) -> AgentProfile  # "claude-code" | "codex", else 404
+def workspace_target(name) -> RemoteTarget | None   # a WSL or SSH workspace's host and folder
+def workspace_env(name) -> dict[str, str]    # the workspace's variables (decrypted)
 def validate_dir(value: str, label: str | None = None) -> str
 def workspace_start(name: str | None) -> str | None
-def append_tools_path(env: dict[str, str]) -> dict[str, str]
 ```
 
 - Folder precedence: `request_cwd`, else `workspace_root`, else None (the
   session manager then uses `default_cwd()`). A folder that does not exist is
   `LaunchError("starting folder does not exist: <value>")`, named after the
   terminal; a workspace whose folder is gone yields None, never an error.
-- `resolve_profile` per terminal type: PowerShell 7 and Windows PowerShell run
-  the profile's `cmd` (the inventory stores an absolute path because a
-  tray-resident app's PATH is stale) or the bare default, with `-NoLogo`, the
-  profile's own args, then `-NoExit -Command <start>`; cmd.exe runs its args,
-  then `/K <start>`. Arguments go before the start command because both
-  shells read the rest of the line after `-Command`/`/K` as the command.
-  bash/zsh/fish and Git Bash run `-l`, or `-lc "<start>; exec <shell> -l"`;
-  Nushell runs `-e <start>`; WSL gets `-d <distro> --cd <folder or ~>` and no
-  Windows process folder; ssh/sftp resolve per client (below). Agent profiles
-  need a folder and raise without one.
-- The bundled PuTTY tools directory is appended to the child's PATH (its key
-  matched case-insensitively), so a user-installed plink still wins.
+- Superseded in 4.5: `resolve_profile` and its per-terminal-type argv for
+  saved profiles, `start_command`, and appending the bundled PuTTY tools to
+  PATH. Agents resolve through `agents.resolve(prof, folder, mode=,
+  session=, prompt=)`, which raises without a folder; a plain shell through
+  `shells.interactive`.
 - No profile and no `cmd` (and no `args`) starts the shell: the request's
   `shell` when given (validated like the config value; it cannot be combined
   with `profile` or `cmd`), else `cfg.shell`, through `shells.interactive`
   (PowerShell `-NoLogo`, cmd bare, Git Bash and POSIX `-l`, WSL
-  `[-d <distro>] --cd <folder or ~>`). The session is named after the shell
+  `[-d <distro>] --cd <folder or ~>`). With a `command` (4.5) the shell runs
+  it once and stays: PowerShell `-NoLogo -NoExit -Command <command>`, cmd
+  `/k "<command>"` (refused when it holds `" & | < > ^ % !`), Git Bash and
+  POSIX `-lc "eval '<command>'; exec <shell> -l"`, WSL `--exec bash -lc` the
+  same way. The session is named after the shell
   ("PowerShell") unless the request names it. `shells.program` resolves
   PowerShell to `pwsh.exe` on PATH or under Program Files, else
   `powershell.exe`; a missing Git Bash or WSL is a 400. For PowerShell, cmd
   and Git Bash the spec also carries `shell=<value>` (`LaunchSpec.shell`,
   passed as the `shell` keyword of `SessionManager.spawn`/`spawn_async`),
   and the session manager adds the shell integration (below).
+- A WSL or SSH workspace (`remote`, from `workspace_target`) starts there:
+  see "Workspace locations, no saved terminals (4.5)".
 - Shell integration (Windows, local terminals only; `shells.INTEGRATED`).
   `SessionManager._build` applies it to a plain shell launch (`shell=`) and
-  to an agent wrap in the same shells; WSL, POSIX, SSH and saved profiles
-  are unchanged. Each prompt reports the folder as
+  to an agent wrap in the same shells; WSL, POSIX and SSH are unchanged.
+  Each prompt reports the folder as
   `ESC ] 9 ; 9 ; <Windows path> ESC \` (unquoted):
   - PowerShell: argv `-NoLogo -NoExit -Command <boot>`, where `<boot>` is
     `& ([ScriptBlock]::Create($env:QUICKTERM_PS_INIT))` in FullLanguage mode
@@ -1210,9 +1214,9 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]
     `shells.GIT_BASH_PROMPT_COMMAND`), which turns `/c/x` into `C:\x` and
     asks `pwd -W` for anything else. A bashrc that sets its own
     `PROMPT_COMMAND` replaces it; then nothing is reported.
-- `profile` `"claude-code"` or `"codex"` names the agent from `cfg.agents`
-  unless a saved profile has that exact name; the session's `profile` is the
-  kind and its name "Claude Code" or "Codex". An agent launch carries
+- `profile` `"claude-code"` or `"codex"` names the agent from `cfg.agents`,
+  with the request's `agent` options merged over the saved ones for that
+  launch; the session's `profile` is the kind and its name "Claude Code" or "Codex". An agent launch carries
   `wrap = shells.Wrap(<effective shell>, <its program>, "claude"|"codex")`;
   `SessionManager._build` adds the hooks to the agent's argv first (none for
   WSL) and then wraps it with `shells.wrap` (the argv per shell is in 4.3,
@@ -1246,18 +1250,13 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]
 
 ### SSH and SFTP
 
-`ssh_client` null or `"putty"` keeps the pre-4.0 path: plink/psftp argv
-`[-ssh] [-P port] [-i key] [user@]host [remote-command]`. `"openssh"` runs
-`%SystemRoot%\System32\OpenSSH\ssh.exe` / `sftp.exe` on Windows, else
-`shutil.which("ssh"|"sftp")`:
-
-- ssh: `[-p port] [-i key] [-J jump] <profile args> [user@]host [remote command]`
-- sftp: `[-P port] [-i key] [-J jump] <profile args> [user@]host`
-
-When `ssh_host` is an alias from `~/.ssh/config`, ssh applies every directive
-of that host itself and explicit profile fields override it. A missing client
-raises "OpenSSH client not found. Install it under Settings > Apps > Optional
-features > OpenSSH Client.", a 400 on the spawn.
+Superseded in 4.5: ssh and sftp profiles, plink/psftp and the PuTTY client
+are gone. SSH is reached only as a workspace location, with OpenSSH
+(`%SystemRoot%\System32\OpenSSH\ssh.exe` on Windows, else
+`shutil.which("ssh")`, `ssh_config.openssh_path`) and the destination as
+`~/.ssh/config` reads it. A missing client raises "OpenSSH client not found.
+Install it under Settings > Apps > Optional features > OpenSSH Client.", a
+400 on the spawn.
 
 `quickterm/ssh_config.py` is pure: it parses `~/.ssh/config` (one keyword per
 line, `keyword value` or `keyword=value`, case-insensitive keywords, `#`
@@ -1272,25 +1271,25 @@ the first entry with `~` expanded, and key files are never read.
 `resolve(alias)` runs `ssh.exe -G <alias>` (CREATE_NO_WINDOW, 3 s) and falls
 back to the parser.
 
-### Terminals of a workspace on an SSH host (as built, 4.3)
+### Terminals of a workspace on an SSH host (as built, 4.3; updated for 4.5)
 
 `api/common.resolve_request` reads `launch.workspace_target(name)` and hands
 it to `launch.resolve(..., remote=RemoteTarget(host, path))`. Without an
-explicit `cmd`, a plain terminal, an agent or a remote-capable profile
-becomes `LaunchSpec(cmd=ssh, args=..., remote=RemoteLaunch(...))`; a request
-`shell` is ignored there (the shell setting does not apply on a host), and a
-connection profile still starts on this computer. `launch.openssh_args(prof,
-options)` is the one OpenSSH argv builder (`_openssh`), shared with
-`ws_exec`.
+explicit `cmd`, a plain terminal or an agent becomes `LaunchSpec(cmd=ssh,
+args=..., remote=RemoteLaunch(...))` (a `wsl:` host goes to the WSL path of
+the 4.5 section instead); a request `shell` is ignored there (the shell
+setting does not apply on a host). 4.3 built the ssh options from an SSH
+profile (`launch.openssh_args`); since 4.5 they are only `-t <destination>`,
+and `ws_exec.ssh_argv` builds the background calls.
 
-- ssh options: `-t`, the profile's port, key, ProxyJump and own arguments,
-  the target, then one remote command. Every folder and argument is
-  POSIX-quoted (`ws_exec.posix_quote`, which refuses NUL and line breaks); a
-  leading `~` stays unquoted so the host expands it.
-- Plain: `cd <folder>; exec "$SHELL" -l`. A remote-capable profile (`bash`,
-  `zsh`, `fish` or `git-bash` with a start command, or `custom` whose
-  program is not a Windows path, `launch.remote_start`): `cd <folder>;
-  <start>; exec "$SHELL" -l`.
+- ssh options: `-t`, the destination, then one remote command. Port, key,
+  ProxyJump and the rest come from `~/.ssh/config`. Every folder and
+  argument is POSIX-quoted (`ws_exec.posix_quote`, which refuses NUL and
+  line breaks); a leading `~` stays unquoted so the host expands it.
+- Plain: `cd <folder>; [export NAME=<value>; ...] exec "$SHELL" -l`, with
+  the workspace's and the request's env exported first (4.5). With a
+  `command`: `cd <folder>; [exports] "${SHELL:-/bin/sh}" -lc '<command>';
+  exec "$SHELL" -l`. The remote-capable profiles of 4.3 are gone.
 - Agent: the CLI name (or the settings' `cmd` when it is a POSIX path) with
   the same arguments as a local launch, run through `"${SHELL:-/bin/sh}" -lc`
   so the login PATH applies, then `exec "$SHELL" -l`.
@@ -1321,8 +1320,8 @@ options)` is the one OpenSSH argv builder (`_openssh`), shared with
 - `quickterm-agent-start` sets an idle state of that agent unless it already
   reported one; `quickterm-agent-exit` sets `agent` to null, for Claude and
   Codex alike. They exist because the process check sees only ssh here. A
-  remote session's `GET /api/sessions` item carries `host` (the profile
-  name; null locally), and the frontend's `agentPresent` judges a remote
+  remote session's `GET /api/sessions` item carries `host` (the SSH
+  destination; null locally and in WSL), and the frontend's `agentPresent` judges a remote
   agent pane by `agent` alone, so Shift+Enter stops sending ESC CR once the
   agent has left.
 - Claude's hooks are one inline `--settings` (no status line); each command
@@ -1341,10 +1340,13 @@ options)` is the one OpenSSH argv builder (`_openssh`), shared with
 ### Agent profiles
 
 Since 4.3 these are the agent settings (`cfg.agents`, launched as profile
-`"claude-code"` or `"codex"`); a saved profile of an agent type is refused.
-The mode is `agent_mode` from the request, else the settings' `agent_mode`,
-else the type default (claude-code `continue`, codex `new`).
-`agents.validate` checks the options on save; `launch.resolve` stays the only
+`"claude-code"` or `"codex"`; `config.agent_profile` hands them to the launch
+code as an `AgentProfile`, and `profile` below means that object). There
+are no saved profiles since 4.5. The mode is `agent_mode` from the request (a
+startup item sends its own), else the settings' `agent_mode`, else the type default
+(claude-code `continue`, codex `new`). A request's `agent` options are
+merged over the settings' for one launch. `agents.validate` checks the
+options on save and on every launch; `launch.resolve` stays the only
 launch path. `GET /api/system/agents` serves each option's `flag` too, for the
 command line Settings shows.
 
@@ -1470,10 +1472,8 @@ Binding grammar, shared with the Settings key capture (`shortcut_input.js`):
 `app.py` registers the summon key with `on_hotkey_thread=True` as
 `lambda: toggle_window("QuickTerm", getattr(cfg, "overlay", None))`, so the
 live overlay settings are read at press time and the Win32 window work never
-runs on the asyncio loop. Profile keys run on the loop and only schedule a
-launch; the callback looks its profile up by keybinding at press time, so a
-save that edits a profile but keeps its key launches the edited one.
-`_GlobalHotkeys.rebind(cfg)` (the server's `rebind_hotkeys`) builds the entries
+runs on the asyncio loop. The summon key is the only global hotkey since 4.5
+(per-profile keys went with the profiles). `_GlobalHotkeys.rebind(cfg)` (the server's `rebind_hotkeys`) builds the entries
 from `cfg`, calls `HotkeyManager.rebind` and sets `cfg.hotkey_error`;
 `_GlobalHotkeys.suspend(flag)` is the server's `suspend_hotkeys`.
 
@@ -1552,7 +1552,7 @@ def user_command(status: dict) -> str | None
   `"<exe>" --statusline`; from source it is `"<python>" -P -c "<import
   statusline_chain and run>" --statusline`, because importing the whole app
   takes over a second and Claude runs the command on every status update.
-  A `--settings` value of the profile's own that sets `statusLine` keeps it
+  A `--settings` value of the agent settings' own that sets `statusLine` keeps it
   for that launch, and that launch reports no Claude numbers.
 - `statusline_chain.run` resolves the user's command itself from
   `<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`, then
@@ -1574,8 +1574,8 @@ def user_command(status: dict) -> str | None
   `@xterm/addon-webgl@0.19.0`, `@xterm/addon-web-links@0.12.0`,
   `@xterm/addon-unicode11@0.9.0`, `@xterm/addon-search@0.16.0` (the release
   published with xterm 6.0.0; its MIT licence is `vendor/addon-search.LICENSE`)
-  (the UMD `lib/*.js` builds and `css/xterm.css`, committed; `vendor/` is in
-  `.gitignore` for PuTTY, so a new file here needs `git add -f`). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
+  (the UMD `lib/*.js` builds and `css/xterm.css`, committed; since 4.5 `.gitignore`
+  ignores only the root `/vendor/`, so a new file here needs no `git add -f`). 6.0 is the floor on Windows: the bundled OpenConsole is 1.24,
   and since 1.22 ConPTY does not repaint after a resize, so the terminal must
   reflow as ConPTY does, which 5.x did not.
 - The top-level document is the shell (see **Shell and the stage** below);
@@ -1621,7 +1621,7 @@ def user_command(status: dict) -> str | None
   like a tiling window manager) and the tree helpers `pane_move.js` builds
   its drag surgery on. Workspace views are not tiled (see **Shell and the
   stage** below).
-  A new terminal with no direction of its own (`Alt+N`, attach, run profile)
+  A new terminal with no direction of its own (`Alt+N`, attach, an agent row)
   uses `LayoutManager.autoDir`, which is dwindle. Splits, closes, moves and
   rebalances slide: app.css transitions `flex-grow` on the children of a
   split carrying `.sliding`, never during a splitter drag, and
@@ -1742,7 +1742,7 @@ def user_command(status: dict) -> str | None
     focus owner `"switcher"`).
 - Panes: an exited pane shows `[exited · code N]` with a Restart action
   (button, Enter in the pane, "restart terminal" in the palette) when it knows
-  its launch (a profile or a launch spec; an attached terminal started
+  its launch (an agent or a launch spec; an attached terminal started
   elsewhere does not). The restart repeats that launch with its
   `launch_options` and keeps the old output above a `[restarted]` mark; on
   Windows the old screen scrolls into the scrollback first, because a new
@@ -1975,14 +1975,17 @@ def user_command(status: dict) -> str | None
   only them), where `dropKilledEverywhere(ids)` closes and
   forgets them in every view without another backend call.
 - Workspace board (the panel view still named `"dashboard"`, Alt+G, the footer
-  button and the palette's "workspace board"): see "Workspace board replaces
-  the dashboard" in 4.3. Scratch is never a card. A card's terminals are the
-  live sessions whose owner (`liveTerminals()`, the sidebar's rule) is that
-  workspace. A move is shown at once and sent with `PUT /api/board/{name}`;
-  a failure puts the card back and says so above the columns. The search box
-  sits in the panel head (`Panels#headTools`); Escape clears it first, then
-  closes the board. Cards: Enter or Space shows the workspace, Up and Down
-  walk a column, Alt+Left and Alt+Right move it and keep it focused.
+  button and the palette's "workspace board"): since 4.5 the six derived
+  columns of "The board sorts itself" (4.5 wave 2); the 4.3 four-column
+  board with drag and `PUT /api/board/{name}` is superseded. Scratch is never
+  a card. A card's terminals are the live sessions whose owner
+  (`liveTerminals()`, the sidebar's rule) is that workspace; a workspace
+  `GET /api/board` does not name waits in Idle. A card whose status changes
+  keeps its node and slides to its new column. The search box sits in the
+  panel head (`Panels#headTools`); Escape clears it first, then closes the
+  board. Cards: Enter or Space shows the workspace, Up and Down walk a
+  column, Left and Right go to the nearest column that has a card. No card
+  moves by hand.
 - Workspaces: named workspaces autosave layout and session IDs and restore the
   exact live sessions; the shell's arrangement remembers which views were
   open. The window's scratch view uses `scratch-view-<registry id>` with
@@ -1995,84 +1998,63 @@ def user_command(status: dict) -> str | None
 - The sidebar lists every live terminal on the backend in its owner's group.
   Chips appear only for needs you, new output, busy and open elsewhere.
   Per-terminal CPU and memory are the sidebar footer's Resources popover.
-- Settings, with no raw JSON editor. Tabs (`settingsTab` ids):
-  - `general` "General": appearance, font, default terminal
+- Settings, with no raw JSON editor. Tabs (`settingsTab` ids, `SETTINGS_TABS`
+  in `settings_index.js`):
+  - `general` "General": color theme (opens the theme switcher), font, text
+    size, shell, notifications, keep awake
   - `window` "Window": size presets through `configChoice` (1280×800,
     1440×900, 1600×1000, 1920×1080, Custom W×H), **Use this window's size**
     (`window.pywebview.api.window_bounds()`, else `outerWidth`/`outerHeight`),
     the remember toggle, the Overlay group (enable, edge, width %, height %,
     always on top, hide when focus leaves, monitor, animate) and the summon
     shortcut with a note that overlay mode changes what it does
-  - `shortcuts` "Shortcuts": the summon key, every profile's global key in
-    one table, and the in-app key reference
-  - `connections` "Terminals" (`terminals` is accepted as an alias): master
-    and detail
+  - `shortcuts` "Shortcuts": the summon key and the in-app key reference
+  - `agents` "Agents" (4.5): Claude Code and Codex, one row each with the
+    resulting command line, expanding to the option editor and their
+    environment. The old ids `connections` and `terminals` open this tab
+    (`settingsTabId`).
   - `snippets` "Snippets": master and detail
   - `advanced` "Advanced": host, port, scrollback, idle cleanup, limit,
     scratch folder, update check
   - `about` "About"
 
-  `Panels#showSetting(id)`, `Panels#showConfig("terminal"|"snippet",
-  name|null)` and `Panels#settingEntries()` are the entry points for the
-  palette and search. `Panels#showWorkspace(name)` opens the
+  `Panels#showSetting(id)`, `Panels#showConfig("snippet", name|null)` (any
+  other kind opens Agents) and `Panels#settingEntries()` are the entry points
+  for the palette and search. `Panels#showWorkspace(name)` opens the
   `"workspace"` sheet for that workspace (the sidebar's "Workspace
-  settings"): folder, logo and the saved layout's preview, Save and Cancel. Every chooser is `configChoice` (a `menu.js` menu);
-  `Panels._select` and every native `<select>` are gone. Every field stamps
-  `data-setting=<id>`.
-- Master and detail (`config_list.js`): on the left a filter input (always
-  shown) and one-line rows (dot, name, muted "type · target" or a command
-  preview, a problem marker, a dirty marker, hover actions **Open** and
-  **Remove** with the confirm popover); on the right the editor of the
-  selected item. Rows are patched with `patchList`; typing in the editor
-  updates its row through `setText` and never rebuilds the editor; selection
-  survives filtering. Below 820 px the detail replaces the list and shows a
-  Back button. **Add** is a `menu.js` menu with headings (Shells, Agents,
-  Remote, From ~/.ssh/config, Devices, Containers, Desktop) built from
-  `CONNECTION_CATALOG`; Codex sits under Agents.
-- Terminal editor: name, description, type label, executable or command line;
-  then the type's fields; then launch mode, shortcut (capture input) and
-  autostart. Arguments (one argv item per line), environment (key/value
-  controls) and the start command sit under one **Advanced** disclosure.
-  Local terminals expose executable, detected WSL distributions, startup
-  command, shortcut and autostart. Serial, Telnet, Docker, Podman,
-  Kubernetes, RDP and VNC expose their typed fields. Desktop profiles say Open
-  window, terminal profiles Open terminal. The pure helpers `runLine`,
-  `kindForCommand`, `splitCommandLine`, `joinCommandLine`,
-  `takesStartCommand` and `purposeFor` live in `profile_model.js`; what is
-  wrong with a profile is `connectionProblems` in `panel_connections.js`.
-  Agent types, modes, mode labels (`AGENT_MODE_LABELS`), `agentModeOf(profile,
+  settings"): location, folder, Environment, Start with, logo and the saved
+  layout's preview, with Cancel, **Run setup now** and Save. Every chooser is
+  `configChoice` (a `menu.js` menu); `Panels._select` and every native
+  `<select>` are gone. Every field stamps `data-setting=<id>`.
+- Master and detail (`config_list.js`) serves the snippets since 4.5: on the
+  left a filter input (always shown) and one-line rows (name, a command
+  preview, a problem marker, a dirty marker, hover action **Remove** with
+  the confirm popover); on the right the editor of the selected item. Rows
+  are patched with `patchList`; typing in the editor updates its row through
+  `setText` and never rebuilds the editor; selection survives filtering.
+  Below 820 px the detail replaces the list and shows a Back button.
+- Superseded in 4.5: the `connections` "Terminals" tab, the terminal editor
+  (executable, arguments, start command, shortcut, autostart, connection
+  fields), the SSH and SFTP editor with its client choice and the
+  "From ~/.ssh/config" Add rows, `profile_model.js` and
+  `panel_connections.js`.
+- Agent types, modes, mode labels (`AGENT_MODE_LABELS`), `agentModeOf(profile,
   type = profile.terminal_type)` and the arguments a mode adds (`modeArgs`)
-  exist once, in `agent_profile.js`; Settings, the sidebar's terminal choices
-  and the palette import them from there.
-- Agent editor (`claude-code`, `codex`): the fields are generated from
+  exist once, in `agent_profile.js`; Settings, the sidebar's terminal
+  choices, the palette and the workspace Start with list import them from
+  there.
+- Agent editor (`claude-code`, `codex`, Settings > Agents and each agent item
+  of a workspace's Start with list): the fields are generated from
   `GET /api/system/agents`, so the frontend hardcodes no option list. The
-  mode is `profile.agent_mode ?? profile.claude_mode ?? (codex ? "new" :
-  "continue")`, labelled new "new conversation", continue "continue latest",
-  resume "choose session", fork "fork a session" (codex only), agents "agent
-  manager". Profiles created here start at `new`. Advanced options sit under
-  the Advanced disclosure. The agent executables are detected in the terminal
-  inventory but stay profile-only, never generic system shells.
-- SSH and SFTP editor: **Host** is free text plus a `menu.js` suggestion list
-  of `~/.ssh/config` aliases, each with detail `user@hostname:port`. Choosing
-  an alias sets `ssh_host=<alias>` and `ssh_client="openssh"` and fetches
-  `GET /api/system/ssh-hosts/{alias}`; the resolved values show as
-  placeholders in User, Port, Key and ProxyJump, where an empty field means
-  "from ~/.ssh/config". A **Fill from ~/.ssh/config** text button copies them
-  into the fields. **Client** chooses OpenSSH or PuTTY and is hidden when only
-  one is installed; ProxyJump shows only for OpenSSH; the key hint changes per
-  client. A PuTTY profile whose key does not end in `.ppk` offers a **Switch
-  to OpenSSH** text button. `ssh` relabels the start command as a remote
-  command; `sftp` hides it. The Add menu's "From ~/.ssh/config" heading has
-  one row per alias, each creating an ssh profile named after the alias (made
-  unique) with `ssh_host=<alias>` and `ssh_client="openssh"`.
-- One Save. The footer **Save** persists everything (profiles, snippets,
-  settings) through `settingsPatch`; the detail editor's **Save** button and
-  Ctrl+S inside the sheet trigger the same save. There is no per-connection
-  persistence. Unsaved rows show a dirty marker, and **Open** stays disabled
-  for an unsaved or dirty item. Cancel discards the draft. Removal leaves live
-  sessions running and is committed by Save. A saved change to the summon key
-  or a profile key applies at once (live rebinding); only host and port still
-  say they apply after a restart.
+  mode is `settings.agent_mode ?? (codex ? "new" : "continue")`, labelled
+  new "new conversation", continue "continue latest", resume "choose
+  session", fork "fork a session" (codex only), agents "agent manager".
+  Advanced options sit under the Advanced disclosure.
+- One Save. The footer **Save** persists everything (agents, snippets,
+  settings) through `settingsPatch`; Ctrl+S inside the sheet triggers the
+  same save. Unsaved rows show a dirty marker. Cancel discards the draft. A
+  saved change to the summon key applies at once (live rebinding); only host
+  and port still say they apply after a restart.
 - Key capture (`shortcut_input.js`): a button shows the binding as `kbd`
   chips, or "Not set". Click or Enter starts capture ("Press a shortcut… Esc
   cancels, Backspace clears"): it calls `claimFocus("shortcut")`, listens for
@@ -2094,30 +2076,33 @@ def user_command(status: dict) -> str | None
   `MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)`, and its chip shows what the
   layout prints there (ß, not -, on QWERTZ). The button's accessible name is
   `<label>: <binding | "Not set" | the capture prompt>`.
-  `shortcutWarnings(binding, {summon, profiles, selfIndex})` reports errors
-  (no ctrl, alt or win, flagged `modifier: true`; a duplicate of the summon
-  key or another profile's key) and warnings (a cold Alt key
-  `keys.js` claims; a plain Alt pass-through key such as Alt+V/P/H/0-9/-,
-  Alt+B/F). The capture input serves the summon key, every profile
-  `keybinding` and the parked voice hotkey. `keys.js` exports one `SHORTCUTS`
+  `shortcutWarnings(binding)` reports errors (no ctrl, alt or win, flagged
+  `modifier: true`) and warnings (a cold Alt key `keys.js` claims; a plain
+  Alt pass-through key such as Alt+V/P/H/0-9/-, Alt+B/F). The capture input
+  serves the summon key and the parked voice hotkey. `keys.js` exports one `SHORTCUTS`
   table `[{id, keys, label, group}]`; the Help panel and the Shortcuts tab
   render from it.
 - Settings search: a search input tops the tab nav, with a `/` focus hint
   while the sheet is open. While it holds text, the content area shows results
-  grouped by tab: settings from `SETTINGS_INDEX` plus a row per terminal and
-  snippet in the draft. Choosing one switches tab, scrolls
-  `[data-setting=<id>]` into view, focuses its control and flashes it; a
-  terminal or snippet result selects its row in the master list. Escape clears
-  the box before it closes the sheet.
+  grouped by tab: settings from `SETTINGS_INDEX` plus a row per snippet in
+  the draft. Choosing one switches tab, scrolls `[data-setting=<id>]` into
+  view, focuses its control and flashes it; a snippet result selects its row
+  in the master list. Escape clears the box before it closes the sheet.
 - Advanced exposes loopback host and stored voice preferences as controls;
   voice capture remains unavailable. A first-run three-step setup tour opens
-  only with no configured profiles and no completed-tour flag, and is available
-  again from Help.
-- Themes: four featured choices stay visible; the catalog groups all remaining
-  palettes under Dark, Neon, Soft, Warm, Light, and Custom. Clicking a theme previews
-  both application chrome and every open xterm immediately; Cancel restores the
-  persisted theme.
-- State scope: saved theme/custom palette, font defaults, profiles, snippets,
+  until it was finished or skipped once (`quickterm.setupComplete` in
+  localStorage), and is available again from Help.
+- Themes (4.5): 54 themes plus Custom. Settings > General shows the current
+  theme as a miniature that opens the theme switcher (`theme_switcher.js`,
+  rules in `theme_switcher_model.js`), as does the palette's "color theme…"
+  row. The switcher is a centred sheet of miniatures grouped Dark, Light and
+  Custom, with a search. Moving the selection (arrows, typing, the pointer)
+  previews the theme on the whole window and every view by setting the
+  root styles; Enter or a click saves it and the sheet stays open; Escape
+  or Cancel goes back to the theme it opened on; Done keeps the selected
+  card. Nothing is saved by a preview. The superseded 4.4 picker (four
+  featured choices, Dark, Neon, Soft, Warm groups) is gone.
+- State scope: saved theme/custom palette, font defaults, agent settings, snippets,
   default terminal, retention/limits, scratch folder and other config are
   backend-wide. `global_settings.js` publishes a revision-only storage event
   after saves and refreshes on native-window focus; each receiving parent
@@ -2153,11 +2138,11 @@ def user_command(status: dict) -> str | None
   palette) it focuses **Kill**, and Alt+W or Enter again completes it; opened
   from the header button it focuses **Cancel**. Escape cancels from anywhere
   in the pane. Alt+W on a pane without a live terminal flashes a notice.
-- Starting folders belong to workspaces, not profiles. An explicit launch
-  directory overrides the workspace root; missing or deleted roots fall back
-  to the home folder. WSL launches translate Windows roots for `--cd`, and
-  use `wsl.exe --cd ~` with no root. The profile startup command runs after
-  that location is selected. Every folder field is
+- Starting folders belong to workspaces, not to the agent settings or a
+  startup item. An explicit launch directory overrides the workspace root;
+  missing or deleted roots fall back to the home folder. WSL launches
+  translate Windows roots for `--cd`, and use `wsl.exe --cd ~` with no root.
+  A startup item's shell command runs after that folder is selected. Every folder field is
   built by the one shared `folderPickerControl(input, options)` in
   `panel_shared.js`, which keeps manual entry and dispatches a bubbling `input`
   event on the field when a folder is picked, so callers need no second
@@ -2186,8 +2171,10 @@ def user_command(status: dict) -> str | None
   path that was typed but never listed, so a typo shows an error in the modal
   instead of becoming a workspace folder that does not exist.
 - Command palette Alt+K: one input, a small kind label per row, fuzzy over
-  profiles / actions (new terminal, split h/v, zoom, detach, kill, open folder
-  in Explorer / VS Code, open file viewer) / snippets / recent sessions, plus:
+  new-terminal rows (`new terminal: <shell or agent>`) / actions (new
+  terminal, split h/v, zoom, detach, kill, open folder in Explorer / VS
+  Code, open file viewer, color theme…, run workspace setup, new
+  workspace…) / snippets / recent sessions, plus:
   - `open workspace: <name>` → `app.openWorkspace(name)` (replaces "load
     workspace" and "show workspace beside…"; its hint says `shown` or
     `open`), `close workspace: <name>` for open views, `next workspace` and
@@ -2200,11 +2187,11 @@ def user_command(status: dict) -> str | None
     because this is a keyboard path; it calls `app.killTerminal(session)` and
     shows a failure inline
   - `setting: <label>` (kind `setting`) from `app.settingEntries()` →
-    `app.openSetting(id)`; `edit terminal: <name>` →
-    `app.editTerminalConfig(name)`; `edit snippet: <name>` →
-    `app.editSnippet(name)`
-  - agent rows per agent profile: "<type> new / continue / choose session /
-    fork (codex) / agent manager: <profile>", "split agent view: <profile>",
+    `app.openSetting(id)`; `edit snippet: <name>` → `app.editSnippet(name)`
+    (the 4.4 `edit terminal: <name>` rows went with the saved terminals;
+    `app.editTerminalConfig` now opens Settings > Agents)
+  - agent rows per agent: "<Claude Code|Codex> new / continue / choose
+    session / fork (codex) / agent manager", "split agent view: <agent>",
     and `resume <Claude|Codex> session: <title>` for the active workspace,
     filled late from `api.listAgentSessions`. `agentSessionTarget(app)` in
     `palette_items.js` picks the folder: a named workspace by name, a scratch
@@ -2264,7 +2251,8 @@ def user_command(status: dict) -> str | None
   The zoom layer matches only keys that actually produce `+`/`-`/`0`: physical
   codes are never matched on their own, so Ctrl+`]` (vim tag jump) and Ctrl+`/`
   (readline/PSReadLine undo) reach the shell on ANSI layouts.
-  Alt+Shift+Left/Up cycle the previous/next new-terminal profile. Ctrl+Left/Right
+  Alt+Shift+Left/Up open the "+" menu (4.4; there is no choice to cycle
+  since every row starts its terminal). Ctrl+Left/Right
   remain untouched for PowerShell/readline word navigation.
   Alt+Shift+C opens the focused terminal's folder (its OSC 7 directory, else
   its launch folder, else the workspace folder) in VS Code through
@@ -2326,7 +2314,8 @@ def user_command(status: dict) -> str | None
 - Desktop file/image drops use pywebview's native WebView2 bridge to obtain
   host-verified full paths, then insert them shell-quoted and separated by
   spaces without submitting the command. WSL receives `/mnt/<drive>/...`
-  translation; SSH/SFTP refuse misleading local paths. A browser that withholds
+  translation; a pane whose terminal type is `ssh` or `sftp` refuses
+  misleading local paths. A browser that withholds
   the native path produces an explicit Copy-as-path/Ctrl+V hint rather than a
   fake basename. Native Ctrl+V/Ctrl+Shift+V remains the ordinary
   PowerShell-friendly paste path.
@@ -2337,7 +2326,7 @@ def user_command(status: dict) -> str | None
   before considering the control that originally opened the panel.
 - Workspace restore attaches only matching live session IDs. A missing process
   restores as a transcript-free unavailable pane with explicit replacement and,
-  for agent profiles, recovery through the agent's own continue
+  for agents, recovery through the agent's own continue
   (`claude --continue`, `codex resume --last`); it is never silently replaced
   under the old terminal identity.
 - Normal persistent logging is warning/error-only, bounded to one 128 KB file
@@ -2423,7 +2412,7 @@ runs `%SystemRoot%\System32\curl.exe -K <config>` from
 `%APPDATA%/quickterm/hooks/`; the configs read the three variables and stdin,
 so one static set serves every terminal. Claude's `"type": "http"` hooks
 cannot put an env var into the URL. Two `--settings` flags do not merge (the
-last wins), so a profile's own `settings` option is read, QuickTerm's hooks are
+last wins), so the agent settings' own `settings` option is read, QuickTerm's hooks are
 appended, and the result is written to `hooks/claude-settings-<hash>.json` and
 passed as the only `--settings`; unreadable user settings leave the launch
 without hooks. Codex gets `-c notify=[curl, -K, codex-notify.curl,
@@ -2681,6 +2670,8 @@ Changing anything here goes through the integrator.
     with the Linux `claude`/`codex` on that distro's PATH. Agent hooks are
     skipped for WSL (the Windows curl and env do not reach it); the agent
     then reports no state, as an agent launched outside QuickTerm does.
+    (Superseded in 4.5 for WSL workspaces: their agents report through
+    Windows `curl.exe` by WSL interop, see "Workspace locations".)
   - POSIX: `$SHELL -lc "<command>; exec $SHELL -l"`.
 - The session keeps `terminal_type` `"claude-code"` / `"codex"` and the
   agent's label, so agent state, Shift+Enter, the sidebar chips, resume and
@@ -2688,10 +2679,16 @@ Changing anything here goes through the integrator.
   arguments are still added to the agent command, not to the shell.
   When the agent exits, the pane stays open at the shell prompt; the session's
   agent state returns to none.
-- A profile's own `cmd` override for an agent still names the agent
-  executable; it is wrapped in the shell the same way.
+- The agent settings' own `cmd` override still names the agent executable;
+  it is wrapped in the shell the same way.
 
 ### The "+" menu
+
+Superseded in 4.5: saved terminals no longer appear in this menu, and it
+has no "Terminal settings…" row. Its rows are the available shells, Claude
+Code and Codex, and "As administrator" (`newTerminalMenu` in
+`sidebar_model.js`); in a WSL or SSH workspace the first row is "Shell in
+<location>" and there is no administrator row.
 
 The sidebar's new-terminal button:
 
@@ -2718,6 +2715,11 @@ The sidebar's new-terminal button:
   `shell`.
 
 ### Agents are settings, profiles are for special terminals (added 2026-10-25)
+
+Superseded in 4.5: the profiles this section kept (SSH, SFTP, connection
+types, `custom`, shells with a start command) are gone too, and so is the
+save-time rejection below. The agent settings and the 4.3 migration stay
+as written. See "Workspace locations, no saved terminals (4.5)".
 
 Shells and agents stop being profiles. Profiles remain only for terminals that
 need their own target or command: SSH, SFTP, the other connection types
@@ -2809,6 +2811,11 @@ Backend:
 
 ### Workspace board replaces the dashboard (added 2026-10-25)
 
+Superseded in 4.5 wave 2: the columns are derived, not dragged. The four
+columns, the drag and Alt+Left/Right moves, `board.json` and
+`PUT /api/board/{name}` below are gone; see "The board sorts itself". What
+moved to the sidebar menu and the palette stays there.
+
 A workspace board, in place of today's dashboard panel (the same sidebar
 footer button and palette entry open it; the button's tooltip becomes
 "Workspace board").
@@ -2838,6 +2845,12 @@ footer button and palette entry open it; the button's tooltip becomes
   404 for an unknown workspace, 400 for an unknown status.
 
 ### Workspaces on an SSH host (added 2026-10-25)
+
+Superseded in 4.5: `host` is an SSH destination, not a profile name; the
+ssh options come from `~/.ssh/config`; "new workspace on host…" became the
+one "New workspace…" dialog; the "+" menu lists no custom profiles. The
+agent hooks over the forwarded socket and the git cache stand. See
+"Workspace locations, no saved terminals (4.5)".
 
 People code on a remote machine over SSH. A workspace can live there, and it
 works the same way a local one does: the "+" menu, Claude Code and Codex with
@@ -2890,6 +2903,251 @@ agent state, Shift+Enter, the sidebar branch, the board.
 - The sidebar row of a remote workspace shows `@<host>` after its name in
   the muted colour; nothing else changes.
 
+### Workspace locations, no saved terminals (4.5, frozen 2026-10-25)
+
+Devin: "neuen Workspace in SSH, neuen Workspace in WSL, halt neuen Workspace
+in Location" and "wir sollten auch gar keine Terminals haben". A workspace
+lives at a location (this PC, a WSL distribution, an SSH host) and works
+the same at each one. Saved terminals (profiles) go entirely. This section
+replaces the profile parts of "Workspaces on an SSH host" above.
+
+Locations
+- `Workspace.host` (JSON `host`, field name unchanged) names the location:
+  - `null`: this PC. `path` is a Windows folder (`normalize_root`).
+  - `"wsl:<distro>"`: a WSL distribution; the name follows the
+    `shells._DISTRO` rule. `path` is a POSIX path there (`/...`, `~`, `~/...`,
+    `normalize_remote_root`).
+  - any other string: an SSH destination as OpenSSH reads it: a
+    `~/.ssh/config` Host alias, `[user@]hostname`, or
+    `ssh://[user@]hostname[:port]`. No leading `-`, no whitespace, no control
+    characters, at most 200 characters. Port, key, ProxyJump and the rest come
+    from `~/.ssh/config`; QuickTerm stores nothing else. `path` is POSIX.
+- `workspace.location_kind(host) -> "local" | "wsl" | "ssh"` and
+  `workspace.wsl_distro(host) -> str | None` are the one place that reads it.
+- `ws_exec.run(ws, argv, ...)` keeps its signature and works for all three:
+  local as today; WSL as `wsl.exe -d <distro> --cd <path> --exec <env prefix>
+  <argv>` (no shell reads the words); SSH as `<openssh ssh> <batch options>
+  <destination> <cd ...&& quoted argv>`. `ws_files.HostFolder`, git info,
+  the right panel and the board therefore work in WSL as they do over SSH.
+  No profile is looked up anywhere (`ws_exec.find_profile` goes).
+- Terminals: a plain terminal in a WSL workspace is `wsl.exe -d <distro>
+  --cd <path>` (the distribution's login shell; the `shell` setting does not
+  apply); in an SSH workspace `ssh -t <destination> "cd <path>; exec
+  \"$SHELL\" -l"` as before. Claude Code and Codex in WSL run through the
+  existing WSL wrap (`--cd <path> --exec bash -lc "<cli> ...; <exit marker>;
+  exec bash -l"`, the CLI from the distribution's PATH); over SSH as before,
+  with the forwarded-socket hooks. Agent state for a WSL agent goes through
+  Windows `curl.exe` via WSL interop with `WSLENV` carrying
+  `QUICKTERM_PORT/QUICKTERM_SESSION_ID/QUICKTERM_HOOK_TOKEN`, if that works on
+  this machine; otherwise WSL agents keep the exit marker only, and the
+  report says so. The "+" menu of a WSL or SSH workspace lists "Shell in
+  <location label>", Claude Code and Codex.
+- An administrator terminal is refused in a WSL or SSH workspace (400), as it
+  is on an SSH host today.
+- `GET /api/locations` (token-gated) -> `{"locations": [entry, ...]}`, entry
+  `{"id": str | null, "kind": "local"|"wsl"|"ssh", "label": str,
+  "detail": str | null, "browse": str | null}`, in this order: This PC
+  (`id: null`, `browse: null`), one per installed WSL distribution from the
+  cached inventory (`id: "wsl:<d>"`, `label: "WSL: <d>"`, `browse:
+  "\\\\wsl.localhost\\<d>\\home"`), one per concrete Host alias in
+  `~/.ssh/config` (`id: "<alias>"`, `label: "<alias>"`, `detail:
+  "[user@]hostname"` when the config names them). It starts no distribution
+  and opens no connection.
+- `GET /api/fs/dirs?path=` also lists `\\wsl.localhost\<d>\...` and
+  `\\wsl$\<d>\...`; when such a path is unreachable because the distribution
+  is stopped, it starts it once (`wsl.exe -d <d> --exec true`, off the loop,
+  20 s timeout) and lists again. The frontend turns a chosen
+  `\\wsl.localhost\<d>\a\b` (or `\\wsl$\...`) into `/a/b` for `path`.
+- `POST /api/workspaces/remote-check {host, path}` -> `{ok, message}` checks a
+  WSL or SSH folder (`test -d`), shape unchanged.
+- `PUT /api/workspaces/{name}` takes `host` as above; a bad one is a 400 with
+  the reason.
+
+No saved terminals
+- `AppConfig.profiles` goes. Loading an older config drops `profiles` once,
+  writing `config.pre-4.5.json` next to it first, and turns every workspace
+  whose `host` named an SSH profile into that profile's destination
+  (`ssh://user@host:port` when it had a port, else `[user@]host`). A
+  profile's key or ProxyJump cannot be carried; the migration notice
+  (`take_migration_notice`) names those hosts and says to put them in
+  `~/.ssh/config`.
+- The agents stay settings (`AppConfig.agents`) and still launch as
+  `profile: "claude-code" | "codex"` in `POST /api/sessions`, `/api/elevate`,
+  `POST /api/launches` and `quickterm new`; any other profile name is a 404
+  `unknown profile`. A plain terminal is a request without `profile`.
+- Gone with the profiles: `GET /api/profiles`, `profiles` in `GET
+  /api/config` and in `PUT /api/config`, the connection types (ssh, sftp,
+  telnet, serial, docker, podman, kubernetes, rdp, vnc, custom, shell with a
+  start command) and their launchers (`connections.py`, desktop
+  connections), per-profile global hotkeys and autostart, the bundled PuTTY
+  tools (`putty_tools.py`, `scripts/fetch_putty.py`, `vendor/putty`, the
+  spec and installer entries, the PuTTY part of THIRD-PARTY-NOTICES.md), and
+  any secret storage that only connections used. `GET
+  /api/system/ssh-hosts` stays (the locations use `ssh_config.py`).
+- Frontend: no "Terminals and connections" settings, no saved-terminal rows
+  in the "+" menu or the palette, no connection labels on rows. "New
+  workspace…" (sidebar "+" and palette) opens one dialog: Location (a
+  `menu.js` menu over `/api/locations`, plus "Other SSH host…" to type a
+  destination), Folder (Browse for This PC and WSL through the in-app folder
+  browser; typed for SSH), the name prefilled from the folder and editable,
+  and Create. WSL and SSH folders are checked with `remote-check` first; a
+  failed check shows its message and a second Create saves anyway. "New
+  workspace on host…" and its palette host steps go; the dialog covers them.
+  A WSL workspace's head shows `WSL: <d>` where an SSH one shows `@<host>`.
+
+### Workspace setup and a board that sorts itself (4.5 wave 2, frozen 2026-10-25)
+
+Devin: "the workspace setup can start agents and terminals with specific
+configuration ... with envs" and "make the workspace dashboard actually make
+sense, it should move based on status and the status should make sense".
+Saved terminals are gone (above); what they were good for moves into the
+workspace.
+
+Workspace setup
+- A workspace gains `env: {NAME: value}` and `startup: [item, ...]` (JSON
+  keys of the same name; absent means `{}` and `[]`, so every existing file
+  is unchanged). `PUT` and `PATCH /api/workspaces/{name}` treat both like
+  `path`: absent preserves, `null` clears, a value replaces. `GET
+  /api/workspaces/{name}` returns them, `env` in plaintext for the settings
+  editor; no other route or log line carries the values.
+- `env`: names `[A-Za-z_][A-Za-z0-9_]*` of at most 255 characters, at most
+  64 entries, each value at most 8 KB without NUL; names starting
+  `QUICKTERM_` and `WSLENV` are refused in any case, and two names that
+  differ only in case are refused (`workspace.validate_env`). Values are stored encrypted at rest with the same DPAPI store the
+  agent settings' env uses (`secret_store`), never in plaintext in the
+  workspace file. Every terminal of the workspace gets them: locally in the
+  PTY environment, in WSL also listed in `WSLENV`, over SSH exported by the
+  remote command before the shell (values are then visible to the host's
+  process list; the settings say so for an SSH workspace). QuickTerm's own
+  variables always win.
+- `startup` item: `{"kind": "shell" | "claude-code" | "codex", "name": str |
+  null, "shell": str | null, "command": str | null, "agent_mode": str | null,
+  "agent": {} | null, "env": {} | null}`, at most 8 items. `shell` is for `shell`
+  only: which installed shell it starts on this PC (a config `shell` value:
+  `powershell`, `cmd`, `git-bash`, `wsl:<distro>`), null for the configured
+  one; in a WSL or SSH workspace the location's login shell starts
+  regardless. A `cmd` item's command is checked at save with the cmd rule
+  below. `command` is for `shell` only: the
+  shell runs it and then stays at its prompt (PowerShell `-NoExit -Command`,
+  cmd `/k`, bash `-lc "...; exec bash -l"`, WSL and SSH the same way).
+  `agent_mode` and `agent` are the agent launch options with the same
+  allowlist as Settings > Agents (`agents.py`); `env` adds to and overrides
+  the workspace `env` for that one terminal.
+- `POST /api/sessions` gains `command` (plain shell only, as above), `env`
+  (per terminal, same rules) and `agent` (an object of agent options merged
+  over the saved Settings > Agents options for this launch only, then
+  validated with the same allowlist; only with `profile` `claude-code` or
+  `codex`), and keeps `agent_mode` and `shell`; the workspace `env` is added by the
+  backend from the workspace named in the request. A startup item becomes
+  exactly such a request.
+- `command` is one line (no CR, LF or NUL), at most 4096 characters. Under
+  cmd it goes verbatim after `/k` and is refused when it holds any of
+  `" & | < > ^ % !` (400 "the command contains characters cmd.exe would
+  reinterpret"), the rule the agent wrap applies to its arguments. Bash, Git
+  Bash, WSL and SSH run it through `eval` in a login shell, so it is read as
+  typed.
+- Environment merge order, later wins: the agent settings' `env` (Settings >
+  Agents), then the workspace `env`, then the terminal's own `env` (the
+  startup item's or the request's); QuickTerm's own variables
+  (`QUICKTERM_*`) are set last by the session manager.
+  In WSL the workspace and terminal names are appended to `WSLENV` so they
+  reach Linux, and for an agent the agent settings' names too (not `PATH`).
+  Over SSH the workspace and terminal variables are exported by the remote
+  command, each value POSIX-quoted, and the agent settings' `env` is not
+  sent to the host. A value with a line break cannot be quoted there, so
+  saving one on an SSH workspace is refused (400 "Over SSH a variable
+  cannot contain a line break."). Values never go on any other command line
+  and are never logged. A hand-edited bad entry drops only itself on load.
+- Background checks (the folder check, git info, the board's git status)
+  skip a WSL workspace whose distribution is not running
+  (`ws_exec.asleep`, from `wsl.exe --list --running`, cached 15 s), so a
+  stopped distribution stays stopped until a terminal opens there.
+- When it runs: a workspace view that opens with no saved panes (a new
+  workspace), or with a non-empty `startup` and none of its terminals alive,
+  starts its `startup` items in order, each in its own pane placed the usual
+  way; with no items it starts one plain shell, as today. A dead saved
+  layout without a `startup` list is restored as before, with its Restart
+  and Resume offers. A startup pane's saved launch keeps its `shell` and
+  `command` (never its variables), so a restart after a reload repeats
+  them; a restart in the same session repeats the whole item. "Run setup" in the
+  workspace's sidebar menu and the palette starts the items again next to
+  what is open.
+- UI: the workspace settings sheet shows the location and folder, an
+  Environment section (name/value rows, values masked until focused) and a
+  "Start with" list (type menu, name, command for a shell, agent mode and
+  options for an agent through the existing agent fields, per-terminal env),
+  plus "Run setup now". The new-workspace dialog offers "Start with": Shell,
+  Claude Code, Codex (any combination; default Shell), which fills
+  `startup`.
+
+The board sorts itself
+- The column is derived, never dragged. `GET /api/board` ->
+  `{"workspaces": {name: {"status", "reason", "since", "git", "pr"}}}`,
+  where `status` is the first that holds of:
+  1. `needs-you`: a terminal of the workspace has an open attention, or an
+     agent is `waiting` (permission or question) or its last turn `failed`
+     unseen;
+  2. `working`: an agent of the workspace is `working`;
+  3. `in-review`: the branch has an open pull request (draft included);
+  4. `changes`: uncommitted changes, or commits not pushed / not in a pull
+     request yet;
+  5. `done`: the branch's pull request was merged and nothing is
+     uncommitted;
+  6. `idle`: none of these (no terminal, or everything clean and quiet).
+  `reason` is one short line saying why ("Claude waits for permission",
+  "3 files changed · 2 commits not pushed", "PR #12 open · checks passing",
+  "PR #12 merged"). `since` is when the status last changed (epoch seconds),
+  `git` `{branch, dirty, ahead, behind}` or null, `pr` `{number, state,
+  checks, url}` or null. As built: `dirty` is the count of changed files
+  (int); `ahead` and `behind` count against the upstream, or with no
+  upstream `ahead` is the commits past the base branch and `behind` null;
+  `pr.state` is `open | draft | merged | closed`; `pr.checks` is `passing |
+  failing | pending | null` (failing wins over pending over passing). A
+  closed pull request leaves the workspace `idle` with the reason
+  "PR #<n> closed".
+- Facts and cost: agent states and attention come from the session manager
+  (free). Git comes from one `git status --porcelain=v2 --branch` per
+  workspace (`ws_exec`, so WSL and SSH work), cached 20 s and refreshed off
+  the loop; the board never waits for a refresh, it answers from the cache
+  and the next poll shows the new state. The pull request comes from the
+  same `gh` call the right panel uses, cached 120 s per workspace (with the
+  base branch and the commits past it), and only for a branch that is not
+  the base branch and a GitHub remote. Scratch is
+  never a card.
+- `PUT /api/board/{name}` and `board.json` statuses go (the file is ignored
+  and removed once). The board shows the six columns in that order, each
+  with its one-line meaning; a card moves by itself when its status
+  changes (with the usual slide), shows the reason line, its terminals and
+  agents as today, and a click shows the workspace. No drag, no
+  Alt+Left/Right moves.
+
+### Themes and the window frame (4.5, as built)
+
+- `themes.js` ships 54 themes (dark and light) plus Custom. A theme may name
+  an optional `selection` colour (its own selected-row colour); without it
+  the terminal's selection colour stands in. `chromeTokens(id, custom)`
+  derives every chrome token, including `--surface-active` (selected rows:
+  menus, the palette, the active Settings tab, the shown workspace card)
+  and `--term-bg`, `--term-fg`, `--term-scrollbar`, `--term-scrollbar-hover`
+  and `--term-scrollbar-active` (what frames the xterm canvas and its
+  scrollbar). Every text token is held at 4.5:1 on `--bg`, `--surface`,
+  `--field`, `--surface-raised`, `--surface-soft` and `--surface-active`.
+  The `:root` block of `app.css` equals `chromeTokens("graphite")`
+  (`tests/js/chrome_theme.test.mjs`).
+- `applyChromeTheme` writes the tokens as root styles and, in the top
+  window only, calls `window.pywebview.api.set_frame_colors({caption, text,
+  border, light})` (`--bg`, `--text`, `--line-strong`), queued until
+  `pywebviewready`. `_DesktopApi.set_frame_colors` hands them to
+  `quickterm/window_frame.py`, which sets `DWMWA_USE_IMMERSIVE_DARK_MODE`,
+  `DWMWA_CAPTION_COLOR`, `DWMWA_TEXT_COLOR` and `DWMWA_BORDER_COLOR` on every
+  top-level window of the viewer process titled "QuickTerm" or
+  "QuickTerm - ...". Each attribute is best effort (Windows 10 takes only
+  dark mode); bad colours return false, nothing raises into the page.
+- The theme switcher (`theme_switcher.js`) previews by setting the root
+  styles of the shell and every view and saves only when a theme is applied
+  (Enter or a click); while it is open it puts its preview back when the
+  window re-reads the saved config.
+
 ### Round 2: more agent and git features (added 2026-10-25)
 
 Picked from a survey of agent IDEs, minus what QuickTerm already
@@ -2909,7 +3167,9 @@ def exists(ws: Workspace) -> bool
 
 Local: `subprocess.run(argv, cwd=ws.path, ...)` with `CREATE_NO_WINDOW`,
 text mode, UTF-8, no shell. Remote: OpenSSH with `-o BatchMode=yes` and the
-profile's args, the remote command `cd <path> && <argv POSIX-quoted>`.
+destination (the profile's args until 4.5), the remote command
+`cd <path> && <argv POSIX-quoted>`; WSL through `wsl.exe -d <d> --cd <path>
+--exec` (4.5).
 Git info, the right panel and the board use it. The
 integrator commits a local-only version first; the remote part owns it after.
 

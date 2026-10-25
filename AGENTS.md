@@ -183,11 +183,28 @@ because the `.iss` relaunch entry is `skipifsilent`.
   terminal theme at runtime, so the `:root` block in `app.css` is only the
   pre-boot default and must stay numerically identical to what that function
   computes for `graphite`, or the window flashes a different palette at boot.
-  Changing the default palette means changing both
-  (`tests/js/chrome_theme.test.mjs` checks it). Every text token is lifted to
-  4.5:1 on `--bg`, `--surface`, `--field`, `--surface-raised` and
-  `--surface-soft` in every theme; text in the accent colour uses `--accent-text`, the raw `--accent`
+  Changing the default palette means changing both: `app.css` `:root` must
+  equal `chromeTokens("graphite")` (`tests/js/chrome_theme.test.mjs` checks
+  it). The chrome tokens include `--surface-active` (selected rows, from the
+  theme's optional `selection` colour, else the terminal selection) and
+  `--term-bg`, `--term-fg`, `--term-scrollbar`, `--term-scrollbar-hover`
+  and `--term-scrollbar-active` (what frames the xterm canvas); style a
+  selected row or the terminal's frame with those, never a fixed colour.
+  Every text token is lifted to 4.5:1 on `--bg`, `--surface`, `--field`,
+  `--surface-raised`, `--surface-soft` and `--surface-active` in every
+  theme; text in the accent colour uses `--accent-text`, the raw `--accent`
   is for fills, borders and dots.
+- Themes are chosen in the theme switcher (`theme_switcher.js`, rules in
+  `theme_switcher_model.js`), a sheet that stays open. It previews by
+  setting the root styles of the shell and every view and saves only when a
+  theme is applied (Enter or a click); Escape or Cancel restores the theme
+  it opened on. It claims the keyboard in `focus.js` and listens on `window`
+  in the capture phase, so the Settings sheet's Escape does not close
+  Settings under it. A preview must survive the config re-read on window
+  focus. The native title bar follows the theme through
+  `pywebview.api.set_frame_colors` (top window only) and
+  `quickterm/window_frame.py` (DWM caption, text, border and dark-mode
+  attributes, each best effort; Windows 10 takes only dark mode).
 - No destructive action may be reachable without consent or feedback. `×` on a
   pane detaches, never kills; kill is a separate labelled `.danger` control in
   the pane header and on the sidebar row. Clicking an open workspace shows
@@ -225,8 +242,9 @@ because the `.iss` relaunch entry is `skipifsilent`.
   hides, from the sidebar or Alt+arrows, unzooms first. Before adding a
   control, ask whether the palette (Alt+K), a tooltip or an existing menu
   already carries it: the launch row is one split button (`+ <choice>` and
-  its menu, which also holds the administrator terminal and Terminal
-  settings), the Workspaces header draws only `+` until hovered, and a
+  its menu: the shells, Claude Code, Codex and the administrator terminal;
+  in a WSL or SSH workspace "Shell in <location>" and the agents), the
+  Workspaces header draws only `+` until hovered, and a
   workspace card's hover tray is Close and `⋮` (Explorer and VS Code are
   rows of that menu). "+" and Alt+N start the menu row picked last
   (`quickterm.newTerminalChoice`), never only the configured shell. Each
@@ -281,21 +299,63 @@ because the `.iss` relaunch entry is `skipifsilent`.
   registry is served replay-only rather than refused, and the client reconnects
   after a 1013 overflow even if the session has since exited.
 - A workspace IS a folder, and it is the ONLY folder. `Workspace.path` is the
-  root every session it owns starts in; profiles carry no folder at all, so one
-  profile is usable in every project. Spawn order: explicit request `cwd` >
+  root every session it owns starts in; the agents carry no folder, so their
+  settings work in every project. Spawn order: explicit request `cwd` >
   workspace root > `default_cwd()`. A missing root degrades to the home folder,
-  and a folder that has been deleted must never fail the spawn. Profiles used to
-  carry `cwd` and `subpath`; `_known()` drops both from older configs on load. `PUT
+  and a folder that has been deleted must never fail the spawn. `PUT
   /api/workspaces/{name}` treats `path` as three-valued: **absent preserves**
   (every layout autosave takes that branch), `null` clears, a string sets.
+- The folder lives at a location, `Workspace.host`: `null` is this PC,
+  `wsl:<distro>` a WSL distribution, anything else an SSH destination as
+  OpenSSH reads it (a `~/.ssh/config` alias, `[user@]host`,
+  `ssh://user@host:port`; port, key and jump host come from that config, never
+  from QuickTerm). `workspace.location_kind` / `wsl_distro` are the one reader.
+  There are no saved terminals (profiles): 4.5 dropped them, with a one-time
+  migration (`migrate_profiles`, backup `config.pre-4.5.json`) that turned
+  each SSH profile a workspace named into its destination and lists what it
+  could not carry in `migration-notice.txt`. `ws_exec.run` is the one way to
+  run a program in a workspace folder at any location: WSL as `wsl.exe -d <d>
+  --cd <folder> --exec sh -c <guard> ...` (the guard exists because `--cd` to
+  a missing folder prints an error and runs the program in `/` with exit 0),
+  SSH as batch-mode OpenSSH. `env` options go BEFORE the assignments in the
+  `env` prefix: GNU env treats everything after the first `NAME=value` as the
+  command.
+- A workspace carries its setup: `env` and `startup` (`workspace.py`,
+  checked by `validate_env`, `validate_command`, `validate_startup`). Env
+  names are `[A-Za-z_][A-Za-z0-9_]*`, at most 64 per map and 8 KB per value,
+  no NUL, unique ignoring case, and never `QUICKTERM_*` or `WSLENV`. Values
+  are DPAPI-sealed in the workspace file (also each startup item's own
+  `env`); only `GET /api/workspaces/{name}` returns them in plaintext, for
+  the editor. Never log an env value, never put one in an error message,
+  and never put one on a command line other than the documented SSH remote
+  command (`export NAME=<posix-quoted>` before the shell); locally and in
+  WSL they travel in the process environment (WSL through `WSLENV` names).
+  Merge order, later wins: agent settings `env`, workspace `env`, the
+  terminal's own `env`, QuickTerm's own variables last
+  (`SessionManager`). The agent settings' env is never sent to an SSH host;
+  in WSL an agent gets its names through `WSLENV` too (not `PATH`). An SSH
+  workspace refuses a value with a line break at save. Background checks
+  must not wake a stopped WSL distribution: check `ws_exec.asleep` first.
+  PUT and PATCH treat `env` and `startup` like `path`: absent keeps, `null`
+  clears, so a layout autosave never drops them. A startup item is
+  `{kind: shell|claude-code|codex, name, shell, command, agent_mode, agent,
+  env}`, at most 8; `shell` (this PC only) and `command` (one line) are for a
+  plain shell only, and under cmd the command is refused when it holds
+  `" & | < > ^ % !`. A startup pane's saved `launch_spec` may carry `shell`
+  and `command`, never the variables. A view runs the startup list
+  only when it opens a named workspace with nothing alive to attach (its
+  saved layout's terminals are all gone, or it is new); otherwise only "Run
+  setup" (the workspace's ⋮ menu, the palette, the settings sheet) starts
+  it, next to what is open. Never run it on a view that restored live
+  terminals.
 - Scratch is disposable, so it opens in a disposable folder:
   `config.scratch_root()` (`AppConfig.scratch_dir`, else
   `<temp>/QuickTerm/scratch`). Never suggest that folder when naming a
   workspace: `suggestedWorkspaceFolder()` offers the focused pane's real
   directory instead, so promoting a scratch you `cd`'d into your project names
   that project.
-- One shell (`AppConfig.shell`, `shells.py`) starts every terminal without a
-  profile, and Claude Code and Codex run inside it: the PTY's process is the
+- One shell (`AppConfig.shell`, `shells.py`) starts every local terminal,
+  and Claude Code and Codex run inside it: the PTY's process is the
   shell, `SessionManager._build` adds the hooks to the agent's argv and then
   wraps it (`shells.wrap`), so the pane ends at a prompt when the agent exits.
   On Windows that shell (PowerShell, cmd, Git Bash; plain or wrapping an
@@ -311,25 +371,23 @@ because the `.iss` relaunch entry is `skipifsilent`.
   variable, because `ScriptBlock.Create` would print an error in every
   terminal. cmd gets a PROMPT prefix, Git Bash a PROMPT_COMMAND.
   The agents are settings (`AppConfig.agents`, launched as profile
-  `claude-code` / `codex`), not profiles; a saved profile is a connection, a
-  custom command or a shell with a start command, and config.py refuses the
-  rest. A pre-4.3 config migrates once (`migrate_agents`, backup
-  `config.pre-4.3.json`). The agent settings carry `agent_mode` (claude-code
+  `claude-code` / `codex`; any other profile name is a 404). A pre-4.3 config
+  migrates once (`migrate_agents`, backup `config.pre-4.3.json`). The agent settings carry `agent_mode` (claude-code
   `new | continue | resume | agents`, default `continue`; codex adds `fork`,
   default `new`; a legacy `claude_mode` is still an accepted request alias),
   typed options in `agent` (allowlisted per type in `agents.py`, served to
   Settings by `GET /api/system/agents`) and a project folder that always
   comes from the workspace. cmd.exe gets the text after `/k` verbatim
   (`conpty.command_line`); never route it through list2cmdline quoting.
-  `launch.resolve_profile` raises only when nothing resolves (a 400 on the
-  spawn, not a config-save error). Every launch path (REST, elevate,
-  autostart, hotkeys, the elevated first terminal) goes through
+  `agents.resolve` raises only when no folder resolves (a 400 on the
+  spawn, not a config-save error). Every launch path (REST, launches, elevate,
+  the elevated first terminal, `quickterm new`) goes through
   `launch.resolve`; do not add a second one. Recovery uses the agent's own CLI
   (`claude --continue`, `codex resume --last`, a session id from
   `/api/agent-sessions`) and must remain explicit when the old PTY is gone.
   A `.cmd`/`.bat` agent executable refuses arguments cmd.exe would re-parse.
-- Global hotkeys apply live: saving a changed summon key or profile key
-  rebinds them through `ctx.rebind_hotkeys`, and only `port` and `host` need a
+- The one global hotkey is the summon key; saving a changed one rebinds it
+  through `ctx.rebind_hotkeys`, and only `port` and `host` need a
   restart. With `overlay.enabled`, the summon key toggles the primary window
   as a drop-down (`overlay.py`); close-to-tray treats a hidden overlay as a
   hidden window.
@@ -343,7 +401,11 @@ because the `.iss` relaunch entry is `skipifsilent`.
   A `claude` or `codex` the user types in a QuickTerm PowerShell is a global
   function from the integration that adds the same static hook arguments
   (`agent_hooks.shell_hooks`); it passes everything through for subcommands
-  without them, a user's own `--settings`, and an unsafe .cmd/.bat.
+  without them, a user's own `--settings`, and an unsafe .cmd/.bat. An agent
+  in a WSL workspace reports through Windows `curl.exe` by WSL interop: the
+  launch sets `WSLENV` to carry `QUICKTERM_PORT`, `QUICKTERM_SESSION_ID`,
+  `QUICKTERM_HOOK_TOKEN` and `QUICKTERM_CURL/p`, so the same curl configs
+  serve it and the token stays out of every command line.
   Hooks run Windows' curl async: a Python process per PreToolUse would slow
   every tool call. Claude's usage limits reach QuickTerm only through the
   per-launch `statusLine` (`statusline_chain.py`), which must keep running
@@ -418,22 +480,8 @@ because the `.iss` relaunch entry is `skipifsilent`.
   `update` is. Use a FREE port, never the user's live 8642/8620.
 - Frontend is served with `Cache-Control: no-cache`. This is required: WebView2
   otherwise serves stale JS/CSS after updates.
-- Bundled PuTTY tools (`plink/pscp/psftp`, the ssh/sftp terminal types, on-PATH
-  in every session): `python scripts/fetch_putty.py` populates the gitignored
-  `vendor/putty/` and is a build prerequisite. `quickterm.spec` re-verifies
-  the pinned SHA-256s and hard-fails without it (dest "putty", covered by the
-  existing `upx=False`). Bumping PuTTY = update version + hashes in
-  `scripts/fetch_putty.py` from the official `sha256sums` (plain `w64/` lines,
-  not "installer version"), re-run the script, rebuild. Also ship
-  `THIRD-PARTY-NOTICES.md` (referenced by `packaging/quickterm.iss`).
-- OpenSSH runs next to the bundled PuTTY: `Profile.ssh_client` `"openssh"`
-  uses Windows' own `%SystemRoot%\System32\OpenSSH\ssh.exe`/`sftp.exe` (never
-  bundled), null or `"putty"` keeps plink/psftp, so every pre-4.0 profile is
-  unchanged. `~/.ssh/config` is parsed by `ssh_config.py` and resolved with
-  `ssh -G`; key files are never read. Host, user and ProxyJump values are
-  checked against argument injection: no leading `-` for both clients, no
-  whitespace for OpenSSH only (plink takes a saved-session name such as "Prod
-  Server" as its host, and `load_config` must keep loading 3.x profiles).
+- SSH destinations are checked against argument injection (no leading `-`,
+  no whitespace, no control characters) before they reach an ssh argv.
 
 ## Local release workflow
 

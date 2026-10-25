@@ -21,7 +21,7 @@ export function renderAboutSettings(host) {
       identity,
       make("p", "about-tagline",
         "A local terminal workspace: split panes, named workspaces, "
-        + "persistent sessions and quick-launch profiles. Everything stays on this computer."),
+        + "persistent sessions, WSL and SSH workspaces. Everything stays on this computer."),
       make("p", "about-credit", "Made by Devin Isaac Worbis · Released under the MIT license"),
     );
     host.append(hero);

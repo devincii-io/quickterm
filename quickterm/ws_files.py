@@ -282,7 +282,7 @@ esac
 
 
 class HostFolder:
-    """Reads of a workspace folder on its SSH host, through ws_exec."""
+    """Reads of a workspace folder in WSL or on its SSH host, through ws_exec."""
 
     def __init__(self, ws: Any) -> None:
         self.ws = ws
@@ -343,7 +343,7 @@ class HostFolder:
 
 def folder_for(ws: Any) -> LocalFolder | HostFolder:
     """How the right panel reads `ws`'s files: directly on this computer,
-    through ws_exec on an SSH host. FileNotFoundError when a local folder is
+    through ws_exec in WSL or on an SSH host. FileNotFoundError when a local folder is
     gone."""
     if getattr(ws, "host", None):
         return HostFolder(ws)

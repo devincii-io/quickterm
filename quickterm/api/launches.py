@@ -2,7 +2,8 @@
 primary window waits on.
 
 Explorer's "Open QuickTerm here" queues a folder; the `quickterm` command line
-also queues a profile, a workspace, or both. Everything is checked here, so
+also queues an agent (profile "claude-code" or "codex"), a workspace, or
+both. Everything is checked here, so
 the window only ever receives a launch that could start.
 """
 

@@ -501,6 +501,90 @@ def launch_args(
     return args
 
 
+# --- launch inside WSL ----------------------------------------------------------
+#
+# A Linux agent runs Windows' own curl.exe through WSL interop, with the same
+# curl configs as a local launch, so the request goes to 127.0.0.1 on
+# Windows whatever WSL's network mode. WSLENV carries the port, session id
+# and token into the distribution and from there back to curl.exe; with /p it
+# also turns the curl.exe path into the distribution's form. The token is in
+# the agent's environment only, never in an argument or a file.
+
+WSL_CURL_VAR = "QUICKTERM_CURL"
+_WSLENV_NAMES = (
+    "QUICKTERM_PORT", "QUICKTERM_SESSION_ID", "QUICKTERM_HOOK_TOKEN", f"{WSL_CURL_VAR}/p",
+)
+
+
+def wsl_hook_command(config: Path, *, notify: bool = False) -> str:
+    """The POSIX command one hook runs inside WSL. A Codex notify gets its
+    JSON as `$1` and sends it on stdin. Without curl.exe (interop off) it
+    does nothing and exits 0."""
+    run = f'"${WSL_CURL_VAR}" -K {shlex.quote(config.as_posix())}'
+    if notify:
+        run = f'printf %s "$1" | {run} --data-binary @-'
+    return f'[ -x "${WSL_CURL_VAR}" ] && {run}; exit 0'
+
+
+def wsl_claude_args(args: list[str], base: Path) -> list[str]:
+    """``args`` with QuickTerm's hooks as one inline ``--settings``; a launch
+    that passes settings of its own keeps them and gets no hooks."""
+    if args[:1] == ["agents"] or _settings_arg(args) is not None:
+        return args
+    hooks = {
+        event: [{"hooks": [{
+            "type": "command", "command": wsl_hook_command(base / f"claude-{event}.curl"),
+            "async": True, "timeout": 10,
+        }]}]
+        for event in CLAUDE_EVENTS
+    }
+    return [*args, "--settings", json.dumps({"hooks": hooks}, separators=(",", ":"))]
+
+
+def wsl_codex_args(args: list[str], base: Path) -> list[str]:
+    """``args`` with a notify that posts each finished turn, only when the
+    Windows Codex config has no notify of its own (the distribution's config
+    cannot be read before the launch, and this would replace it)."""
+    if args[:1] == ["agents"] or _codex_user_notify() != []:
+        return args
+    notify = ["sh", "-c", wsl_hook_command(base / CODEX_CURL_FILE, notify=True), "quickterm-notify"]
+    return ["-c", "notify=" + toml_strings(notify), *args]
+
+
+def wsl_env(env: dict[str, str]) -> dict[str, str]:
+    """``env`` with what the WSL hooks need: the curl.exe path and the
+    variables added to WSLENV (the user's own entries stay)."""
+    out = dict(env)
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    out[WSL_CURL_VAR] = str(Path(root) / "System32" / "curl.exe")
+    key = next((name for name in out if name.casefold() == "wslenv"), None)
+    current = out.pop(key) if key is not None else os.environ.get("WSLENV", "")
+    names = [name for name in current.split(":") if name]
+    have = {name.split("/")[0] for name in names}
+    names += [name for name in _WSLENV_NAMES if name.split("/")[0] not in have]
+    out["WSLENV"] = ":".join(names)
+    return out
+
+
+def wsl_launch(
+    agent: str, args: list[str], env: dict[str, str], base: Path | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """The argv and environment of one agent launch inside WSL. Blocking:
+    writes the hook files. Any failure leaves the launch as it was."""
+    base = base if base is not None else hooks_dir()
+    if os.name != "nt" or not curl_usable():
+        return args, env
+    try:
+        ensure_files(base)
+    except OSError:
+        log.warning("agent hooks unavailable for this WSL launch", exc_info=True)
+        return args, env
+    hooked = wsl_claude_args(args, base) if agent == "claude" else wsl_codex_args(args, base)
+    if hooked == args:
+        return args, env
+    return hooked, wsl_env(env)
+
+
 # --- launch on an SSH host ----------------------------------------------------
 #
 # The agent runs on the host, so the Windows curl configs cannot reach it.

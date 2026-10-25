@@ -411,12 +411,10 @@ class _RecordingManager:
         return self.results(self.entries)
 
 
-def _app_cfg(summon="ctrl+alt+grave", keys=("ctrl+alt+1",)):
+def _app_cfg(summon="ctrl+alt+grave"):
     from types import SimpleNamespace
 
-    profiles = [SimpleNamespace(name=f"p{i}", keybinding=key) for i, key in enumerate(keys)]
-    profiles.append(SimpleNamespace(name="plain", keybinding=None))
-    return SimpleNamespace(summon_hotkey=summon, profiles=profiles, hotkey_error="stale")
+    return SimpleNamespace(summon_hotkey=summon, hotkey_error="stale")
 
 
 def test_rebind_registers_summon_on_the_hotkey_thread_and_clears_the_error(monkeypatch):
@@ -426,10 +424,10 @@ def test_rebind_registers_summon_on_the_hotkey_thread_and_clears_the_error(monke
     try:
         manager = _RecordingManager(lambda entries: [True] * len(entries))
         cfg = _app_cfg()
-        app._GlobalHotkeys(hotkeys, manager, loop, None, cfg).rebind(cfg)
+        app._GlobalHotkeys(hotkeys, manager, cfg).rebind(cfg)
 
         assert [(e.binding, e.on_hotkey_thread) for e in manager.entries] == [
-            ("ctrl+alt+1", False), ("ctrl+alt+grave", True),
+            ("ctrl+alt+grave", True),
         ]
         assert cfg.hotkey_error is None
     finally:
@@ -444,7 +442,7 @@ def test_rebind_names_a_key_another_program_owns():
     try:
         manager = _RecordingManager(lambda entries: [e.binding != "ctrl+alt+grave" for e in entries])
         cfg = _app_cfg()
-        app._GlobalHotkeys(hotkeys, manager, loop, None, cfg).rebind(cfg)
+        app._GlobalHotkeys(hotkeys, manager, cfg).rebind(cfg)
         assert cfg.hotkey_error == "ctrl+alt+grave is in use by another program"
     finally:
         loop.close()
@@ -460,8 +458,8 @@ def test_the_summon_callback_reads_the_overlay_at_press_time(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         manager = _RecordingManager(lambda entries: [True] * len(entries))
-        cfg = _app_cfg(keys=())
-        app._GlobalHotkeys(hotkeys, manager, loop, None, cfg).rebind(cfg)
+        cfg = _app_cfg()
+        app._GlobalHotkeys(hotkeys, manager, cfg).rebind(cfg)
         cfg.overlay = SimpleNamespace(enabled=True)
         manager.entries[-1].callback()
         assert pressed == [("QuickTerm", cfg.overlay)]
@@ -479,10 +477,8 @@ def test_the_backend_summon_replaces_the_in_process_toggle(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         manager = _RecordingManager(lambda entries: [True] * len(entries))
-        cfg = _app_cfg(keys=())
-        app._GlobalHotkeys(
-            hotkeys, manager, loop, None, cfg, summon=lambda: pressed.append(True)
-        ).rebind(cfg)
+        cfg = _app_cfg()
+        app._GlobalHotkeys(hotkeys, manager, cfg, summon=lambda: pressed.append(True)).rebind(cfg)
         assert manager.entries[-1].on_hotkey_thread is True
         manager.entries[-1].callback()
         assert pressed == [True]

@@ -188,20 +188,6 @@ test("a binding without Ctrl, Alt or Win is refused", () => {
   assert.deepEqual(shortcutWarnings(null), []);
 });
 
-test("duplicates of the summon key or another terminal are refused, never against itself", () => {
-  const profiles = [{ name: "Dev", keybinding: "ctrl+alt+1" }, { name: "Ops", keybinding: "Control+Alt+2" }];
-  const own = shortcutWarnings("ctrl+alt+1", { summon: "ctrl+alt+grave", profiles, selfIndex: 0 });
-  assert.deepEqual(own, []);
-  const clash = shortcutWarnings("alt+ctrl+2", { summon: "ctrl+alt+grave", profiles, selfIndex: 0 });
-  assert.equal(clash.length, 1);
-  assert.match(clash[0].text, /Already used by "Ops"/);
-  const summon = shortcutWarnings("ctrl+alt+grave", { summon: "ctrl+alt+grave", profiles, selfIndex: 1 });
-  assert.match(summon[0].text, /summon shortcut/);
-  // The summon key checks itself against every terminal.
-  const fromSummon = shortcutWarnings("ctrl+alt+1", { profiles, selfIndex: -1 });
-  assert.match(fromSummon[0].text, /Already used by "Dev"/);
-});
-
 test("a cold Alt key QuickTerm claims gets a warning, not an error", () => {
   const rows = shortcutWarnings("alt+k");
   assert.deepEqual(rows.map((row) => row.level), ["warning"]);

@@ -1,8 +1,7 @@
-"""The one launch resolver, and the app-side launches that now go through it."""
+"""The one launch resolver, and the app-side launches that go through it."""
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import sys
@@ -11,268 +10,31 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from quickterm import launch, putty_tools
-from quickterm.api import system as system_routes
+from quickterm import launch
 from quickterm import workspace as real_workspace
-from quickterm.config import Profile
+from quickterm.config import AgentSettings
 
 
-@dataclass
-class Prof:
-    name: str
-    cmd: str = ""
-    args: list = field(default_factory=list)
-    env: dict = field(default_factory=dict)
-    terminal_type: str | None = None
-    wsl_distro: str | None = None
-    start_command: str | None = None
-    claude_mode: str | None = None
-    ssh_host: str | None = None
-    ssh_port: int | None = None
-    ssh_user: str | None = None
-    ssh_key: str | None = None
-    autostart: bool = False
-    keybinding: str | None = None
+def _agents() -> dict:
+    return {
+        "claude-code": AgentSettings(cmd="claude.exe", agent_mode="agents"),
+        "codex": AgentSettings(cmd="C:/bin/codex.exe", agent={"model": "gpt-6"}),
+    }
 
 
 @dataclass
 class Cfg:
-    profiles: list = field(default_factory=list)
+    agents: dict = field(default_factory=_agents)
+    shell: str = "cmd"
     host: str = "127.0.0.1"
     port: int = 8620
 
 
-@pytest.fixture(autouse=True)
-def no_putty_tools(monkeypatch):
-    monkeypatch.setattr(putty_tools, "tools_dir", lambda: None)
-    monkeypatch.setattr(putty_tools, "plink_path", lambda: None)
-    monkeypatch.setattr(putty_tools, "psftp_path", lambda: None)
-
-
-@pytest.fixture
-def putty_dir(monkeypatch, tmp_path):
-    base = tmp_path / "putty"
-    base.mkdir()
-    for name in ("plink.exe", "pscp.exe", "psftp.exe"):
-        (base / name).write_bytes(b"")
-    monkeypatch.setattr(putty_tools, "tools_dir", lambda: base)
-    monkeypatch.setattr(putty_tools, "plink_path", lambda: base / "plink.exe")
-    monkeypatch.setattr(putty_tools, "psftp_path", lambda: base / "psftp.exe")
-    return base
-
-
-# --- every terminal type honours the start command it offers ----------------
-
-
-def _inventory_type_ids() -> list[str]:
-    windows = [
-        "claude-code", "codex", "powershell-core", "windows-powershell", "command-prompt",
-        "wsl", "git-bash", "nushell", "ssh", "sftp", "custom",
-    ]
-    # The POSIX inventory also lists the login shell under its own name; that
-    # one depends on $SHELL, so only the fixed ids are pinned here.
-    posix = ["claude-code", "zsh", "bash", "fish", "custom"]
-    return sorted(set(windows) | set(posix))
-
-
-@pytest.mark.skipif(os.name != "nt", reason="the Windows inventory probes Windows paths")
-def test_the_pinned_ids_cover_the_windows_inventory(monkeypatch):
-    def no_wsl(*_args, **_kwargs):
-        raise OSError("not asked in tests")
-
-    monkeypatch.setattr(system_routes.subprocess, "run", no_wsl)
-    ids = {t["id"] for t in system_routes._terminal_inventory()["types"]}
-    assert ids <= set(_inventory_type_ids())
-
-
-# Settings hides the start-command field for exactly these kinds.
-_NO_START_COMMAND = {"custom", "sftp", "claude-code", "codex"}
-
-
-@pytest.mark.parametrize("type_id", _inventory_type_ids())
-def test_every_inventory_type_resolves_and_runs_its_start_command(type_id, putty_dir, tmp_path):
-    prof = Prof(
-        name="t", cmd="shell-binary", terminal_type=type_id,
-        start_command="echo marker", ssh_host="box",
-    )
-    cmd, args, _cwd = launch.resolve_profile(prof, str(tmp_path))
-    assert cmd
-    # Settings shows "<exe> then <start>" for every other kind; it must run.
-    runs = any("echo marker" in arg for arg in args)
-    assert runs is (type_id not in _NO_START_COMMAND), (type_id, args)
-
-
-def test_git_bash_gets_the_bash_start_command_treatment():
-    prof = Prof(
-        name="git", cmd=r"C:\Program Files\Git\bin\bash.exe", terminal_type="git-bash",
-        args=["-l"], start_command="uv run dev",
-    )
-    cmd, args, cwd = launch.resolve_profile(prof, "/tmp/x")
-    assert cmd == r"C:\Program Files\Git\bin\bash.exe"
-    # `exec bash`, not the Windows path, which has a space bash would split.
-    assert args == ["-lc", "uv run dev; exec bash -l"]
-    assert cwd == "/tmp/x"
-    prof.start_command = None
-    assert launch.resolve_profile(prof)[1] == ["-l"]
-    # Arguments set in Advanced survive, ahead of the command bash runs.
-    prof.args = ["--norc", "-l"]
-    prof.start_command = "make"
-    assert launch.resolve_profile(prof)[1] == ["--norc", "-lc", "make; exec bash -l"]
-
-
-@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
-def test_posix_login_shells_keep_the_profile_arguments(shell):
-    # These used to drop the profile's own arguments at launch, so an
-    # --norc/--no-config set in Advanced silently did nothing.
-    prof = Prof(name="s", cmd=f"/usr/bin/{shell}", terminal_type=shell, args=["--norc", "-l"])
-    assert launch.resolve_profile(prof, "/tmp/x") == (
-        f"/usr/bin/{shell}", ["--norc", "-l"], "/tmp/x",
-    )
-    prof.start_command = "make"
-    # Ahead of -lc, which takes the next operand as the command; our own -l
-    # is not doubled by the profile's.
-    assert launch.resolve_profile(prof)[1] == [
-        "--norc", "-lc", f"make; exec /usr/bin/{shell} -l",
-    ]
-    prof.args = ["--login"]
-    assert launch.resolve_profile(prof)[1] == ["-lc", f"make; exec /usr/bin/{shell} -l"]
-    assert launch.resolve_profile(Prof(name="s", terminal_type=shell))[0] == shell
-
-
-def test_the_exec_after_a_start_command_survives_a_windows_shell_path():
-    # The shell parses this line itself: unquoted backslashes vanished and
-    # the terminal closed as soon as the start command had run.
-    prof = Prof(
-        name="msys", cmd=r"C:\msys64\usr\bin\bash.exe", terminal_type="bash", start_command="make",
-    )
-    cmd, args, _cwd = launch.resolve_profile(prof)
-    assert cmd == r"C:\msys64\usr\bin\bash.exe"
-    assert args == ["-lc", "make; exec C:/msys64/usr/bin/bash.exe -l"]
-    prof.cmd = "/opt/my shells/zsh"
-    prof.terminal_type = "zsh"
-    assert launch.resolve_profile(prof)[1] == ["-lc", "make; exec '/opt/my shells/zsh' -l"]
-
-
-def test_nushell_runs_the_start_command_and_stays_interactive():
-    prof = Prof(name="nu", cmd="C:/nu/nu.exe", terminal_type="nushell", start_command="ls")
-    assert launch.resolve_profile(prof) == ("C:/nu/nu.exe", ["-e", "ls"], None)
-    prof.start_command = None
-    assert launch.resolve_profile(prof) == ("C:/nu/nu.exe", [], None)
-    assert launch.resolve_profile(Prof(name="nu", terminal_type="nushell"))[0] == "nu"
-
-
-@pytest.mark.parametrize("type_id,default", [
-    ("powershell-core", "pwsh.exe"),
-    ("windows-powershell", "powershell.exe"),
-    ("command-prompt", "cmd.exe"),
-])
-def test_system_shell_profiles_use_the_resolved_executable(type_id, default):
-    # The inventory stores an absolute path on purpose (PATH is stale in a
-    # tray-resident app); the bare name is only the fallback.
-    absolute = r"C:\Program Files\PowerShell\7\pwsh.exe"
-    assert launch.resolve_profile(Prof(name="p", cmd=absolute, terminal_type=type_id))[0] == absolute
-    assert launch.resolve_profile(Prof(name="p", cmd="  ", terminal_type=type_id))[0] == default
-
-
-def test_powershell_keeps_profile_args_without_a_second_nologo():
-    prof = Prof(
-        name="p", cmd="pwsh.exe", terminal_type="powershell-core",
-        args=["-NoLogo", "-NoProfile"], start_command="uv run dev",
-    )
-    _cmd, args, _cwd = launch.resolve_profile(prof)
-    # The profile's args sit before -Command: PowerShell reads everything
-    # after -Command as the command text.
-    assert args == ["-NoLogo", "-NoProfile", "-NoExit", "-Command", "uv run dev"]
-    prof.start_command = None
-    assert launch.resolve_profile(prof)[1] == ["-NoLogo", "-NoProfile"]
-
-
-def test_command_prompt_keeps_profile_args_before_the_start_command():
-    prof = Prof(name="c", cmd="cmd.exe", terminal_type="command-prompt", args=["/Q"], start_command="dir")
-    assert launch.resolve_profile(prof)[1] == ["/Q", "/K", "dir"]
-
-
-def test_claude_code_needs_a_folder():
-    with pytest.raises(ValueError, match="project folder"):
-        launch.resolve_profile(Prof(name="c", cmd="claude", terminal_type="claude-code"))
-    with pytest.raises(ValueError, match="Codex profile requires a project folder"):
-        launch.resolve_profile(Prof(name="c", cmd="codex.exe", terminal_type="codex"))
-
-
-# --- SSH: OpenSSH next to PuTTY --------------------------------------------
-
-
-@pytest.fixture
-def openssh(monkeypatch, tmp_path):
-    from quickterm import ssh_config
-
-    paths = {kind: tmp_path / "OpenSSH" / f"{kind}.exe" for kind in ("ssh", "sftp")}
-    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: paths[kind])
-    return paths
-
-
-def _ssh(kind: str, **fields) -> Profile:
-    return Profile(name="box", cmd="", terminal_type=kind, **fields)
-
-
-def test_openssh_ssh_argv_puts_options_then_profile_args_then_target(openssh):
-    prof = _ssh(
-        "ssh", ssh_client="openssh", ssh_host="devbox", ssh_user="deploy", ssh_port=2222,
-        ssh_key="~/.ssh/id_ed25519", ssh_proxy_jump="admin@bastion", args=["-A"],
-        start_command="uptime",
-    )
-    assert launch.resolve_profile(prof, "/work") == (
-        str(openssh["ssh"]),
-        ["-p", "2222", "-i", "~/.ssh/id_ed25519", "-J", "admin@bastion", "-A", "deploy@devbox", "uptime"],
-        "/work",
-    )
-
-
-def test_openssh_alias_alone_leaves_everything_to_ssh_config(openssh):
-    assert launch.resolve_profile(_ssh("ssh", ssh_client="openssh", ssh_host="devbox"))[1] == ["devbox"]
-
-
-def test_openssh_sftp_spells_the_port_in_capitals_and_runs_no_command(openssh):
-    prof = _ssh(
-        "sftp", ssh_client="openssh", ssh_host="h", ssh_user="u", ssh_port=22,
-        ssh_proxy_jump="j1,j2", start_command="ls",
-    )
-    cmd, args, _cwd = launch.resolve_profile(prof)
-    assert cmd == str(openssh["sftp"])
-    assert args == ["-P", "22", "-J", "j1,j2", "u@h"]
-
-
-def test_putty_argv_is_unchanged_and_the_default_client(putty_dir, openssh):
-    for client in (None, "putty"):
-        prof = _ssh(
-            "ssh", ssh_client=client, ssh_host="h", ssh_user="u", ssh_port=2222,
-            ssh_key="k.ppk", start_command="uptime",
-        )
-        assert launch.resolve_profile(prof) == (
-            str(putty_dir / "plink.exe"), ["-ssh", "-P", "2222", "-i", "k.ppk", "u@h", "uptime"], None,
-        )
-    sftp = _ssh("sftp", ssh_host="h", ssh_user="u")
-    assert launch.resolve_profile(sftp)[:2] == (str(putty_dir / "psftp.exe"), ["u@h"])
-
-
-def test_a_missing_openssh_client_says_where_to_install_it(monkeypatch):
-    from quickterm import ssh_config
-
-    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
-    cfg = Cfg(profiles=[_ssh("ssh", ssh_client="openssh", ssh_host="h")])
-    with pytest.raises(launch.LaunchError) as caught:
-        launch.resolve(cfg, profile="box")
-    assert caught.value.status == 400
-    assert caught.value.message == (
-        "OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client."
-    )
-
-
-@pytest.mark.parametrize("fields", [{"ssh_host": "-oProxyCommand=x"}, {"ssh_host": "h", "ssh_user": "-l"}])
-def test_a_host_or_user_that_reads_as_an_option_never_launches(openssh, putty_dir, fields):
-    for client in ("openssh", None):
-        with pytest.raises(ValueError, match="must not start with -"):
-            launch.resolve_profile(_ssh("ssh", ssh_client=client, **fields))
+def test_agents_need_a_folder():
+    with pytest.raises(launch.LaunchError, match="Claude Code profile requires a project folder"):
+        launch.resolve(Cfg(), profile="claude-code")
+    with pytest.raises(launch.LaunchError, match="Codex profile requires a project folder"):
+        launch.resolve(Cfg(), profile="codex")
 
 
 # --- agent launch requests ---------------------------------------------------
@@ -280,67 +42,56 @@ def test_a_host_or_user_that_reads_as_an_option_never_launches(openssh, putty_di
 SESSION = "0199a3b2-7c41-7d10-9e55-2f1a3c4b5d6e"
 
 
-def _agent_cfg(tmp_path) -> Cfg:
-    return Cfg(profiles=[
-        Prof(name="claude", cmd="claude.exe", terminal_type="claude-code", claude_mode="agents"),
-        Profile(name="codex", cmd="C:/bin/codex.exe", terminal_type="codex", agent={"model": "gpt-6"}),
-        Prof(name="shell", cmd="cmd.exe"),
-    ])
-
-
 def test_legacy_claude_mode_still_overrides_with_its_old_messages(tmp_path):
-    cfg = _agent_cfg(tmp_path)
-    spec = launch.resolve(cfg, profile="claude", claude_mode="continue", request_cwd=str(tmp_path))
+    cfg = Cfg()
+    spec = launch.resolve(cfg, profile="claude-code", claude_mode="continue", request_cwd=str(tmp_path))
     assert spec.args == ["--continue"]
-    for profile, mode, message in (
-        ("shell", "resume", "claude_mode requires a Claude Code profile"),
-        ("codex", "fork", "claude_mode requires a Claude Code profile"),
-        ("claude", "fork", "claude_mode must be new, continue, resume, or agents"),
-    ):
-        with pytest.raises(launch.LaunchError) as caught:
-            launch.resolve(cfg, profile=profile, claude_mode=mode, request_cwd=str(tmp_path))
-        assert str(caught.value) == message
+    with pytest.raises(launch.LaunchError) as caught:
+        launch.resolve(cfg, profile="claude-code", claude_mode="fork", request_cwd=str(tmp_path))
+    assert str(caught.value) == "claude_mode must be new, continue, resume, or agents"
+    with pytest.raises(launch.LaunchError) as caught:
+        launch.resolve(cfg, profile="codex", claude_mode="fork", request_cwd=str(tmp_path))
+    assert str(caught.value) == "claude_mode requires a Claude Code profile"
     with pytest.raises(launch.LaunchError) as caught:
         launch.resolve(cfg, cmd="cmd.exe", claude_mode="new")
-    assert str(caught.value) == "start_command and claude_mode require a profile"
+    assert str(caught.value) == "claude_mode requires a profile"
 
 
 def test_agent_mode_overrides_either_agent_and_agrees_with_its_alias(tmp_path):
-    cfg = _agent_cfg(tmp_path)
+    cfg = Cfg()
     folder = str(tmp_path)
-    assert launch.resolve(cfg, profile="claude", agent_mode="new", request_cwd=folder).args == []
+    assert launch.resolve(cfg, profile="claude-code", agent_mode="new", request_cwd=folder).args == []
     assert launch.resolve(
-        cfg, profile="claude", agent_mode="resume", claude_mode="resume", request_cwd=folder,
+        cfg, profile="claude-code", agent_mode="resume", claude_mode="resume", request_cwd=folder,
     ).args == ["--resume"]
     assert launch.resolve(cfg, profile="codex", agent_mode="continue", request_cwd=folder).args == [
         "resume", "--last", "--cd", folder, "--model", "gpt-6",
     ]
-    # The profile's own mode when the request names none: Claude's agents.
-    assert launch.resolve(cfg, profile="claude", request_cwd=folder).args == ["agents", "--cwd", folder]
+    # The agent's own mode when the request names none: Claude's agents.
+    assert launch.resolve(cfg, profile="claude-code", request_cwd=folder).args == ["agents", "--cwd", folder]
 
 
 @pytest.mark.parametrize(("profile", "fields", "message"), [
-    ("claude", {"agent_mode": "new", "claude_mode": "continue"}, "agent_mode and claude_mode disagree"),
-    ("shell", {"agent_mode": "new"}, "agent_mode requires a Claude Code or Codex profile"),
-    ("claude", {"agent_mode": "fork"}, "agent_mode must be new, continue, resume, or agents"),
+    ("claude-code", {"agent_mode": "new", "claude_mode": "continue"}, "agent_mode and claude_mode disagree"),
+    ("claude-code", {"agent_mode": "fork"}, "agent_mode must be new, continue, resume, or agents"),
     ("codex", {"agent_mode": "later"}, "agent_mode must be new, continue, resume, fork, or agents"),
-    ("claude", {"agent_session": "not-a-uuid"}, "agent_session must be a session id"),
-    ("claude", {"agent_session": SESSION, "agent_mode": "continue"}, "agent_session needs resume or fork"),
-    ("claude", {"agent_session": SESSION, "agent_mode": "new"}, "agent_session needs resume or fork"),
+    ("claude-code", {"agent_session": "not-a-uuid"}, "agent_session must be a session id"),
+    ("claude-code", {"agent_session": SESSION, "agent_mode": "continue"}, "agent_session needs resume or fork"),
+    ("claude-code", {"agent_session": SESSION, "agent_mode": "new"}, "agent_session needs resume or fork"),
     ("codex", {"agent_session": SESSION, "agent_mode": "agents"}, "agent_session needs resume or fork"),
-    ("shell", {"agent_session": SESSION}, "requires a Claude Code or Codex profile"),
     (None, {"agent_mode": "new"}, "agent_mode requires a Claude Code or Codex profile"),
+    (None, {"agent_session": SESSION}, "agent_mode requires a Claude Code or Codex profile"),
 ])
 def test_agent_request_errors(tmp_path, profile, fields, message):
     with pytest.raises(launch.LaunchError, match=message) as caught:
-        launch.resolve(_agent_cfg(tmp_path), profile=profile, cmd="x", request_cwd=str(tmp_path), **fields)
+        launch.resolve(Cfg(), profile=profile, cmd="x", request_cwd=str(tmp_path), **fields)
     assert caught.value.status == 400
 
 
 def test_a_session_id_resumes_that_session_and_codex_can_fork_it(tmp_path):
-    cfg = _agent_cfg(tmp_path)
+    cfg = Cfg()
     folder = str(tmp_path)
-    assert launch.resolve(cfg, profile="claude", agent_session=SESSION, request_cwd=folder).args == [
+    assert launch.resolve(cfg, profile="claude-code", agent_session=SESSION, request_cwd=folder).args == [
         "--resume", SESSION,
     ]
     assert launch.resolve(cfg, profile="codex", agent_session=SESSION, request_cwd=folder).args == [
@@ -352,10 +103,11 @@ def test_a_session_id_resumes_that_session_and_codex_can_fork_it(tmp_path):
 
 
 def test_an_agent_launch_folder_is_the_workspace_root(tmp_path):
-    spec = launch.resolve(_agent_cfg(tmp_path), profile="codex", workspace_root=str(tmp_path))
+    spec = launch.resolve(Cfg(), profile="codex", workspace_root=str(tmp_path))
     assert spec.cwd == str(tmp_path)
     assert spec.cmd == "C:/bin/codex.exe"
     assert spec.args[:2] == ["--cd", str(tmp_path)]
+    assert spec.name == "Codex" and spec.profile == "codex"
 
 
 # --- resolve(): the whole request ------------------------------------------
@@ -374,39 +126,40 @@ def test_request_folder_beats_the_workspace_root_beats_nothing(tmp_path):
 
 
 def test_a_missing_request_folder_names_the_terminal(tmp_path):
-    cfg = Cfg(profiles=[Prof(name="api", cmd="cmd.exe")])
     with pytest.raises(launch.LaunchError) as caught:
-        launch.resolve(cfg, profile="api", request_cwd=str(tmp_path / "gone"))
-    assert str(caught.value).startswith('Terminal "api": starting folder does not exist')
+        launch.resolve(Cfg(), profile="claude-code", request_cwd=str(tmp_path / "gone"))
+    assert str(caught.value).startswith('Terminal "claude-code": starting folder does not exist')
     assert caught.value.status == 400
 
 
-def test_unknown_profile_is_a_404():
+@pytest.mark.parametrize("name", ["nope", "Windows PowerShell", "server"])
+def test_any_profile_but_the_agents_is_a_404(name):
     with pytest.raises(launch.LaunchError) as caught:
-        launch.resolve(Cfg(), profile="nope")
+        launch.resolve(Cfg(), profile=name)
     assert caught.value.status == 404
+    assert str(caught.value) == f"unknown profile: {name}"
 
 
-def test_profile_env_is_validated_and_request_env_overrides_it():
-    cfg = Cfg(profiles=[Prof(name="p", cmd="sh", env={"A": "1"})])
-    assert launch.resolve(cfg, profile="p").env == {"A": "1"}
-    assert launch.resolve(cfg, profile="p", env={"B": "2"}).env == {"B": "2"}
+def test_agent_env_is_validated_and_request_env_adds_to_it(tmp_path):
+    cfg = Cfg()
+    cfg.agents["claude-code"].env = {"A": "1"}
+    folder = str(tmp_path)
+    assert launch.resolve(cfg, profile="claude-code", request_cwd=folder).env == {"A": "1"}
+    assert launch.resolve(
+        cfg, profile="claude-code", env={"B": "2", "A": "3"}, request_cwd=folder,
+    ).env == {"A": "3", "B": "2"}
     with pytest.raises(launch.LaunchError, match="invalid env"):
         launch.resolve(cfg, cmd="sh", env={"BAD=NAME": "x"})
 
 
-def test_putty_tools_are_appended_to_the_path_key_whatever_its_case(putty_dir, monkeypatch):
-    monkeypatch.setenv("PATH", "base")
-    spec = launch.resolve(Cfg(), cmd="sh", env={"Path": "profile"})
-    # One entry, the profile's spelling kept, the tools last.
-    assert spec.env == {"Path": f"profile{os.pathsep}{putty_dir}"}
-    assert launch.resolve(Cfg(), cmd="sh").env == {"PATH": f"base{os.pathsep}{putty_dir}"}
-    assert launch.resolve(Cfg(), cmd="sh", append_tools=False).env == {}
+def test_nothing_is_added_to_the_path_any_more():
+    assert launch.resolve(Cfg(), cmd="sh", env={"Path": "mine"}).env == {"Path": "mine"}
+    assert launch.resolve(Cfg(), cmd="sh").env == {}
 
 
-def test_label_is_profile_then_name_then_command():
-    cfg = Cfg(profiles=[Prof(name="prof", cmd="sh")])
-    assert launch.resolve(cfg, profile="prof", name="given").label == "prof"
+def test_label_is_profile_then_name_then_command(tmp_path):
+    cfg = Cfg()
+    assert launch.resolve(cfg, profile="codex", name="given", request_cwd=str(tmp_path)).label == "codex"
     assert launch.resolve(cfg, cmd="sh", name="given").label == "given"
     assert launch.resolve(cfg, cmd=" sh ").label == "sh"
 
@@ -440,7 +193,7 @@ def test_hardened_process_no_longer_finds_programs_in_the_launch_folder(monkeypa
     assert dict(os.environ) == environment
 
 
-# --- app launches: autostart, hotkeys, the elevated first terminal ----------
+# --- app launches: the elevated first terminal --------------------------------
 
 
 class _Manager:
@@ -455,64 +208,16 @@ class _Manager:
         return types.SimpleNamespace(id="s1", **kwargs)
 
 
-async def test_autostart_failure_is_reported_not_swallowed():
+def test_profile_autostart_and_hotkeys_are_gone():
     from quickterm import app as app_mod
 
-    cfg = Cfg(profiles=[Prof(name="Claude", cmd="claude", terminal_type="claude-code", autostart=True)])
-    manager = _Manager()
-    await app_mod._spawn_autostart(manager, cfg)
-    assert manager.spawned == []
-    assert cfg.launch_error == 'Terminal "Claude": Claude Code profile requires a project folder'
+    assert not hasattr(app_mod, "_spawn_autostart")
+    assert not hasattr(app_mod, "_profile_callback")
 
 
-async def test_autostart_spawn_error_names_the_terminal():
-    from quickterm import app as app_mod
-    from quickterm.session_manager import SpawnError
-
-    cfg = Cfg(profiles=[Prof(name="Tools", cmd="missing-xyz", autostart=True)])
-    await app_mod._spawn_autostart(_Manager(SpawnError("command not found: missing-xyz")), cfg)
-    assert cfg.launch_error == 'Terminal "Tools": command not found: missing-xyz'
-
-
-async def test_autostart_launch_matches_a_ui_launch(putty_dir, monkeypatch):
+async def test_the_elevated_first_terminal_is_resolved_and_checked(tmp_path):
     from quickterm import app as app_mod
 
-    monkeypatch.setenv("PATH", "base")
-    cfg = Cfg(profiles=[Prof(
-        name="dev", cmd="pwsh.exe", terminal_type="powershell-core", start_command="uv run dev",
-        autostart=True,
-    )])
-    manager = _Manager()
-    await app_mod._spawn_autostart(manager, cfg)
-    assert manager.spawned == [{
-        "name": "dev", "profile": "dev", "cmd": "pwsh.exe",
-        "args": ["-NoLogo", "-NoExit", "-Command", "uv run dev"], "cwd": None,
-        # The bundled tools are on PATH here too, as for every other launch.
-        "env": {"PATH": f"base{os.pathsep}{putty_dir}"},
-    }]
-    assert getattr(cfg, "launch_error", None) is None
-
-
-async def test_a_hotkey_schedules_the_launch_off_the_hotkey_callback():
-    from quickterm import app as app_mod
-
-    prof = Prof(name="sh", cmd="sh")
-    cfg = Cfg(profiles=[prof])
-    manager = _Manager()
-    fire = app_mod._profile_callback(asyncio.get_running_loop(), manager, prof, cfg)
-    fire()
-    assert manager.spawned == []  # the callback itself never blocks the loop
-    for _ in range(100):
-        if manager.spawned:
-            break
-        await asyncio.sleep(0.01)
-    assert manager.spawned[0]["cmd"] == "sh"
-
-
-async def test_the_elevated_first_terminal_is_resolved_and_checked(putty_dir, tmp_path, monkeypatch):
-    from quickterm import app as app_mod
-
-    monkeypatch.setenv("PATH", "base")
     server = types.SimpleNamespace(started=True)
     manager = _Manager()
     cfg = Cfg()
@@ -520,11 +225,25 @@ async def test_the_elevated_first_terminal_is_resolved_and_checked(putty_dir, tm
     await app_mod._after_ready(server, manager, cfg, launch_window=False, initial_launch=spec)
     assert manager.spawned[0]["cwd"] == str(tmp_path)
     assert manager.spawned[0]["name"] == "Administrator - cmd"
-    assert manager.spawned[0]["env"]["PATH"].endswith(str(putty_dir))
+    assert manager.spawned[0]["env"] == {}
 
     gone = dict(spec, cwd=str(tmp_path / "gone"))
     await app_mod._after_ready(server, _Manager(), cfg, launch_window=False, initial_launch=gone)
     assert "starting folder does not exist" in cfg.launch_error
+
+
+async def test_a_failed_elevated_terminal_names_it():
+    from quickterm import app as app_mod
+    from quickterm.session_manager import SpawnError
+
+    server = types.SimpleNamespace(started=True)
+    cfg = Cfg()
+    spec = {"cmd": "missing-xyz", "args": [], "cwd": None, "env": {}, "name": "Tools"}
+    await app_mod._after_ready(
+        server, _Manager(SpawnError("command not found: missing-xyz")), cfg,
+        launch_window=False, initial_launch=spec,
+    )
+    assert cfg.launch_error == 'Terminal "Tools": command not found: missing-xyz'
 
 
 def test_an_elevated_instance_uses_its_own_workspace_folder_before_touching_scratch(monkeypatch):

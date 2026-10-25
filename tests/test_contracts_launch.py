@@ -120,7 +120,8 @@ def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy
     assert "registerOscHandler(7" in pane
     assert "registerOscHandler(9" in pane
     items = PALETTE_ITEMS_JS.read_text(encoding="utf-8")
-    assert "...agentRows(p, a)" in palette
+    assert "rows.push(...agentRows(row.profile, app));" in items
+    assert "agentRows" not in palette, "the agents come with the + menu rows, never per profile"
     assert "label: `split agent view${suffix || `: ${agent}`}`" in items
     assert 'agentMode: "agents"' in spawner
     # A split starts the shell (CONTRACTS 4.3), never the agent it sits beside.
@@ -269,7 +270,7 @@ def test_the_palette_reaches_terminals_settings_and_configs_across_views():
     assert "label: `go to terminal: ${terminalName(entry)}`" in items
     assert "run: () => app?.activateTerminal?.(entry.session)" in items
     assert "label: `setting: ${entry.label}`" in items
-    assert "label: `edit terminal: ${profile.name}`" in items
+    assert "edit terminal:" not in items, "saved terminals are gone (4.5)"
     assert "label: `edit snippet: ${snippet.name}`" in items
     assert "items.push(...terminalRows(a));" in palette
     # The kind prefixes are parsed where the list is filtered, and the input
@@ -308,15 +309,24 @@ def test_kill_terminal_in_the_palette_preselects_the_kill_row():
     assert "error?.detail" in chosen
 
 
-def test_the_api_client_has_the_agent_ssh_and_hotkey_wrappers():
+def test_the_api_client_has_the_agent_location_and_hotkey_wrappers():
     api = (FRONTEND_JS / "api.js").read_text(encoding="utf-8")
     assert "export const getAgentCatalog = (fresh = false) =>" in api
     assert '`/api/system/agents${fresh ? "?fresh=true" : ""}`' in api
     assert "export const listAgentSessions = (type, { workspace = null, cwd = null } = {}, limit = 20) =>" in api
     assert 'else if (cwd) query.set("cwd", cwd);' in api
     assert "/api/agent-sessions?" in api
-    assert 'export const getSshHosts = () => req("GET", "/api/system/ssh-hosts");' in api
-    assert "`/api/system/ssh-hosts/${encodeURIComponent(alias)}`" in api
+    # 4.5: the locations replace the ssh-host list and the saved terminals.
+    assert 'export const getLocations = () => req("GET", "/api/locations");' in api
+    assert "layout: null, session_ids: [], host: host || null, path," in api
+    # 4.5 wave 2: the dialog's Start with list goes along; absent preserves.
+    assert "...(startup === undefined ? {} : { startup })" in api
+    assert "...(setup?.env === undefined ? {} : { env: setup.env })" in api
+    # The board sorts itself: no call sets a column any more.
+    assert "setBoardStatus" not in api and 'req("PUT", `/api/board' not in api
+    assert 'req("POST", "/api/workspaces/remote-check", { host, path })' in api
+    for gone in ("/api/profiles", "/api/connections/", "getSshHosts", "putRemoteWorkspace"):
+        assert gone not in api, gone
     assert 'req("POST", "/api/hotkeys/suspend", { suspended: Boolean(suspended) })' in api
 
 
@@ -334,3 +344,28 @@ def test_the_spawner_sends_agent_mode_and_session():
     assert "state.scratchCwd = openDir || null;" in main
     assert "runClaudeMode: runAgentMode," in spawner
     assert "splitClaudeAgentView: splitAgentView," in spawner
+
+
+def test_a_view_with_nothing_alive_runs_its_start_list():
+    """4.5 wave 2: a workspace's "Start with" list replaces the one shell."""
+    switch = WORKSPACE_SWITCH_JS.read_text(encoding="utf-8")
+    main = MAIN_JS.read_text(encoding="utf-8")
+    shell = (FRONTEND_JS / "shell.js").read_text(encoding="utf-8")
+    launcher = (FRONTEND_JS / "launcher.js").read_text(encoding="utf-8")
+    palette = (FRONTEND_JS / "palette.js").read_text(encoding="utf-8")
+    restore = switch[switch.index("  async function restoreWorkspace("):switch.index("\n  async function startScratch")]
+    decision = 'startupDecision(saved, (id) => byId.has(id)) === "startup"'
+    assert f"!isScratchWorkspace(name) && {decision}" in restore
+    # Decided before the saved layout is rebuilt; no items still means one shell.
+    assert restore.index(decision) < restore.index("layout.restore(savedLayout)")
+    assert "else {\n        await spawnDefaultInto(first);" in restore
+    assert "runStartup: startup.runStartup," in main
+    # Run setup from the workspace menu and the palette, through the shell.
+    start = shell.index("export const SHELL_MEMBERS")
+    members = shell[start:shell.index("]);", start)]
+    assert '"runWorkspaceSetup"' in members and '"saveWorkspaceSetup"' in members
+    assert 'label: "Run setup"' in launcher
+    assert 'label: "run workspace setup"' in palette
+    assert "a.openThemeSwitcher?.()" in palette
+    # The sidebar's module stays under its size limit.
+    assert launcher.count("\n") < 900

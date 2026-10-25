@@ -1,6 +1,5 @@
 // Alt+K command palette: one input, subsequence fuzzy match over actions,
-// profiles, agents, snippets, workspaces, running terminals, settings and
-// configs. A leading `>`, `@`, `#` or `!` narrows the list to one kind.
+// agents, snippets, workspaces, running terminals, settings and configs. A leading `>`, `@`, `#` or `!` narrows the list to one kind.
 // Sub-modes (kill, search, new window, move here) and the file path prompt
 // reuse the same input.
 
@@ -8,14 +7,12 @@ import * as api from "./api.js";
 import { displaySnippet, layoutSessionIds } from "./panel_shared.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { resultLabel } from "./terminal_actions.js";
-import { connectionLabel, connectionTarget } from "./panel_connections.js";
 import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
 import { AGENT_TYPES, agentTypeOf } from "./agent_profile.js";
 import { copyText } from "./resume_command.js";
 import { showError } from "./feedback.js";
-import { hostRows } from "./remote_workspace.js";
 import {
-  PREFIX_HINT, agentRows, agentSessionRows, agentSessionTarget, configRows, fuzzyScore, killName, killRows,
+  PREFIX_HINT, agentSessionRows, agentSessionTarget, configRows, fuzzyScore, killName, killRows,
   newTerminalRows, parsePrefix, placeOrder, resumeCopyRows, rowGroup, settingRows, terminalRows, workspaceRows,
 } from "./palette_items.js";
 
@@ -49,7 +46,6 @@ export class Palette {
     this.searchMode = false;
     this.killMode = false;
     this.killTarget = null;
-    this.hostMode = false;
     this.killPending = false;
     this.foreignSessions = [];
     this.late = emptyLate();
@@ -182,31 +178,6 @@ export class Palette {
     this._newWindowMode();
   }
 
-  // "new workspace on host…" (palette row and the sidebar's Workspaces "+"):
-  // which OpenSSH terminal, then the folder there (remote_workspace.js).
-  remoteWorkspaceMode() {
-    if (!this.open) {
-      this.open = true;
-      this.requestId++;
-      claimFocus("palette");
-      this.overlay.hidden = false;
-    }
-    this._leaveSubModes();
-    this.hostMode = true;
-    this.input.value = "";
-    const rows = hostRows(this, this.app.profiles || []);
-    this.input.placeholder = rows.length
-      ? "New workspace on which SSH host? Esc goes back"
-      : "No SSH terminal uses OpenSSH yet: add one in terminals and connections";
-    this.items = [
-      ...rows,
-      ...(rows.length ? [] : [{ kind: "action", label: "terminals and connections", run: () => this.app.setupTerminals?.() }]),
-      { kind: "back", label: "back to commands", keepOpen: true, run: () => this.openPalette() },
-    ];
-    this._refilter();
-    this.focusInput();
-  }
-
   // The input is the palette: every path that shows it, opening or stepping
   // into a two-step prompt, lands here. Focus is re-asserted on the next frame
   // because the overlay was hidden a moment ago and WebView2 does not always
@@ -223,7 +194,7 @@ export class Palette {
   // A prompt or one of the lists reached from a command row: the command
   // list's late enrichment must not overwrite it.
   _inSubMode() {
-    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode || this.killMode || this.hostMode);
+    return Boolean(this.prompt || this.foreignMode || this.windowMode || this.searchMode || this.killMode);
   }
 
   _leaveSubModes() {
@@ -233,7 +204,6 @@ export class Palette {
     this.searchMode = false;
     this.killMode = false;
     this.killTarget = null;
-    this.hostMode = false;
   }
 
   _current(requestId) {
@@ -249,16 +219,15 @@ export class Palette {
     ];
   }
 
-  // "resume <agent> session: <title>" rows for the first profile of each agent
-  // type, from that agent's own session store for this view's folder: a named
-  // workspace's, or the one a scratch view starts its agents in.
+  // "resume <agent> session: <title>" rows for each agent, from that agent's
+  // own session store for this view's folder: a named workspace's, or the
+  // one a scratch view starts its agents in.
   async _fillAgentSessions(requestId) {
     const a = this.app;
     const target = agentSessionTarget(a);
     if (!target || typeof api.listAgentSessions !== "function") return;
     const profiles = AGENT_TYPES
-      .map((type) => [...(a.agentProfiles?.() || []), ...(a.profiles || [])]
-        .find((profile) => agentTypeOf(profile) === type))
+      .map((type) => (a.agentProfiles?.() || []).find((profile) => agentTypeOf(profile) === type))
       .filter(Boolean);
     if (!profiles.length) return;
     const answers = await Promise.all(profiles.map((profile) =>
@@ -277,8 +246,10 @@ export class Palette {
     const a = this.app;
     // The two folder rows name the folder they would open: that is the
     // focused terminal's directory when there is one, else the workspace's.
+    // A WSL or SSH workspace has no folder on this PC, so they are left out.
     const here = a.hereFolder?.() || null;
     const folderHint = (keys) => (here ? `${here} · ${keys}` : keys);
+    const local = !a.workspaceHost?.();
     const items = [
       { kind: "action", label: "workspace board", hint: "Alt+G", run: () => a.openPanel?.("dashboard") },
       // The right panel; Alt+Shift+E opens and closes it on its last tab.
@@ -286,7 +257,12 @@ export class Palette {
       { kind: "action", label: "changes", hint: "source control in the right panel", run: () => a.showRightPanel?.("changes") },
       { kind: "action", label: "pull request", hint: "the branch's pull request in the right panel", run: () => a.showRightPanel?.("pr") },
       { kind: "action", label: "settings", run: () => a.openPanel?.("settings") },
-      { kind: "action", label: "terminals and connections", run: () => a.setupTerminals?.() },
+      { kind: "action", label: "color theme…", hint: "try the themes live", run: () => a.openThemeSwitcher?.() },
+      {
+        kind: "action", label: "run workspace setup", hint: "starts its Start with list next to what is open",
+        run: () => a.runWorkspaceSetup?.(),
+      },
+      { kind: "action", label: "agent settings", hint: "Claude Code and Codex", run: () => a.setupTerminals?.() },
       { kind: "action", label: "setup tour", run: () => a.setupTour?.() },
       { kind: "action", label: "help", run: () => a.openPanel?.("help") },
       { kind: "action", label: "new terminal", hint: "Alt+N", run: () => a.newTerminal?.() },
@@ -347,8 +323,10 @@ export class Palette {
         kind: "action", label: "open last saved output", hint: a.lastSavedOutput(),
         run: () => a.openLastSavedOutput?.(),
       }] : []),
-      { kind: "action", label: "open folder in Explorer", hint: here || "", run: () => a.openExplorer?.() },
-      { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor?.() },
+      ...(local ? [
+        { kind: "action", label: "open folder in Explorer", hint: here || "", run: () => a.openExplorer?.() },
+        { kind: "action", label: "open folder in VS Code", hint: folderHint("Alt+Shift+C"), run: () => a.openEditor?.() },
+      ] : []),
       {
         kind: "action", label: "move terminal here…", hint: "from another workspace or Unassigned",
         keepOpen: true, run: () => this._foreignSessionMode(),
@@ -369,12 +347,8 @@ export class Palette {
         keepOpen: true, run: () => this._saveWorkspacePrompt(),
       },
       {
-        kind: "action", label: "new workspace…", hint: "choose a folder; the workspace is named after it",
+        kind: "action", label: "new workspace…", hint: "a folder on this PC, in WSL or over SSH",
         run: () => this.app.newWorkspace?.(),
-      },
-      {
-        kind: "action", label: "new workspace on host…", hint: "a folder on a machine you reach over SSH",
-        keepOpen: true, run: () => this.remoteWorkspaceMode(),
       },
       {
         kind: "action", label: "open file viewer…", keepOpen: true,
@@ -388,20 +362,6 @@ export class Palette {
         }),
       },
     ];
-    for (const p of a.profiles || []) {
-      const desktop = ["rdp", "vnc"].includes(p.terminal_type);
-      // An agent profile has no target of its own; connectionTarget then
-      // falls back to the same type and mode label, which read twice.
-      const typeLabel = connectionLabel(p);
-      const target = connectionTarget(p);
-      items.push({
-        kind: desktop ? "window" : "terminal",
-        label: `open ${desktop ? "window" : "terminal"}: ${p.name}`,
-        hint: target && target !== typeLabel ? `${typeLabel} · ${target}` : typeLabel,
-        run: () => a.runProfile?.(p),
-      });
-      items.push(...agentRows(p, a));
-    }
     // Snippets type straight into the focused terminal, so the row has to show
     // both what is sent and where it lands: two similarly named snippets are
     // otherwise indistinguishable in the list.
@@ -705,7 +665,7 @@ export class Palette {
         this._killMode();
         return;
       }
-      if (this.foreignMode || this.windowMode || this.searchMode || this.killMode || this.hostMode) {
+      if (this.foreignMode || this.windowMode || this.searchMode || this.killMode) {
         this.openPalette();
         return;
       }

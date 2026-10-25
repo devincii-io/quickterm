@@ -6,12 +6,11 @@
 // a new workspaceSessionIds, a config save a new cfg.
 
 export function createAppState({
-  cfg, profiles, snippets, workspaceNames, terminalInventory, windowIsPrimary,
+  cfg, snippets, workspaceNames, terminalInventory, windowIsPrimary,
 }) {
   return {
     // The config as last read, and the lists that come with it.
     cfg,
-    profiles,
     snippets,
     workspaceNames,
     terminalInventory,
@@ -33,6 +32,8 @@ export function createAppState({
     // null means "no folder chosen": the backend falls back to the home folder.
     workspacePath: null,
     workspacePathExists: true,
+    // Where the folder is (locations.js): null this PC, "wsl:<d>" or SSH.
+    workspaceHost: null,
     // Scratch is disposable, so its terminals start in a disposable folder
     // instead of the user's home directory. Re-read whenever settings are saved,
     // because scratch_dir is configurable.

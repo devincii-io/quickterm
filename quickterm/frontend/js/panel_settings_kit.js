@@ -6,7 +6,7 @@
 //
 //   * a problem belongs at the item, not only in the footer. The footer check
 //     (global_settings.js `settingsProblems`) stays as the backstop that
-//     refuses the save; these markers say WHICH of eleven profiles it meant.
+//     refuses the save; these markers say WHICH of eleven snippets it meant.
 //   * an empty state names the thing you would make and says why, rather than
 //     reporting that the list is empty.
 

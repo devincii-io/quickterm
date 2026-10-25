@@ -35,11 +35,9 @@ async function req(method, path, body, { keepalive = false } = {}) {
 }
 
 export const getConfig = () => req("GET", "/api/config");
-export const getProfiles = () => req("GET", "/api/profiles");
 export const getSessions = (options = {}) =>
   req("GET", options.metrics === false ? "/api/sessions?metrics=false" : "/api/sessions");
 export const createSession = (spec) => req("POST", "/api/sessions", spec || {});
-export const openDesktopConnection = (name) => req("POST", `/api/connections/${encodeURIComponent(name)}/open`, {});
 export const killSession = (id) => req("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
 export const retainSession = (id) => req("POST", `/api/sessions/${encodeURIComponent(id)}/retain`, {});
 export const renameSession = (id, name) => req("PATCH", `/api/sessions/${encodeURIComponent(id)}`, { name });
@@ -63,24 +61,34 @@ export const patchWorkspace = (name, metadata) => req("PATCH", `/api/workspaces/
 // `path` is deliberately three-valued: undefined omits the key so the server
 // keeps the stored folder (every layout autosave takes this branch), null
 // clears it, a string sets it.
-export const putWorkspace = (name, layout, logo, sessionIds = [], path, options) =>
+// `setup` ({env, startup}) is sent only when given: absent preserves both.
+export const putWorkspace = (name, layout, logo, sessionIds = [], path, options, setup) =>
   req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
     layout,
+    ...(setup?.env === undefined ? {} : { env: setup.env }),
+    ...(setup?.startup === undefined ? {} : { startup: setup.startup }),
     ...(logo === undefined ? {} : { logo }),
     session_ids: [...new Set(sessionIds || [])],
     ...(/^scratch-view-[A-Za-z0-9_-]{8,64}$/.test(name) ? { temporary: true } : {}),
     ...(path === undefined ? {} : { path }),
   }, options);
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
-// A workspace on an SSH host: `host` names an OpenSSH profile, `path` is a
-// folder there. The check runs `test -d` over ssh: {ok, message}.
-export const putRemoteWorkspace = (name, host, path) =>
-  req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { layout: null, session_ids: [], host, path });
+// A new workspace at a location (locations.js): `host` null is this PC,
+// "wsl:<distro>" a WSL distribution, anything else an SSH destination.
+// `startup` is the dialog's "Start with" list.
+export const putLocationWorkspace = (name, host, path, startup) =>
+  req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, {
+    layout: null, session_ids: [], host: host || null, path, ...(startup === undefined ? {} : { startup }),
+  });
+// {locations: [{id, kind, label, detail, browse}]}: this PC, the WSL
+// distributions and the Host aliases of ~/.ssh/config.
+export const getLocations = () => req("GET", "/api/locations");
+// `test -d` in WSL or over ssh: {ok, message}.
 export const checkRemoteFolder = (host, path) => req("POST", "/api/workspaces/remote-check", { host, path });
-// The workspace board's columns: {status: {"<workspace>": "todo"|...}};
-// a workspace without an entry is "in-progress".
+// The workspace board sorts itself (CONTRACTS 4.5 wave 2):
+// {workspaces: {"<name>": {status, reason, since, git, pr}}}. Nothing sets a
+// column; it follows the agents, the attention and git.
 export const getBoard = () => req("GET", "/api/board");
-export const setBoardStatus = (name, status) => req("PUT", `/api/board/${encodeURIComponent(name)}`, { status });
 // Branch and worktree facts for up to 256 folders, read from .git without
 // starting git: {"<path as sent>": null | {branch, head, worktree, main_path}}.
 export const gitInfo = (paths) => req("POST", "/api/git/info", { paths: [...(paths || [])] });
@@ -138,10 +146,6 @@ export const listAgentSessions = (type, { workspace = null, cwd = null } = {}, l
   else if (cwd) query.set("cwd", cwd);
   return req("GET", `/api/agent-sessions?${query}`);
 };
-// Host aliases from ~/.ssh/config, and one alias resolved through `ssh -G`.
-export const getSshHosts = () => req("GET", "/api/system/ssh-hosts");
-export const resolveSshHost = (alias) =>
-  req("GET", `/api/system/ssh-hosts/${encodeURIComponent(alias)}`);
 // While a shortcut is being captured, the global hotkeys are unregistered so
 // a combination QuickTerm already owns is recorded instead of fired. The
 // server resumes them on its own after 20 s.

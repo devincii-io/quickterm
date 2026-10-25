@@ -81,7 +81,6 @@ test("the shell reads what every view shows and owns, a pane winning over a clai
 
 test("the sidebar model lists saved workspaces with their folders, the views and who holds what", () => {
   const state = {
-    profiles: [{ name: "pwsh" }],
     terminalInventory: { types: [] },
     cfg: { shell: "cmd", agents: {} },
     selectedTerminal: null,
@@ -111,7 +110,7 @@ test("the sidebar model lists saved workspaces with their folders, the views and
   assert.deepEqual(model.agents, [], "no agent is installed in this inventory");
   assert.equal(model.logoUrl, "/logo");
   assert.deepEqual(Object.keys(model).sort(), [
-    "agents", "attached", "focusedId", "here", "inventory", "logoUrl", "owned", "profiles", "sessions", "shell",
+    "agents", "attached", "focusedId", "here", "inventory", "logoUrl", "owned", "sessions", "shell",
     "views", "workspaces",
-  ], "the SidebarModel of spec 4.2, with the shell and the agents of 4.3");
+  ], "the SidebarModel of spec 4.2, with the shell and the agents of 4.3 and no profiles (4.5)");
 });

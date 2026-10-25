@@ -1,14 +1,9 @@
 # PyInstaller recipe for the installed/portable Windows app folder.
 
-import hashlib
 import importlib.util
 import os
-import sys
 
 from PyInstaller.utils.hooks import collect_submodules
-
-sys.path.insert(0, os.path.join(SPECPATH, "scripts"))
-from fetch_putty import PUTTY_SHA256, VENDOR_DIR  # noqa: E402
 
 
 # The server explicitly selects these protocol implementations. Avoid bundling
@@ -25,7 +20,6 @@ hiddenimports = collect_submodules("webview") + [
 # or they go missing from the frozen build (a missing one 500s the endpoint).
 hiddenimports += [
     "quickterm.opener",
-    "quickterm.connections",
     "quickterm.agents",
     "quickterm.agent_sessions",
     "quickterm.ssh_config",
@@ -50,26 +44,10 @@ if _missing_conpty:
     raise RuntimeError(f"release build missing the ConPTY host from pywinpty: {_missing_conpty}")
 conpty_binaries = [(os.path.join(_conpty_dir, name), "conpty") for name in _conpty_names]
 
-# Bundled PuTTY console tools (ssh/sftp terminal types + on-PATH pscp). Pinned
-# and hash-verified: a missing or tampered exe fails the build, it never ships.
-_putty_problems = []
-for _name, _expected in PUTTY_SHA256.items():
-    _path = VENDOR_DIR / _name
-    if not _path.is_file():
-        _putty_problems.append(f"{_name}: missing")
-    elif hashlib.sha256(_path.read_bytes()).hexdigest() != _expected.lower():
-        _putty_problems.append(f"{_name}: SHA-256 mismatch")
-if _putty_problems:
-    raise RuntimeError(
-        "PuTTY tools not ready for release build "
-        f"({'; '.join(_putty_problems)}). Run: python scripts/fetch_putty.py"
-    )
-putty_binaries = [(str(VENDOR_DIR / name), "putty") for name in PUTTY_SHA256]
-
 a = Analysis(
     ["quickterm/app.py"],
     pathex=[],
-    binaries=conpty_binaries + putty_binaries,
+    binaries=conpty_binaries,
     datas=[("quickterm/frontend", "quickterm/frontend")],
     hiddenimports=hiddenimports,
     hookspath=[],

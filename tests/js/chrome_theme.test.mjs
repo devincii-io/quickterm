@@ -35,7 +35,7 @@ test("every text token is 4.5:1 on every panel surface, in every theme", () => {
   for (const id of Object.keys(TERMINAL_THEMES)) {
     const tokens = palette(id);
     for (const fg of ["--text", "--text-soft", "--muted", "--sage", "--danger", "--accent-text"]) {
-      for (const bg of ["--bg", "--surface", "--field", "--surface-raised", "--surface-soft"]) {
+      for (const bg of ["--bg", "--surface", "--field", "--surface-raised", "--surface-soft", "--surface-active"]) {
         const measured = ratio(tokens[fg], tokens[bg]);
         if (measured < 4.5) failures.push(`${id} ${fg} on ${bg}: ${measured.toFixed(2)}`);
       }

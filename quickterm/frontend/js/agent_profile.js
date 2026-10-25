@@ -167,3 +167,11 @@ export function agentCommandLine(kind, settings = {}, options = []) {
 export function isAgentSessionId(value) {
   return typeof value === "string" && SESSION_ID.test(value);
 }
+
+// Mirrors agents.validate in the backend for the one rule a person can break
+// by combining otherwise valid choices.
+export function agentConflicts(kind, agent = {}) {
+  if (kind !== "codex" || agent.bypass !== "true") return [];
+  const clash = Boolean(agent.approval) || Boolean(agent.sandbox) || agent.approve_for_me === "true";
+  return clash ? ["bypass replaces approval and sandbox; clear them first"] : [];
+}

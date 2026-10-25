@@ -34,6 +34,7 @@ const MODULES = {
   "spawner.js": [
     "serializableSpec", "commandTerminalType", "legacyAgentSpec", "claudeProfileForPane", "createSpawner",
   ],
+  "startup_runner.js": ["createStartupRunner"],
   "updates.js": ["watchUpdates"],
   "window_registry.js": ["createWindowRegistry"],
   "workspace_actions.js": ["validateWorkspaceName", "createWorkspaceActions"],
@@ -76,6 +77,7 @@ test("a factory builds without touching its dependencies", async () => {
     ["workspace_actions.js", "createWorkspaceActions"], ["workspace_switch.js", "createWorkspaceSwitch"],
     ["fonts.js", "createFontSize"], ["terminal_actions.js", "createTerminalActions"],
     ["launch_loop.js", "createLaunchTarget"], ["shell_routing.js", "createTerminalRouting"],
+    ["startup_runner.js", "createStartupRunner"],
   ];
   for (const [file, name] of factories) {
     const factory = (await load(file))[name];
@@ -191,17 +193,15 @@ test("spawn specs are derived without any window state", async () => {
   assert.equal(commandTerminalType({ cmd: "bash", terminal_type: "bash" }), "bash");
   assert.equal(commandTerminalType({ cmd: "bash" }), null);
 
-  const profiles = [
-    { name: "Claude", terminal_type: "claude-code" },
-    { name: "Shell", terminal_type: "bash", cmd: "bash" },
-    { name: "Direct", cmd: "C:\\bin\\claude.cmd" },
+  const agents = [
+    { name: "claude-code", terminal_type: "claude-code" },
+    { name: "codex", terminal_type: "codex" },
   ];
-  assert.equal(claudeProfileForPane(profiles, { profileName: "Claude" }).name, "Claude");
-  assert.equal(claudeProfileForPane(profiles, { profileName: "Shell" }), null);
-  // A resumable shell counts once its title shows it was running claude.
-  assert.equal(claudeProfileForPane(profiles, { profileName: "Shell", title: "claude" }).name, "Shell");
-  assert.equal(claudeProfileForPane(profiles, { profileName: "Direct" }).name, "Direct");
-  assert.equal(claudeProfileForPane(profiles, { profileName: "missing" }), null);
+  assert.equal(claudeProfileForPane(agents, { profileName: "claude-code" }).name, "claude-code");
+  // A saved terminal from before 4.5 is gone; its title still names the agent it ran.
+  assert.equal(claudeProfileForPane(agents, { profileName: "Shell", title: "claude" }).name, "claude-code");
+  assert.equal(claudeProfileForPane(agents, { profileName: "Shell" }), null);
+  assert.equal(claudeProfileForPane(agents, { profileName: "missing" }), null);
 });
 
 test("workspace names that the backend would mangle or delete are refused", async () => {
@@ -393,7 +393,7 @@ test("the shell answers window-wide members itself and everything else from the 
   for (const name of [
     "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
     "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal",
-    "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals",
+    "settingEntries", "openSetting", "editSnippet", "setupTerminals",
   ]) assert.ok(SHELL_MEMBERS.includes(name), name);
   const shell = { openWorkspace: () => "shell", killTerminal: () => "shell" };
   const facade = { splitH: () => "facade", profiles: ["fallback"] };

@@ -55,7 +55,7 @@ from quickterm.windows import (
 )
 
 if TYPE_CHECKING:
-    from quickterm.config import AppConfig, Profile
+    from quickterm.config import AppConfig
     from quickterm.session_manager import SessionManager
 
 MIN_BUILD = 17763  # Windows 10 1809, first usable ConPTY
@@ -76,11 +76,6 @@ BACKEND_START_S = 30.0
 BACKEND_RETIRE_S = 20.0
 GRACEFUL_SHUTDOWN_S = 3
 log = logging.getLogger("quickterm")
-
-# Hotkey launches run as tasks nobody awaits; the loop keeps only weak
-# references, so they are held here until they finish.
-_launch_tasks: set[asyncio.Task] = set()
-
 
 def begin_update_shutdown() -> bool:
     """The in-app updater's stand-down; pty_host.begin_update decides."""
@@ -171,6 +166,19 @@ class _DesktopApi:
             log.warning("could not open a second window", exc_info=True)
             return {"opened": False, "error": "failed", "detail": str(exc)}
         return {"opened": True, "window_id": window_id, "workspace": name}
+
+    def set_frame_colors(self, colors: Any = None) -> bool:
+        """Paint this viewer's title bars and borders in the theme's colours
+        (`window_frame.py`). False for bad colours; never raises into the page."""
+        try:
+            from quickterm import window_frame
+
+            return window_frame.apply(colors) > 0
+        except ValueError:
+            return False
+        except Exception:
+            log.debug("frame colours unavailable", exc_info=True)
+            return False
 
     def window_bounds(self) -> dict | None:
         """This window's size in pywebview logical units, for Settings'
@@ -383,8 +391,8 @@ def _base_url(port: int, host: str = "127.0.0.1") -> str:
 
 
 def take_migration_notice(cfg: "AppConfig") -> None:
-    """Show what the 4.3 settings migration dropped, once, in the window's
-    error banner, and log it. Only a backend takes it: the launcher may be
+    """Show what a settings migration dropped, once, in the window's error
+    banner, and log it. Only a backend takes it: the launcher may be
     the process that migrated, and it never shows a window of its own."""
     from quickterm.config import take_migration_notice as take
 
@@ -1052,8 +1060,7 @@ def _run_backend(
 
     Windows come from the window process it starts (pty_host.Host). The tray
     and the global hotkeys live here because they must keep working while no
-    window exists: they are how the user gets one back, and a profile hotkey
-    spawns its PTY here anyway.
+    window exists: they are how the user gets one back.
     """
     if not elevated and _already_running(cfg.port, cfg.host):
         # Two launchers raced and the other backend won. Going on would discard
@@ -1531,8 +1538,7 @@ async def _after_ready(
         await asyncio.sleep(0.05)
     if initial_launch:
         # The elevated instance's first terminal goes through the same
-        # resolver as every other launch: its folder is checked and the PuTTY
-        # tools land on its PATH.
+        # resolver as every other launch: its folder is checked.
         await _launch_terminal(
             manager,
             cfg,
@@ -1543,8 +1549,6 @@ async def _after_ready(
             name=initial_launch.get("name"),
             request_cwd=initial_launch.get("cwd"),
         )
-    else:
-        await _spawn_autostart(manager, cfg)
     if handoff:
         await _queue_startup_handoff(cfg, handoff)
     if ready_event is not None:
@@ -1627,26 +1631,14 @@ def _discard_scratch_workspace() -> None:
         log.debug("could not discard scratch workspace", exc_info=True)
 
 
-async def _spawn_autostart(manager: "SessionManager", cfg: "AppConfig") -> None:
-    for prof in list(cfg.profiles):
-        if prof.autostart:
-            await _launch_profile(manager, prof, cfg)
-
-
-async def _launch_profile(manager: "SessionManager", prof: "Profile", cfg: "AppConfig") -> None:
-    # Identical to a launch from the UI, because it is the same resolver: a
-    # profile does not mean something else when a hotkey starts it.
-    await _launch_terminal(manager, cfg, prof.name, profile=prof, name=prof.name)
-
-
 async def _launch_terminal(
     manager: "SessionManager", cfg: "AppConfig", label: str, **request: Any
 ) -> None:
     """Resolve and spawn one terminal nobody is waiting on; report, never raise.
 
-    Autostart, hotkeys and the elevated first terminal have no request to
-    answer, so a failure used to vanish into `except Exception: pass`. It is
-    logged and kept on the live config as `launch_error`, which the UI shows.
+    The elevated first terminal has no request to answer, so a failure used
+    to vanish into `except Exception: pass`. It is logged and kept on the
+    live config as `launch_error`, which the UI shows.
     """
     from quickterm.session_manager import SessionLimitError, SpawnError
 
@@ -1656,7 +1648,7 @@ async def _launch_terminal(
     except (launch.LaunchError, SpawnError, SessionLimitError) as exc:
         _report_launch_failure(cfg, launch.describe_failure(label, exc))
     except Exception as exc:
-        # A broken profile must not take down startup or the hotkey thread.
+        # A broken launch must not take down startup.
         log.debug("terminal launch failed", exc_info=True)
         _report_launch_failure(cfg, launch.describe_failure(label, exc))
 
@@ -1676,7 +1668,7 @@ def hotkey_error_text(failed: list[str]) -> str | None:
 
 
 class _GlobalHotkeys:
-    """The summon key and every profile key, registered with Windows.
+    """The summon key, registered with Windows.
 
     `rebind` and `suspend` are what PUT /api/config and
     POST /api/hotkeys/suspend call, through `asyncio.to_thread`: both wait for
@@ -1687,16 +1679,12 @@ class _GlobalHotkeys:
         self,
         hotkeys_mod: Any,
         hk: Any,
-        loop: asyncio.AbstractEventLoop,
-        manager: "SessionManager",
         cfg: "AppConfig",
         *,
         summon: Callable[[], None] | None = None,
     ) -> None:
         self._mod = hotkeys_mod
         self._hk = hk
-        self._loop = loop
-        self._manager = manager
         self._cfg = cfg
         # The backend's Host.toggle: it also starts the window process when
         # there is no window to toggle.
@@ -1707,13 +1695,6 @@ class _GlobalHotkeys:
         entry = self._mod.HotkeyEntry
         entries: list[Any] = []
         labels: list[str] = []
-        for prof in cfg.profiles:
-            if not prof.keybinding:
-                continue
-            entries.append(
-                entry(prof.keybinding, _profile_callback(self._loop, self._manager, prof, cfg))
-            )
-            labels.append(f"{prof.keybinding} ({prof.name})")
         if cfg.summon_hotkey:
             toggle = self._mod.toggle_window
             # Reads the live overlay settings at press time, and runs on the
@@ -1761,7 +1742,7 @@ def _start_hotkeys(
         import quickterm.hotkeys as hotkeys_mod
 
         hk = hotkeys_mod.HotkeyManager(loop)
-        hotkeys = _GlobalHotkeys(hotkeys_mod, hk, loop, manager, cfg, summon=summon)
+        hotkeys = _GlobalHotkeys(hotkeys_mod, hk, cfg, summon=summon)
         # Windows refuses a combination another program already owns. That
         # used to fail silently and leave a tray-hidden window unreachable;
         # Settings renders cfg.hotkey_error next to the field instead.
@@ -1779,24 +1760,6 @@ def _start_hotkeys(
     except Exception:
         log.debug("global hotkeys unavailable", exc_info=True)
         return None
-
-
-def _profile_callback(
-    loop: asyncio.AbstractEventLoop, manager: "SessionManager", prof: "Profile", cfg: "AppConfig"
-) -> Callable[[], None]:
-    # HotkeyManager runs callbacks on the loop thread; the launch itself
-    # resolves off the loop, so the callback only schedules it.
-    binding = prof.keybinding
-
-    def fire() -> None:
-        # The profile as it is now: a save that edits the profile but keeps its
-        # key does not rebind, and must not leave the old command bound.
-        current = next((p for p in cfg.profiles if p.keybinding == binding), prof)
-        task = loop.create_task(_launch_profile(manager, current, cfg))
-        _launch_tasks.add(task)
-        task.add_done_callback(_launch_tasks.discard)
-
-    return fire
 
 
 def _wire_voice(hotkeys: Any, manager: "SessionManager", cfg: "AppConfig") -> None:

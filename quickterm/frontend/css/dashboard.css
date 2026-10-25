@@ -38,6 +38,8 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
+/* The six workspace columns; the Agents tab sets its own. */
+.board-workspaces .board-columns { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 
 .board-column {
   min-height: 0;
@@ -47,7 +49,6 @@
   border-radius: 8px;
   transition: border-color .12s ease, background-color .12s ease;
 }
-.board-column.drop-target { border-color: var(--accent); background: var(--drop-target); }
 
 .board-column-head {
   flex: none;
@@ -56,11 +57,15 @@
   gap: 8px;
   padding: 9px 10px 7px;
 }
+.board-column-heading { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.board-column-line { display: flex; align-items: center; gap: 8px; }
+.board-column-meaning { margin: 0; color: var(--muted); font-size: 11px; line-height: 15px; }
 .board-column-title { margin: 0; color: var(--text); font-size: 12px; font-weight: 600; }
 .board-column-count { color: var(--muted); font: 11px var(--mono); }
 
-/* The thin status mark: an empty ring, a half-filled ring, a ring with a
-   dot, a filled ring with a tick. */
+/* The thin status mark: a haloed dot (needs you), a half-filled ring
+   (working), a ring with a dot (in review), a dashed ring (changes), a
+   filled ring with a tick (done), an empty ring (idle). */
 .board-status-icon {
   position: relative;
   flex: none;
@@ -69,10 +74,16 @@
   border: 1.5px solid var(--muted);
   border-radius: 50%;
 }
-.board-status-icon[data-status="in-progress"] {
-  border-color: var(--warning);
-  background: conic-gradient(var(--warning) 0 50%, transparent 50% 100%);
+.board-status-icon[data-status="needs-you"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent);
 }
+.board-status-icon[data-status="working"] {
+  border-color: var(--accent);
+  background: conic-gradient(var(--accent) 0 50%, transparent 50% 100%);
+}
+.board-status-icon[data-status="changes"] { border-color: var(--warning); border-style: dashed; }
 .board-status-icon[data-status="in-review"] {
   border-color: var(--sage);
   background: radial-gradient(circle, var(--sage) 0 2px, transparent 2.5px);
@@ -116,11 +127,24 @@
   background: var(--surface-raised);
   cursor: pointer;
   user-select: none;
-  touch-action: none;
 }
 .board-card:hover { border-color: var(--line-hover); }
 .board-card:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: 1px; }
-.board-card.dragging { opacity: .4; }
+.board-card[data-status="needs-you"] { border-color: var(--accent-border); }
+/* A card whose status changed eases from its old place into the new one. */
+.board-card-ghost { position: fixed; z-index: 110; margin: 0; pointer-events: none; transition: transform .22s ease; }
+.board-card.arriving { opacity: 0; }
+.board-reason {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-card[data-status="needs-you"] .board-reason { color: var(--accent-text); }
+.board-reason[hidden] { display: none; }
 
 .board-card-name {
   margin: 0;
@@ -220,32 +244,18 @@
 }
 .board-dot.state-failed { border-color: var(--danger); background: var(--danger); }
 
-.board-drag-ghost {
-  position: fixed;
-  z-index: 1000;
-  max-width: 240px;
-  overflow: hidden;
-  padding: 4px 9px;
-  border: 1px solid var(--accent-border);
-  border-radius: 6px;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-sm);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  pointer-events: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Narrower than six readable columns: two rows of three, each scrolling. */
+@media (max-width: 1280px) {
+  .board-workspaces .board-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); }
 }
-
 @media (max-width: 900px) {
   .panel[data-view="dashboard"] .panel-body { overflow-y: auto; }
   .board { height: auto; }
-  .board-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .board-columns, .board-workspaces .board-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: auto; }
   .board-cards { overflow: visible; }
 }
 @media (max-width: 520px) {
-  .board-columns { grid-template-columns: minmax(0, 1fr); }
+  .board-columns, .board-workspaces .board-columns { grid-template-columns: minmax(0, 1fr); }
   .panel[data-view="dashboard"] .panel-head > div:first-child { flex: 1; }
   .panel[data-view="dashboard"] .panel-head-tools { flex-basis: 100%; order: 3; }
   .panel[data-view="dashboard"] .panel-head { flex-wrap: wrap; }
@@ -255,11 +265,13 @@
 @media (prefers-reduced-motion: reduce) {
   .board-dot.state-busy { animation: none; }
   .board-column { transition: none; }
+  .board-card-ghost { transition: none; }
 }
 
 @media (forced-colors: active) {
   .board-card:focus-visible { outline-color: Highlight; }
-  .board-column.drop-target { border-color: Highlight; }
+  .board-status-icon[data-status="needs-you"],
+  .board-status-icon[data-status="working"] { border-color: Mark; background: Mark; }
   .board-dot.state-busy,
   .board-dot.state-attention,
   .board-dot.state-done,
@@ -439,3 +451,75 @@
 .workspace-settings .workspace-preview-pane { border-radius: 3px; background: var(--surface-raised); }
 .workspace-settings .workspace-preview-pane::before,
 .workspace-settings .workspace-preview-pane::after { display: none; }
+
+/* Location, environment and "Start with" (CONTRACTS 4.5 wave 2). */
+.workspace-settings-location {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+.workspace-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.workspace-settings-section-head { display: flex; flex-direction: column; gap: 2px; }
+.workspace-settings-section-title { margin: 0; color: var(--text); font-size: 12.5px; font-weight: 650; }
+.setup-env, .setup-start { display: flex; flex-direction: column; gap: 6px; }
+.setup-env-rows { display: flex; flex-direction: column; gap: 6px; }
+.setup-env-rows:empty { display: none; }
+.setup-env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 28px;
+  gap: 6px;
+  align-items: center;
+}
+.setup-env-row .ui-input { font-family: var(--mono); font-size: 12px; }
+.setup-env-row > .setup-problem { grid-column: 1 / -1; }
+.setup-env-add, .setup-start-add { align-self: flex-start; }
+.setup-problem { margin: 0; color: var(--danger); font-size: 11.5px; }
+.setup-problem[hidden] { display: none; }
+.setup-note { margin: 0; }
+.workspace-settings .ui-input[aria-invalid="true"] { border-color: var(--danger); }
+
+.setup-start-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.setup-start-list:empty { display: none; }
+.setup-start-empty { margin: 0; }
+.setup-start-empty[hidden] { display: none; }
+.setup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+.setup-item-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.setup-item-number { flex: none; width: 16px; color: var(--muted); font: 11px var(--mono); text-align: right; }
+.setup-item-kind { flex: none; width: 128px; }
+.setup-item-name { flex: 1; min-width: 0; }
+.setup-item-up .icon { transform: rotate(180deg); }
+.setup-item-head .icon-button:disabled { opacity: .35; cursor: default; }
+.setup-item-head .icon-button:disabled:hover { background: transparent; color: var(--muted); }
+.setup-item-command { font-family: var(--mono); font-size: 12px; }
+.setup-item-command-field[hidden], .setup-item-shell-field[hidden], .setup-item-agent[hidden] { display: none; }
+.setup-item-shell-field .config-choice { width: 220px; max-width: 100%; }
+.setup-item .config-advanced { margin-top: 0; }
+.setup-item .agent-fields .settings-field + .agent-option-group { margin-top: 8px; }
+
+@media (max-width: 520px) {
+  .setup-item-head { flex-wrap: wrap; }
+  .setup-item-kind { width: auto; flex: 1; }
+  .setup-item-name { flex-basis: 100%; order: 3; }
+}
+@media (forced-colors: active) {
+  .workspace-settings .ui-input[aria-invalid="true"] { border-color: Mark; }
+}

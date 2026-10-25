@@ -1,0 +1,225 @@
+/* The theme switcher (js/theme_switcher.js): a centred, bounded sheet over
+   the window, above Settings (100) and the palette (110), under menus (130).
+   The scrim is lighter than a panel's on purpose: the point of the sheet is
+   to watch the window behind it change. Each card's miniature takes its
+   colours from --m-* properties the script sets from that theme; everything
+   else is the current theme's tokens. */
+
+.ts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 115;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(14px, 4vh, 44px);
+  background: color-mix(in srgb, var(--scrim) 45%, transparent);
+}
+.ts-sheet {
+  width: min(980px, 94vw);
+  height: min(720px, 86vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+}
+
+.ts-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px 11px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.ts-titles { min-width: 0; flex: 1; }
+.ts-title { margin: 0; font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.ts-subtitle { margin: 3px 0 0; color: var(--muted); font-size: 10.5px; }
+.ts-search {
+  flex: 0 1 260px;
+  min-width: 140px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--field);
+  color: var(--muted);
+}
+.ts-search:focus-within { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-ring); }
+.ts-search-input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  caret-color: var(--accent);
+  font-size: 12px;
+}
+.ts-search-input::placeholder { color: var(--muted); }
+.ts-actions { flex: none; display: flex; gap: 6px; }
+
+.ts-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px 14px; }
+.ts-group-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 10px 0 7px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.ts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(208px, 1fr)); gap: 10px; }
+.ts-empty { margin: 30px 0; color: var(--muted); text-align: center; }
+
+.ts-card {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 6px 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ts-card:hover { border-color: var(--line-hover); background: var(--surface-soft); }
+.ts-card.selected { border-color: var(--accent); background: var(--surface-active); box-shadow: 0 0 0 1px var(--accent); }
+.ts-card-label { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 0 2px; }
+.ts-card-label strong { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ts-card-label small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.ts-card-mark {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 18px;
+  height: 18px;
+  display: none;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.ts-card.applied .ts-card-mark { display: grid; }
+
+/* The miniature: 30% sidebar, 70% terminal. */
+.ts-mini {
+  height: 92px;
+  display: grid;
+  grid-template-columns: 30% 1fr;
+  overflow: hidden;
+  border: 1px solid var(--m-line);
+  border-radius: 3px;
+  background: var(--m-term-bg);
+  pointer-events: none;
+}
+.ts-mini-side {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 5px;
+  border-right: 1px solid var(--m-line);
+  background: var(--m-bg);
+}
+.ts-mini-card, .ts-mini-row { display: flex; align-items: center; gap: 4px; height: 13px; padding: 0 4px; border-radius: 2px; }
+.ts-mini-card { background: var(--m-active); box-shadow: inset 2px 0 0 var(--m-accent); }
+.ts-mini-dot { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--m-accent); }
+.ts-mini-dot.hollow { border: 1px solid var(--m-muted); background: transparent; }
+.ts-mini-bar { flex: 1; height: 3px; border-radius: 2px; background: var(--m-muted); opacity: .8; }
+.ts-mini-bar.short { flex: 0 0 55%; }
+.ts-mini-name { background: var(--m-text); opacity: 1; }
+.ts-mini-term {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 7px 0;
+  color: var(--m-term-fg);
+  font: 9px/1.35 var(--mono);
+  white-space: nowrap;
+}
+.ts-mini-line { overflow: hidden; text-overflow: clip; }
+.ts-mini-cursor { display: inline-block; width: 5px; height: 10px; vertical-align: -2px; background: var(--m-cursor); }
+
+.ts-custom {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+}
+.ts-custom-title { flex-basis: 100%; margin: 0; color: var(--text-soft); font-size: 11px; font-weight: 600; }
+.ts-custom-field { display: flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 10.5px; }
+.ts-custom-field input { width: 32px; height: 24px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); cursor: pointer; }
+.ts-custom-apply { margin-left: auto; }
+
+.ts-foot {
+  flex: none;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.ts-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-status.error { color: var(--danger); }
+.ts-keys { flex: none; font-family: var(--mono); }
+
+/* Settings > General: the row that opens the switcher. */
+.theme-row {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--field);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.theme-row:hover { border-color: var(--line-hover); background: var(--surface-raised); }
+.theme-row .ts-mini { flex: none; width: 92px; height: 34px; }
+.theme-row .ts-mini-side { gap: 2px; padding: 3px; }
+.theme-row .ts-mini-card, .theme-row .ts-mini-row { height: 7px; padding: 0 2px; }
+.theme-row .ts-mini-term { padding: 3px 4px 0; font-size: 5px; gap: 0; }
+.theme-row-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.theme-row-copy strong { font-size: 12px; font-weight: 600; }
+.theme-row-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.theme-row-action { flex: none; color: var(--accent-text); font-size: 11px; font-weight: 600; }
+
+@media (max-width: 680px) {
+  .ts-head { flex-wrap: wrap; }
+  .ts-search { flex-basis: 100%; order: 3; }
+  .ts-keys { display: none; }
+}
+
+@media (forced-colors: active) {
+  .ts-card.selected { outline: 2px solid Highlight; }
+}

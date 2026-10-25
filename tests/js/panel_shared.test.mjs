@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  countPanes, displaySnippet, environmentError, formatBytes, inferTerminalType,
+  countPanes, displaySnippet, environmentError, formatBytes,
   layoutSessionIds, nativeFolderPickerAvailable, pickNativeFolder,
-  runnableSnippet, sessionAlreadyGone, TERMINAL_TYPES,
+  runnableSnippet, sessionAlreadyGone,
 } from "../../quickterm/frontend/js/panel_shared.js";
 
 test("a forgotten session is told apart from a kill that failed", () => {
@@ -37,48 +37,10 @@ test("the environment rule rejects unsafe values", () => {
   assert.equal(environmentError({ GOOD: "value" }), "");
 });
 
-test("terminal and snippet helpers preserve their UI contracts", () => {
-  assert.equal(inferTerminalType({ cmd: "C:\\Windows\\System32\\wsl.exe" }), "wsl");
-  assert.equal(inferTerminalType({ cmd: "C:\\Users\\me\\bin\\claude.exe" }), "custom");
-  assert.equal(inferTerminalType({ cmd: "claude.exe", terminal_type: "claude-code" }), "claude-code");
+test("snippet and size helpers preserve their UI contracts", () => {
   assert.equal(displaySnippet("echo ready\r"), "echo ready");
   assert.equal(runnableSnippet("echo ready"), "echo ready\r");
   assert.equal(formatBytes(1024 * 1024), "1.0 MB");
-});
-
-test("the terminal type is inferred for every shell the launcher knows", () => {
-  const cases = [
-    ["pwsh", "powershell-core"], ["C:\\Program Files\\PowerShell\\7\\pwsh.exe", "powershell-core"],
-    ["powershell.exe", "windows-powershell"], ["cmd", "command-prompt"], ["wsl.exe", "wsl"],
-    ["plink.exe", "ssh"], ["psftp", "sftp"],
-    ["bash", "bash"], ["/usr/bin/zsh", "zsh"], ["/opt/homebrew/bin/fish", "fish"],
-    ["C:\\Program Files\\Git\\bin\\bash.exe", "git-bash"], ["C:\\Program Files\\Git\\usr\\bin\\bash.exe", "git-bash"],
-    ["C:\\Windows\\System32\\bash.exe", "bash"],
-    ["nu", "nushell"], ["C:\\Users\\me\\.cargo\\bin\\nu.exe", "nushell"],
-    ["python.exe", "custom"], ["claude", "custom"], ["", "custom"], ["nushell", "custom"],
-  ];
-  for (const [cmd, type] of cases) assert.equal(inferTerminalType({ cmd }), type, cmd);
-  // launch.py builds its own arguments for these and drops the profile's, so
-  // a command that carries arguments is not inferred as one of them.
-  assert.equal(inferTerminalType({ cmd: "bash", args: ["-c", "make"] }), "custom");
-  assert.equal(inferTerminalType({ cmd: "wsl.exe", args: ["-d", "Ubuntu"] }), "custom");
-  assert.equal(inferTerminalType({ cmd: "nu", args: ["--no-config"] }), "nushell");
-  assert.equal(inferTerminalType({ cmd: "pwsh", args: ["-NoLogo"] }), "powershell-core");
-});
-
-test("codex is inferred from its native exe and from the npm shim", () => {
-  for (const cmd of [
-    "codex", "codex.exe", "codex.cmd", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd",
-    "C:\\tools\\Codex.EXE",
-  ]) {
-    assert.equal(inferTerminalType({ cmd }), "codex", cmd);
-  }
-  // Codex builds its own mode arguments ahead of the profile's, so extra
-  // arguments do not make it a custom command.
-  assert.equal(inferTerminalType({ cmd: "codex", args: ["--search"] }), "codex");
-  assert.equal(inferTerminalType({ cmd: "codex-helper.exe" }), "custom");
-  assert.equal(inferTerminalType({ cmd: "pwsh.cmd" }), "custom");
-  assert.ok(TERMINAL_TYPES.some((type) => type.id === "codex" && type.label === "Codex"));
 });
 
 test("native folder picker distinguishes selection, cancel, and browser fallback", async () => {

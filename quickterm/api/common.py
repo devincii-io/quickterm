@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException, Request
 
 from quickterm import launch
+from quickterm import workspace as workspace_store
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
@@ -98,9 +99,7 @@ async def checked_dir(value: str, label: str | None = None) -> str:
         raise HTTPException(exc.status, str(exc)) from exc
 
 
-async def resolve_request(
-    ctx: ApiContext, body: dict, *, append_tools: bool = True
-) -> launch.LaunchSpec:
+async def resolve_request(ctx: ApiContext, body: dict) -> launch.LaunchSpec:
     """The one path from a request body to a LaunchSpec (spawn and elevate)."""
     workspace_name = request_workspace(body)
     cwd = body.get("cwd")
@@ -108,12 +107,21 @@ async def resolve_request(
         raise HTTPException(400, "cwd must be a string")
     # A workspace is a folder: every session it owns starts there unless
     # the request names a directory itself (Explorer handoff, or a split
-    # inheriting the source pane's cwd). Profiles contribute nothing here.
+    # inheriting the source pane's cwd).
     request_cwd = cwd if cwd and cwd.strip() else None
+    # A terminal's own variables follow the workspace rules (no QUICKTERM_*,
+    # no WSLENV); the workspace's own come from its file.
+    env = body.get("env")
+    if env is not None:
+        try:
+            env = workspace_store.validate_env(env)
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid env: {exc}") from exc
     root = None
     remote = await asyncio.to_thread(launch.workspace_target, workspace_name)
     if request_cwd is None and remote is None:
         root = await asyncio.to_thread(launch.workspace_start, workspace_name)
+    shared_env = await asyncio.to_thread(launch.workspace_env, workspace_name)
     try:
         return await asyncio.to_thread(
             functools.partial(
@@ -122,18 +130,19 @@ async def resolve_request(
                 profile=body.get("profile"),
                 cmd=body.get("cmd"),
                 args=body.get("args"),
-                env=body.get("env"),
+                env=env,
                 name=body.get("name"),
-                start_command=body.get("start_command"),
                 claude_mode=body.get("claude_mode"),
                 agent_mode=body.get("agent_mode"),
                 agent_session=body.get("agent_session"),
                 request_cwd=request_cwd,
                 workspace_root=root,
-                append_tools=append_tools,
                 shell=body.get("shell"),
                 prompt=body.get("prompt"),
                 remote=remote,
+                command=body.get("command"),
+                workspace_env=shared_env,
+                agent_options=body.get("agent"),
             )
         )
     except launch.LaunchError as exc:

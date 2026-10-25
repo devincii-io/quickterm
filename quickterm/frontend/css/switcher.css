@@ -40,7 +40,7 @@
   border-radius: 5px;
   cursor: pointer;
 }
-.qt-switcher-row.active { background: var(--surface-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.qt-switcher-row.active { background: var(--surface-active); box-shadow: inset 2px 0 0 var(--accent); }
 .qt-switcher-dot {
   flex: none;
   width: 7px;

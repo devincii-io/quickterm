@@ -15,7 +15,7 @@
 //   Alt+Shift+V        split top and bottom
 //   Alt+Shift+Right    split to the right
 //   Alt+Shift+Down     split below
-//   Alt+Shift+Left/Up  previous / next new-terminal profile
+//   Alt+Shift+Left/Up  open the new-terminal menu
 //   Alt+Shift+S        sidebar: full, rail, hidden
 //   Alt+Shift+E        right panel: files, changes, pull request
 //   Alt+Shift+C        open the focused terminal's folder in VS Code
@@ -55,7 +55,7 @@ export const SHORTCUTS = [
   { id: "focus", keys: "Alt+Arrows", label: "Move between panes", group: "Panes", bindings: arrows("alt") },
   { id: "split-right", keys: "Alt+Shift+→ or Alt+Shift+H", label: "Split the selected terminal to the right", group: "Panes", bindings: ["alt+shift+right", "alt+shift+h"] },
   { id: "split-down", keys: "Alt+Shift+↓ or Alt+Shift+V", label: "Split the selected terminal below", group: "Panes", bindings: ["alt+shift+down", "alt+shift+v"] },
-  { id: "cycle-terminal", keys: "Alt+Shift+← / ↑", label: "Previous / next new-terminal choice", group: "Panes", bindings: ["alt+shift+left", "alt+shift+up"] },
+  { id: "cycle-terminal", keys: "Alt+Shift+← / ↑", label: "Open the new-terminal menu (what + starts)", group: "Panes", bindings: ["alt+shift+left", "alt+shift+up"] },
   { id: "sidebar", keys: "Alt+Shift+S", label: "Sidebar: full, rail, hidden", group: "Window", bindings: ["alt+shift+s"] },
   { id: "workspace-n", keys: "Ctrl+Shift+1…9", label: "Show the first to ninth workspace in the sidebar", group: "Window", bindings: [..."123456789"].map((digit) => `ctrl+shift+${digit}`) },
   { id: "workspace-cycle", keys: "Alt+PgDn / Alt+PgUp", label: "Next / previous open workspace", group: "Window", bindings: ["alt+pagedown", "alt+pageup"] },
