@@ -210,9 +210,208 @@ def ps_command(exe: str, args: list[str]) -> str:
     )
 
 
-def interactive(value: str, prog: str, cwd: str | None) -> tuple[str, list[str], str | None]:
-    """The plain shell: command, arguments, process folder."""
+# --- shell integration ---------------------------------------------------------
+#
+# A terminal QuickTerm starts in its configured Windows shell reports its
+# folder at every prompt as OSC 9;9 with a plain Windows path (pane.js and
+# signals.py read it), so the sidebar knows where a `cd` went. In PowerShell
+# the user's own `claude` and `codex` also get QuickTerm's hooks. WSL, POSIX
+# shells and SSH terminals are left as they are.
+
+INTEGRATED = ("powershell", "cmd", "git-bash")
+# The integration script travels in this variable rather than on the command
+# line: an agent prompt already takes up to 16000 characters of it, and an
+# inline script is not subject to the execution policy, as a file would be.
+# The script removes the variable before anything else runs. Constrained
+# Language Mode (AppLocker, WDAC) refuses ScriptBlock.Create with an error at
+# the top of every terminal, so there the script is skipped and only the
+# variable removed: no folder reports, no agent functions.
+PS_INIT_VAR = "QUICKTERM_PS_INIT"
+PS_BOOT = (
+    "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') "
+    f"{{ & ([ScriptBlock]::Create($env:{PS_INIT_VAR})) }} "
+    f"else {{ Remove-Item -LiteralPath Env:{PS_INIT_VAR} -ErrorAction Ignore }}"
+)
+# cmd.exe expands $E to ESC and $P to the current folder in PROMPT.
+CMD_PROMPT_PREFIX = "$E]9;9;$P$E\\"
+CMD_PROMPT_DEFAULT = "$P$G"
+# A drive folder (/c/Users) becomes C:\Users without starting a process;
+# anything else (the msys root) asks `pwd -W`, a builtin, in a subshell.
+GIT_BASH_PROMPT_COMMAND = (
+    "__qt_d=$PWD; __qt_b='\\'; "
+    "if [[ $__qt_d =~ ^/([A-Za-z])(/.*)?$ ]]; "
+    "then __qt_d=${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}; "
+    "else __qt_d=$(pwd -W 2>/dev/null); fi; "
+    "[[ -n $__qt_d ]] && printf '\\033]9;9;%s\\033\\\\' \"${__qt_d//\\//$__qt_b}\"; "
+    "unset __qt_d __qt_b"
+)
+# First arguments after which the user's own command goes through untouched:
+# subcommands that take no --settings (Claude) or have nothing to report.
+CLAUDE_PLAIN = (
+    "agents", "mcp", "config", "update", "doctor", "install", "setup-token",
+    "migrate-installer", "plugin", "plugins", "login", "logout",
+)
+CODEX_PLAIN = (
+    "login", "logout", "mcp", "mcp-server", "completion", "apply", "app-server",
+    "proto", "debug", "help",
+)
+
+
+@dataclass(frozen=True)
+class AgentHook:
+    """What QuickTerm adds to the user's own `claude` or `codex` in PowerShell:
+    `args` (Claude's go after the user's, Codex's before), and whether a
+    .cmd/.bat program may be given them (cmd.exe would re-parse some)."""
+
+    args: tuple[str, ...]
+    batch_ok: bool
+
+
+@dataclass(frozen=True)
+class Integration:
+    """Shell integration for one terminal. The agent hooks are None when the
+    launch has none (elevated instance, no usable curl, an unsafe folder)."""
+
+    claude: AgentHook | None = None
+    codex: AgentHook | None = None
+
+
+def _ps_array(words: tuple[str, ...] | list[str]) -> str:
+    return "@(" + ",".join(ps_quote(word) for word in words) + ")"
+
+
+def _ps_agent_function(name: str, hook: AgentHook, plain: tuple[str, ...], *, after: bool) -> str:
+    """A global function `name` that runs the real program with `hook.args`.
+
+    The program is resolved on each call, so a later install or PATH change
+    counts. Not found: the function steps aside and PowerShell runs `name`
+    itself, which reports the usual error (or runs an alias or script). A
+    function of that name the user's profile defined (a wrapper for a second
+    account, a default model) is theirs: it stays, and gets no hooks."""
+    settings = (
+        " -or ($a | Where-Object { $s = [string]$_; $s -ceq '--settings' -or "
+        "$s.StartsWith('--settings=') })"
+        if name == "claude" else ""
+    )
+    call = "$a + $h" if after else "$h + $a"
+    batch = "" if hook.batch_ok else (
+        " -or @('.cmd','.bat') -contains [IO.Path]::GetExtension($p.Source).ToLowerInvariant()"
+    )
+    return (
+        f"if (-not (Get-Command -Name {name} -CommandType Function -ErrorAction Ignore)) {{\n"
+        f"function global:{name} {{\n"
+        f"  $a = @($args)\n"
+        f"  $p = Get-Command -Name {name} -CommandType Application -ErrorAction Ignore"
+        " | Select-Object -First 1\n"
+        "  if (-not $p) {\n"
+        f"    $f = ${{function:global:{name}}}\n"
+        f"    Remove-Item -LiteralPath Function:\\{name}\n"
+        "    try { if ($MyInvocation.ExpectingInput) { $input | & "
+        f"{ps_quote(name)} @a }} else {{ & {ps_quote(name)} @a }} }}\n"
+        f"    finally {{ ${{function:global:{name}}} = $f }}\n"
+        "    return\n"
+        "  }\n"
+        f"  $h = {_ps_array(hook.args)}\n"
+        f"  $plain = ($a.Count -gt 0 -and {_ps_array(plain)} -ccontains [string]$a[0])"
+        f"{settings}{batch}\n"
+        f"  $c = @(if ($plain) {{ $a }} else {{ {call} }})\n"
+        "  if ($MyInvocation.ExpectingInput) { $input | & $p.Source @c } else { & $p.Source @c }\n"
+        "}\n"
+        "}\n"
+    )
+
+
+# Runs once the profile has loaded. The original prompt runs first, so $?
+# and $LASTEXITCODE are still the user's when a prompt framework reads them;
+# nothing here starts a program.
+_PS_PROMPT = (
+    "$global:__QuickTermPrompt = $function:prompt\n"
+    "if (-not $global:__QuickTermPrompt) {\n"
+    "  $global:__QuickTermPrompt = { \"PS $($executionContext.SessionState.Path.CurrentLocation)"
+    "$('>' * ($nestedPromptLevel + 1)) \" }\n"
+    "}\n"
+    "function global:prompt {\n"
+    "  $out = & $global:__QuickTermPrompt\n"
+    "  $loc = $executionContext.SessionState.Path.CurrentLocation\n"
+    "  if ($loc.Provider.Name -eq 'FileSystem') {\n"
+    "    [Console]::Write([string][char]27 + ']9;9;' + $loc.ProviderPath + [char]27 + '\\')\n"
+    "  }\n"
+    "  $out\n"
+    "}\n"
+)
+
+
+def ps_integration(integration: Integration) -> str:
+    """The PowerShell integration script (the value of PS_INIT_VAR)."""
+    parts = [f"Remove-Item -LiteralPath Env:{PS_INIT_VAR} -ErrorAction Ignore\n", _PS_PROMPT]
+    if integration.claude is not None:
+        parts.append(_ps_agent_function("claude", integration.claude, CLAUDE_PLAIN, after=True))
+    if integration.codex is not None:
+        parts.append(_ps_agent_function("codex", integration.codex, CODEX_PLAIN, after=False))
+    return "".join(parts)
+
+
+def _env_get(env: dict[str, str], name: str) -> tuple[str | None, str | None]:
+    """(key, value) of `name` in `env`, matched case-insensitively."""
+    for key, value in env.items():
+        if key.casefold() == name.casefold():
+            return key, value
+    return None, None
+
+
+def integration_env(value: str, integration: Integration | None, env: dict[str, str]) -> dict[str, str]:
+    """`env` with what the shell integration of `value` needs. `env` is the
+    launch's own environment; QuickTerm's environment (os.environ) is only
+    read for cmd's PROMPT."""
+    if integration is None or value not in INTEGRATED:
+        return env
+    out = dict(env)
     if value == "powershell":
+        out[PS_INIT_VAR] = ps_integration(integration)
+    elif value == "cmd":
+        key, current = _env_get(out, "PROMPT")
+        if key is not None:
+            del out[key]
+        if current is None:
+            current = _env_get(dict(os.environ), "PROMPT")[1]
+        out["PROMPT"] = cmd_prompt(current)
+    elif value == "git-bash":
+        key, current = _env_get(out, "PROMPT_COMMAND")
+        if key is not None:
+            del out[key]
+        if current is None:
+            current = _env_get(dict(os.environ), "PROMPT_COMMAND")[1]
+        out["PROMPT_COMMAND"] = bash_prompt_command(current)
+    return out
+
+
+def cmd_prompt(current: str | None) -> str:
+    """cmd's PROMPT: the folder report, then the user's own prompt."""
+    own = current or CMD_PROMPT_DEFAULT
+    while own.startswith(CMD_PROMPT_PREFIX):
+        own = own[len(CMD_PROMPT_PREFIX):]
+    return CMD_PROMPT_PREFIX + (own or CMD_PROMPT_DEFAULT)
+
+
+def bash_prompt_command(current: str | None) -> str:
+    """Git Bash's PROMPT_COMMAND: the user's own (from the environment), then
+    the folder report. A bashrc that sets its own replaces both."""
+    own = (current or "").strip().rstrip(";").rstrip()
+    if not own or GIT_BASH_PROMPT_COMMAND in own:
+        return own or GIT_BASH_PROMPT_COMMAND
+    return f"{own}; {GIT_BASH_PROMPT_COMMAND}"
+
+
+def interactive(
+    value: str, prog: str, cwd: str | None, integration: Integration | None = None,
+) -> tuple[str, list[str], str | None]:
+    """The plain shell: command, arguments, process folder.
+
+    With `integration`, PowerShell runs QuickTerm's integration script
+    (`integration_env` carries it) and stays interactive."""
+    if value == "powershell":
+        if integration is not None:
+            return prog, ["-NoLogo", "-NoExit", "-Command", PS_BOOT], cwd
         return prog, ["-NoLogo"], cwd
     if value == "cmd":
         return prog, [], cwd
@@ -234,13 +433,20 @@ class Wrap:
     cli: str
 
 
-def wrap(spec: Wrap, exe: str, args: list[str], cwd: str | None) -> tuple[str, list[str], str | None]:
+def wrap(
+    spec: Wrap, exe: str, args: list[str], cwd: str | None,
+    integration: Integration | None = None,
+) -> tuple[str, list[str], str | None]:
     """Command, arguments and process folder of the shell that runs `exe args`
     once and then stays interactive. ValueError when cmd.exe would re-parse
-    an argument."""
+    an argument. With `integration`, PowerShell runs QuickTerm's integration
+    script first; cmd and Git Bash take theirs from the environment alone."""
     value, prog = spec.value, spec.program
     if value == "powershell":
-        return prog, ["-NoLogo", "-NoExit", "-Command", ps_command(exe, args)], cwd
+        command = ps_command(exe, args)
+        if integration is not None:
+            command = f"{PS_BOOT}\n{command}"
+        return prog, ["-NoLogo", "-NoExit", "-Command", command], cwd
     if value == "cmd":
         for word in [exe, *args]:
             if _CMD_UNSAFE.search(word):

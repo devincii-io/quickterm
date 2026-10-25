@@ -111,8 +111,10 @@ def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy
     assert 'from "./split_policy.js"' in spawner
     assert "spawnSplitInto(pane, source)" in commands
     # Alt+N and "+" (4.3): the focused pane's folder only inside the
-    # workspace folder, else the workspace folder as before.
-    assert "newTerminal:" in commands and "spawnDefaultInto(pane, cwd)" in commands
+    # workspace folder, else the workspace folder as before. The shell is the
+    # sidebar's "+" choice, the configured one until another row was picked.
+    assert "newTerminal:" in commands and "spawnDefaultInto(pane, cwd, shell)" in commands
+    assert "state.launcherView?.newTerminalChoice?.()" in commands
     assert "sameFolderCwd(source?.bestKnownCwd?.() || null, state.workspacePath)" in commands
     assert "samePath(paneCwd, root) || insidePath(paneCwd, root) ? paneCwd : null" in spawner
     assert "registerOscHandler(7" in pane

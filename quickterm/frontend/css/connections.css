@@ -17,10 +17,11 @@
 .setup-step.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .setup-window { display: grid; grid-template-columns: 75px minmax(0, 1fr); border: 1px solid var(--line-hover); border-radius: 5px; overflow: hidden; margin-bottom: 24px; font-size: 11px; }
 .setup-window-label { grid-column: 1 / -1; background: var(--surface-raised); padding: 9px 12px; }
-.setup-sidebar { padding: 16px 8px; border-right: 1px solid var(--line-hover); background: var(--surface); }
-.setup-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
+.setup-sidebar { display: flex; flex-direction: column; gap: 2px; padding: 8px 4px; border-right: 1px solid var(--line-hover); background: var(--surface); }
+.setup-sidebar-row { padding: 3px 6px; border-radius: 3px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setup-sidebar-row.active { background: var(--surface-raised); box-shadow: inset 2px 0 var(--accent); color: var(--text); }
+.setup-stage { padding: 10px; }
 .setup-workspace { min-width: 0; border-bottom: 2px solid var(--accent); }
-.setup-workspace + .setup-workspace { border-color: var(--success); }
 .setup-workspace strong { display: block; padding: 6px; color: var(--muted); }
 .setup-terminal { display: flex; align-items: center; gap: 6px; min-height: 70px; padding: 8px; background: var(--bg); }
 .setup-copy { color: var(--muted); line-height: 1.6; max-width: 52ch; }

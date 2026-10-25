@@ -45,6 +45,9 @@ import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
 import { createRemoteWorkspace } from "./remote_workspace.js";
+import { createFolderWorkspace } from "./new_workspace.js";
+import { openFolderBrowser } from "./folder_browser.js";
+import { nativeFolderPickerAvailable, pickNativeFolder } from "./panel_shared.js";
 
 const $ = (id) => document.getElementById(id);
 const noop = () => {};
@@ -54,7 +57,7 @@ const KILLED_SESSIONS_KEY = "quickterm.killedSessions";
 // Shell members win over the active view's app (spec 4.4): they concern the
 // whole window, so a view must never answer them for itself.
 export const SHELL_MEMBERS = Object.freeze([
-  "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "openWorkspaces",
+  "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "newWorkspace", "openWorkspaces",
   "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal", "moveTerminalHere",
   "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals", "setupTour",
   "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme",
@@ -165,6 +168,30 @@ export async function bootShell() {
   // The window's one scratch view, opened when it is not open yet.
   async function newScratchView() {
     return Boolean(await views.open(null));
+  }
+  // "New workspace…": a folder from the folder browser, which starts where
+  // the focused terminal is (never the disposable scratch folder), becomes a
+  // workspace and opens.
+  async function newWorkspace() {
+    panels?.close();
+    const folder = await openFolderBrowser({
+      startPath: activeApp()?.suggestedWorkspaceFolder?.() || "",
+      title: "New workspace",
+      label: "Choose the new workspace's folder",
+      confirmLabel: "Create workspace",
+      nativePicker: { available: nativeFolderPickerAvailable, pick: pickNativeFolder },
+    });
+    if (!folder) return false;
+    try {
+      await createFolderWorkspace({
+        api, folder, folders, onWorkspacesChanged, openView: (name) => views.open(name),
+      });
+    } catch (error) {
+      // The palette's row lands here too, and it reports nothing itself.
+      showError(error?.detail || `Could not create a workspace for ${folder}.`);
+      return false;
+    }
+    return true;
   }
   // True when no view of this window shows `name` any more. "scratch" names
   // the scratch view, and never when it is also a saved workspace's name.
@@ -298,6 +325,7 @@ export async function bootShell() {
     loadWorkspace: openWorkspace,
     closeWorkspaceView,
     newScratchView,
+    newWorkspace,
     openWorkspaces: () => views.list().map(({ workspace: name, label, color, active }) => ({ workspace: name, label, color, active })),
     liveTerminals,
     ...routing,
@@ -465,6 +493,7 @@ export async function bootShell() {
       openWorkspace: reported(openWorkspace),
       closeWorkspace: reported(closeWorkspaceView),
       newScratch: reported(newScratchView),
+      newWorkspace: reported(newWorkspace),
       openWorkspaceInWindow: (name) => registry.openNewWindow(name),
       newWindow: () => {
         panels.close();
@@ -485,6 +514,13 @@ export async function bootShell() {
       }),
       workspaceHere: reported(() => chromeApp.createWorkspaceHere()),
       openFolder: (app) => chromeApp.openHere(app),
+      // A workspace that is not shown: its own folder.
+      openWorkspaceFolder: reported(async (name, app) => {
+        const path = folders.get(name)?.path;
+        if (!path) throw { detail: `Workspace "${name}" has no folder. Set one in its Workspace settings.` };
+        await api.openFolder(path, app);
+        return true;
+      }),
       search: () => {
         closeMenu("replaced");
         closeConfirm("replaced");

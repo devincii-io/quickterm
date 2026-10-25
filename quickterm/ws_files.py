@@ -180,7 +180,14 @@ class LocalFolder:
     def resolve(self, rel: str) -> Path:
         """The real path of `rel`, refused when links lead out of the folder
         or into a `.git` folder."""
-        full = os.path.realpath(os.path.join(self.root, *rel.split("/")) if rel else self.root)
+        try:
+            full = os.path.realpath(os.path.join(self.root, *rel.split("/")) if rel else self.root)
+        except OSError:
+            # Windows refuses to follow some links (WinError 448, an untrusted
+            # mount point such as a junction under the temp folder), and
+            # realpath raises instead of stopping there. Where it leads is
+            # unknown, so the path is refused like one that leaves the folder.
+            raise PathError("path leads through a link Windows will not follow") from None
         root = _norm(self.root)
         real = _norm(full)
         if real != root:

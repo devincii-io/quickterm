@@ -143,7 +143,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # agent state.
             if manager.get(sid) is None:
                 raise HTTPException(404, "no such session")
-            api_usage.claude_limits(request.app).record(payload.get("rate_limits"))
+            store = api_usage.claude_limits(request.app)
+            if store.record(payload.get("rate_limits")) and store.needs_save():
+                await asyncio.to_thread(store.save)
             return Response(status_code=204)
         title = None
         # An agent on an SSH host has its files there: paths in its hooks are

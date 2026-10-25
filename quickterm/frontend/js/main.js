@@ -87,6 +87,7 @@ async function bootView() {
   Object.defineProperty(state, "launcherView", {
     get: () => ({
       cycleTerminal: (delta) => chrome.launcherView?.cycleTerminal(delta) || null,
+      newTerminalChoice: () => chrome.launcherView?.newTerminalChoice?.() || null,
       cycleMode: () => chrome.launcherView?.cycleMode(),
       updateHere: () => chrome.refreshSoon(),
     }),
@@ -222,7 +223,7 @@ async function bootView() {
   });
   const paneCommands = createPaneCommands({
     api, state, layout,
-    spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
+    spawnSplitInto, spawnDefaultInto, runProfile, forgetSession, ensureScratchWorkspace,
     scheduleWorkspaceSave, persistCurrentWorkspace, showError,
     refreshStatusSoon: () => refreshStatusSoon(),
   });

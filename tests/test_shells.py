@@ -9,9 +9,15 @@ import tomllib
 
 import pytest
 
-from quickterm import agent_hooks, conpty, shells
+from quickterm import agent_hooks, shells
 from quickterm.agent_hooks import AgentState
 from quickterm.session_manager import Session, SessionInfo, SessionManager
+
+# conpty loads kernel32 at import, so on POSIX the module cannot load and
+# the tests of its command line skip instead of stopping collection.
+if os.name == "nt":
+    from quickterm import conpty
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="ConPTY is Windows only")
 
 EXE = r"C:\Users\me\AppData\Roaming\npm\claude.exe"
 CWD = r"C:\work\proj"
@@ -41,6 +47,8 @@ def test_cmd_quotes_the_whole_line_after_k():
     )
     assert (cmd, cwd) == ("cmd.exe", CWD)
     assert args == ["/k", '""C:\\Program Files\\claude.exe" --model=haiku"']
+    if os.name != "nt":
+        return
     # conpty passes the text after /k verbatim; cmd strips the outer pair.
     assert conpty.command_line("C:\\Windows\\System32\\cmd.exe", args) == (
         'C:\\Windows\\System32\\cmd.exe /k ""C:\\Program Files\\claude.exe" --model=haiku"'
@@ -163,6 +171,7 @@ def test_powershell_falls_back_to_windows_powershell(monkeypatch):
     assert shells.program("powershell") == "found:powershell.exe"
 
 
+@WINDOWS_ONLY
 def test_conpty_quotes_ordinary_arguments_as_before():
     assert conpty.command_line("pwsh.exe", ["-Command", "a b"]) == 'pwsh.exe -Command "a b"'
     assert conpty.command_line("cmd.exe", ["/c", "echo", "hi"]) == "cmd.exe /c echo hi"

@@ -177,10 +177,12 @@ class FakeSessionManager:
         return info
 
     def spawn(self, *, name=None, profile=None, cmd, args=(), cwd=None,
-              env=(), cols=120, rows=30, workspace=None, agent=None, wrap=None) -> FakeSessionInfo:
+              env=(), cols=120, rows=30, workspace=None, agent=None, wrap=None,
+              shell=None) -> FakeSessionInfo:
         self.last_spawn = {"name": name, "profile": profile, "cmd": cmd,
                            "args": list(args), "cwd": cwd, "env": dict(env),
-                           "workspace": workspace, "agent": agent, "wrap": wrap}
+                           "workspace": workspace, "agent": agent, "wrap": wrap,
+                           "shell": shell}
         return self.add_session(name=name or "s", profile=profile, cols=cols,
                                 rows=rows, workspace=workspace)
 

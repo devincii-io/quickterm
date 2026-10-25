@@ -59,6 +59,74 @@ def test_a_window_without_a_reset_time_keeps_null():
     assert store.snapshot()["windows"] == [{"id": "seven_day", "used_percent": 7.0, "resets_at": None}]
 
 
+def test_claude_limits_survive_a_restart_in_their_file(tmp_path):
+    path = tmp_path / "claude-usage.json"
+    store = usage.ClaudeLimits(clock=lambda: 1000.0)
+    store.attach_file(path)
+    assert store.snapshot() is None and not store.needs_save()
+    assert store.record(LIMITS) and store.needs_save()
+    store.save()
+    assert not store.needs_save()
+    again = usage.ClaudeLimits(clock=lambda: 2000.0)
+    again.attach_file(path)
+    assert again.snapshot() == store.snapshot()
+    assert not again.needs_save(), "loading is no change"
+
+
+def test_an_unchanged_report_never_writes(tmp_path):
+    path = tmp_path / "claude-usage.json"
+    now = [1000.0]
+    store = usage.ClaudeLimits(clock=lambda: now[0])
+    store.attach_file(path)
+    store.record(LIMITS)
+    store.save()
+    marker = path.read_text(encoding="utf-8")
+    now[0] = 1060.0
+    store.record(LIMITS)
+    assert not store.needs_save()
+    store.save()
+    assert path.read_text(encoding="utf-8") == marker, "the file keeps updated_at 1000"
+    assert store.snapshot()["updated_at"] == 1060, "memory still has the latest report"
+    moved = {**LIMITS, "five_hour": {"used_percentage": 33, "resets_at": 1795459716}}
+    store.record(moved)
+    assert store.needs_save()
+    reset = {**LIMITS, "seven_day": {"used_percentage": 12, "resets_at": 1795900001}}
+    store.record(reset)
+    assert store.needs_save(), "a new reset time counts as a change"
+
+
+def test_without_a_file_nothing_is_saved(tmp_path):
+    store = usage.ClaudeLimits()
+    store.record(LIMITS)
+    assert not store.needs_save()
+    store.save()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("text", [
+    "", "not json", "[]", '{"windows": []}', '{"windows": [{"id": "x", "used_percent": 1}]}',
+    '{"windows": [{"id": "five_hour", "used_percent": "1"}], "updated_at": 5}',
+    '{"windows": [{"id": "five_hour", "used_percent": 1, "resets_at": 0}], "updated_at": 5}',
+    '{"windows": [{"id": "five_hour", "used_percent": 1}]}',
+])
+def test_a_broken_file_starts_empty(tmp_path, text):
+    path = tmp_path / "claude-usage.json"
+    path.write_text(text, encoding="utf-8")
+    store = usage.ClaudeLimits()
+    store.attach_file(path)
+    assert store.snapshot() is None
+    store.record(LIMITS)
+    assert store.needs_save()
+    store.save()
+    assert json.loads(path.read_text(encoding="utf-8"))["windows"][1]["id"] == "seven_day"
+
+
+def test_the_usage_file_lives_in_the_config_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert usage.claude_usage_file() == tmp_path / "quickterm" / "claude-usage.json"
+
+
 # --- Codex's rollouts ---------------------------------------------------------
 
 
@@ -372,6 +440,20 @@ def test_the_event_stores_numbers_and_never_touches_agent_state(client):
     assert [w["id"] for w in answer["claude"]["windows"]] == ["five_hour", "seven_day"]
     assert answer["claude"]["windows"][0]["used_percent"] == 32.5
     assert answer["codex"] is None
+
+
+def test_a_reported_change_is_stored_off_the_loop(client):
+    test_client, manager, ctx, tmp_path = client
+    from quickterm.api import usage as api_usage
+
+    stored = tmp_path / "claude-usage.json"
+    api_usage.claude_limits(test_client.app).attach_file(stored)
+    info = manager.add_session()
+    url = f"/api/sessions/{info.id}/agent-event?agent=claude"
+    hook = {"X-QuickTerm-Hook-Token": ctx.hook_token}
+    body = {"hook_event_name": "QuickTermRateLimits", "rate_limits": LIMITS}
+    assert test_client.post(url, json=body, headers=hook).status_code == 204
+    assert json.loads(stored.read_text(encoding="utf-8"))["windows"][0]["used_percent"] == 32.5
 
 
 def test_usage_reports_codex_and_null_claude(client):

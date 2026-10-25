@@ -348,7 +348,9 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
   for (const name of saved.keys()) if (!isScratchWorkspace(name)) ensure(name);
   for (const name of viewOf.keys()) ensure(name);
   const flat = options.group === "none";
-  for (const session of sessions || []) {
+  // GET /api/sessions lists terminals in the order they were started, so the
+  // index is their age: the tie-break between two rows of one name.
+  for (const [started, session] of (sessions || []).entries()) {
     if (!isListedSession(session)) continue;
     // A finished terminal that still asks for you stays: hiding it would hide
     // the question.
@@ -358,16 +360,28 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
     const ownerGroup = ensure(owner);
     const group = flat ? ensureFlat(groups) : ownerGroup;
     const state = sessionState(session, Boolean(attachedIn));
-    group.sessions.push({ session, state, attachedIn, finished: session.alive === false, owner: ownerGroup.label });
+    group.sessions.push({ session, state, attachedIn, finished: session.alive === false, owner: ownerGroup.label, started });
     if (COUNTED_STATES.includes(state.key)) group.counts[state.key] += 1;
   }
 
   const rowName = (entry) => entry.session.name || entry.session.id || "";
   const byName = (a, b) => rowName(a).localeCompare(rowName(b), undefined, { numeric: true })
-    || String(a.session.id).localeCompare(String(b.session.id), undefined, { numeric: true });
+    || a.started - b.started;
   const recent = options.sort === "activity";
   for (const group of groups.values()) {
-    group.sessions.sort(recent ? (a, b) => idleOf(a.session) - idleOf(b.session) || byName(a, b) : byName);
+    group.sessions.sort(byName);
+    // Two terminals of one name in one group ("PowerShell", "PowerShell")
+    // are told apart by a number in the order they were started, so a new
+    // one is always the next number, and the activity sort never moves it.
+    const seen = new Map();
+    for (const entry of group.sessions) {
+      const name = entry.session.name;
+      if (!name) continue;
+      const count = (seen.get(name) || 0) + 1;
+      seen.set(name, count);
+      entry.label = count > 1 ? `${name} ${count}` : name;
+    }
+    if (recent) group.sessions.sort((a, b) => idleOf(a.session) - idleOf(b.session) || byName(a, b));
   }
   const ordered = [...groups.values()].filter((group) => !flat || group.kind === "flat");
   return ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
@@ -522,7 +536,9 @@ export function shellLabel(profile) {
 // between the parts; a part with nothing in it leaves no empty band.
 // A workspace on an SSH host (`host`) has no local shells: its first row is
 // the remote login shell, and only the profiles that make sense there follow.
-export function newTerminalMenu({ inventory = null, profiles = [], shell = DEFAULT_SHELL, agents = [], host = null } = {}) {
+export function newTerminalMenu({
+  inventory = null, profiles = [], shell = DEFAULT_SHELL, agents = [], host = null, admin = false,
+} = {}) {
   const current = shell ?? DEFAULT_SHELL;
   const rows = host
     ? [{ key: "remote-shell", kind: "remote-shell", label: `Shell on ${host}`, isDefault: true }]
@@ -548,15 +564,44 @@ export function newTerminalMenu({ inventory = null, profiles = [], shell = DEFAU
     })),
   ];
   if (launchers.length) rows.push({ key: "separator:launchers", kind: "separator" }, ...launchers);
-  rows.push({ key: "separator:settings", kind: "separator" }, { key: "settings", kind: "settings", label: "Terminal settings…" });
+  rows.push({ key: "separator:settings", kind: "separator" });
+  // The sidebar's menu (`admin`) also starts the chosen row elevated; the
+  // admin instance itself and an SSH host cannot.
+  if (admin && !host) rows.push({ key: "admin", kind: "admin", label: "As administrator…" });
+  rows.push({ key: "settings", kind: "settings", label: "Terminal settings…" });
   return rows;
 }
 
-// What "+" itself starts: the configured shell.
+// The configured shell, the "+" button's choice until another row is picked.
 export function defaultShellRow(menu) {
   const shellLike = (row) => row.kind === "shell" || row.kind === "remote-shell";
   return (menu || []).find((row) => shellLike(row) && row.isDefault)
     || (menu || []).find(shellLike) || null;
+}
+
+// The rows a new terminal can be started from (no separators, no settings).
+const LAUNCHABLE = new Set(["shell", "remote-shell", "agent", "profile"]);
+
+// What "+" and Alt+N start: the row picked last in the "+" menu, while the
+// menu still has it (a remote workspace has no local shells, a deleted
+// profile is gone), else the configured shell.
+export function chosenRow(menu, key) {
+  const picked = key ? (menu || []).find((row) => row.key === key && LAUNCHABLE.has(row.kind)) : null;
+  return picked || defaultShellRow(menu);
+}
+
+// Remembered per machine, like the sidebar mode: the menu's key of the row.
+export const TERMINAL_CHOICE_KEY = "quickterm.newTerminalChoice";
+
+export function loadTerminalChoice() {
+  try { return localStorage.getItem(TERMINAL_CHOICE_KEY) || null; } catch (_) { return null; }
+}
+
+export function saveTerminalChoice(key) {
+  try {
+    if (key) localStorage.setItem(TERMINAL_CHOICE_KEY, key);
+    else localStorage.removeItem(TERMINAL_CHOICE_KEY);
+  } catch (_) { /* optional */ }
 }
 
 export function loadMode() {

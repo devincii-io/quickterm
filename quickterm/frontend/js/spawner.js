@@ -233,9 +233,10 @@ export function createSpawner({
   }
 
   // A new terminal with no profile (Alt+N, "+", a folder handed in from
-  // Explorer or `quickterm new`): the configured shell.
-  function spawnDefaultInto(pane, cwdOverride) {
-    return spawnShellInto(pane, contextCwd(cwdOverride), null);
+  // Explorer or `quickterm new`): the configured shell, or the one the
+  // sidebar's "+" was last pointed at.
+  function spawnDefaultInto(pane, cwdOverride, shell = null) {
+    return spawnShellInto(pane, contextCwd(cwdOverride), shell);
   }
 
   function splitCwd(source, choice) {

@@ -73,6 +73,9 @@ class LaunchSpec:
     # the complete ssh command without agent hooks; the session manager adds
     # them from this once the session id exists.
     remote: RemoteLaunch | None = None
+    # The effective shell value of a plain shell launch whose shell gets
+    # QuickTerm's integration (shells.INTEGRATED); the session manager adds it.
+    shell: str | None = None
 
     def spawn_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -89,6 +92,8 @@ class LaunchSpec:
             kwargs["wrap"] = self.wrap
         if self.remote is not None:
             kwargs["remote"] = self.remote
+        if self.shell is not None:
+            kwargs["shell"] = self.shell
         return kwargs
 
 
@@ -763,6 +768,7 @@ def resolve(
     hook_agent = None
     wrap = None
     terminal_type = None
+    plain_shell = None
     if prof is not None:
         kind = getattr(prof, "terminal_type", None)
         if kind in AGENT_KINDS and prof.name == kind and requested_name is None:
@@ -794,6 +800,8 @@ def resolve(
         cmd, args, cwd = shells.interactive(value, shell_program(value), folder)
         terminal_type = shells.terminal_type(value)
         requested_name = requested_name or shells.label(value)
+        if value in shells.INTEGRATED:
+            plain_shell = value
     else:
         cwd = folder
     if not isinstance(cmd, str) or not cmd.strip():
@@ -826,4 +834,5 @@ def resolve(
         agent=hook_agent,
         wrap=wrap,
         terminal_type=terminal_type,
+        shell=plain_shell,
     )

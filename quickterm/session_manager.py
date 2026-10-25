@@ -285,6 +285,7 @@ class SessionManager:
         agent: str | None = None,
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
+        shell: str | None = None,
     ) -> SessionInfo:
         """Start a session synchronously (loop thread: app startup, hotkeys).
 
@@ -304,6 +305,7 @@ class SessionManager:
             agent=agent,
             wrap=wrap,
             remote=remote,
+            shell=shell,
         )
         self._sessions[session.info.id] = session
         return session.info
@@ -323,6 +325,7 @@ class SessionManager:
         agent: str | None = None,
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
+        shell: str | None = None,
     ) -> SessionInfo:
         """``spawn`` for request handlers: the PTY is built off the loop.
 
@@ -348,6 +351,7 @@ class SessionManager:
                 agent=agent,
                 wrap=wrap,
                 remote=remote,
+                shell=shell,
             )
         )
         build.add_done_callback(self._finish_async_spawn)
@@ -380,6 +384,7 @@ class SessionManager:
         agent: str | None = None,
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
+        shell: str | None = None,
     ) -> Session:
         """Create the Session and start its PTY. Blocking; touches no registry."""
         sid = uuid.uuid4().hex
@@ -405,13 +410,22 @@ class SessionManager:
             start_dir = remote.folder or "~"
             if remote.agent in agent_hooks.AGENTS and remote.command and hook_env:
                 args, marker, nonce = self._remote_hooks(remote, sid, hook_env)
+        # The configured Windows shell reports its folder at each prompt, and
+        # in PowerShell the user's own claude and codex get the hooks.
+        shell_value = wrap.value if wrap is not None else shell
+        integration = None
+        if os.name == "nt" and remote is None and shell_value in shells.INTEGRATED:
+            integration = self._integration(shell_value)
+            child_env = shells.integration_env(shell_value, integration, child_env)
         if wrap is not None:
             # The hooks belong to the agent's own argv; the shell runs it once
             # and stays, so the pane ends at a prompt when the agent exits.
             try:
-                cmd, args, pty_dir = shells.wrap(wrap, cmd, args, start_dir)
+                cmd, args, pty_dir = shells.wrap(wrap, cmd, args, start_dir, integration)
             except ValueError as exc:
                 raise SpawnError(str(exc)) from exc
+        elif shell_value is not None and integration is not None:
+            cmd, args, pty_dir = shells.interactive(shell_value, cmd, start_dir, integration)
         info = SessionInfo(
             id=sid,
             name=title,
@@ -425,7 +439,11 @@ class SessionManager:
             host=remote.host if remote is not None else None,
         )
         session = Session(info, self._cap)
-        session.agent_shell = wrap is not None
+        # A plain PowerShell with the agent functions runs the user's own
+        # agent as its child, the same shape as a wrapped one.
+        session.agent_shell = wrap is not None or bool(
+            integration and (integration.claude or integration.codex)
+        )
         info.agent_shell = wrap.value if wrap is not None else None
         # Git Bash's bin\bash.exe keeps usr\bin\bash.exe as its child for
         # good, so a wrapped agent's busy is judged from the shell at the end
@@ -464,6 +482,21 @@ class SessionManager:
         except OSError as exc:
             raise SpawnError(str(exc)) from exc
         return session
+
+    def _integration(self, value: str) -> shells.Integration:
+        """The shell integration of one local terminal. Blocking (hook files).
+
+        The agent functions only where hooks are on: not in the elevated
+        instance, which never gets a hook environment."""
+        if value != "powershell" or not self._hook_env:
+            return shells.Integration()
+        hooks = agent_hooks.shell_hooks()
+
+        def hook(agent: str) -> shells.AgentHook | None:
+            found = hooks.get(agent)
+            return shells.AgentHook(*found) if found is not None else None
+
+        return shells.Integration(claude=hook("claude"), codex=hook("codex"))
 
     @staticmethod
     def _remote_hooks(

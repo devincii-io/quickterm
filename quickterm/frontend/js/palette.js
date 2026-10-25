@@ -168,7 +168,7 @@ export class Palette {
     this.app.refocusTerm?.();
   }
 
-  // The sidebar's "new window" button and the palette's own "new window…" row
+  // The sidebar's "Open in new window…" row and the palette's own "new window…" row
   // land here, so exactly one place decides what a second window may open on.
   // Opening the picker directly skips the command list the button's user never
   // asked for.
@@ -355,7 +355,7 @@ export class Palette {
       },
       // No shortcut: keys.js may only claim cold Alt combos, and every letter
       // left over is a readline or PSReadLine binding the shell needs (see
-      // AGENTS.md). The sidebar footer button is the other way in.
+      // AGENTS.md). The sidebar's Workspaces "+" menu is the other way in.
       {
         kind: "action", label: "new window…", hint: "a second window on another workspace",
         keepOpen: true, run: () => this._newWindowMode(),
@@ -367,6 +367,10 @@ export class Palette {
       {
         kind: "action", label: "save workspace as…", hint: "names this layout; its folder is set in Workspace settings",
         keepOpen: true, run: () => this._saveWorkspacePrompt(),
+      },
+      {
+        kind: "action", label: "new workspace…", hint: "choose a folder; the workspace is named after it",
+        run: () => this.app.newWorkspace?.(),
       },
       {
         kind: "action", label: "new workspace on host…", hint: "a folder on a machine you reach over SSH",
