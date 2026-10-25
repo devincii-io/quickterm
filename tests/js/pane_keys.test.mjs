@@ -76,6 +76,34 @@ test("Shift+Enter in a shell pane is left to xterm", () => {
   assert.deepEqual(frames, []);
 });
 
+test("once the agent has left its shell, Shift+Enter is the shell's again", () => {
+  const { pane, typed } = livePane("claude-code");
+  Object.assign(pane, { _renderActivity() {}, _agentSeen: false, agentGone: false });
+  pane.noteAgent(false);
+  assert.equal(pane.agentGone, false, "not before the agent was ever seen");
+  pane.noteAgent(true);
+  assert.equal(pane._handleKey(key("keydown")), false);
+  pane.noteAgent(false);
+  assert.equal(pane.agentGone, true);
+  assert.equal(pane._handleKey(key("keydown")), true, "left to xterm, as in any shell");
+  assert.deepEqual(typed, [[AGENT_NEWLINE, true]]);
+  pane.noteAgent(true);
+  assert.equal(pane.agentGone, false, "an agent started again at the prompt counts");
+});
+
+test("an agent in WSL keeps Shift+Enter from launch until the wrap's exit marker", () => {
+  const { pane, typed } = livePane("claude-code");
+  Object.assign(pane, { _renderActivity() {}, _agentSeen: false, agentGone: false, _agentExitMarked: false });
+  // No hook state ever arrives from WSL, wsl.exe always looks busy, and the
+  // classic renderer draws on the main screen: only the marker can tell.
+  pane.term.buffer = { active: { type: "normal" } };
+  pane.noteAgent(true, { byMarker: true });
+  assert.equal(pane._handleKey(key("keydown")), false, "the agent runs: a newline");
+  pane.noteAgentExit();
+  assert.equal(pane._handleKey(key("keydown")), true, "the bash prompt: Enter, left to xterm");
+  assert.deepEqual(typed, [[AGENT_NEWLINE, true]]);
+});
+
 test("an agent pane that cannot take input swallows Shift+Enter without sending", () => {
   const { pane, frames, typed } = livePane("codex");
   pane._protocol.beginReplay();

@@ -3,6 +3,11 @@ import { icon } from "./icons.js";
 import { folderPickerControl, make } from "./panel_shared.js";
 import { configChoice, configPurpose, configToggle } from "./panel_settings_kit.js";
 import { shortcutInput } from "./shortcut_input.js";
+import { aboutLine } from "./update_card.js";
+import {
+  checkForUpdate, installUpdateNow, onUpdateState, refreshUpdateState, restartForUpdate,
+  startUpdateDownload, updateState,
+} from "./updates.js";
 export function renderAboutSettings(host) {
     const version = this.app.version || "";
 
@@ -37,60 +42,96 @@ export function renderAboutSettings(host) {
     }
     host.append(links);
 
-    const card = make("section", "about-update");
-    card.dataset.setting = "updates";
-    card.append(
-      make("h4", "", "Updates"),
-      configPurpose("Checking asks GitHub for the latest release and compares it with the version you are running. Installing downloads that release's installer, verifies its SHA-256, and runs it; QuickTerm closes while it does."),
-    );
-    const status = make("p", "about-update-status", "New versions are fetched from GitHub releases.");
-    const row = make("div", "about-update-row");
-    const check = this._button("Check for updates", "secondary-button compact");
-    const install = this._button("", "primary-button compact");
-    install.hidden = true;
-    row.append(check, install);
-    card.append(status, row);
-
-    check.addEventListener("click", async () => {
-      check.disabled = true;
-      status.textContent = "Checking…";
-      install.hidden = true;
-      try {
-        const result = await api.checkUpdate(true);
-        if (result.update_available) {
-          status.textContent = `QuickTerm v${result.latest} is available (you have v${result.current}).`;
-          if (result.installable) {
-            install.textContent = `Install v${result.latest}`;
-            install.hidden = false;
-          }
-        } else {
-          status.textContent = `You are up to date (v${result.current}).`;
-        }
-      } catch (error) {
-        status.textContent = "Could not reach GitHub. Check your connection and try again.";
-      } finally {
-        check.disabled = false;
-      }
-    });
-    install.addEventListener("click", async () => {
-      install.disabled = true;
-      const wanted = install.textContent;
-      install.textContent = "Downloading…";
-      try {
-        await api.installUpdate();
-        status.textContent = "Installer started - QuickTerm will close and update itself.";
-        install.textContent = wanted;
-        install.hidden = true;
-      } catch (error) {
-        status.textContent = "The download failed. You can update manually from the releases page.";
-        install.textContent = wanted;
-        install.disabled = false;
-      }
-    });
-
-    host.append(card);
+    host.append(renderUpdates.call(this));
     host.append(renderSettingsHistory.call(this));
   }
+
+// The same update state as the card (updates.js), in words, with the same
+// actions, plus the switch for the automatic download.
+function renderUpdates() {
+  const cfg = this.settingsDraft || {};
+  const card = make("section", "about-update");
+  card.dataset.setting = "updates";
+  card.append(
+    make("h4", "", "Updates"),
+    configPurpose("Checking asks GitHub for the latest release and compares it with the version you are running. A newer release's installer is downloaded in the background and verified against its SHA-256; Install now runs it, and your terminals keep running."),
+  );
+  const status = make("p", "about-update-status", "New versions are fetched from GitHub releases.");
+  const row = make("div", "about-update-row");
+  const check = this._button("Check for updates", "secondary-button compact");
+  const action = this._button("", "primary-button compact");
+  action.hidden = true;
+  row.append(check, action);
+  const auto = configToggle({
+    id: "update_auto_download",
+    label: "Download updates automatically",
+    checked: cfg.update_auto_download !== false,
+    onChange: (checked) => { cfg.update_auto_download = checked; },
+  });
+  card.append(status, row, auto.el);
+
+  let note = "";
+  const show = (update) => {
+    const line = aboutLine(update);
+    status.textContent = line || note || "New versions are fetched from GitHub releases.";
+    const next = aboutAction(update);
+    action.hidden = !next;
+    if (next) {
+      action.textContent = next.label;
+      action.dataset.action = next.id;
+    }
+  };
+  const stop = onUpdateState((update) => {
+    if (!card.isConnected) {
+      stop();
+      return;
+    }
+    show(update);
+  });
+  show(updateState());
+  refreshUpdateState().catch(() => {});
+
+  check.addEventListener("click", async () => {
+    check.disabled = true;
+    status.textContent = "Checking…";
+    action.hidden = true;
+    try {
+      const result = await checkForUpdate(true);
+      if (!result.update_available) note = `You are up to date (v${result.current}).`;
+      else if (!result.installable) note = `QuickTerm v${result.latest} is available (you have v${result.current}). Install it from the releases page.`;
+      else note = `QuickTerm v${result.latest} is available (you have v${result.current}).`;
+    } catch (error) {
+      note = "Could not reach GitHub. Check your connection and try again.";
+    } finally {
+      check.disabled = false;
+      show(updateState());
+    }
+  });
+  action.addEventListener("click", async () => {
+    action.disabled = true;
+    try {
+      if (action.dataset.action === "install") await installUpdateNow();
+      else if (action.dataset.action === "restart") await restartForUpdate();
+      else await startUpdateDownload();
+    } catch (error) {
+      if (error?.detail) note = error.detail;
+    } finally {
+      action.disabled = false;
+      show(updateState());
+    }
+  });
+  return card;
+}
+
+function aboutAction(update) {
+  switch (update?.state) {
+    case "available": return { id: "download", label: "Download" };
+    case "ready": return { id: "install", label: "Install now" };
+    case "failed": return { id: "retry", label: "Retry" };
+    case "installed": return update.can_restart ? { id: "restart", label: "Restart now" } : null;
+    default: return null;
+  }
+}
 
 // "theme, profiles" from the server; an empty summary means that version and
 // the one after it hold the same values (DPAPI makes their files differ).

@@ -67,8 +67,8 @@ test("workspaces are opened from enumerated rows, never loaded in place", () => 
   const labels = palette.items.map((item) => item.label);
   assert.ok(!labels.some((label) => /load workspace|show workspace beside/.test(label)));
   assert.ok(labels.includes("open workspace: api"));
-  assert.ok(labels.includes("close workspace view: web"));
-  assert.ok(labels.includes("new scratch view"));
+  assert.ok(labels.includes("close workspace: web"));
+  assert.ok(labels.includes("open scratch"));
   assert.ok(labels.includes("move terminal here…"));
   assert.ok(labels.includes("new window…"));
   palette.input.value = "open workspace: api";

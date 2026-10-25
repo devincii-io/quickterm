@@ -2,6 +2,248 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.3.0
+
+Released 2026-10-25.
+
+QuickTerm 4.3 is simpler to look at and does more around your agents. The
+window shows one workspace at a time, every terminal starts in your shell
+(PowerShell unless you choose another), and Claude Code and Codex run
+inside it. A workspace can live on an SSH host. A right panel shows the
+workspace's files, changes and pull request, the board tracks workspaces
+and agents, and updates download in the background.
+
+### One workspace at a time
+
+- The window shows one workspace, the one you clicked in the sidebar, at
+  full size. Workspaces are no longer tiled side by side: no view headers,
+  no coloured frames, no maximize or close buttons on a view, no dividers,
+  no dragging views around.
+- The other open workspaces stay open behind it with their terminals
+  running, and come back instantly when you click them. The shown one is
+  highlighted in the sidebar.
+- Close a workspace with the x on its sidebar row or from the palette.
+  Closing the one on screen shows the one you looked at before it.
+- The palette has **next workspace** and **previous workspace**, in sidebar
+  order.
+- Each window has one scratch workspace, called `scratch`. Explorer's "Open
+  QuickTerm here" opens a terminal in it instead of a new scratch view.
+- The open workspaces and the one on screen come back after a restart. The
+  first start after the update brings back the workspaces you had tiled.
+
+### One shell, and agents inside it
+
+- Every new terminal starts in one shell, PowerShell unless you pick another
+  in Settings > General > Shell: Command Prompt, Git Bash or a WSL
+  distribution. PowerShell 7 is used when it is installed.
+- Claude Code and Codex run inside that shell. When the agent exits, the
+  terminal stays open at the shell prompt in the same folder instead of
+  closing. The agent's state in the sidebar clears when it exits (in
+  PowerShell, Command Prompt and Git Bash; WSL reports none, see below).
+  Codex's hooks work in Windows PowerShell 5.1 and Command Prompt too.
+- The "+" button starts the shell. Its menu lists every installed shell,
+  then Claude Code and Codex, then your saved terminals, then Terminal
+  settings. Each row starts its terminal at once. Alt+Shift+Left and
+  Alt+Shift+Up open this menu. The palette lists the same entries.
+- Claude Code and Codex are now settings, not saved terminals: Settings >
+  Terminals has an Agents section with one row each, showing the command it
+  runs and opening into the options. `quickterm new claude-code` and
+  `quickterm new codex` start them from the command line.
+- Saved terminals are for connections (SSH, SFTP, containers, serial,
+  remote desktops), custom commands and shells with a start command.
+- Your settings move over once when 4.3 first starts: the first Claude Code
+  and the first Codex terminal become the agent settings. A shell that only
+  started an agent (such as `codex --yolo`) becomes that agent's settings,
+  arguments included, when there is no agent terminal of that kind. Plain
+  shell terminals are removed. The previous file is kept as
+  `config.pre-4.3.json` next to `config.json`, and a notice on the first
+  start names every terminal that was removed or lost a shortcut or its
+  autostart. Restoring an older version from the settings history moves it
+  over the same way. Workspaces that still name a removed terminal open the
+  shell there and say so, and a dead Claude or Codex pane still offers to
+  continue or choose a session.
+- In WSL the agent runs from the distribution's own PATH and reports no
+  state to the sidebar. Its arguments reach bash as they are, so text such
+  as `$(...)` in a prompt is never run. Shift+Enter adds a newline while the
+  agent runs and is Enter again at the bash prompt once it has exited.
+
+### Workspaces on an SSH host
+
+A workspace can now live on a machine you reach over SSH. Choose "new
+workspace on host" in the palette or in the Workspaces "+" menu, pick one of
+your SSH terminals that uses OpenSSH and type the folder there; QuickTerm
+checks the folder over ssh and saves it even when the check fails. Its row
+in the sidebar and its card on the board show `@host`. Every terminal it
+opens is an ssh session that starts in that folder, and the "+" menu offers
+the shell on the host, Claude Code, Codex and the saved commands that make
+sense there. Claude Code and Codex run on the host and still report their
+state, through a socket that the session's ssh forwards back. The sidebar
+shows the branch, read with git over ssh about once a minute. Key or agent
+sign-in works best: each terminal is its own connection, and the background
+calls never ask for a password.
+
+### Files, changes and the pull request
+
+- Alt+Shift+E opens a panel on the right of the window for the workspace on
+  screen, with three tabs: Files, Changes and Pull request. The palette has
+  rows for each, and the left sidebar's footer has a right panel button.
+- The panel works like the left sidebar: full, a rail of icons, or hidden.
+  The chevron in its footer folds it to the rail, where Changes has a dot
+  while the tree has changes and Pull request takes the colour of its
+  checks. Both sides look the same and slide in and out the same way. Drag
+  the panel's left edge to resize it; QuickTerm remembers the width and the
+  mode. Hidden, it takes no space. Opening the focused terminal's folder in
+  Explorer, which Alt+Shift+E did before, stays in the palette and on the
+  sidebar's folder button.
+- Files shows the workspace folder as a tree. Files git ignores are dimmed
+  and listed last, new and changed files are tinted and marked. The filter
+  field searches file names, or file contents with Contents switched on.
+  Click a file to read it over the terminals, with line numbers and syntax
+  colours from your theme; Ctrl+F finds text, Ctrl+G goes to a line, Escape
+  closes it. Alt+click pastes the file's quoted path into the focused
+  terminal; right click has copy path, open in editor and reveal in Explorer.
+- Changes shows the branch, what it is measured against, commits ahead and
+  behind and the lines added on the branch. One button stages all, commits,
+  pushes, publishes the branch or pulls, depending on the state; its menu
+  holds commit and push, amend (asking first when the commit is already
+  pushed), pull and push. Ctrl+Enter in the message commits. Files are listed
+  under Staged, Changes and Committed on branch, each with stage, unstage and
+  discard. Click one to see its diff, unified or side by side, with n and p
+  for the next and previous change.
+- When a commit hook or git fails, its output shows under the button with
+  Fix with Claude, which opens Claude Code in the workspace with the error,
+  the message and the staged files, told not to bypass hooks, commit or push.
+- Pull request shows the branch's pull request through the GitHub CLI: its
+  number, state and title, its checks grouped into failing, pending and
+  passing, the log tail of a failing check, and a merge button with the
+  methods the repository allows. Fix with Claude on failed checks opens
+  Claude Code with their names, links and logs. Without the GitHub CLI or
+  without a pull request it says so in one line with the command to run.
+  Only a pull request from the repository the branch pushes to counts; a
+  fork's pull request with the same branch name is not shown.
+- Reading files, changes and diffs never runs a program named in the
+  repository's git config (fsmonitor, diff textconv, filter drivers).
+  Staging, committing, pushing and pulling run the filters as git does. A
+  file a filter stores in another form, such as a Git LFS pointer, can
+  therefore show as changed once its timestamp changes.
+- Files and Changes work for workspaces on an SSH host too; the pull request
+  is read with the GitHub CLI on this computer. The scratch view shows its
+  own folder; outside a git repository Changes and Pull request say so.
+- Starting Claude Code or Codex through the API can now carry a first
+  prompt.
+
+### Workspace board
+
+- The dashboard is now a workspace board (Alt+G, the same sidebar button).
+  Every saved workspace is a card in one of four columns: Todo, In progress,
+  In review and Done. A card shows the repository and branch and the
+  workspace's live terminals with their agent state and running subagents.
+- Drag a card to another column, or focus it and press Alt+Left or
+  Alt+Right. Click a card to show that workspace. The search field next to
+  the title filters by name, repository and branch.
+- The columns are kept in `board.json` next to the settings, so saving a
+  layout never moves a card. A workspace you have not placed sits in In
+  progress, and deleting a workspace removes its card.
+- What the dashboard did besides that moved: a workspace's folder, logo and
+  layout preview are in Workspace settings in its sidebar menu; naming the
+  current layout is **save workspace as…** in the palette; stopping every
+  terminal is **kill all terminals…** in the palette's kill list. Per
+  terminal memory and CPU are in the sidebar footer's resources popover,
+  and detached terminals are rows in the sidebar.
+
+### Agents on the board
+
+- The workspace board has a second tab, Agents. Every Claude Code and Codex
+  session is one card in Needs you, Working or Done, with what you last
+  asked, the start of the last answer, its workspace and branch, and how
+  long ago it last did something. Subagents fold under one line. Agents
+  that have been quiet for 30 minutes move to Idle, which stays behind a
+  slim toggle at the end of the row until you open it. A card whose
+  subagent waits for a permission counts as needing you. Click a card to
+  show its terminal; the search box filters by anything a card says.
+- A pane without a name of your own takes the conversation's title once
+  Claude Code or Codex has given it one, and gives it back when the agent
+  exits. A name you type still wins.
+- A finished turn now gets your attention like a question does, but only
+  while QuickTerm is not in front. Settings > General > Notifications and
+  sleep sets each of the two to Off, Flash (the taskbar button) or Notify
+  (also a Windows notification), with Notify for questions and Flash for
+  finished turns at first, and a switch for the notification sound.
+- Keep awake, in the same group: while an agent works, QuickTerm keeps
+  Windows from going to sleep (the screen may still turn off) and lets it
+  sleep again when none does. It can also hold always or never.
+- The palette copies the command that resumes an agent's conversation, in
+  its folder and for your shell: "copy resume command" for a running agent,
+  and Shift+Enter on any "resume ... session" row.
+
+### Agent usage and resources
+
+- The bottom of the full sidebar shows one quiet line: how much of Claude's
+  and Codex's usage limits is used, with the time until that window resets,
+  and the memory all terminals take. Clicking the agents opens each limit
+  window with a bar and its reset time; clicking the memory lists the open
+  workspaces and their terminals with CPU and memory, and a click on a
+  terminal shows it.
+- Claude's numbers come from the status line of Claude Code sessions started
+  in QuickTerm. Your own status line keeps showing as before. Codex's
+  numbers are read from its session logs on this computer. Nothing is sent
+  anywhere and no credentials are read.
+
+### Terminal and keys
+
+- Ctrl+Shift+F finds text in the focused terminal. A small field opens in
+  the pane's top right corner and shows the match count, such as 3/17.
+  Enter and Shift+Enter jump to the next and previous match, Alt+C toggles
+  match case, Alt+R regular expressions, and Escape closes it and returns
+  you to the terminal. The palette's search across all terminals is still
+  there.
+- Ctrl+Tab lists the last eight terminals you used, across workspaces. Keep
+  Ctrl down, press Tab or Shift+Tab to move, and let go to show that
+  terminal; Escape cancels. One quick Ctrl+Tab flips between the last two.
+- Ctrl+Shift+1 to Ctrl+Shift+9 show the first to ninth workspace in the
+  sidebar, on any keyboard layout. Alt+PgDn and Alt+PgUp show the next and
+  previous open workspace.
+- Alt+N and the + open the new terminal in the folder of the terminal you
+  are in, as long as that folder is inside the workspace. Elsewhere they
+  open in the workspace folder as before.
+- New palette rows: **reset terminal** clears the screen and leftover modes
+  of the focused terminal without touching the program in it, **copy
+  terminal text** copies its whole text (up to 2 MB), and **find in
+  terminal** opens the find field.
+
+### Updates in the background
+
+- A new version now downloads in the background as soon as QuickTerm finds
+  it. A small card at the bottom right of the window shows the progress,
+  and once the installer is downloaded and its checksum matches, it offers
+  Install now. Setup then runs with only its progress window, your
+  terminals keep running, and QuickTerm starts again when Setup is done.
+- The minus button or Later folds the card into the sidebar footer, where
+  the percentage or "up" stays visible; a click opens the card again.
+- Settings > About shows the same state with the same actions and has a new
+  switch, Download updates automatically. With it off, the card offers a
+  Download button instead.
+
+### No more worktree creation
+
+- **new worktree...** and its setup command are gone, and worktree
+  workspaces no longer sit under their main checkout: every workspace is a
+  folder on this computer or on an SSH host. A workspace whose folder is a
+  git worktree is listed like any other and says `worktree` after its branch;
+  its tooltip names the main checkout.
+
+### Fixes
+
+- A QuickTerm started from inside a Claude Code session no longer passes
+  that session's markers to its terminals. Claude there took itself for a
+  subagent and switched transcript saving off, so its pane had no title
+  and could not be resumed.
+- Git and the GitHub CLI never stop for a password prompt in the
+  background, and use the workspace's repository even when QuickTerm's
+  own environment names another one.
+- An administrator terminal is refused on a workspace on an SSH host,
+  where it would only have elevated the local ssh client.
+
 ## QuickTerm 4.2.0
 
 Released 2026-10-25.

@@ -31,6 +31,22 @@ DRAIN_IDLE_S = 0.15
 DRAIN_MAX_S = 1.0
 
 
+# What a running Claude Code session exports to its own children. When the
+# backend was started from inside one (a `quickterm` typed in a Claude pane,
+# an agent running the app), every terminal inherited them, and a Claude
+# started there took itself for a subagent: transcript saving off, so no
+# title, no resume and no answers on the board. The messaging token is also a
+# secret of that other session. Claude's configuration variables
+# (CLAUDE_CODE_USE_BEDROCK, ...) are not on this list and pass through.
+INHERITED_AGENT_MARKERS = frozenset({
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SSE_PORT",
+    "AI_AGENT",
+})
+
+
 def merge_environment(override: dict[str, str] | None) -> dict[str, str]:
     """The child's environment: QuickTerm's own, with the profile override on top.
 
@@ -38,8 +54,11 @@ def merge_environment(override: dict[str, str] | None) -> dict[str, str]:
     ``os.environ`` there. A plain ``dict.update`` with a profile ``Path`` (the
     spelling the Windows dialog shows) therefore added a second entry behind
     ``PATH``, and every lookup returned the inherited value first.
+
+    Agent session markers inherited by the backend are dropped; a profile may
+    still set one on purpose through `override`.
     """
-    merged = dict(os.environ)
+    merged = {k: v for k, v in os.environ.items() if k.upper() not in INHERITED_AGENT_MARKERS}
     if os.name == "nt":
         for key in override or {}:
             folded = key.casefold()
@@ -93,6 +112,7 @@ class PtyBase:
         # and raising BufferError at a terminal that is gone.
         self._input_closed = threading.Event()
         self._writer: threading.Thread | None = None
+        self._secrets: set[bytes] = set()
 
     def write(self, data: bytes) -> None:
         if self._input_closed.is_set():
@@ -101,6 +121,19 @@ class PtyBase:
             self._write_q.put_nowait(data)
         except queue.Full:
             raise BufferError("PTY input queue is full") from None
+
+    def write_secret(self, data: bytes, secret: bytes) -> None:
+        """`write`, for input that carries `secret` (the hook token typed into
+        a remote agent terminal). The input log shows it as `<hook token>`."""
+        if secret:
+            self._secrets.add(secret)
+        self.write(data)
+
+    def redact(self, data: bytes) -> bytes:
+        """`data` as the input log may show it."""
+        for secret in self._secrets:
+            data = data.replace(secret, b"<hook token>")
+        return data
 
     def _do_write(self, data: bytes) -> bool:
         """Write all of ``data`` to the PTY; False once the PTY is gone."""

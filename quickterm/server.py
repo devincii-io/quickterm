@@ -12,14 +12,17 @@ from fastapi.staticfiles import StaticFiles
 from quickterm.api import (
     assets,
     attach,
+    board,
     config,
     launches,
     remote,
     sessions,
     system,
     transcripts,
+    usage,
     windows as window_routes,
     workspaces,
+    ws,
 )
 from quickterm.api.context import ApiContext
 from quickterm.api.guard import LocalGuard
@@ -109,10 +112,13 @@ def create_app(
         set_agent_hooks(cfg.port, ctx.hook_token)
     app.add_middleware(LocalGuard, ctx=ctx)
     for routes in (
-        system, sessions, remote, launches, window_routes, workspaces, config, assets, attach
+        system, sessions, remote, launches, window_routes, workspaces, board, config, assets,
+        attach,
     ):
         routes.register(app, ctx)
     transcripts.register(app, ctx)
+    usage.register(app, ctx)
+    ws.register(app, ctx)
     _mount_frontend(app)
     return app
 

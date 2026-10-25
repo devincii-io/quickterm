@@ -1,0 +1,131 @@
+/* The update card (js/update_card.js): bottom right of the window, over the
+   stage and under the panel sheet (z-index 100), and the footer pill it
+   folds into. */
+
+.update-card {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 90;
+  width: min(320px, calc(100vw - 28px));
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+  font: 12px/1.45 var(--ui-font);
+}
+.update-card[hidden] { display: none; }
+.update-card.entering { animation: update-card-in .18s ease-out; }
+@keyframes update-card-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-card.entering { animation: none; }
+}
+
+.update-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.update-card-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+.update-card-minimize {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  margin: -4px -6px 0 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font: 15px/1 var(--ui-font);
+  cursor: pointer;
+}
+.update-card-minimize[hidden] { display: none; }
+.update-card-minimize:hover { background: var(--surface-soft); color: var(--text); }
+
+.update-card-text {
+  margin: 0;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+.update-card[data-state="failed"] .update-card-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-card-notes {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.update-card-notes[hidden] { display: none; }
+.update-card-notes:hover { color: var(--text); }
+
+.update-card-bar {
+  position: relative;
+  height: 4px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-soft);
+}
+.update-card-bar[hidden] { display: none; }
+.update-card-fill {
+  width: 0;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width .3s ease;
+}
+.update-card-bar.indeterminate .update-card-fill {
+  width: 30%;
+  animation: update-card-sweep 1.2s ease-in-out infinite;
+}
+@keyframes update-card-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-card-bar.indeterminate .update-card-fill { animation: none; width: 100%; opacity: .5; }
+}
+
+.update-card-progress { margin: 0; color: var(--muted); font-size: 11px; }
+.update-card-progress[hidden] { display: none; }
+
+.update-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.update-card-actions[hidden] { display: none; }
+.update-card-actions .primary-button,
+.update-card-actions .secondary-button { min-height: 28px; padding: 0 12px; }
+
+.update-card button:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: 1px; }
+
+/* The footer pill shows a percentage while downloading, so it grows a little
+   past the icon width; the dot marks something to act on. */
+.sidebar-footer .update-pill {
+  width: auto;
+  min-width: 24px;
+  padding: 0 3px;
+}
+.sidebar-footer .update-pill[data-state="downloading"]::after,
+.sidebar-footer .update-pill[data-state="verifying"]::after,
+.sidebar-footer .update-pill[data-state="installing"]::after { display: none; }
+.sidebar-footer .update-pill[data-state="failed"] { color: var(--danger); }
+.sidebar-footer .update-pill[data-state="failed"]::after { background: var(--danger); }

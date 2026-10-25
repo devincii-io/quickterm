@@ -38,7 +38,7 @@ export function storedScratchActive() {
   try { return localStorage.getItem(SCRATCH_ACTIVE_KEY) === "1"; } catch (_) { return false; }
 }
 
-// The shell's view arrangement (workspace_views.js) replaced what 3.x
+// The shell's stored open workspaces (open_views.js) replaced what 3.x
 // remembered here. Views still call this on every switch and promotion; it
 // is a no-op so those call sites need no branch.
 export function rememberWorkspace(_name) {}

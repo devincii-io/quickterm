@@ -13,17 +13,36 @@
   --sidebar-rail: 30px;
 }
 
-#app { grid-template-columns: var(--sidebar-w, 200px) minmax(0, 1fr); }
+/* Three columns always: the left sidebar, the stage and the right panel
+   (js/right_panel.js). A hidden side is a 0px column, never a missing one, so
+   every mode change is the same track list with other sizes and the grid
+   slides between them (app.css transitions grid-template-columns). */
+#app {
+  --sidebar-col: var(--sidebar-w, 200px);
+  --rp-col: 0px;
+  grid-template-columns: var(--sidebar-col) minmax(0, 1fr) var(--rp-col);
+}
 
 /* A mode wins over any stored width. A rail that remembered 380px would be a
    very wide column of centred dots. */
-body.sidebar-collapsed #app { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
-body.sidebar-hidden #app { grid-template-columns: 0 minmax(0, 1fr); }
-body.sidebar-hidden .launcher.sidebar { display: none; }
-/* Placed explicitly: with the sidebar display:none, auto-placement would put
-   the workspace into the first column, the one that is 0px wide. */
-#app > .launcher.sidebar { grid-column: 1; }
-#app > .workspace-shell { grid-column: 2; }
+body.sidebar-collapsed #app { --sidebar-col: var(--sidebar-rail); }
+body.sidebar-hidden #app { --sidebar-col: 0px; }
+body.rp-mode-full #app { --rp-col: var(--rp-width, 340px); }
+body.rp-mode-rail #app { --rp-col: var(--sidebar-rail); }
+
+/* Each side keeps its own width while its column slides, pinned to its inner
+   edge, and #app clips what is past the window: the content moves, it never
+   reflows. Hidden turns invisible once the slide is over. Hidden from the
+   rail keeps the rail (sidebar-collapsed stays set, launcher.js). */
+#app > .launcher.sidebar {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  width: var(--sidebar-w, 200px);
+}
+body.sidebar-collapsed #app > .launcher.sidebar { width: var(--sidebar-rail); }
+body.sidebar-hidden #app > .launcher.sidebar { visibility: hidden; transition: visibility 0s linear .14s; }
+#app > .workspace-shell { grid-column: 2; grid-row: 1; }
 
 /* The grid column animates on collapse, which is exactly wrong while a pointer
    is dragging the edge: the sidebar would arrive .14s behind the cursor. The
@@ -434,13 +453,22 @@ body .session-where[hidden] { display: none; }
 .session-group-head:hover { background: var(--surface-raised); color: var(--text); }
 .session-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-group.open > .session-group-headline > .session-group-head { color: var(--text); }
-.session-group.active > .session-group-headline > .session-group-head { color: var(--text); font-weight: 600; }
+/* The workspace on the stage: the one row the content area belongs to. */
+.session-group.active > .session-group-headline > .session-group-head {
+  background: var(--surface-raised);
+  box-shadow: inset 2px 0 var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
 .session-group-head.warning .session-group-name { text-decoration: underline dotted var(--danger); }
 .session-group.unassigned > .session-group-headline > .session-group-head,
 .session-group.flat > .session-group-headline > .session-group-head { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: 8.5px; }
 .session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The checked-out branch, muted after the name; it gives way before the name. */
-.session-group-branch {
+/* The checked-out branch, muted after the name; it gives way before the name.
+   A remote workspace's `@host` and a worktree checkout's word read the same. */
+.session-group-branch,
+.session-group-host,
+.session-group-worktree {
   flex: 0 10 auto;
   min-width: 0;
   overflow: hidden;
@@ -450,9 +478,10 @@ body .session-where[hidden] { display: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-group-branch[hidden] { display: none; }
-/* A worktree workspace hangs under its main checkout like a terminal row. */
-.session-group.worktree { margin-left: 9px; padding-left: 5px; border-left: 1px solid var(--line); }
+.session-group-host { flex-shrink: 5; }
+.session-group-branch[hidden],
+.session-group-host[hidden],
+.session-group-worktree[hidden] { display: none; }
 .session-group-chevron { width: 12px; flex: none; display: grid; place-items: center; color: var(--muted); }
 .session-group-head:hover .session-group-chevron { color: var(--text); }
 /* Nothing to fold, but still a row that opens: the arrow stays, quieter. */
@@ -571,6 +600,8 @@ body .session-where[hidden] { display: none; }
   cursor: pointer;
 }
 .sidebar-nav-button:hover, .sidebar-collapse:hover { background: var(--surface-raised); color: var(--text); }
+/* A footer toggle that is on (the right panel shows). */
+.sidebar-nav-button[aria-pressed="true"] { background: var(--surface-raised); color: var(--accent-text); }
 .sidebar-nav-button:focus-visible, .sidebar-collapse:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .sidebar-collapse { position: absolute; top: 3px; right: 4px; }
 .sidebar-collapse svg { transform: rotate(180deg); transition: transform .14s ease; }
@@ -624,11 +655,11 @@ body.sidebar-collapsed .session-group-headline,
 body.sidebar-collapsed .session-group-detail,
 body.sidebar-collapsed .session-actions,
 body.sidebar-collapsed .sidebar-empty,
-body.sidebar-collapsed .sidebar-nav-button:not([data-nav="settings"]),
+/* Scoped: the right panel's rail uses the same button class. */
+body.sidebar-collapsed .launcher.sidebar .sidebar-nav-button:not([data-nav="settings"]):not([data-nav="right panel"]),
 body.sidebar-collapsed .sidebar-admin-badge { display: none; }
 body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
 body.sidebar-collapsed .session-group { padding: 0; }
-body.sidebar-collapsed .session-group.worktree { margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-group > .session-group-rows,
 body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
@@ -684,6 +715,7 @@ body.sidebar-collapsed .update-pill { width: 24px; }
 
 @media (prefers-reduced-motion: reduce) {
   #app, .sidebar-grip, .sidebar-collapse svg, .float-launch { transition: none; }
+  body.sidebar-hidden #app > .launcher.sidebar { transition: none; }
   .session-row.state-busy .session-state { animation: none; }
 }
 
@@ -696,6 +728,7 @@ body.sidebar-collapsed .update-pill { width: 24px; }
   .session-row.state-done .session-state,
   .session-group-dot:not(.hollow) { border-color: Highlight; background: Highlight; }
   .session-row.state-failed .session-state { border-color: Mark; background: Mark; }
+  .session-group.active > .session-group-headline > .session-group-head { outline: 1px solid Highlight; outline-offset: -1px; }
   .sidebar-save[data-state] { background: CanvasText; }
   .sidebar-save[data-state="error"] { background: Mark; }
   .group-actions, .session-actions { background: Canvas; }

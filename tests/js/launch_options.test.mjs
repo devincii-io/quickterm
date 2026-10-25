@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import {
   launchOptions, launchOptionsFromNode, launchOptionsToNode, repeatLaunchOptions,
 } from "../../quickterm/frontend/js/launch_options.js";
-import { claudeProfileForPane, createSpawner, defaultSystemSpec } from "../../quickterm/frontend/js/spawner.js";
+import {
+  claudeProfileForPane, createSpawner, legacyAgentSpec, serializableSpec,
+} from "../../quickterm/frontend/js/spawner.js";
 
 const SESSION = "0199a6f2-1c2d-7e3f-8a9b-0c1d2e3f4a5b";
 
@@ -103,7 +105,7 @@ function spawnerHarness(profiles) {
       return { id: `s${next}`, cwd: "C:\\work" };
     },
   };
-  const state = { cfg: {}, profiles, currentWorkspace: "proj", selectedTerminal: null, terminalInventory: null };
+  const state = { cfg: { shell: "powershell" }, profiles, currentWorkspace: "proj", terminalInventory: null };
   const spawner = createSpawner({
     api, state, layout: {}, ownSession() {}, scheduleWorkspaceSave() {}, refreshStatusSoon() {}, showError() {},
   });
@@ -132,14 +134,80 @@ test("a Claude pane started as a new conversation restarts as one", async () => 
   assert.equal(requests.at(-1).cwd, "C:\\work");
 });
 
-test("a new terminal in a replaceable pane starts in the profile's default mode", async () => {
+test("a new terminal with no profile is the configured shell, whatever the pane held", async () => {
   const profiles = [{ name: "Claude", terminal_type: "claude-code" }];
   const { spawner, requests, state } = spawnerHarness(profiles);
-  state.cfg.default_profile = "Claude";
+  state.cfg.shell = "wsl:Ubuntu";
   const pane = fakePane({ profileName: "Claude", launchOptions: { agentMode: "new" } });
-  await spawner.spawnDefaultInto(pane);
-  assert.equal("agent_mode" in requests.at(-1), false);
+  await spawner.spawnDefaultInto(pane, "C:\\here");
+  assert.deepEqual(requests.at(-1), { cwd: "C:\\here", workspace: "proj" });
   assert.equal(pane.launchOptions, null);
+  assert.equal(pane.profileName, null);
+  assert.equal(pane.launchSpec, null, "the backend resolves the configured shell on every start");
+  assert.equal(pane.terminalType, "wsl");
+  await spawner.restartSavedPane(pane);
+  assert.equal("shell" in requests.at(-1), false);
+});
+
+test("a shell from the + menu is remembered by its value", async () => {
+  const { spawner, requests } = spawnerHarness([]);
+  const pane = fakePane();
+  await spawner.spawnShellInto(pane, null, "git-bash");
+  assert.equal(requests.at(-1).shell, "git-bash");
+  assert.deepEqual(pane.launchSpec, { shell: "git-bash", name: "Git Bash", terminal_type: "git-bash" });
+  await spawner.restartSavedPane(pane);
+  assert.equal(requests.at(-1).shell, "git-bash");
+  assert.equal("cmd" in requests.at(-1), false);
+  assert.deepEqual(serializableSpec({ shell: "cmd", cwd: "C:\\w" }),
+    { shell: "cmd", name: "Command Prompt", cwd: "C:\\w", terminal_type: "command-prompt" });
+});
+
+test("Claude Code and Codex start from their settings under their kind's name", async () => {
+  const { spawner, requests, state } = spawnerHarness([]);
+  state.cfg.agents = { "claude-code": { agent_mode: "new" }, codex: {} };
+  assert.equal(spawner.profileTerminalType("claude-code"), "claude-code");
+  assert.equal(spawner.profileByName("codex").label, "Codex");
+  const pane = fakePane();
+  await spawner.spawnInto(pane, "codex", null, { agentMode: "continue" });
+  assert.equal(requests.at(-1).profile, "codex");
+  assert.equal(requests.at(-1).agent_mode, "continue");
+  assert.equal(pane.terminalType, "codex");
+});
+
+test("a dead pane of a migrated agent profile still offers continue and choose session", async () => {
+  const { spawner, requests } = spawnerHarness([{ name: "Box", terminal_type: "ssh" }]);
+  const migrated = fakePane({ profileName: "Claude New", cwd: "C:\\work" });
+  const agent = claudeProfileForPane(spawner.allProfiles(), migrated);
+  assert.equal(agent?.name, "claude-code", "the gone profile's name names the agent");
+  assert.equal(claudeProfileForPane([{ name: "Box", terminal_type: "ssh" }], migrated), null,
+    "saved profiles alone know nothing about it");
+  await spawner.resumeClaudePane(migrated, "resume");
+  assert.deepEqual([requests.at(-1).profile, requests.at(-1).agent_mode], ["claude-code", "resume"]);
+  // A 4.3 agent pane is found by its own profile, a renamed one by its type.
+  assert.equal(claudeProfileForPane(spawner.allProfiles(), fakePane({ profileName: "codex" }))?.name, "codex");
+  const typed = fakePane({ profileName: "Reviewer", terminalType: "codex" });
+  assert.equal(claudeProfileForPane(spawner.allProfiles(), typed)?.name, "codex");
+  assert.equal(claudeProfileForPane(spawner.allProfiles(), fakePane({ profileName: "Box" })), null);
+});
+
+test("a pane saved with a profile that is gone opens the shell instead", async () => {
+  const { spawner, requests } = spawnerHarness([]);
+  const notices = [];
+  const pane = fakePane({ flashNotice: (text) => notices.push(text) });
+  await spawner.spawnInto(pane, "Windows PowerShell", null);
+  assert.equal("profile" in requests.at(-1), false);
+  assert.match(notices[0], /"Windows PowerShell" no longer exists/);
+});
+
+test("a 4.2 built-in agent pane comes back through the agent settings", async () => {
+  assert.deepEqual(legacyAgentSpec({ cmd: "claude.exe", args: ["--continue"], terminal_type: "claude-code" }),
+    { kind: "claude-code", mode: "continue" });
+  assert.deepEqual(legacyAgentSpec({ cmd: "codex.exe", args: ["resume", "--last"], terminal_type: "codex" }),
+    { kind: "codex", mode: "continue" });
+  assert.equal(legacyAgentSpec({ cmd: "pwsh.exe", args: [] }), null);
+  const { spawner, requests } = spawnerHarness([]);
+  await spawner.spawnSpecInto(fakePane(), { cmd: "claude.exe", args: [], terminal_type: "claude-code" });
+  assert.deepEqual([requests.at(-1).profile, requests.at(-1).agent_mode], ["claude-code", "new"]);
 });
 
 // A layout with one replaceable focused pane, so the run* helpers fill it.
@@ -213,10 +281,9 @@ test("the agent view splits beside the focused pane, and ordinary splits do not 
   await harness.spawner.splitAgentView(codex);
   assert.equal(harness.splits.length, 1);
   assert.equal(harness.requests.at(-1).agent_mode, "agents");
-  harness.state.selectedTerminal = { kind: "profile", profile: codex };
   await harness.spawner.spawnSplitInto(fakePane(), harness.pane);
-  assert.equal(harness.requests.at(-1).agent_mode, "continue");
-  assert.equal(harness.requests.at(-1).cwd, undefined);
+  assert.equal("agent_mode" in harness.requests.at(-1), false);
+  assert.equal("profile" in harness.requests.at(-1), false, "a split starts the shell");
 });
 
 test("a dead Codex pane is recovered through its own continue", async () => {
@@ -228,18 +295,6 @@ test("a dead Codex pane is recovered through its own continue", async () => {
   assert.equal(requests.at(-1).agent_mode, "continue");
   await spawner.resumeClaudePane(pane, "resume");
   assert.equal(requests.at(-1).agent_mode, "resume");
-});
-
-test("Codex is never the default system shell", () => {
-  const inventory = {
-    types: [
-      { id: "codex", executable: "codex.exe", label: "Codex CLI" },
-      { id: "claude-code", executable: "claude.exe", label: "Claude Code" },
-      { id: "command-prompt", executable: "cmd.exe", label: "Command Prompt" },
-    ],
-  };
-  assert.equal(defaultSystemSpec(inventory).terminalType, "command-prompt");
-  assert.equal(defaultSystemSpec(inventory, "codex").terminalType, "command-prompt");
 });
 
 test("a restored pane node repeats its saved start command", async () => {

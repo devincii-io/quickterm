@@ -128,6 +128,98 @@ def _claude_title(path: Path) -> str | None:
     return _title(chosen) if chosen else None
 
 
+_DRIVE_FIXED = 3
+
+
+def _drive_type(drive: str) -> int:
+    """GetDriveTypeW for ``"C:\\"``; asks the volume manager, not the drive."""
+    import ctypes
+
+    return int(ctypes.windll.kernel32.GetDriveTypeW(drive))
+
+
+def _is_network_path(text: str) -> bool:
+    """A UNC or device path (``\\\\host\\share``, ``//host/share``,
+    ``\\\\?\\UNC\\...``), or on Windows anything not on a fixed local drive. A
+    file there makes Windows log on to that host and hand it the user's
+    NetNTLM hash. Decided from the text alone, except for the drive type."""
+    if text[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return True
+    if os.name != "nt":
+        return False
+    drive, _ = os.path.splitdrive(text)
+    if len(drive) != 2 or drive[1] != ":" or not drive[0].isalpha():
+        return True
+    return _drive_type(drive.upper() + "\\") != _DRIVE_FIXED
+
+
+def local_file_under(value: object, root: Path, suffix: str = ".jsonl") -> str | None:
+    """``value`` when it names a ``suffix`` file inside ``root`` on a local
+    disk, else None. Hook payloads come from whatever runs in a terminal (a
+    remote host too), so a path in one is only ever read when it lies where
+    the agent itself writes. Nothing here touches the file."""
+    if not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value:
+        return None
+    if _is_network_path(value) or not value.endswith(suffix) or not os.path.isabs(value):
+        return None
+    base = str(root)
+    if not base or _is_network_path(base):
+        return None
+    path = os.path.normcase(os.path.normpath(value))
+    folder = os.path.normcase(os.path.normpath(base)).rstrip("\\/")
+    if not path.startswith(folder + os.sep):
+        return None
+    return value
+
+
+def claude_transcript(value: object) -> str | None:
+    """A transcript path from a hook, when it lies in Claude's own projects folder."""
+    return local_file_under(value, claude_root() / "projects")
+
+
+def claude_title(transcript: str) -> str | None:
+    """The title a Claude conversation carries itself: the one the user chose,
+    else the generated one or an older summary. Never its first prompt: a pane
+    named after that would only repeat the board's card. Blocking: reads the
+    transcript's head and tail. Only a transcript in Claude's own folder."""
+    checked = claude_transcript(transcript)
+    if checked is None:
+        return None
+    path = Path(checked)
+    custom_title = generated = None
+    try:
+        text = _read_bounded(path)
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if '"custom-title"' not in line and '"ai-title"' not in line and '"summary"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("type")
+        value = {"custom-title": "customTitle", "ai-title": "aiTitle", "summary": "summary"}.get(str(kind))
+        found = record.get(value) if value else None
+        if not isinstance(found, str) or not found.strip():
+            continue
+        if kind == "custom-title":
+            custom_title = found
+        else:
+            generated = found
+    chosen = custom_title or generated
+    return _title(chosen) if chosen else None
+
+
+def codex_thread_name(thread_id: str) -> str | None:
+    """The name Codex gave a thread (its session index), or None."""
+    entry = _codex_index(codex_home()).get(thread_id, {})
+    name = entry.get("thread_name")
+    return _title(name) if isinstance(name, str) and name.strip() else None
+
+
 def claude_sessions(cwd: str, limit: int = 20) -> list[dict]:
     """`[{id, title, updated_at, cwd}]`, newest first."""
     try:

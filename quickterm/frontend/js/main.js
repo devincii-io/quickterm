@@ -24,10 +24,13 @@ import { createScratch } from "./scratch.js";
 import { createSessionOwnership } from "./session_ownership.js";
 import { bootShell } from "./shell.js";
 import { createSpawner } from "./spawner.js";
+import { agentProfiles, isAgentType } from "./agent_profile.js";
+import { newTerminalMenu } from "./sidebar_model.js";
 import { createTerminalActions } from "./terminal_actions.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
 import { createWorkspaceSwitch } from "./workspace_switch.js";
+import { agentPresent } from "./remote_workspace.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -76,7 +79,6 @@ async function bootView() {
     terminalInventory: loadedInventory,
     windowIsPrimary: false,
   });
-  state.requireConfiguredTerminals = true;
   // The shell's sidebar and its terminal choice, seen from this view.
   Object.defineProperty(state, "selectedTerminal", {
     get: () => chrome.selectedTerminal || null,
@@ -129,14 +131,14 @@ async function bootView() {
     if (value) claimFocus("inactive-view"); else releaseFocus("inactive-view");
   }
   suspendView(true);
-  document.addEventListener("pointerdown", () => {
-    viewHost()?.activate(window);
-    suspendView(false);
-  }, true);
-  window.addEventListener("focus", () => {
-    viewHost()?.activate(window);
-    suspendView(false);
-  });
+  // Only the shown view can be clicked or focused (the hidden ones are
+  // inert); a stray focus in a hidden one must not take the keyboard.
+  const shownHere = () => {
+    const host = viewHost();
+    return !host || host.active === host.viewFor(window);
+  };
+  document.addEventListener("pointerdown", () => { if (shownHere()) suspendView(false); }, true);
+  window.addEventListener("focus", () => { if (shownHere()) suspendView(false); });
 
   applyChromeTheme(state.cfg.theme, state.cfg.custom_theme);
   if (state.cfg.elevated) document.body.classList.add("elevated");
@@ -196,13 +198,14 @@ async function bootView() {
     api, workspace, state, layout,
     claimWorkspaceFor, discardScratch, ownedSessionIds, usableWorkspacePath,
     spawnInto, spawnSpecInto, spawnDefaultInto, profileTerminalType, restartSavedPane, resumeClaudePane,
+    allProfiles: spawner.allProfiles,
     cancelWorkspaceSave, scheduleWorkspaceSave, showError, clearError,
     buildLauncher: () => buildLauncher(),
     refreshStatusSoon: () => refreshStatusSoon(),
   });
-  // A view never switches to another workspace in place: it opens or
-  // focuses that workspace's own view in the shell.
-  const openWorkspaceView = (name) => viewHost()?.open(name, { anchorWindow: window }) ?? Promise.resolve(false);
+  // A view never switches to another workspace in place: the shell shows
+  // that workspace's own view, opening it first when needed.
+  const openWorkspaceView = (name) => viewHost()?.open(name) ?? Promise.resolve(false);
   const actions = createWorkspaceActions({
     api, workspace, state, layout,
     claimWorkspaceFor, listWindowsSafe, ensureScratchWorkspace, attachSession, hereState,
@@ -265,11 +268,6 @@ async function bootView() {
       state.currentWorkspace,
     ),
     openNewWindow,
-    // Another workspace tiled into this window, beside this view.
-    openWorkspaceBeside: (name) => openWorkspaceView(name),
-    canShowWorkspaceBeside: () => Boolean(viewHost()),
-    shownViews: () => viewHost()?.list() || [],
-    focusShownWorkspace: (name) => Boolean(viewHost()?.focusWorkspace(name)),
     createWorkspaceHere: actions.createWorkspaceHere,
     hereState,
     explainWindowChoice: (row) => showError(windowChoiceMessage(row)),
@@ -290,6 +288,20 @@ async function bootView() {
     ownedSessionIds: () => [...ownedSessionIds()],
     focusedSessionId: () => layout.focused?.session?.id || null,
     focusedTerminalType: () => layout.focused?.terminalType || null,
+    // The sidebar's session poll: every pane learns its terminal's current
+    // name (an agent's conversation title), and an agent pane whether its
+    // agent is still running inside the shell (a child process, or hook state).
+    noteSessions: (sessions) => {
+      const byId = new Map((sessions || []).map((session) => [session?.id, session]));
+      for (const pane of layout.panes()) {
+        const session = byId.get(pane.session?.id);
+        if (session) pane.noteName?.(session.name);
+        if (session && session.alive !== false && isAgentType(pane.terminalType)) {
+          const wsl = /^wsl(?::|$)/.test(session.agent_shell || "");
+          pane.noteAgent?.(agentPresent(session), { byMarker: wsl && !session.host });
+        }
+      }
+    },
     focusSession: (id) => {
       const pane = layout.panes().find((item) => item.session?.id === id);
       if (pane) layout.focusPane(pane);
@@ -326,6 +338,12 @@ async function bootView() {
   // The palette offers the same installs as the new-terminal menu.
   app.shellInstalls = () => state.terminalInventory?.installs || [];
   app.installShell = (install) => runInstaller(install);
+  // The "+" menu's entries, for the palette's new-terminal rows.
+  app.agentProfiles = () => agentProfiles(state.cfg, state.terminalInventory);
+  app.newTerminalMenu = () => newTerminalMenu({
+    inventory: state.terminalInventory, profiles: state.profiles, shell: state.cfg?.shell ?? null,
+    agents: app.agentProfiles(), host: state.workspaceHost || null,
+  });
 
   const palette = chrome.palette;
   const panels = chrome.panels;
@@ -333,11 +351,6 @@ async function bootView() {
   app.setupTerminals = () => {
     panels.settingsTab = "connections";
     panels.show("settings");
-  };
-  const newConfiguredTerminal = app.newTerminal;
-  app.newTerminal = () => {
-    if (!state.profiles.some((profile) => !["rdp", "vnc"].includes(profile.terminal_type))) return app.setupTerminals();
-    return newConfiguredTerminal();
   };
 
   app.setFontSize = setFontSize;

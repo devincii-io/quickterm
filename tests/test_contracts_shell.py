@@ -220,7 +220,7 @@ def test_two_windows_can_never_own_one_workspace():
     assert boot.index("state.currentWorkspace = null;") < boot.index("showError(refusal);")
     # The shell reserves every view's claim before the iframe exists.
     views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
-    claim = _function(views, "  async _claimView(", "\n  // Rebuild a whole arrangement")
+    claim = _function(views, "  async _claimView(", "\n  // Appended once")
     assert claim.index("await api.registerWindow({ workspace: name || null") < claim.index(
         'document.createElement("iframe")'
     )
@@ -346,8 +346,8 @@ def test_only_the_primary_window_claims_the_explorer_folder_handoff():
 
 
 def test_open_folder_actions_share_one_resolver_and_one_route():
-    """Sidebar buttons, Alt+Shift+E/C and two palette rows all open the focused
-    terminal's folder. One resolver (`hereFolder`: the pane's OSC 7 directory,
+    """Sidebar buttons, Alt+Shift+C and two palette rows all open the focused
+    terminal's folder (Alt+Shift+E went to the right panel in 4.3). One resolver (`hereFolder`: the pane's OSC 7 directory,
     else its launch folder, else the workspace folder) and one token-gated
     route (`POST /api/open` with `app`), so every entry point opens the same
     place and says so in the same banner when it cannot.
@@ -368,97 +368,102 @@ def test_open_folder_actions_share_one_resolver_and_one_route():
     assert "    openHere,\n" in main
     assert "openFolder: (app) => chromeApp.openHere(app)," in shell
     # Shift layer only: plain Alt+C is readline's capitalize-word.
-    assert 'if (key === "e") return done(actions.openExplorer);' in keys
     assert 'if (key === "c") return done(actions.openEditor);' in keys
-    assert keys.index("// Alt+Shift layer") < keys.index('if (key === "e") return done(actions.openExplorer);')
-    assert 'label: "open folder in Explorer", hint: folderHint("Alt+Shift+E")' in palette
+    assert keys.index("// Alt+Shift layer") < keys.index('if (key === "c") return done(actions.openEditor);')
+    assert 'const toggle = windowAction(actions, "toggleRightPanel");' in keys
+    assert 'label: "open folder in Explorer", hint: here || "", run: () => a.openExplorer?.()' in palette
     assert 'label: "open folder in VS Code", hint: folderHint("Alt+Shift+C")' in palette
     assert 'req("POST", "/api/open", { target: path, app })' in api
 
 
-def test_workspace_views_tile_like_panes_and_never_reparent_an_iframe():
-    """Any number of workspaces in one window, placed like panes.
+def test_the_stage_shows_one_workspace_and_never_reparents_an_iframe():
+    """One workspace on screen at a time, chosen in the sidebar (4.3).
 
-    Views and panes are leaves of the same split tree, a new one takes half of
-    the focused leaf along its longer side (dwindle), and a header drag uses the
-    pane drop zones. The one rule the DOM has to keep: an iframe that changes
-    parent reloads its document, so views are absolutely positioned and a
-    layout change only writes their boxes. That box transition is also the
-    animation, and it is off during drags and under reduced motion.
+    Every open workspace is an iframe covering the whole stage. The hidden ones
+    keep their box (visibility, never display: none, so xterm keeps its size),
+    are inert, and are told setHidden(true) so their panes drop WebGL. An
+    iframe that changes parent reloads its document, so a view element is
+    appended once and only its classes change afterwards. No view header, no
+    frame, no divider, no view drag.
     """
     views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
     views_css = (FRONTEND_CSS / "workspace_views.css").read_text(encoding="utf-8")
-    layout = (FRONTEND_JS / "layout.js").read_text(encoding="utf-8")
-    tree = (FRONTEND_JS / "split_tree.js").read_text(encoding="utf-8")
-    move = (FRONTEND_JS / "pane_move.js").read_text(encoding="utf-8")
-    app_css = (FRONTEND_CSS / "app.css").read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
 
-    assert "export function dwindleDir(rect)" in tree
-    assert 'import { findLeaf, parentOf, replaceChild } from "./split_tree.js";' in move
-    assert 'import { dropZone, movePaneNode, zoneRect } from "./pane_move.js";' in views
-    assert (
-        "import { dwindleDir, findLeaf, insertBeside, layoutRects, leaves, mapLeaves, removeLeaf }"
-        ' from "./split_tree.js";'
-        in views
-    )
-    assert "this.root = insertBeside(this.root, beside, view, dwindleDir(from));" in views
-    # Never re-parented: appended once, then only its box is written. The
-    # shell's own grid gives way to the stage once, before any view exists.
-    assert "this.stage.append(view.el);" in views
-    assert "applyRect(view.el, box);" in views
+    assert "split_tree" not in views and "pane_move" not in views
+    for gone in ("workspace-view-heading", "workspace-view-divider", "multiple", "zoom", "moveView"):
+        assert gone not in views, gone
+        assert gone not in views_css, gone
+    # Never re-parented: appended once, then only its classes change.
+    assert views.count("this.stage.append(view.el);") == 1
+    assert "insertBefore" not in views and "replaceChildren" not in views
     assert "this.stage.textContent" not in views and "this.stage.innerHTML" not in views
-    assert "insertBefore" not in views and "replaceChildren(view" not in views
     assert "shell.before(this.stage);" in views
-    assert "position: absolute;" in views_css
-    assert ".workspace-views.resizing .workspace-view," in views_css
-    # Panes: the same placement rule, and the same motion rules.
-    assert "autoDir(pane = this.focused)" in layout and "return dwindleDir(" in layout
-    assert "layout.autoDir(pane)" in SPAWNER_JS.read_text(encoding="utf-8")
-    for module in MAIN_MODULES:
-        assert "function autoDir(" not in module.read_text(encoding="utf-8"), module.name
-    assert ".split.sliding > * { transition: flex-grow" in app_css
-    assert "body.dragging .split > * { transition: none; }" in app_css
-    assert "prefers-reduced-motion" in app_css and "function reducedMotion()" in layout
-    # A view can open another view: the shell owns the tiling.
+    paint = _function(views, "  _paint() {", "\n  // A hidden view lets")
+    assert 'view.el.classList.toggle("shown", shown);' in paint
+    assert "view.el.inert = !shown;" in paint
+    assert "this._tellHidden(view);" in paint
+    assert "child.setHidden(hidden);" in views
+    # Hidden by visibility, at the full stage rect.
+    assert ".workspace-view { position: absolute; inset: 0; display: flex; visibility: hidden; }" in views_css
+    assert ".workspace-view.shown { visibility: visible; }" in views_css
+    for line in views_css.splitlines():
+        if line.startswith(".workspace-view ") or line.startswith(".workspace-view."):
+            assert "display: none" not in line, line
+    # A view asks the shell to show another workspace; it never tiles one.
     assert "const viewHost = () => window.parent?.quicktermViews || null;" in main
-    assert "viewHost()?.open(name, { anchorWindow: window })" in main
-    assert "viewHost()?.activate(window);" in main
+    assert "viewHost()?.open(name)" in main
+    for gone in ("openWorkspaceBeside", "canShowWorkspaceBeside", "shownViews", "focusShownWorkspace"):
+        assert gone not in main, gone
+        assert gone not in SHELL_JS.read_text(encoding="utf-8"), gone
     # A view tells the shell when it can take the keyboard and be asked things.
     assert "viewHost()?.ready(window);" in main
     assert main.index("window.quicktermView = {") < main.index("viewHost()?.ready(window);")
+    assert "setHidden: (hidden) => layout.setViewHidden(hidden)," in main
+    # A stray focus in a hidden view never takes the keyboard or switches.
+    assert "viewHost()?.activate(window)" not in main
+    assert "return !host || host.active === host.viewFor(window);" in main
 
 
-def test_views_have_no_primary_and_every_view_closes():
-    """No workspace is special. The window's document hosts none, every
-    workspace is an equal iframe view with a close button, and closing the
-    last one leaves an empty stage with a way back in.
+def test_every_view_closes_and_the_shown_one_hands_over_to_the_last_shown():
+    """No workspace is special. Closing any view saves through its own
+    document; closing the shown one shows the most recently shown remaining
+    one, or the empty stage with a way back in.
     """
     views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8")
     views_css = (FRONTEND_CSS / "workspace_views.css").read_text(encoding="utf-8")
-    # Only the version 1 migration still knows what a primary leaf was.
     manager = views[views.index("export class WorkspaceViews"):]
-    for gone in ("primary", "workspace-view-primary"):
-        assert gone not in manager, gone
-    assert "const PRIMARY = " not in views and "primaryName" not in views
-    assert "workspace-view-primary" not in views_css
-    make = _function(views, "  _makeView({", "\n  _button(")
-    assert 'view.closeButton = this._button("x",' in make
-    assert "if (!primary)" not in make
-    # Opens, closes and rebuilds run one after another instead of refusing.
+    assert "primary" not in manager
+    # Opens, closes and restores run one after another instead of refusing.
     assert "    return this._serial(() => this._close(view));" in views
-    close = _function(views, "  async _close(view) {", "\n  // One view over the whole window")
-    assert "if (!view || !this.views().includes(view)) return false;" in close
-    # _serial() orders open, close and rebuild; a busy flag could never be set.
     assert "this.busy" not in views
-    # Closing saves, retains and releases through the view's own document,
-    # then removes the leaf; nothing is killed.
-    assert close.index("await child.close()") < close.index("this.root = removeLeaf(this.root, view);")
+    close = _function(views, "  async _close(view) {", "\n  // ---- across restarts")
+    assert "if (!view || !this.items.includes(view)) return false;" in close
+    assert close.index("await child.close()") < close.index("view.el.remove();")
+    assert "const heir = this.recent.at(-1) || this.items.at(-1) || null;" in close
     assert "killSession" not in close
     assert 'EMPTY_STAGE_TEXT = "No workspace open. Open one from the sidebar.";' in views
     assert 'button.textContent = "New scratch";' in views
-    assert "this.empty.hidden = views.length > 0;" in views
+    assert "this.empty.hidden = this.items.length > 0;" in views
     assert ".workspace-views-empty {" in views_css
+    # One scratch view per window, labelled scratch; Explorer's folder lands
+    # in it instead of in a new one.
+    assert 'export const SCRATCH_LABEL = "scratch";' in views
+    open_ = _function(views, "  async _open(name,", "\n  // Explorer's folder")
+    assert "const shown = name ? this.viewForWorkspace(name) : this.scratchView();" in open_
+    assert "if (!name && cwd) this._startIn(shown, cwd);" in open_
+    assert "await app.startLaunch({ cwd })" in views
+
+
+def test_the_shown_row_is_highlighted_in_the_sidebar():
+    sidebar_css = (FRONTEND_CSS / "sidebar.css").read_text(encoding="utf-8")
+    launcher = LAUNCHER_JS.read_text(encoding="utf-8")
+    head = sidebar_css[sidebar_css.index(".session-group.active > .session-group-headline > .session-group-head {"):]
+    head = head[: head.index("}")]
+    assert "background: var(--surface-raised);" in head
+    assert "box-shadow: inset 2px 0 var(--accent);" in head
+    assert 'setClass(node, "active", group.active);' in launcher
+    assert '"aria-current": group.active ? "true" : false,' in launcher
 
 
 def test_a_view_never_draws_the_sidebar():
@@ -535,7 +540,7 @@ def test_workspace_here_moves_the_terminal_before_opening_its_view():
     assert holder < save < retain < close < opened
     assert "switchWorkspace" not in body
     assert "killSession" not in body and "cleanupSessions" not in body
-    assert "openWorkspaceView = (name) => viewHost()?.open(name, { anchorWindow: window })" in (
+    assert "openWorkspaceView = (name) => viewHost()?.open(name) ?? Promise.resolve(false);" in (
         MAIN_JS.read_text(encoding="utf-8")
     )
     # The offer is patched with every sidebar refresh, never rebuilt.
@@ -610,28 +615,30 @@ def test_the_window_restores_its_views_and_falls_back_to_one_scratch_view():
     """
     shell = SHELL_JS.read_text(encoding="utf-8")
     main = MAIN_JS.read_text(encoding="utf-8")
-    # The arrangement half lives in view_arrangement.js; read them as one.
-    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8") + (FRONTEND_JS / "view_arrangement.js").read_text(encoding="utf-8")
+    # The stored list lives in open_views.js; read them as one.
+    views = WORKSPACE_VIEWS_JS.read_text(encoding="utf-8") + (FRONTEND_JS / "open_views.js").read_text(encoding="utf-8")
+    assert not (FRONTEND_JS / "view_arrangement.js").exists()
 
-    assert (
-        "const keepsViewArrangement = identity.workspace === undefined && state.windowIsPrimary;"
-    ) in shell
-    assert "store: keepsViewArrangement ? viewArrangementStore() : null," in shell
+    assert "const keepsOpenViews = identity.workspace === undefined && state.windowIsPrimary;" in shell
+    assert "store: keepsOpenViews ? openViewsStore() : null," in shell
+    leftovers = shell.index("await views.releaseLeftovers();")
     restore = shell.index("restored = await views.restoreSaved({")
     explorer = shell.index("if (openDir) await views.open(null, { cwd: openDir });")
     remembered = shell.index("!restored?.stored ? storedWorkspace() : null;")
     scratch = shell.index("await views.open(null, { first: identity.workspace === undefined });")
-    assert restore < explorer < remembered < scratch
+    assert leftovers < restore < explorer < remembered < scratch
     assert "rememberedWorkspace: storedScratchActive() ? null : storedWorkspace()," in shell
 
-    assert 'export const VIEW_ARRANGEMENT_KEY = "quickterm.workspaceViews";' in views
-    assert "export const VIEW_ARRANGEMENT_VERSION = 2;" in views
-    assert "primaryName" not in views
-    store = views[views.index("export function viewArrangementStore("):]
+    assert 'export const OPEN_VIEWS_KEY = "quickterm.openViews.v1";' in views
+    assert 'export const LEGACY_ARRANGEMENT_KEY = "quickterm.workspaceViews";' in views
+    store = views[views.index("export function openViewsStore("):]
     store = store[: store.index("\n}\n")]
-    # Both the read and the write are wrapped; storage can throw at any time.
-    assert store.count("try {") == 2
-    assert store.count("catch (_)") == 2
+    # Every read and write is wrapped; storage can throw at any time.
+    assert store.count("try {") == 3
+    assert store.count("catch (_)") == 3
+    # The tiling record is read once, then removed.
+    stored = _function(views, "export function readStoredViews(", "\n}\n")
+    assert "if (legacy !== null) store.dropLegacy?.();" in stored
     assert views.count("api.registerWindow(") == 1
     assert views.count("await this._claimView(") == 2
 

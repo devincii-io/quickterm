@@ -8,6 +8,19 @@ window.
 
 from __future__ import annotations
 
+import sys
+
+# Claude Code runs the status line chain on every status update and Codex the
+# notify chain after every turn. In the frozen build this file is the entry
+# script, and the imports below take over a second, so both stdlib-only
+# modules are answered first. main() keeps the same dispatch for `-c` callers.
+if __name__ == "__main__" and sys.argv[1:2] in (["--statusline"], ["--codex-notify"]):
+    if sys.argv[1] == "--statusline":
+        from quickterm.statusline_chain import run as _chain_run
+    else:
+        from quickterm.codex_notify import run as _chain_run
+    sys.exit(_chain_run(sys.argv[2:]))
+
 import asyncio
 import argparse
 import functools
@@ -30,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server as UvicornServer
 
-from quickterm import __version__, cli, codex_notify, launch, pty_host
+from quickterm import __version__, cli, codex_notify, launch, pty_host, statusline_chain
 from quickterm.server import client_host, create_app
 from quickterm.windows import (
     WindowInfo,
@@ -201,6 +214,9 @@ def main() -> None:
     # parse its JSON argument as an option or a folder.
     if argv[:1] == [codex_notify.FLAG]:
         sys.exit(codex_notify.run(argv[1:]))
+    # Claude Code's status line (statusline_chain.py), for the same reason.
+    if argv[:1] == [statusline_chain.FLAG]:
+        sys.exit(statusline_chain.run(argv[1:]))
     # A verb (`quickterm ls`, `new`, `open`, `send`) drives the running app and
     # exits; nothing below runs for it. `new` with no app running starts this
     # program again, detached, with --handoff.
@@ -271,6 +287,8 @@ def main() -> None:
         if args.serve or elevated:
             _setup_logging()
             log.info("QuickTerm %s backend starting on %s:%s", __version__, cfg.host, cfg.port)
+            if not elevated:
+                take_migration_notice(cfg)
             # The elevated instance is its own backend, run in place, with its
             # one window; it ends with that window.
             code = _run_backend(
@@ -288,6 +306,8 @@ def main() -> None:
         return
     _setup_logging()
     log.info("QuickTerm %s starting on %s:%s", __version__, cfg.host, cfg.port)
+    if not elevated:
+        take_migration_notice(cfg)
     # One ordinary backend: later launches hand work to it instead of starting
     # another one onto the same session set.
     if not elevated and _already_running(cfg.port, cfg.host):
@@ -360,6 +380,18 @@ def _override_port(cfg: "AppConfig", port: int) -> None:
 
 def _base_url(port: int, host: str = "127.0.0.1") -> str:
     return f"http://{client_host(host)}:{port}"
+
+
+def take_migration_notice(cfg: "AppConfig") -> None:
+    """Show what the 4.3 settings migration dropped, once, in the window's
+    error banner, and log it. Only a backend takes it: the launcher may be
+    the process that migrated, and it never shows a window of its own."""
+    from quickterm.config import take_migration_notice as take
+
+    notice = take()
+    if notice:
+        log.warning("%s", notice)
+        cfg.launch_error = notice
 
 
 def _setup_logging(filename: str = "quickterm.log") -> None:

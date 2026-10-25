@@ -1,15 +1,20 @@
 """Git facts for a folder, read from `.git` and `HEAD` without starting git.
 
 The sidebar asks for every workspace folder on each refresh, so this stays a
-handful of small, bounded file reads. Nothing here writes, locks or runs a
-process. Callers keep it off the event loop: a folder on a network share can
-still stall a read.
+handful of small, bounded file reads. Nothing in the local half writes,
+locks or runs a process. Callers keep it off the event loop: a folder on a
+network share can still stall a read. A workspace on an SSH host has its own
+half at the end, which runs git there in the background.
 """
 
 from __future__ import annotations
 
 import os
+import posixpath
 import re
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,3 +136,92 @@ def git_info(path: str | os.PathLike[str] | None) -> dict | None:
 
 def git_info_many(paths: list[str]) -> dict[str, dict | None]:
     return {path: git_info(path) for path in paths}
+
+
+# --- a workspace on an SSH host ----------------------------------------------
+#
+# Over ssh there are no files to read, so git itself answers, once a minute
+# per workspace and never on a request's path: a request gets what is cached
+# and, when that is stale, starts a refresh in a background thread. A host
+# that wants a password fails quietly (BatchMode) and shows no branch.
+
+REMOTE_TTL_S = 60.0
+REMOTE_TIMEOUT_S = 15.0
+_REMOTE_ARGV = [
+    "git", "rev-parse", "--abbrev-ref", "HEAD",
+    "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+]
+_remote_cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
+_remote_running: set[tuple[str, str]] = set()
+_remote_lock = threading.Lock()
+
+
+def parse_remote(output: str, short_head: str | None = None) -> dict | None:
+    """The contract's git_info from the rev-parse lines: the branch (``HEAD``
+    when detached), the checkout's top folder and the common git folder."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return None
+    branch, top, common = lines[0], lines[1].rstrip("/"), lines[2].rstrip("/")
+    main = posixpath.dirname(common) if posixpath.basename(common) == ".git" else common
+    worktree = common != f"{top}/.git" and main != top
+    detached = branch == "HEAD"
+    return {
+        "branch": None if detached else branch,
+        "head": short_head if detached else None,
+        "worktree": worktree,
+        "main_path": main if worktree else None,
+    }
+
+
+def _read_remote(ws: object) -> dict | None:
+    from quickterm import ws_exec
+
+    try:
+        done = ws_exec.run(ws, _REMOTE_ARGV, timeout=REMOTE_TIMEOUT_S, env=ws_exec.GIT_ENV)
+        if done.returncode:
+            return None
+        short = None
+        if done.stdout.strip().splitlines()[:1] == ["HEAD"]:
+            head = ws_exec.run(ws, ["git", "rev-parse", "--short", "HEAD"], timeout=REMOTE_TIMEOUT_S,
+                                  env=ws_exec.GIT_ENV)
+            short = (head.stdout.strip()[:12] or None) if head.returncode == 0 else None
+        return parse_remote(done.stdout, short)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _refresh_remote(key: tuple[str, str], ws: object) -> None:
+    try:
+        info = _read_remote(ws)
+        with _remote_lock:
+            _remote_cache[key] = (time.monotonic(), info)
+    finally:
+        with _remote_lock:
+            _remote_running.discard(key)
+
+
+def remote_git_info(ws: object, *, wait: bool = False) -> dict | None:
+    """The cached git_info of a remote workspace. A stale or missing entry
+    starts one background refresh; `wait` runs it here instead (tests)."""
+    host = getattr(ws, "host", None)
+    path = getattr(ws, "path", None)
+    if not host or not path:
+        return None
+    key = (str(host), str(path))
+    with _remote_lock:
+        cached = _remote_cache.get(key)
+        fresh = cached is not None and time.monotonic() - cached[0] < REMOTE_TTL_S
+        start = not fresh and key not in _remote_running
+        if start:
+            _remote_running.add(key)
+    if start:
+        if wait:
+            _refresh_remote(key, ws)
+            with _remote_lock:
+                cached = _remote_cache.get(key)
+        else:
+            threading.Thread(
+                target=_refresh_remote, args=(key, ws), name="remote-git", daemon=True
+            ).start()
+    return cached[1] if cached is not None else None

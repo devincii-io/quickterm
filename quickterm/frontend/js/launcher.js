@@ -8,11 +8,12 @@ import { confirmNear } from "./confirm_popover.js";
 import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
   clampSidebarWidth, isWideSidebar, rowWhere, sessionTooltip, sidebarGroups, groupSummary,
-  folderName, terminalChoices, canLaunch, choiceKey, loadMode, saveMode, loadWidth, saveWidth,
-  loadClosedGroups, saveClosedGroups, foldId, visibleGroups, activitySeconds, relativeTime, groupBranch,
-  nextNeedsYou as findNeedsYou,
+  folderName, newTerminalMenu, defaultShellRow, loadMode, saveMode, loadWidth, saveWidth,
+  loadClosedGroups, saveClosedGroups, foldId, visibleGroups, activitySeconds, relativeTime, groupBranch, worktreeNote,
+  nextNeedsYou as findNeedsYou, NAV_ICONS,
 } from "./sidebar_model.js";
 import { createViewControls } from "./sidebar_view_menu.js";
+import { mountUsageFooter } from "./usage_footer.js";
 import { fromKeyboard, iconButton, make, patchSubagents, setLabel, wireFloat } from "./sidebar_dom.js";
 
 // The pure half lives in sidebar_model.js; its public names stay importable
@@ -21,7 +22,7 @@ export {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX,
   maxSidebarWidth, clampSidebarWidth, SIDEBAR_WIDE_AT, isWideSidebar, UNASSIGNED_GROUP, sessionState,
   sessionFolder, attentionText, isListedSession, sessionSummary, sessionTooltip, sidebarGroups,
-  groupSummary, terminalChoices, canLaunch,
+  groupSummary, newTerminalMenu, defaultShellRow,
 } from "./sidebar_model.js";
 
 // The sidebar is the whole chrome. Three modes, one hotkey (Alt+Shift+S)
@@ -40,7 +41,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   el.classList.add("sidebar");
 
   let model = {
-    profiles: [], inventory: null, defaultProfile: null, selectedTerminal: null, logoUrl: null,
+    profiles: [], inventory: null, shell: null, agents: [], logoUrl: null,
     workspaces: [], views: [], sessions: [], attached: {}, owned: {}, here: null,
   };
 
@@ -54,7 +55,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   let mode = loadMode();
   const float = wireFloat(actions, signal, () => setMode("full"));
   const applyMode = () => {
-    document.body.classList.toggle("sidebar-collapsed", mode === "rail");
+    // Hidden from the rail keeps the rail's layout, so the rail slides out.
+    document.body.classList.toggle("sidebar-collapsed", mode === "rail" || (mode === "hidden" && document.body.classList.contains("sidebar-collapsed")));
     document.body.classList.toggle("sidebar-hidden", mode === "hidden");
     el.setAttribute("aria-hidden", String(mode === "hidden"));
     if (mode === "hidden") float.show(); else float.hide();
@@ -71,82 +73,63 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   };
 
   // New terminal -----------------------------------------------------------
-  // One button that opens whatever is selected, and a chevron beside it that
-  // opens the list of choices as a menu (menu.js). Built once; the choices are
-  // recomputed when profiles, inventory or the selection change.
+  // The "+" button starts the configured shell; the chevron (or a
+  // right click) opens the menu of shells, agents and saved profiles, and
+  // every row there starts its terminal at once. Built once; the rows are
+  // recomputed when the shell, the agents, profiles or inventory change.
   const launch = make("div", "sidebar-launch");
-  let menuChoices = [];
-  let choices = [];
-  let selected = null;
+  let menu = [];
+  let shellRow = null;
 
   const open = make("button", "sidebar-new");
   open.type = "button";
   const openLabel = make("span", "sidebar-label");
   open.append(icon("plus", 15), openLabel);
   const describeOpen = () => {
-    setText(openLabel, selected ? selected.label : "Set up terminal");
-    open.title = selected
-      ? `New ${selected.label} (Alt+N) · ${selected.detail}`
-      : "No shell was found on this computer";
-    open.disabled = !selected && !actions.setup;
+    setText(openLabel, shellRow ? shellRow.label : "New terminal");
+    open.title = `New ${shellRow ? shellRow.label : "terminal"} terminal (Alt+N)`;
+  };
+  const runRow = (row) => {
+    if (row.kind === "shell") return actions.runSystem?.({ kind: "shell", shell: row.value, label: row.label });
+    if (row.kind === "remote-shell") return actions.newTerminal?.();
+    if (row.kind === "agent" || row.kind === "profile") return actions.runProfile?.(row.profile);
+    return actions.setup?.();
   };
   open.addEventListener("click", () => {
-    if (!selected) { actions.setup?.(); return; }
-    const launched = selected.kind === "profile"
-      ? actions.runProfile?.(selected.profile)
-      : actions.runSystem?.(selected);
-    Promise.resolve(launched).finally(handBack);
+    Promise.resolve(actions.newTerminal ? actions.newTerminal() : shellRow && runRow(shellRow)).finally(handBack);
   }, { signal });
 
-  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Choose what a new terminal runs");
+  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "New terminal in another shell, an agent or a saved profile");
   pick.setAttribute("aria-haspopup", "menu");
   pick.setAttribute("aria-expanded", "false");
-  const select = (choice) => {
-    selected = choice;
-    // Kept here as well, so a later profiles update cannot restore the old pick
-    // before the shell has echoed the new one.
-    model = { ...model, selectedTerminal: choice };
-    if (choice) actions.selectTerminal?.(choice);
-    describeOpen();
-  };
   const openTerminalMenu = () => {
-    if (!menuChoices.length) { actions.setup?.(); return; }
-    const items = [];
-    let group = null;
-    for (const choice of menuChoices) {
-      if (choice.group !== group) {
-        group = choice.group;
-        items.push({ heading: group });
-      }
-      items.push({
-        label: choice.label,
-        detail: choice.detail,
-        icon: canLaunch(choice) ? undefined : "plus",
-        selected: choice.key === choiceKey(selected),
-        run: () => (canLaunch(choice) ? select(choice) : actions.install?.(choice)),
-      });
-    }
-    items.push({ separator: true }, { label: "Manage terminals and connections", icon: "settings", run: () => actions.setup?.() });
-    toggleMenu({ anchor: launch, trigger: pick, items, label: "Terminal for new panes", onClose: handBack });
+    const items = menu.map((row) => {
+      if (row.kind === "separator") return { separator: true };
+      return {
+        label: row.label,
+        detail: row.isDefault ? "default" : row.detail,
+        icon: row.kind === "settings" ? "settings" : undefined,
+        selected: Boolean(row.isDefault),
+        run: () => Promise.resolve(runRow(row)).finally(handBack),
+      };
+    });
+    toggleMenu({ anchor: launch, trigger: pick, items, label: "New terminal", onClose: handBack });
   };
   pick.addEventListener("click", openTerminalMenu, { signal });
-  // Right-clicking "+" is the fast way to the same list.
   open.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     openTerminalMenu();
   }, { signal });
   launch.append(open, pick);
-  launch.append(iconButton("sidebar-setup", "settings", "Manage terminals and connections", () => actions.setup?.()));
+  launch.append(iconButton("sidebar-setup", "settings", "Terminal settings", () => actions.setup?.()));
   if (!elevated) {
     // Elevation spawns a separate process, so success is invisible here and a
     // declined UAC prompt is indistinguishable from a dead button. Hold the
     // button while the request is in flight and let the shell report the outcome.
     const admin = iconButton("sidebar-admin", "shield", "New administrator terminal", () => {
-      if (!selected || admin.disabled) return;
+      if (shellRow?.kind !== "shell" || admin.disabled) return;
       admin.disabled = true;
-      const request = selected.kind === "profile"
-        ? actions.elevateProfile?.(selected.profile)
-        : actions.elevateSystem?.(selected);
+      const request = actions.elevateSystem?.({ kind: "shell", shell: shellRow.value, label: shellRow.label });
       Promise.resolve(request).finally(() => { admin.disabled = false; });
     });
     launch.append(admin);
@@ -154,27 +137,18 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   el.append(launch);
 
   const patchLaunch = () => {
-    // The configured launcher lists saved terminals only (setup adds them); a
-    // model can opt back into the raw inventory with configuredOnly: false.
-    menuChoices = terminalChoices({ ...model, configuredOnly: model.configuredOnly ?? true });
-    choices = menuChoices.filter(canLaunch);
-    const wanted = choiceKey(model.selectedTerminal) || choiceKey(selected);
-    let next = choices.find((choice) => choice.key === wanted);
-    if (!next && model.defaultProfile) {
-      // A profile name, or a system shell id ("git-bash"; "wsl" is its first
-      // distribution). A profile of the same name wins.
-      next = choices.find((choice) => choice.key === `profile:${model.defaultProfile}`)
-        || choices.find((choice) => choice.kind === "system" && choice.id === model.defaultProfile);
-    }
-    next ||= choices[0] || null;
-    pick.disabled = !menuChoices.length;
-    if (next && choiceKey(next) !== choiceKey(model.selectedTerminal)) select(next);
-    else { selected = next; describeOpen(); }
+    const shown = (model.views || []).find((view) => view.active)?.workspace;
+    const host = (model.workspaces || []).find((entry) => entry.name === shown)?.host || null;
+    menu = newTerminalMenu({
+      inventory: model.inventory, profiles: model.profiles, shell: model.shell, agents: model.agents, host,
+    });
+    shellRow = defaultShellRow(menu);
+    describeOpen();
   };
 
   // Workspaces -------------------------------------------------------------
   const section = make("div", "sidebar-section");
-  const add = iconButton("sidebar-section-add", "plus", "New scratch view, workspace here, or a new window");
+  const add = iconButton("sidebar-section-add", "plus", "Scratch, workspace here, a workspace on an SSH host, or a new window");
   add.setAttribute("aria-haspopup", "menu");
   add.setAttribute("aria-expanded", "false");
   add.addEventListener("click", () => {
@@ -184,11 +158,12 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       trigger: add,
       label: "Workspaces",
       items: [
-        { label: "New scratch view", icon: "plus", detail: "a fresh disposable layout", run: () => actions.newScratch?.() },
+        { label: "Scratch", icon: "plus", detail: "this window's disposable workspace", run: () => actions.newScratch?.() },
         here ? {
           label: `Workspace here: ${here.name}`, icon: "folder", detail: folderName(here.folder), title: hereTitle(here),
           run: () => actions.workspaceHere?.(),
         } : null,
+        { label: "New workspace on host…", icon: "plus", detail: "a folder on an SSH host", run: () => actions.newRemoteWorkspace?.() },
         { label: "Open in new window…", icon: "new-window", run: () => actions.newWindow?.() },
       ],
       onClose: (reason) => { if (reason !== "run") handBack(); },
@@ -231,7 +206,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   // The folder is resolved by the shell at click time, so it is where the
   // focused terminal is right now (a `cd` counts), else the workspace folder.
   tools.append(
-    openIn("explorer", "folder", "Open the focused terminal's folder in Explorer (Alt+Shift+E)"),
+    openIn("explorer", "folder", "Open the focused terminal's folder in Explorer"),
     openIn("vscode", "code", "Open the focused terminal's folder in VS Code (Alt+Shift+C)"),
   );
   const save = make("span", "sidebar-save");
@@ -541,9 +516,6 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     if (group.kind === "workspace") {
       items.push({ label: "Open in new window", icon: "new-window", run: () => actions.openWorkspaceInWindow?.(group.name) });
     }
-    if (group.git) {
-      items.push({ label: "New worktree…", icon: "plus", detail: "a new branch in its own folder", run: () => actions.newWorktree?.(group.name) });
-    }
     items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
     if (group.kind === "workspace") {
       items.push({ separator: true }, {
@@ -574,10 +546,12 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const dot = make("span", "session-group-dot");
     const name = make("span", "session-group-name");
     const count = make("span", "sidebar-count");
+    const host = make("small", "session-group-host");
     const branch = make("small", "session-group-branch");
-    head.append(chevron, dot, name, branch, count);
+    const worktree = make("small", "session-group-worktree");
+    head.append(chevron, dot, name, host, branch, worktree, count);
     const tray = make("div", "group-actions");
-    const closeView = iconButton("group-action group-close", "x", "Close view");
+    const closeView = iconButton("group-action group-close", "x", "Close");
     const kebab = iconButton("group-action group-more", "more", "Workspace actions");
     kebab.setAttribute("aria-haspopup", "menu");
     kebab.setAttribute("aria-expanded", "false");
@@ -586,7 +560,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const slot = make("div", "session-group-detail");
     const rows = make("div", "session-group-rows");
     node.append(headline, slot, rows);
-    parts.set(node, { headline, head, chevron, dot, name, branch, count, tray, closeView, kebab, slot, rows });
+    parts.set(node, { headline, head, chevron, dot, name, host, branch, worktree, count, tray, closeView, kebab, slot, rows });
 
     head.addEventListener("click", (event) => {
       const group = itemFor(node);
@@ -616,13 +590,18 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
 
   const updateGroup = (node, group) => {
     const groupParts = parts.get(node);
-    const { head, chevron, dot, name, branch, count, closeView, kebab, rows } = groupParts;
+    const { head, chevron, dot, name, host, branch, worktree, count, closeView, kebab, rows } = groupParts;
     const hasRows = group.sessions.length > 0;
     const closed = hasRows && closedGroups.has(foldId(group));
     for (const kind of ["workspace", "scratch", "unassigned", "flat"]) setClass(node, kind, group.kind === kind);
-    setClass(node, "worktree", Boolean(group.parent));
+    setText(host, group.host ? `@${group.host}` : "");
+    host.hidden = !group.host;
     setText(branch, groupBranch(group));
     branch.hidden = !branch.textContent;
+    const note = worktreeNote(group.git);
+    setText(worktree, note?.word || "");
+    worktree.hidden = !note;
+    setAttrs(worktree, { title: note?.title || false });
     setClass(node, "open", group.open);
     setClass(node, "active", group.active);
     setClass(node, "has-attention", group.counts.attention > 0);
@@ -640,11 +619,11 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     setClass(dot, "hollow", !group.open);
     if (group.open && group.color) dot.style.setProperty("--group-color", group.color);
     else dot.style.removeProperty("--group-color");
-    setText(name, group.shortLabel || group.label);
+    setText(name, group.label);
     setText(count, String(group.sessions.length));
     count.hidden = !hasRows;
     const where = group.kind === "unassigned" ? "Live terminals no workspace owns"
-      : group.path ? `${group.path}${group.pathExists === false ? " (missing)" : ""}`
+      : group.path ? `${group.host ? `${group.host}:` : ""}${group.path}${group.pathExists === false ? " (missing)" : ""}`
         : group.label;
     setAttrs(head, {
       title: `${where} · ${groupSummary(group)}`,
@@ -652,7 +631,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       "aria-current": group.active ? "true" : false,
     });
     closeView.hidden = !group.open;
-    setLabel(closeView, `Close view ${group.label}: saves it, terminals keep running`);
+    setLabel(closeView, `Close ${group.label}: saves it, terminals keep running`);
     kebab.hidden = !group.name;
     setLabel(kebab, `${group.label}: workspace actions`);
     if (group.active) {
@@ -696,17 +675,10 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   };
 
   // Footer -----------------------------------------------------------------
-  // Keyed by the label the shell passes in `chrome`, so a new footer entry is
-  // one map line away from its own glyph instead of silently falling back
-  // to the terminal one.
   const footer = make("nav", "sidebar-footer");
   footer.setAttribute("aria-label", "Application");
-  const navIcons = {
-    dashboard: "dashboard", settings: "settings", help: "help",
-    commands: "terminal", "new window": "new-window",
-  };
   for (const [label, onClick, shortcut] of chrome || []) {
-    const button = iconButton("sidebar-nav-button", navIcons[label] || "terminal",
+    const button = iconButton("sidebar-nav-button", NAV_ICONS[label] || "terminal",
       shortcut ? `${label} (${shortcut})` : label, onClick);
     button.dataset.nav = label;
     footer.append(button);
@@ -727,6 +699,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     collapse.setAttribute("aria-expanded", String(mode !== "rail"));
   };
   footer.append(collapse);
+  mountUsageFooter(el, { signal, handBack, actions, mode: () => mode, groups: () => sidebarGroups(model.sessions, { ...model, view: viewControls.view() }) });
   el.append(footer);
 
   // Resize grip -------------------------------------------------------------
@@ -858,7 +831,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   describeCollapse();
   requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
 
-  const LAUNCH_KEYS = ["profiles", "inventory", "defaultProfile", "selectedTerminal", "configuredOnly"];
+  const LAUNCH_KEYS = ["profiles", "inventory", "shell", "agents", "views", "workspaces"];
   const update = (partial = {}) => {
     model = { ...model, ...partial };
     if (LAUNCH_KEYS.some((key) => key in partial)) patchLaunch();
@@ -874,12 +847,11 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   return {
     update,
     updateHere,
-    cycleTerminal(delta = 1) {
-      if (!choices.length) return null;
-      const current = Math.max(0, choices.findIndex((choice) => choice.key === choiceKey(selected)));
-      select(choices[(current + (delta < 0 ? -1 : 1) + choices.length) % choices.length]);
-      handBack();
-      return selected;
+    // Alt+Shift+Left/Up: there is no selection to cycle any more; every row
+    // of the "+" menu starts its terminal, so the keys open that menu.
+    cycleTerminal() {
+      openTerminalMenu();
+      return null;
     },
     // Alt+J: the next terminal that needs you after the focused one, in the
     // order the list shows them, folded groups included.

@@ -238,7 +238,7 @@ class PtySession(PtyBase):
 
     def _do_write(self, data: bytes) -> bool:
         if _DEBUG_IO:
-            log.info("pty %s <- in %r", self._pid, data)
+            log.info("pty %s <- in %r", self._pid, self.redact(data))
         if self._console.write(data):
             return True
         # The console host is gone; the error code tells a dead PTY from

@@ -142,3 +142,20 @@ def test_post_tolerates_a_closed_loop():
     loop.close()
     pty = FakePty(loop)
     pty._post(lambda _arg: None, 1)  # must not raise
+
+
+def test_a_backend_started_inside_claude_does_not_pass_its_session_on(monkeypatch):
+    # Inherited, these made every Claude in QuickTerm a "child session" with
+    # transcript saving off; the messaging token is that session's secret.
+    _fake_os(monkeypatch, "nt", {
+        "CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "secret",
+        "CLAUDE_CODE_SESSION_ID": "abc", "AI_AGENT": "claude", "CLAUDE_CODE_USE_BEDROCK": "1",
+        "PATH": r"C:\Windows",
+    })
+
+    merged = merge_environment({})
+
+    assert not {"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_TOKEN",
+                "CLAUDE_CODE_SESSION_ID", "AI_AGENT"} & set(merged)
+    assert merged["CLAUDE_CODE_USE_BEDROCK"] == "1", "configuration passes through"
+    assert merge_environment({"CLAUDECODE": "1"})["CLAUDECODE"] == "1", "a profile may set one"

@@ -1,4 +1,4 @@
-// Agent state, the hover time, Alt+J and git worktrees in the sidebar's pure
+// Agent state, the hover time, Alt+J and git facts in the sidebar's pure
 // model (CONTRACTS 4.2), with fake /api/sessions and /api/git/info data.
 
 import test from "node:test";
@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 import {
   activitySeconds, agentLines, groupBranch, groupSummary, needsYou, nextNeedsYou, relativeTime,
-  sessionState, sessionTooltip, sidebarGroups, subagentLabel, visibleGroups,
+  sessionState, sessionTooltip, sidebarGroups, subagentLabel, visibleGroups, worktreeNote,
 } from "../../quickterm/frontend/js/sidebar_model.js";
 import { gitPaths, sessionToMarkSeen, sidebarModel } from "../../quickterm/frontend/js/sidebar.js";
 
@@ -115,39 +115,29 @@ const tree = (name, branch, folder) => ({
   git: { branch, head: null, worktree: true, main_path: "c:/src/qt/" },
 });
 
-test("worktree workspaces hang under their main checkout, alphabetical inside", () => {
+test("worktree workspaces are listed like any other and only say what they are", () => {
   const workspaces = [
     { name: "alpha", path: "C:\\src\\alpha", pathExists: true, git: null },
     tree("qt/zeta", "zeta", "qt-zeta"),
     main,
     tree("qt/beta", "feat/beta", "qt-beta"),
-    { name: "web", path: "C:\\src\\web", pathExists: true, git: null },
+    { name: "web", path: "C:\\src\\web", pathExists: true, git: null, host: "devbox" },
   ];
   const groups = sidebarGroups([], { workspaces });
   assert.deepEqual(groups.map((group) => group.name), ["alpha", "qt", "qt/beta", "qt/zeta", "web"]);
-  const beta = groups.find((group) => group.name === "qt/beta");
-  assert.equal(beta.parent, "ws:qt");
-  assert.equal(beta.shortLabel, "beta");
-  assert.equal(groups.find((group) => group.name === "qt").parent, null);
-});
-
-test("a worktree whose main checkout is no workspace stays on its own", () => {
-  const groups = sidebarGroups([], { workspaces: [tree("orphan", "x", "elsewhere")] });
-  assert.equal(groups[0].parent, null);
-});
-
-test("a shown worktree keeps its main workspace drawn", () => {
-  const all = sidebarGroups([session("a", { workspace: "qt/beta" })], {
-    workspaces: [main, tree("qt/beta", "beta", "qt-beta"), { name: "other", path: null, pathExists: null }],
-  });
-  const { groups, hidden } = visibleGroups(all);
-  assert.deepEqual(groups.map((group) => group.name), ["qt", "qt/beta"]);
-  assert.equal(hidden, 1);
+  assert.equal(groups.find((group) => group.name === "web").host, "devbox");
+  assert.equal(groups.find((group) => group.name === "qt").host, null);
+  assert.deepEqual(worktreeNote(groups.find((group) => group.name === "qt/beta").git),
+    { word: "worktree", title: "worktree of c:/src/qt/" });
+  assert.equal(worktreeNote(main.git), null);
+  assert.equal(worktreeNote(null), null);
+  const shown = visibleGroups(sidebarGroups([session("a", { workspace: "qt/beta" })], { workspaces }));
+  assert.deepEqual(shown.groups.map((group) => group.name), ["qt/beta"]);
 });
 
 test("the head shows the branch unless it repeats the name", () => {
   assert.equal(groupBranch({ label: "qt", git: main.git }), "main");
-  assert.equal(groupBranch({ label: "qt/feat-beta", shortLabel: "feat-beta", git: { branch: "feat/beta" } }), "");
+  assert.equal(groupBranch({ label: "feat-beta", git: { branch: "feat/beta" } }), "");
   assert.equal(groupBranch({ label: "qt", git: { branch: null, head: "abc1234" } }), "@abc1234");
   assert.equal(groupBranch({ label: "qt", git: null }), "");
 });

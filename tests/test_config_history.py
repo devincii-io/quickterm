@@ -51,7 +51,7 @@ def test_each_save_that_changes_something_keeps_the_replaced_version(fake_appdat
 
 
 def test_an_unchanged_save_with_secrets_adds_no_entry(fake_appdata, sealed):
-    profiles = [Profile(name="work", cmd="cmd.exe", env={"TOKEN": "secret"})]
+    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"TOKEN": "secret"})]
     save_config(AppConfig(profiles=profiles, font_size=12))
     save_config(AppConfig(profiles=profiles, font_size=13))
     save_config(AppConfig(profiles=profiles, font_size=13))
@@ -77,7 +77,7 @@ def test_the_list_is_newest_first_with_what_restoring_would_change(fake_appdata)
     save_config(AppConfig(theme="graphite"))
     saved_theme = os.stat(fake_appdata / "quickterm" / "config.json").st_mtime_ns
     save_config(AppConfig(theme="nord"))
-    save_config(AppConfig(theme="nord", profiles=[Profile(name="work", cmd="cmd.exe")]))
+    save_config(AppConfig(theme="nord", profiles=[Profile(name="work", cmd="cmd.exe", terminal_type="custom")]))
 
     entries = config_history()
     assert [entry["summary"] for entry in entries] == ["profiles", "theme"]
@@ -91,7 +91,7 @@ def test_the_list_is_newest_first_with_what_restoring_would_change(fake_appdata)
 
 
 def test_summaries_compare_decrypted_values(fake_appdata, sealed):
-    profiles = [Profile(name="work", cmd="cmd.exe", env={"TOKEN": "secret"})]
+    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"TOKEN": "secret"})]
     save_config(AppConfig(profiles=profiles, font_size=12))
     save_config(AppConfig(profiles=profiles, font_size=13))
     assert [entry["summary"] for entry in config_history()] == ["font_size"]
@@ -162,7 +162,7 @@ def test_restoring_a_version_with_a_3x_plain_key_is_not_refused(client, fake_app
     rule for new shortcuts must not lock a recovery out."""
     from quickterm.config import Profile
 
-    save_config(AppConfig(summon_hotkey="f12", profiles=[Profile(name="kept", cmd="cmd.exe")]))
+    save_config(AppConfig(summon_hotkey="f12", profiles=[Profile(name="kept", cmd="cmd.exe", terminal_type="custom")]))
     save_config(AppConfig(summon_hotkey="ctrl+grave", profiles=[]))
     entry_id = client.get("/api/config/history").json()[0]["id"]
 
@@ -171,6 +171,32 @@ def test_restoring_a_version_with_a_3x_plain_key_is_not_refused(client, fake_app
     restored = cfgmod.load_config()
     assert restored.summon_hotkey == "f12"
     assert [p.name for p in restored.profiles] == ["kept"]
+
+
+def test_restoring_a_version_from_before_4_3_migrates_it(client, fake_appdata):
+    save_config(AppConfig(font_size=12))
+    save_config(AppConfig(font_size=13))
+    entry_id = client.get("/api/config/history").json()[0]["id"]
+    path = fake_appdata / "quickterm" / "history" / f"{entry_id}.json"
+    path.write_text(json.dumps({
+        "font_size": 12,
+        "default_profile": "Claude New",
+        "profiles": [
+            {"name": "Claude New", "cmd": "", "terminal_type": "claude-code", "agent_mode": "new"},
+            {"name": "codex", "cmd": "powershell.exe", "terminal_type": "windows-powershell",
+             "start_command": "codex --yolo"},
+            {"name": "Windows PowerShell", "cmd": "powershell.exe", "terminal_type": "windows-powershell"},
+            {"name": "box", "cmd": "", "terminal_type": "ssh", "ssh_host": "box"},
+        ],
+    }), encoding="utf-8")
+
+    response = client.post(f"/api/config/history/{entry_id}/restore")
+    assert response.status_code == 204, response.text
+    restored = cfgmod.load_config()
+    assert [p.name for p in restored.profiles] == ["box"]
+    assert restored.agents["claude-code"].agent_mode == "new"
+    assert restored.agents["codex"].args == ["--yolo"]
+    assert restored.font_size == 12
 
 
 def test_restoring_an_unknown_version_is_404(client):

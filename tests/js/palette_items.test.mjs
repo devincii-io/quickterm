@@ -94,24 +94,24 @@ test("workspace rows open saved workspaces and close open views, with no free-te
   const labels = rows.map((row) => row.label);
   assert.deepEqual(labels.filter((label) => label.startsWith("open workspace: ")),
     ["open workspace: api", "open workspace: web"]);
-  assert.ok(labels.includes("close workspace view: api"));
-  assert.ok(labels.some((label) => label.startsWith("close workspace view: ") && label !== "close workspace view: api"));
-  assert.ok(labels.includes("new scratch view"));
+  assert.ok(labels.includes("close workspace: api"));
+  assert.ok(labels.some((label) => label.startsWith("close workspace: ") && label !== "close workspace: api"));
+  assert.ok(labels.includes("open scratch"));
   assert.ok(!labels.some((label) => label.includes("load workspace")));
-  assert.equal(rows.find((row) => row.label === "open workspace: api").hint, "open · C:\\src\\api");
+  assert.equal(rows.find((row) => row.label === "open workspace: api").hint, "shown · C:\\src\\api");
   assert.equal(rows.find((row) => row.label === "open workspace: web").hint, "C:\\src\\web (missing)");
   for (const row of rows) assert.equal(rowGroup(row), "place");
   rows.find((row) => row.label === "open workspace: web").run();
-  rows.find((row) => row.label === "close workspace view: api").run();
-  rows.find((row) => row.label === "new scratch view").run();
+  rows.find((row) => row.label === "close workspace: api").run();
+  rows.find((row) => row.label === "open scratch").run();
   assert.deepEqual(calls, [["openWorkspace", "web"], ["closeWorkspaceView", "api"], ["newScratchView"]]);
 });
 
 test("workspace rows survive an app that has none of the new members", () => {
   const rows = workspaceRows({}, ["api"]);
-  assert.deepEqual(rows.map((row) => row.label), ["open workspace: api", "new scratch view"]);
+  assert.deepEqual(rows.map((row) => row.label), ["open workspace: api", "open scratch"]);
   for (const row of rows) assert.doesNotThrow(() => row.run());
-  assert.deepEqual(workspaceRows(null).map((row) => row.label), ["new scratch view"]);
+  assert.deepEqual(workspaceRows(null).map((row) => row.label), ["open scratch"]);
 });
 
 test("terminal rows reach every listed terminal and say where it is and how it is", () => {

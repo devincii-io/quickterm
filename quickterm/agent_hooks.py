@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ import threading
 import time
 import tomllib
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,16 @@ log = logging.getLogger(__name__)
 
 AGENTS = ("claude", "codex")
 TEXT_LIMIT = 200
+# The board's card keeps more of the prompt and the answer than the tooltip.
+LAST_TEXT_LIMIT = 300
+# An agent with no event for this long is idle on the board, unless it waits.
+IDLE_AFTER_S = 30 * 60
+# How much of a transcript's end is read for the last answer.
+TRANSCRIPT_TAIL = 256 * 1024
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Claude's session ids and Codex's thread ids are UUIDs; nothing else goes
+# into a resume command.
+_CONVERSATION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]{0,99}")
 MAX_SUBAGENTS = 32
 # Async hooks are separate curl processes, so two events fired a few
 # milliseconds apart can arrive in either order. An event that would move the
@@ -60,6 +72,11 @@ CLAUDE_EVENTS = (
     "SessionEnd",
 )
 CODEX_TURN_COMPLETE = "agent-turn-complete"
+# Sent by the script that runs an agent on an SSH host, where no process
+# check can tell whether the agent still runs: started (state idle unless the
+# agent already reported) and gone (state none).
+AGENT_START = "quickterm-agent-start"
+AGENT_EXIT = "quickterm-agent-exit"
 CLAUDE_SETTINGS_FILE = "claude-settings.json"
 CODEX_CURL_FILE = "codex-notify.curl"
 SETTINGS_MAX_BYTES = 2 * 1024 * 1024
@@ -224,7 +241,8 @@ def _ensure_files(base: Path) -> None:
     for event in CLAUDE_EVENTS:
         _write_if_changed(base / f"claude-{event}.curl", _curl_config("claude", event))
     _write_if_changed(base / CODEX_CURL_FILE, _curl_config("codex", None))
-    settings = {"hooks": claude_hooks(base)}
+    settings: dict[str, Any] = {"hooks": claude_hooks(base)}
+    _add_status_line(settings)
     _write_if_changed(base / CLAUDE_SETTINGS_FILE, json.dumps(settings, indent=2) + "\n")
 
 
@@ -256,7 +274,35 @@ def merge_claude_settings(user: dict[str, Any], base: Path) -> dict[str, Any]:
         existing = hooks.get(event)
         hooks[event] = (list(existing) if isinstance(existing, list) else []) + entries
     merged["hooks"] = hooks
+    _add_status_line(merged)
     return merged
+
+
+def statusline_command() -> str | None:
+    """The ``statusLine`` command that reports Claude's rate limits
+    (``statusline_chain.py``), or None when the program path is unsafe in a
+    shell. A source run imports only that module: Claude starts it on every
+    status update, and the whole app takes over a second to import."""
+    from quickterm.statusline_chain import FLAG
+
+    program = Path(sys.executable).as_posix()
+    if _SHELL_UNSAFE.search(program):
+        return None
+    if getattr(sys, "frozen", False):
+        return f'"{program}" {FLAG}'
+    # -P: no project folder on sys.path, so a file there cannot shadow a module.
+    code = "import sys; from quickterm.statusline_chain import run; sys.exit(run(sys.argv[1:]))"
+    return f'"{program}" -P -c "{code}" {FLAG}'
+
+
+def _add_status_line(settings: dict[str, Any]) -> None:
+    """QuickTerm's status line, unless these settings name one of their own:
+    a ``--settings`` value that sets ``statusLine`` keeps it for the launch."""
+    if "statusLine" in settings:
+        return
+    command = statusline_command()
+    if command is not None:
+        settings["statusLine"] = {"type": "command", "command": command}
 
 
 def _settings_arg(args: list[str]) -> tuple[int, int, str] | None:
@@ -348,6 +394,26 @@ def _codex_user_notify() -> list[str] | None:
     return notify
 
 
+def toml_strings(items: list[str]) -> str:
+    """A TOML array of strings for a ``-c key=<value>`` argument.
+
+    Literal strings ('...') where they can hold the item: a double quote in
+    the argument is lost by Windows PowerShell 5.1's native argument passing
+    and refused by the cmd wrap, and a literal string needs none. An item
+    with a single quote is a multi-line literal ('''...''') when that can
+    hold it, else a basic (JSON) string.
+    """
+    parts = []
+    for item in items:
+        if "'" not in item and "\n" not in item and "\r" not in item:
+            parts.append(f"'{item}'")
+        elif "'''" not in item and not item.endswith("'") and not item.startswith(("\n", "\r")):
+            parts.append(f"'''{item}'''")
+        else:
+            parts.append(json.dumps(item))
+    return "[" + ",".join(parts) + "]"
+
+
 def _self_command() -> list[str]:
     """How a child process starts this program (codex_notify.py's entry)."""
     if getattr(sys, "frozen", False):
@@ -377,7 +443,7 @@ def codex_args(cmd: str, args: list[str], base: Path) -> list[str]:
         # Codex appends the notification JSON as the last argument, which
         # becomes the --data-binary body.
         notify = [curl_program(), "-K", (base / CODEX_CURL_FILE).as_posix(), "--data-binary"]
-    return ["-c", "notify=" + json.dumps(notify), *args]
+    return ["-c", "notify=" + toml_strings(notify), *args]
 
 
 def launch_args(
@@ -401,6 +467,77 @@ def launch_args(
     return args
 
 
+# --- launch on an SSH host ----------------------------------------------------
+#
+# The agent runs on the host, so the Windows curl configs cannot reach it.
+# The session's ssh forwards a Unix socket on the host to the backend
+# (`-R <socket>:127.0.0.1:<port>`), and the hooks post through it with the
+# host's own curl. The token is read from the session's environment and fed
+# to curl on stdin (`-H @-`), so it is in no command line and no file there.
+
+
+def remote_hook_command(agent: str, port: int, *, body: str = "@/dev/fd/4") -> str:
+    """The POSIX command one remote hook runs. The Host header names the
+    backend's port, which the guard's Host allowlist expects. Without the
+    socket or curl it does nothing and exits 0."""
+    url = f"http://127.0.0.1:{int(port)}/api/sessions/$QUICKTERM_SESSION_ID/agent-event?agent={agent}"
+    keep_stdin = "exec 4<&0; " if body == "@/dev/fd/4" else ""
+    return (
+        '[ -S "$QUICKTERM_HOOK_SOCKET" ] && command -v curl >/dev/null 2>&1 && { '
+        f"{keep_stdin}"
+        "printf 'X-QuickTerm-Hook-Token: %s\\n' \"$QUICKTERM_HOOK_TOKEN\" | "
+        'curl --unix-socket "$QUICKTERM_HOOK_SOCKET" -sS -m 2 -o /dev/null -H @- '
+        "-H 'Content-Type: application/json' "
+        f'--data-binary {body} "{url}"; }}; exit 0'
+    )
+
+
+def remote_lifecycle_command(agent: str, port: int, event: str) -> str:
+    """A hook command the remote script itself runs, before the agent starts
+    (`AGENT_START`) and after it ended (`AGENT_EXIT`), with the contract's
+    envelope as its body. It ends with `exit 0`, so the caller runs it in a
+    subshell."""
+    body = json.dumps({"agent": agent, "event": event, "payload": {}}, separators=(",", ":"))
+    return remote_hook_command(agent, port, body=shlex.quote(body))
+
+
+def remote_claude_args(args: list[str], port: int) -> list[str]:
+    """``args`` with QuickTerm's hooks as one inline ``--settings``. A launch
+    that already passes its own settings keeps them and gets no hooks: the
+    file it names lives on the host, so it cannot be merged from here."""
+    if args[:1] == ["agents"] or _settings_arg(args) is not None:
+        return args
+    command = remote_hook_command("claude", port)
+    hooks = {
+        event: [{"hooks": [{"type": "command", "command": command, "async": True, "timeout": 10}]}]
+        for event in CLAUDE_EVENTS
+    }
+    return [*args, "--settings", json.dumps({"hooks": hooks}, separators=(",", ":"))]
+
+
+def remote_codex_args(args: list[str], port: int) -> list[str]:
+    """``args`` with a per-launch notify that posts each finished turn. Only
+    when the local Codex config has no notify of its own: the remote one
+    cannot be read before the launch, and this would replace it."""
+    if args[:1] == ["agents"] or _codex_user_notify() != []:
+        return args
+    script = remote_hook_command("codex", port, body='"$1"')
+    notify = ["sh", "-c", script, "quickterm-notify"]
+    return ["-c", "notify=" + toml_strings(notify), *args]
+
+
+def remote_launch_args(agent: str, args: list[str], port: int) -> list[str]:
+    """The remote agent argv with QuickTerm's hooks; any failure keeps it as it was."""
+    try:
+        if agent == "claude":
+            return remote_claude_args(args, port)
+        if agent == "codex":
+            return remote_codex_args(args, port)
+    except (OSError, ValueError):
+        log.warning("agent hooks unavailable for this remote launch", exc_info=True)
+    return args
+
+
 # --- state ------------------------------------------------------------------
 
 
@@ -410,6 +547,8 @@ class Subagent:
     type: str | None
     description: str | None
     started: float
+    # Asked for a permission and has not used a tool since.
+    waiting: bool = False
 
 
 @dataclass(frozen=True)
@@ -421,6 +560,16 @@ class AgentState:
     message: str | None = None
     tool: str | None = None
     subagents: tuple[Subagent, ...] = field(default_factory=tuple)
+    # The board's card: the last prompt and the start of the last answer, up
+    # to LAST_TEXT_LIMIT characters, and when any event last arrived.
+    last_prompt: str | None = None
+    last_answer: str | None = None
+    last_event: float = 0.0
+    # The agent's own conversation (Claude's session id, Codex's thread id),
+    # the folder it runs in, and its title once the agent has one.
+    conversation: str | None = None
+    cwd: str | None = None
+    title: str | None = None
 
 
 _RANK = {"idle": 0, "working": 1, "waiting": 2, "done": 3, "failed": 3}
@@ -433,6 +582,15 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
+def _long_text(value: Any) -> str | None:
+    """The first LAST_TEXT_LIMIT characters, control characters and runs of
+    whitespace collapsed, without an ellipsis (the card clamps its own)."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(_CONTROL.sub(" ", value).split())[:LAST_TEXT_LIMIT].rstrip()
+    return text or None
+
+
 def _field(payload: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in payload:
@@ -440,13 +598,33 @@ def _field(payload: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _ident(value: Any) -> str | None:
+    """A conversation id as the CLIs print it, or None."""
+    if isinstance(value, str) and _CONVERSATION_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _folder(value: Any) -> str | None:
+    """The hook's ``cwd``, kept as text for the resume command and never
+    opened. A network path is dropped: running a copied ``cd`` into one would
+    log on to that host."""
+    if not isinstance(value, str) or not value or len(value) > 1024 or _CONTROL.search(value):
+        return None
+    if value[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class Outcome:
     """What one event did: the new state (None: no agent), and the text of a
-    "needs you" attention when the event moved the agent to waiting."""
+    "needs you" attention when the event moved the agent to waiting, or of a
+    finished turn when it moved the agent to done or failed."""
 
     state: AgentState | None
     waiting: str | None = None
+    finished: str | None = None
 
 
 def _is_permission_notification(payload: dict[str, Any]) -> bool:
@@ -457,10 +635,26 @@ def _is_permission_notification(payload: dict[str, Any]) -> bool:
     return isinstance(message, str) and "permission" in message.casefold()
 
 
+def _stamped(state: AgentState, payload: dict[str, Any], now: float, conversation_key: str) -> AgentState:
+    """``state`` with this event's time and the conversation it names."""
+    return replace(
+        state,
+        last_event=now,
+        conversation=_ident(payload.get(conversation_key)) or state.conversation,
+        cwd=_folder(payload.get("cwd")) or state.cwd,
+    )
+
+
 def apply(
     current: AgentState | None, agent: str, event: str, payload: dict[str, Any], now: float
 ) -> Outcome:
     """Fold one hook event into the agent state. Unknown events change nothing."""
+    if event == AGENT_EXIT:
+        return Outcome(None)
+    if event == AGENT_START:
+        if current is not None and current.kind == agent:
+            return Outcome(current)
+        return Outcome(AgentState(agent, "idle", now))
     if agent == "codex":
         if event != CODEX_TURN_COMPLETE:
             return Outcome(current)
@@ -468,33 +662,44 @@ def apply(
             "codex", "idle", now
         )
         inputs = payload.get("input-messages")
-        prompt = _text(inputs[-1]) if isinstance(inputs, list) and inputs else None
-        return Outcome(replace(
+        last_input = inputs[-1] if isinstance(inputs, list) and inputs else None
+        answer = payload.get("last-assistant-message")
+        state = replace(
             base,
             state="done",
             changed=now,
-            prompt=prompt or base.prompt,
-            message=_text(payload.get("last-assistant-message")),
+            prompt=_text(last_input) or base.prompt,
+            message=_text(answer),
             tool=None,
-        ))
+            last_prompt=_long_text(last_input) or base.last_prompt,
+            last_answer=_long_text(answer),
+        )
+        state = _stamped(state, payload, now, "thread-id")
+        return Outcome(state, finished=state.last_answer or "")
 
     if event == "SessionEnd":
         return Outcome(None)
+
+    def stamp(state: AgentState) -> AgentState:
+        return _stamped(state, payload, now, "session_id")
+
     # SessionStart also fires with source "compact" in the middle of a turn,
     # which starts nothing new.
     if event == "SessionStart" and (
         current is None or payload.get("source") in (None, "startup", "resume", "clear", "fork")
     ):
-        return Outcome(AgentState("claude", "idle", now))
+        # A resumed or forked conversation keeps the title it had.
+        title = current.title if current is not None and payload.get("source") == "resume" else None
+        return Outcome(stamp(AgentState("claude", "idle", now, title=title)))
     state = current if current is not None and current.kind == "claude" else AgentState(
         "claude", "idle", now
     )
 
     def moved(new_state: str, **changes: Any) -> AgentState:
         if new_state == state.state and not changes:
-            return state
-        return replace(state, state=new_state, changed=now if new_state != state.state
-                       else state.changed, **changes)
+            return stamp(state)
+        return stamp(replace(state, state=new_state, changed=now if new_state != state.state
+                             else state.changed, **changes))
 
     def straggler(new_state: str) -> bool:
         return (
@@ -503,37 +708,57 @@ def apply(
             and now - state.changed < LATE_S
         )
 
+    def subagents_with(agent_id: Any, waiting: bool) -> tuple[Subagent, ...]:
+        if not isinstance(agent_id, str):
+            return state.subagents
+        return tuple(
+            replace(s, waiting=waiting) if s.id == agent_id[:100] else s for s in state.subagents
+        )
+
+    if event == "SessionStart":
+        return Outcome(state)  # compaction: the turn goes on
     if event == "UserPromptSubmit":
-        return Outcome(replace(
-            state, state="working", changed=now, prompt=_text(payload.get("prompt")),
-            message=None, tool=None,
-        ))
+        prompt = payload.get("prompt")
+        return Outcome(stamp(replace(
+            state, state="working", changed=now, prompt=_text(prompt),
+            message=None, tool=None, last_prompt=_long_text(prompt), last_answer=None,
+        )))
     if event in ("PreToolUse", "PostToolUse"):
+        # A tool call inside a subagent means it got what it waited for.
+        subagents = subagents_with(payload.get("agent_id"), False)
         if straggler("working"):
-            return Outcome(state)
+            return Outcome(state if subagents == state.subagents else replace(state, subagents=subagents))
         tool = _text(payload.get("tool_name")) if event == "PreToolUse" else None
-        return Outcome(moved("working", tool=tool))
+        return Outcome(moved("working", tool=tool, subagents=subagents))
     if event == "PermissionRequest" or (
         event == "Notification" and _is_permission_notification(payload)
     ):
+        subagents = subagents_with(payload.get("agent_id"), True)
         if straggler("waiting"):
-            return Outcome(state)
+            return Outcome(state if subagents == state.subagents else replace(state, subagents=subagents))
         tool = _text(payload.get("tool_name")) or state.tool
         text = _text(payload.get("message")) or (
             f"permission to use {tool}" if tool else "permission requested"
         )
         changed = state.state != "waiting"
-        return Outcome(moved("waiting", tool=tool), waiting=text if changed else None)
+        return Outcome(moved("waiting", tool=tool, subagents=subagents),
+                       waiting=text if changed else None)
     if event == "Stop":
-        message = _text(payload.get("last_assistant_message"))
-        return Outcome(replace(
-            state, state="done", changed=now, tool=None, message=message or state.message
+        answer = payload.get("last_assistant_message")
+        message = _text(answer)
+        done = stamp(replace(
+            state, state="done", changed=now, tool=None, message=message or state.message,
+            last_answer=_long_text(answer) or state.last_answer,
         ))
+        return Outcome(done, finished=(done.last_answer or "") if state.state != "done" else None)
     if event == "StopFailure":
-        message = _text(_field(payload, "last_assistant_message", "error_details", "error"))
-        return Outcome(replace(
-            state, state="failed", changed=now, tool=None, message=message or state.message
+        error = _field(payload, "last_assistant_message", "error_details", "error")
+        message = _text(error)
+        failed = stamp(replace(
+            state, state="failed", changed=now, tool=None, message=message or state.message,
+            last_answer=_long_text(error) or state.last_answer,
         ))
+        return Outcome(failed, finished=(failed.last_answer or "") if state.state != "failed" else None)
     if event == "SubagentStart":
         agent_id = payload.get("agent_id")
         if not isinstance(agent_id, str) or not agent_id:
@@ -545,11 +770,11 @@ def apply(
             _text(_field(payload, "description", "task_description")),
             now,
         )
-        return Outcome(replace(state, subagents=(*kept, added)))
+        return Outcome(stamp(replace(state, subagents=(*kept, added))))
     if event == "SubagentStop":
         agent_id = payload.get("agent_id")
         kept = tuple(s for s in state.subagents if s.id != agent_id)
-        return Outcome(replace(state, subagents=kept))
+        return Outcome(stamp(replace(state, subagents=kept)))
     return Outcome(current)
 
 
@@ -560,9 +785,47 @@ def seen(state: AgentState | None, now: float) -> AgentState | None:
     return state
 
 
-def describe(state: AgentState | None, now: float) -> dict[str, Any] | None:
+def with_title(state: AgentState | None, title: str | None) -> AgentState | None:
+    """``state`` carrying the conversation's title, when it has one."""
+    text = _text(title)
+    if state is None or not text or text == state.title:
+        return state
+    return replace(state, title=text)
+
+
+def board_column(state: AgentState | None, now: float) -> str | None:
+    """Where the board's Agents tab shows this agent.
+
+    Waiting, or a subagent waiting for permission, is "needs-you" however long
+    it has waited. Otherwise an agent that sent no event for IDLE_AFTER_S is
+    "idle". A finished turn stays "done" after it was seen, until then; only an
+    agent that never finished a turn is idle at once.
+    """
     if state is None:
         return None
+    if state.state == "waiting" or any(s.waiting for s in state.subagents):
+        return "needs-you"
+    if now - state.last_event >= IDLE_AFTER_S:
+        return "idle"
+    if state.state == "working":
+        return "working"
+    if state.state in ("done", "failed") or state.last_answer or state.last_prompt:
+        return "done"
+    return "idle"
+
+
+def _iso_utc(seconds: float) -> str:
+    stamp = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return stamp.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def describe(state: AgentState | None, now: float, wall: float | None = None) -> dict[str, Any] | None:
+    """The ``agent`` field of ``GET /api/sessions``. ``now`` is the monotonic
+    clock the state was stamped with, ``wall`` the matching epoch time."""
+    if state is None:
+        return None
+    wall = time.time() if wall is None else wall
+    event_age = max(0.0, now - state.last_event)
     return {
         "kind": state.kind,
         "state": state.state,
@@ -575,11 +838,97 @@ def describe(state: AgentState | None, now: float) -> dict[str, Any] | None:
                 "type": s.type,
                 "description": s.description,
                 "age_seconds": max(0, int(now - s.started)),
+                "waiting": s.waiting,
             }
             for s in state.subagents
         ],
         "age_seconds": max(0, int(now - state.changed)),
+        "last_prompt": state.last_prompt,
+        "last_answer": state.last_answer,
+        "last_event_at": _iso_utc(wall - event_age),
+        "event_age_seconds": int(event_age),
+        "board": board_column(state, now),
+        "conversation_id": state.conversation,
+        "cwd": state.cwd,
+        "title": state.title,
     }
+
+
+# --- what the hook payload only points at ---------------------------------------
+
+
+def _assistant_text(record: Any) -> str | None:
+    if not isinstance(record, dict) or record.get("type") != "assistant":
+        return None
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    parts = [
+        part["text"] for part in content
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+    ]
+    return " ".join(parts).strip() or None
+
+
+def transcript_answer(path: Any, cap: int = TRANSCRIPT_TAIL) -> str | None:
+    """The last assistant text in a Claude transcript, read from its end.
+
+    Only the last ``cap`` bytes are read; a transcript holds the whole
+    conversation and can be tens of megabytes. Blocking: reads a file, and
+    only one in Claude's own projects folder on a local disk.
+    """
+    from quickterm import agent_sessions
+
+    path = agent_sessions.claude_transcript(path)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            start = max(0, size - cap)
+            handle.seek(start)
+            data = handle.read(cap)
+    except OSError:
+        return None
+    lines = data.split(b"\n")
+    if start > 0:
+        lines = lines[1:]  # the first line was cut by the seek
+    for line in reversed(lines):
+        if b'"assistant"' not in line:
+            continue
+        try:
+            text = _assistant_text(json.loads(line))
+        except (ValueError, RecursionError):
+            continue
+        if text:
+            return _long_text(text)
+    return None
+
+
+def turn_details(agent: str, event: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """What a finished turn's hook only points at: the payload with the answer
+    filled in from the transcript when the hook did not carry it, and the
+    conversation's own title. Blocking: reads the agent's files. Never call it
+    for a session on an SSH host: its paths are the host's, not this disk's."""
+    from quickterm import agent_sessions
+
+    if agent == "codex":
+        if event != CODEX_TURN_COMPLETE:
+            return payload, None
+        thread = _ident(payload.get("thread-id"))
+        return payload, agent_sessions.codex_thread_name(thread) if thread else None
+    if event != "Stop":
+        return payload, None
+    transcript = payload.get("transcript_path")
+    if not _long_text(payload.get("last_assistant_message")):
+        answer = transcript_answer(transcript)
+        if answer:
+            payload = {**payload, "last_assistant_message": answer}
+    title = agent_sessions.claude_title(transcript) if isinstance(transcript, str) else None
+    return payload, title
 
 
 def parse_body(raw: Any, query_agent: str | None) -> tuple[str, str, dict[str, Any]]:

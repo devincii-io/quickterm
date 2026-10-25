@@ -16,9 +16,13 @@ export const SETTINGS_TABS = [
 export const SETTINGS_INDEX = [
   { id: "font_family", tab: "general", label: "Terminal font", keywords: "font family typeface monospace", hint: "Any monospace font installed on this computer" },
   { id: "font_size", tab: "general", label: "Terminal text size", keywords: "font size zoom px", hint: "Also Ctrl+plus, minus and 0" },
-  { id: "default_profile", tab: "general", label: "Default terminal", keywords: "default profile startup shell", hint: "Opened when QuickTerm starts" },
+  { id: "shell", tab: "general", label: "Shell", keywords: "shell default terminal powershell cmd command prompt git bash wsl", hint: "What new terminals and the agents run in" },
   { id: "theme", tab: "general", label: "Theme", keywords: "colors colours dark light palette appearance", hint: "Terminal and app colours" },
   { id: "logo", tab: "general", label: "App logo", keywords: "branding icon image mark", hint: "Shown when a workspace has none" },
+  { id: "notifications.needs_you", tab: "general", label: "When an agent needs you", keywords: "notifications notify flash taskbar balloon toast permission waiting attention bell", hint: "Off, flash or notify" },
+  { id: "notifications.finished", tab: "general", label: "When an agent finishes", keywords: "notifications notify flash taskbar balloon toast done finished turn", hint: "Off, flash or notify" },
+  { id: "notifications.sound", tab: "general", label: "Notification sound", keywords: "notifications sound beep audio", hint: "Play the Windows notification sound" },
+  { id: "keep_awake", tab: "general", label: "Keep awake", keywords: "sleep power standby awake caffeine agents", hint: "Hold off sleep while agents work" },
   { id: "window.size", tab: "window", label: "Window size", keywords: "width height default size resolution", hint: "Size of a new window" },
   { id: "window.remember_bounds", tab: "window", label: "Remember size and position", keywords: "bounds restore position maximized", hint: "Reopen where you left it" },
   { id: "overlay.enabled", tab: "window", label: "Drop-down overlay", keywords: "quake overlay drop down dropdown slide", hint: "The summon shortcut drops QuickTerm from a screen edge" },
@@ -41,6 +45,7 @@ export const SETTINGS_INDEX = [
   { id: "update_check", tab: "advanced", label: "Update notifications", keywords: "updates release version check notify", hint: "Tell me when a new version is out" },
   { id: "voice", tab: "advanced", label: "Voice input", keywords: "voice whisper speech dictation", hint: "Parked for now" },
   { id: "updates", tab: "about", label: "Check for updates", keywords: "update install version release", hint: "Compare with the latest release" },
+  { id: "update_auto_download", tab: "about", label: "Download updates automatically", keywords: "update download background automatic install", hint: "Fetch a new version in the background" },
   { id: "config_history", tab: "about", label: "Settings history", keywords: "history restore undo backup versions", hint: "The last 20 saved versions" },
 ];
 

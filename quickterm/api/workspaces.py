@@ -1,9 +1,8 @@
-"""Workspace routes: list, read, save and delete a workspace file, its git facts,
-and a new workspace on a fresh git worktree.
+"""Workspace routes: list, read, save and delete a workspace file, and its git facts.
 
-Workspace names may contain `/` (a worktree workspace is `<from>/<branch>`),
-so the name routes use the `path` converter: Starlette decodes `%2F` before
-routing, and a plain `{name}` would never match such a name.
+Workspace names may contain `/`, so the name routes use the `path` converter:
+Starlette decodes `%2F` before routing, and a plain `{name}` would never
+match such a name.
 """
 
 from __future__ import annotations
@@ -14,13 +13,27 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from quickterm import git_info, worktree
+from quickterm import board, git_info, ws_exec
+from quickterm import workspace as workspace_store
 from quickterm.api.common import asdict, kill_each, read_json
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
 
 MAX_GIT_INFO_PATHS = 256
+
+
+def _folder(workspace: object, value: object, host: str | None) -> str | None:
+    """A request's folder: a local path, or a POSIX path on the host."""
+    if host:
+        return workspace_store.normalize_remote_root(value)
+    return workspace.normalize_root(value)  # type: ignore[attr-defined]
+
+
+def _host_field(host: str | None) -> dict:
+    # Only a remote workspace passes the field, so a local save reads exactly
+    # as it did before hosts existed.
+    return {"host": host} if host else {}
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -37,47 +50,39 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(400, f"at most {MAX_GIT_INFO_PATHS} paths per request")
         return await asyncio.to_thread(git_info.git_info_many, paths)
 
-    # Registered before the `{name:path}` routes, which would otherwise also
-    # match this path (they answer other methods, but order keeps it obvious).
-    @app.post("/api/workspaces/worktree", status_code=201)
-    async def post_worktree(request: Request) -> dict:
-        workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
+    def checked_host(value: object) -> str | None:
+        """A workspace host from a request: None, or an OpenSSH profile's name."""
+        try:
+            host = workspace_store.normalize_host(value)
+            if host is not None:
+                ws_exec.find_profile(host, list(getattr(ctx.cfg, "profiles", []) or []))
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return host
 
+    # Before the `{name:path}` routes; they answer other methods anyway.
+    @app.post("/api/workspaces/remote-check")
+    async def remote_check(request: Request) -> dict:
+        """Is `path` a folder on `host`? `{"ok": bool, "message": str}` with
+        what ssh printed; a failed check does not stop the workspace saving."""
         body = await read_json(request)
         if not isinstance(body, dict):
-            raise HTTPException(400, "body must be {'from': ..., 'branch': ...}")
-        source_name = body.get("from")
-        if not isinstance(source_name, str) or not source_name:
-            raise HTTPException(400, "from must be a workspace name")
-        source = await asyncio.to_thread(workspace.load_workspace, source_name)
-        if source is None:
-            raise HTTPException(404, "no such workspace")
+            raise HTTPException(400, "body must be {'host': ..., 'path': ...}")
+        host = checked_host(body.get("host"))
+        if host is None:
+            raise HTTPException(400, "host is required")
         try:
-            branch = worktree.validate_branch(body.get("branch"))
-            base = worktree.validate_base(body.get("base"))
-            new_name = f"{source_name}/{worktree.branch_slug(branch)}"
-        except worktree.WorktreeError as exc:
-            raise HTTPException(exc.status, exc.message) from exc
-        if await asyncio.to_thread(workspace.load_workspace, new_name) is not None:
-            raise HTTPException(409, f"a workspace named {new_name!r} already exists")
+            path = workspace_store.normalize_remote_root(body.get("path"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if path is None:
+            raise HTTPException(400, "path is required")
+        profiles = list(getattr(ctx.cfg, "profiles", []) or [])
         try:
-            created = await asyncio.to_thread(
-                worktree.create_worktree, getattr(source, "path", None), branch, base
-            )
-        except worktree.WorktreeError as exc:
-            raise HTTPException(exc.status, exc.message) from exc
-        async with workspace_write_lock:
-            # Never overwrite a workspace that appeared while git was running.
-            if await asyncio.to_thread(workspace.load_workspace, new_name) is not None:
-                raise HTTPException(
-                    409, f"a workspace named {new_name!r} already exists; "
-                    f"the worktree was created at {created.path}",
-                )
-            await asyncio.to_thread(
-                workspace.save_workspace,
-                workspace.Workspace(name=new_name, layout={}, path=created.path),
-            )
-        return {"workspace": new_name, "path": created.path, "setup": created.setup}
+            ok, message = await asyncio.to_thread(ws_exec.check_folder, host, path, profiles=profiles)
+        except FileNotFoundError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": ok, "message": message}
 
     @app.get("/api/workspaces")
     def list_workspaces() -> list[str]:
@@ -93,6 +98,14 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if ws is None:
             raise HTTPException(404, "no such workspace")
         out = asdict(ws)
+        host = getattr(ws, "host", None)
+        out["host"] = host
+        if host:
+            # Nothing here may wait for ssh: the folder check and git answer
+            # from what the background calls last found.
+            out["path_exists"] = ws_exec.cached_exists(ws)
+            out["git"] = git_info.remote_git_info(ws)
+            return out
         # A workspace folder can be renamed, unmounted or deleted behind our
         # back. Report it instead of letting every spawn silently land in the
         # home directory with no explanation.
@@ -105,6 +118,10 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     async def put_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
+        # Dot names are reserved (the right panel's `.scratch` among them);
+        # the frontend says the same in validateWorkspaceName.
+        if name.strip().startswith("."):
+            raise HTTPException(400, "Names starting with a dot are reserved.")
         body = await read_json(request)
         if not isinstance(body, dict) or "layout" not in body:
             raise HTTPException(400, "body must be {'layout': ...}")
@@ -123,11 +140,14 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # dropped the folder, the logo, and the detached sessions the
             # workspace owns (which the reaper then took).
             existing = None
-            if any(key not in body for key in ("path", "logo", "session_ids", "temporary")):
+            if any(key not in body for key in ("path", "logo", "session_ids", "temporary", "host")):
                 existing = await asyncio.to_thread(workspace.load_workspace, name)
-            if "path" in body:
+            # `host` is three-valued like `path`; the folder is read as a
+            # path on whichever host the workspace ends up on.
+            host = checked_host(body["host"]) if "host" in body else getattr(existing, "host", None)
+            if "path" in body or ("host" in body and host != getattr(existing, "host", None)):
                 try:
-                    path = workspace.normalize_root(body.get("path"))
+                    path = _folder(workspace, body.get("path", getattr(existing, "path", None)), host)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
             else:
@@ -155,6 +175,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     path=path,
                     session_ids=session_ids,
                     temporary=body.get("temporary", getattr(existing, "temporary", False)),
+                    **_host_field(host),
                 ),
             )
             manager.sync_workspace(name, set(session_ids))
@@ -164,16 +185,21 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     async def patch_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")
         body = await read_json(request)
-        if not isinstance(body, dict) or not body or set(body) - {"path", "logo"}:
-            raise HTTPException(400, "body must contain path or logo only")
+        if not isinstance(body, dict) or not body or set(body) - {"path", "logo", "host"}:
+            raise HTTPException(400, "body must contain path, logo or host only")
         if body.get("logo") is not None and not isinstance(body["logo"], str):
             raise HTTPException(400, "logo must be a string or null")
         async with workspace_write_lock:
             saved = await asyncio.to_thread(workspace.load_workspace, name)
             if saved is None:
                 raise HTTPException(404, "no such workspace")
+            old_host = getattr(saved, "host", None)
+            host = checked_host(body["host"]) if "host" in body else old_host
             try:
-                path = workspace.normalize_root(body["path"]) if "path" in body else saved.path
+                if "path" in body or host != old_host:
+                    path = _folder(workspace, body.get("path", saved.path), host)
+                else:
+                    path = saved.path
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             # Metadata edits must not submit a stale layout from another viewer.
@@ -181,6 +207,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 name=name, layout=saved.layout, path=path,
                 logo=body.get("logo", saved.logo), session_ids=saved.session_ids,
                 temporary=getattr(saved, "temporary", False),
+                **_host_field(host),
             ))
         return Response(status_code=204)
 
@@ -212,5 +239,6 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 if failed:
                     raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
             await asyncio.to_thread(workspace.delete_workspace, name)
+            await asyncio.to_thread(board.forget_workspace, name)
             manager.sync_workspace(name, set())
         return Response(status_code=204)

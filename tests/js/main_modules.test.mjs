@@ -32,7 +32,7 @@ const MODULES = {
   ],
   "terminal_actions.js": ["createTerminalActions", "resultLabel"],
   "spawner.js": [
-    "defaultSystemSpec", "serializableSpec", "commandTerminalType", "claudeProfileForPane", "createSpawner",
+    "serializableSpec", "commandTerminalType", "legacyAgentSpec", "claudeProfileForPane", "createSpawner",
   ],
   "updates.js": ["watchUpdates"],
   "window_registry.js": ["createWindowRegistry"],
@@ -176,28 +176,8 @@ test("folders compare the way the file system does", async () => {
 });
 
 test("spawn specs are derived without any window state", async () => {
-  const { defaultSystemSpec, serializableSpec, commandTerminalType, claudeProfileForPane } =
+  const { serializableSpec, commandTerminalType, claudeProfileForPane } =
     await load("spawner.js");
-  const inventory = {
-    types: [
-      { id: "claude-code", executable: "claude.exe" },
-      { id: "cmd", executable: "cmd.exe", available: false, label: "cmd" },
-      { id: "windows-powershell", executable: "powershell.exe", label: "Windows PowerShell" },
-    ],
-  };
-  assert.deepEqual(defaultSystemSpec(inventory), {
-    cmd: "powershell.exe", args: ["-NoLogo"], name: "Windows PowerShell", terminalType: "windows-powershell",
-  });
-  assert.equal(defaultSystemSpec(null), null);
-  assert.deepEqual(defaultSystemSpec({ types: [{ id: "wsl", executable: "wsl.exe", label: "WSL" }] }).args,
-    ["--cd", "~"]);
-  // default_profile may name a system shell; it wins over the first one, and
-  // Git Bash starts as a login shell, as from the menu.
-  const withBash = { types: [...inventory.types, { id: "git-bash", executable: "bash.exe", label: "Git Bash" }] };
-  assert.deepEqual(defaultSystemSpec(withBash, "git-bash"), {
-    cmd: "bash.exe", args: ["-l"], name: "Git Bash", terminalType: "git-bash",
-  });
-  assert.equal(defaultSystemSpec(withBash, "cmd").terminalType, "windows-powershell");  // unavailable
 
   const spec = { cmd: "bash", args: ["-l"], label: "Bash", terminalType: "bash", extra: 1 };
   const out = serializableSpec(spec);

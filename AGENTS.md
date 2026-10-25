@@ -19,7 +19,7 @@ uv run --no-sync ruff check quickterm tests scripts
 uv run --no-sync python scripts/check.py       # complete local/manual CI gate
 uv run --no-sync pyinstaller --noconfirm --clean quickterm.spec   # dist/QuickTerm/QuickTerm.exe
 uv run --no-sync python scripts/smoke_packaged.py                  # frozen PTY/auth/replay/routes smoke
-uv run --no-sync python scripts/smoke_workspace_views.py           # isolated native dual-view/close smoke
+uv run --no-sync python scripts/smoke_workspace_views.py           # isolated native one-shown-workspace/close smoke
 uv run --no-sync python scripts/smoke_pty_host.py                  # a terminal survives the window process
 python scripts/bench_throughput.py 20                             # output throughput
 ```
@@ -59,8 +59,12 @@ viewer; the backend stays in the tray (`tray.py`, ctypes) only when a live
 session is touched, explicitly retained, or busy, else it quits. Frozen, the
 backend runs from a versioned copy under `%LOCALAPPDATA%\QuickTerm\host\` as
 `QuickTerm-host.exe`, so Setup can replace the program while terminals run.
-`update.py` probes the pinned GitHub repo's latest release; install downloads
-the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
+`update.py` probes the pinned GitHub repo's latest release and, unless
+`update_auto_download` is off, downloads the Setup asset in the background
+(streamed, SHA-256 checked against SHA256SUMS.txt; the update card shows the
+progress). "Install now" re-checks the hash and runs Setup `/SILENT` through
+a small `handover.cmd` that starts the installed QuickTerm once Setup exits,
+because the `.iss` relaunch entry is `skipifsilent`.
 
 ## Conventions
 
@@ -70,13 +74,26 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   across two reads became U+FFFD (`test_multibyte_output_arrives_whole`). The
   console host caps bulk output at about 5-6 MB/s with either binding.
 - UI keyboard layer claims only **cold** Alt combos (`keys.js`): Alt+K palette,
-  Alt+G/S/I dashboard/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
+  Alt+G/S/I workspace board/settings/help, Alt+N new terminal, Alt+Z zoom, Alt+D
   detach, Alt+W confirmed kill, Alt+J next terminal that needs you, and
   Alt+arrows focus on plain Alt; Alt+Shift+Right/Down
-  (or H/V) split; Alt+Shift+Left/Up cycle new-terminal choices; Alt+Shift+S
+  (or H/V) split; Alt+Shift+Left/Up open the "+" menu; Alt+Shift+S
   cycles the sidebar (full, rail, hidden; plain Alt+B is readline's
-  backward-word and Ctrl+B the tmux prefix, so neither is ours); and
-  Ctrl+±/0 terminal text zoom. Plain Alt+V/P/H/0-9/- MUST pass
+  backward-word and Ctrl+B the tmux prefix, so neither is ours);
+  Alt+Shift+E the right panel (also while the panel holds the keyboard;
+  Explorer is the palette row and the sidebar button); Alt+Shift+C VS Code;
+  Ctrl+Shift+1..9 the nth workspace in the sidebar (matched on `code`
+  Digit1..9, never on `key`, which is the layout's shifted symbol; not
+  Alt+Shift, which is readline's M-! M-@ M-$ completion on US layouts, and
+  not Ctrl+Alt, which is AltGr; a Ctrl+Shift+digit whose `key` is `+`, as on
+  Swiss German, stays the text zoom);
+  Alt+PageDown/PageUp the next/previous open workspace; Ctrl+Tab and
+  Ctrl+Shift+Tab the recent-terminals list (release of Ctrl chooses, so
+  keys.js forwards Control keyup from every document); Ctrl+Shift+F find in
+  the pane (pane.js, not keys.js; plain Ctrl+F stays readline's
+  forward-char); and Ctrl+±/0 terminal text zoom. The window keys live in
+  the shell: a view reaches them through `quicktermChrome.windowKeys`.
+  Plain Alt+V/P/H/0-9/- MUST pass
   through to the shell (Codex image paste & model switch, PSReadLine/readline
   bindings). Never re-claim them. The zoom layer matches only keys that really
   produce `+`/`-`/`0`; never match a physical `code` alone (`Slash` and
@@ -118,7 +135,7 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   completes it, and Escape cancels; the bar claims the keyboard in `focus.js`
   while up. A sidebar kill uses `confirm_popover.js` and keeps the row and the
   server's detail on a 500, with Kill relabelled Retry.
-- Panels (Dashboard/Settings/Help) are a centred, bounded sheet, never
+- Panels (workspace board/Settings/Help) are a centred, bounded sheet, never
   full-bleed: the dense styling is about the rows inside, not the frame.
   Stretching `.panel-overlay` edge to edge removes the click-outside-to-close
   target and makes a dialog read as a second application.
@@ -136,12 +153,12 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   (`POST /api/hotkeys/suspend`) while it captures, or pressing a combination
   QuickTerm already owns fires it instead of recording it. It resumes them on
   finish, blur or cancel; the server resumes on its own after 20 s.
-- Live panels patch, they never rebuild (`render.js`). The dashboard refreshes
-  every 5 s; emptying `.panel-body` and recreating it threw away half-typed
-  input, an armed "Overwrite?", an open folder editor, and the very `<input>`
+- Live panels patch, they never rebuild (`render.js`). The workspace board
+  refreshes every 5 s; on the old dashboard, emptying `.panel-body` and
+  recreating it threw away half-typed input, an armed "Overwrite?", an open folder editor, and the very `<input>`
   the folder picker had captured, so choosing a folder silently did nothing.
-  `buildDashboard()` creates the skeleton and wires listeners once;
-  `applyDashboard()` only writes data. Listeners must not close over the data
+  `buildBoard()` creates the skeleton and wires listeners once;
+  `applyBoard()` only writes data. Listeners must not close over the data
   they were built from: they read `itemFor(node)` or the live view object.
   `patchList` reuses the node for a key rather than recreating it, and never
   `insertBefore`s a node already in place, because moving a node detaches it and
@@ -173,18 +190,24 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   is for fills, borders and dots.
 - No destructive action may be reachable without consent or feedback. `×` on a
   pane detaches, never kills; kill is a separate labelled `.danger` control in
-  the pane header and on the sidebar row. Clicking an open workspace focuses
-  its view and never replaces a layout; New scratch always opens a new view.
+  the pane header and on the sidebar row. Clicking an open workspace shows
+  its view and never replaces a layout; New scratch shows the window's one
+  scratch view.
   There is no free-text workspace prompt. Errors go to the `#app-error` banner
   or the pane notice. `#sb-save` is the saving/saved lifecycle only: it is the
   dot on the active workspace group in the sidebar, driven by `data-state`,
   never text.
 - The top-level document is the shell and hosts no workspace. Every
   workspace, scratch included, is an equal iframe view with its own claim,
-  LayoutManager and autosave; there is no primary view. A view stays on one
-  workspace for its whole life: the sidebar, palette, dashboard and launch
-  loop open or focus a view, never switch one in place. Closing any view
-  saves, retains its terminals and releases its claim; nothing is killed. A
+  LayoutManager and autosave; there is no primary view. The stage shows one
+  view at a time: no view header, frame, divider or view drag.
+  The hidden ones keep their full box (`visibility: hidden` plus `inert`,
+  never `display: none`, or xterm loses its size) and are told
+  `setHidden(true)`. A view stays on one workspace for its whole life: the
+  sidebar, palette, board and launch loop show a view (opening it when
+  needed), never switch one in place. One scratch view per window. Closing
+  any view saves, retains its terminals and releases its claim; nothing is
+  killed, and the most recently shown remaining view comes back. A
   scratch view retains only what holds work (busy, touched or unknown) and
   drops its idle untouched shells from its file, so the idle reaper collects
   them; retaining every new scratch's starter shell pinned it forever and kept
@@ -203,18 +226,25 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   control, ask whether the palette (Alt+K) or a tooltip already carries it.
   The shell inventory is cached in localStorage
   and served from a 60 s server-side cache, so boot never waits for it.
+  The right panel (`right_panel.js`) is the sidebar's mirror, not a second
+  chrome: same modes, surface, row heights, icon buttons, grip and slide.
+  `#app` always has three columns and a hidden side is a 0px one, so mode
+  changes slide; never give a side `display: none` or drop its column. A
+  body class must not share a name with an element's class (`rp-rail` on the
+  body once matched the rail element's rule and collapsed the stage); the
+  panel's mode classes are `rp-mode-*`.
 - Every chooser in the chrome is a `menu.js` menu, never a native `<select>`
   (the OS list cannot show a folder under a name, a colour dot, or a second
   action on a row). A trigger's click handler calls `toggleMenu`, not
   `openMenu`, or the press that closes the menu reopens it. Menus claim the
   keyboard in `focus.js` and hand it back through `onClose`.
-- Panes and workspace views are leaves of the same split tree
-  (`split_tree.js`), and a new one with no direction of its own takes half of
-  the focused leaf along its longer side (`dwindleDir`). Workspace views are
-  iframes and MUST NOT be re-parented: an iframe that moves in the DOM
-  reloads its document. `workspace_views.js` positions every view and divider
-  absolutely and only ever writes their boxes; the CSS transition on the box
-  is the animation. Pane motion is the `.sliding` class on a split (app.css
+- Panes inside a workspace are leaves of a split tree (`split_tree.js`), and
+  a new one with no direction of its own takes half of the focused leaf
+  along its longer side (`dwindleDir`). Workspace views are not tiled. They
+  are iframes and MUST NOT be re-parented: an iframe that moves in the DOM
+  reloads its document. `workspace_views.js` appends every view once, at the
+  full stage rect, and only toggles `.shown` afterwards. Pane motion is the
+  `.sliding` class on a split (app.css
   transitions `flex-grow`); a splitter drag never slides. The layout owns the
   pane DOM: `closePane` disposes with `keepElement: true` and `_animateLeave`
   removes the box after the slide, then re-renders unless a later render
@@ -256,14 +286,23 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   workspace: `suggestedWorkspaceFolder()` offers the focused pane's real
   directory instead, so promoting a scratch you `cd`'d into your project names
   that project.
-- Agent profiles are `terminal_type` `claude-code` or `codex`, with
-  `agent_mode` (claude-code `new | continue | resume | agents`, default
-  `continue`; codex adds `fork`, default `new`; a legacy `claude_mode` migrates
-  on load and stays an accepted request alias), typed options in
-  `Profile.agent` (allowlisted per type in `agents.py`, served to Settings by
-  `GET /api/system/agents`) and a project folder that always comes from the
-  workspace. `launch.resolve_profile` raises only when nothing resolves (a 400
-  on the spawn, not a config-save error). Every launch path (REST, elevate,
+- One shell (`AppConfig.shell`, `shells.py`) starts every terminal without a
+  profile, and Claude Code and Codex run inside it: the PTY's process is the
+  shell, `SessionManager._build` adds the hooks to the agent's argv and then
+  wraps it (`shells.wrap`), so the pane ends at a prompt when the agent exits.
+  The agents are settings (`AppConfig.agents`, launched as profile
+  `claude-code` / `codex`), not profiles; a saved profile is a connection, a
+  custom command or a shell with a start command, and config.py refuses the
+  rest. A pre-4.3 config migrates once (`migrate_agents`, backup
+  `config.pre-4.3.json`). The agent settings carry `agent_mode` (claude-code
+  `new | continue | resume | agents`, default `continue`; codex adds `fork`,
+  default `new`; a legacy `claude_mode` is still an accepted request alias),
+  typed options in `agent` (allowlisted per type in `agents.py`, served to
+  Settings by `GET /api/system/agents`) and a project folder that always
+  comes from the workspace. cmd.exe gets the text after `/k` verbatim
+  (`conpty.command_line`); never route it through list2cmdline quoting.
+  `launch.resolve_profile` raises only when nothing resolves (a 400 on the
+  spawn, not a config-save error). Every launch path (REST, elevate,
   autostart, hotkeys, the elevated first terminal) goes through
   `launch.resolve`; do not add a second one. Recovery uses the agent's own CLI
   (`claude --continue`, `codex resume --last`, a session id from
@@ -282,11 +321,26 @@ the Setup asset, verifies it against SHA256SUMS.txt, and launches it.
   `runtime.token`, which `quickterm send` reads). No hooks in the elevated
   instance: their curl configs live where a normal process can rewrite them.
   Hooks run Windows' curl async: a Python process per PreToolUse would slow
-  every tool call. Git facts are read from `.git` files (`git_info.py`); `git`
-  itself runs only to create a worktree, off the loop, with a list argv and
-  the repository location variables (`GIT_DIR`, `GIT_WORK_TREE` and the like)
-  removed. `GIT_CONFIG_*` and `GIT_SSH_COMMAND` pass through on purpose: they
-  are the user's own environment, not input from a request.
+  every tool call. Claude's usage limits reach QuickTerm only through the
+  per-launch `statusLine` (`statusline_chain.py`), which must keep running
+  the user's own status line and must never resolve its own command again;
+  it is the one per-update Python process, so it imports nothing but itself
+  from source. Git facts of a local workspace are read from `.git` files
+  (`git_info.py`); a program that must run in a workspace's folder (git for
+  the right panel, git over ssh for a remote workspace's branch) goes through
+  `ws_exec.py`, off the loop, with a list argv and no shell. QuickTerm creates
+  no worktrees; it only shows that a folder is one. Every path the right
+  panel takes from a request passes `ws_files.clean_rel` and is re-checked
+  after following links (`LocalFolder.resolve`, or the host script); git
+  gets it with `--literal-pathspecs`, so `*` or `:(top)` in a file name stays
+  a file name. `git~N` (the 8.3 name of `.git`) counts as `.git`. Direct file
+  reads go only through `ws_files.folder_for`. The panel polls, so its git
+  reads run no program a repository's config names: `core.fsmonitor=false`,
+  no external diff, `--no-textconv`, and every filter driver emptied
+  (`ws_git.refresh_filters` lists them with `git config --get-regexp` first).
+  Writes keep the filters (stage, discard, commit, push, pull), and only
+  commit, push and pull run hooks. A read therefore sees a filtered file
+  unfiltered; for a file stored as a pointer that can show it as changed.
 - `QUICKTERM_DEBUG_IO=1` logs raw bytes both directions (key-level debugging);
   no other value enables it because input logs may contain secrets.
 - Tests: pytest asyncio_mode=auto; real short-lived PTYs (`cmd.exe /c echo hi`
@@ -397,6 +451,22 @@ clicked, and `taskkill.exe` runs by absolute path. Do not "harden" this with
 `NoDefaultCurrentDirectoryInExePath`: every child, terminals included, would
 inherit it. `update.py` only fetches https URLs from the pinned repo's release
 payload and hash-verifies installers.
+
+A remote workspace's agent reaches the backend through a Unix socket that its
+ssh reverse-forwards (`-R /tmp/quickterm-<16 hex>.sock:127.0.0.1:<port>`;
+sshd creates it owner-only). The hook token goes to the host only as one line,
+`<nonce>:<token>`, typed into that terminal after the remote script turns
+echo off and prints its marker, answered once per session
+(`SessionManager._answer_hook_marker`). The script drops every line without
+the nonce, and the user's typing waits in order from the script's ready
+marker until the answer went out, so neither can swap the token and a prompt;
+nothing typed at ssh's own password or host-key prompt is held. Write it with `write_secret` so the
+`QUICKTERM_DEBUG_IO` log redacts it. Never put the hook token into an ssh
+argv, the remote command, a `SetEnv`, the inline `--settings` or a file on
+the host: a remote command line is readable by every user there. The full API token never leaves this computer. Every
+remote path and word is POSIX-quoted through `ws_exec.posix_quote`, which
+refuses NUL and line breaks; background ssh calls use `BatchMode=yes` and
+`ClearAllForwardings=yes`.
 
 ## Author / license
 

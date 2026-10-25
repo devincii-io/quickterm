@@ -41,6 +41,7 @@ _NIF_ICON = 0x2
 _NIF_TIP = 0x4
 _NIF_INFO = 0x10
 _NIIF_INFO = 0x1
+_NIIF_NOSOUND = 0x10
 _NIN_BALLOONUSERCLICK = 0x0405  # WM_USER + 5
 
 _FLASHW_ALL = 0x3
@@ -267,16 +268,17 @@ class TrayIcon:
         self._balloon_shown = True
         self.balloon(title, text)
 
-    def balloon(self, title: str, text: str) -> None:
+    def balloon(self, title: str, text: str, *, quiet: bool = False) -> None:
         """Show a notification from the tray icon. Clicking it opens the
-        windows, like clicking the icon. Safe from any thread."""
+        windows, like clicking the icon. Safe from any thread. ``quiet``
+        leaves out the sound Windows would play with it."""
         if not self._hwnd:
             return
         nid = self._nid()
         nid.uFlags = _NIF_INFO
         nid.szInfo = _utf16_prefix(text, 255)
         nid.szInfoTitle = _utf16_prefix(title, 63)
-        nid.dwInfoFlags = _NIIF_INFO
+        nid.dwInfoFlags = _NIIF_INFO | (_NIIF_NOSOUND if quiet else 0)
         _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(nid))
 
     # ---- tray thread ----

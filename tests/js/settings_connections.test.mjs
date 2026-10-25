@@ -23,11 +23,16 @@ test("connection setup preserves detected executable paths and avoids duplicate 
   const profile = newConnection(shell, { types: [{ id: shell.id, executable: "C:/Program Files/pwsh.exe" }] }, [{ name: "PowerShell 7" }]);
   assert.equal(profile.name, "PowerShell 7 2");
   assert.equal(profile.cmd, "C:/Program Files/pwsh.exe");
+  // A plain shell is in the + menu; a shell profile exists for its start command.
+  assert.deepEqual(connectionProblems(profile, []), ["Enter a start command. The plain shell is already in the + menu."]);
+  profile.start_command = "npm run dev";
   assert.deepEqual(connectionProblems(profile, []), []);
+  profile.start_command = "claude --continue";
+  assert.match(connectionProblems(profile, [])[0], /set them up under Agents/);
   assert.ok(connectionProblems({ name: "SSH", terminal_type: "ssh", ssh_host: "" }, []).length);
 });
 
-test("a new agent starts a new conversation with no options", () => {
+test("an agent profile is refused: Claude Code and Codex are settings", () => {
   for (const id of ["claude-code", "codex"]) {
     const profile = newConnection(type(id), { types: [] }, []);
     assert.equal(profile.agent_mode, "new", id);
@@ -40,7 +45,7 @@ test("a new agent starts a new conversation with no options", () => {
   assert.equal(codex.cmd, "");
   assert.equal("claude_mode" in codex, false);
   assert.equal(connectionLabel(codex), "Codex · new conversation");
-  assert.deepEqual(connectionProblems(codex, []), []);
+  assert.deepEqual(connectionProblems(codex, []), ["Claude Code and Codex are set up under Agents, not as a terminal."]);
 });
 
 test("a new ssh profile uses OpenSSH when it is installed, else PuTTY", () => {
@@ -70,7 +75,7 @@ test("ssh and agent problems are refused before the save", () => {
   assert.match(connectionProblems({ ...base, ssh_client: "openssh", ssh_key: "k.ppk" }, [])[0], /\.ppk/);
   assert.match(connectionProblems({ ...base, ssh_host: "-x" }, [])[0], /must not start with -/);
   const codex = { name: "Codex", terminal_type: "codex", agent: { bypass: "true", approval: "never" } };
-  assert.deepEqual(connectionProblems(codex, []), ["bypass replaces approval and sandbox; clear them first"]);
+  assert.deepEqual(connectionProblems(codex, []), ["Claude Code and Codex are set up under Agents, not as a terminal."]);
 });
 
 test("the tour only opens automatically before setup has been completed", () => {

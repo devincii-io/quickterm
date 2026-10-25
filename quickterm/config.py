@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,6 +63,26 @@ class Profile:
 
 
 @dataclass
+class AgentSettings:
+    """How Claude Code or Codex starts: what an agent profile held for the
+    launch before 4.3. An empty `cmd` finds the CLI on PATH."""
+
+    cmd: str = ""
+    args: list[str] = field(default_factory=list)
+    agent_mode: str | None = None
+    agent: dict[str, str] = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=dict)
+
+
+AGENT_KINDS = ("claude-code", "codex")
+AGENT_LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
+
+
+def _default_agents() -> dict[str, AgentSettings]:
+    return {kind: AgentSettings() for kind in AGENT_KINDS}
+
+
+@dataclass
 class Snippet:
     name: str
     text: str
@@ -97,6 +118,20 @@ class OverlayConfig:
     hide_on_blur: bool = True
     monitor: str = "cursor"
     animate: bool = True
+
+
+NOTIFY_MODES = ("off", "flash", "notify")
+
+
+@dataclass
+class NotificationsConfig:
+    """How a terminal the user is not looking at gets their attention:
+    "off", "flash" (the taskbar button) or "notify" (also a Windows
+    notification), per kind; ``sound`` plays the notification sound too."""
+
+    needs_you: str = "notify"
+    finished: str = "flash"
+    sound: bool = False
 
 
 def _default_profiles() -> list[Profile]:
@@ -139,17 +174,24 @@ class AppConfig:
     max_sessions: int = 0
     # probe GitHub releases and offer one-click updates in the UI
     update_check: bool = True
+    # download a found update in the background (update.py); off offers a button
+    update_auto_download: bool = True
     summon_hotkey: str = "ctrl+alt+grave"
     # Root folder for the disposable scratch workspace. Empty = a QuickTerm
     # folder under the system temp directory, created on demand.
     scratch_dir: str = ""
-    # Saved profile name. Legacy shell IDs remain readable for older clients.
-    default_profile: str = ""
+    # The shell every new terminal starts in, and the one Claude Code and
+    # Codex run inside (shells.py). Replaced `default_profile` in 4.3.
+    shell: str = "powershell"
+    agents: dict[str, AgentSettings] = field(default_factory=_default_agents)
     profiles: list[Profile] = field(default_factory=_default_profiles)
     snippets: list[Snippet] = field(default_factory=_default_snippets)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    # Hold off system sleep: "agents" while an agent works, "always", "off".
+    keep_awake: str = "agents"
 
 
 def default_cwd() -> str:
@@ -309,7 +351,7 @@ def _storage_dict(cfg: AppConfig) -> dict:
             profile["keybinding"] = None
     if not secret_store.protection_available():
         return stored
-    for profile in stored["profiles"]:
+    for profile in [*stored["profiles"], *stored["agents"].values()]:
         profile["env"] = {
             key: {
                 "protected": _DPAPI_SCHEME,
@@ -326,13 +368,16 @@ def _has_plaintext_environment(raw: dict) -> bool:
     if not secret_store.protection_available():
         return False
     profiles = raw.get("profiles")
-    if not isinstance(profiles, list):
-        return False
+    agents = raw.get("agents")
+    holders = [
+        *(profiles if isinstance(profiles, list) else []),
+        *(agents.values() if isinstance(agents, dict) else []),
+    ]
     return any(
         isinstance(profile, dict)
         and isinstance(profile.get("env"), dict)
         and any(isinstance(value, str) for value in profile["env"].values())
-        for profile in profiles
+        for profile in holders
     )
 
 
@@ -347,10 +392,197 @@ def _parse(cls: type, data: dict):
     return cls(**_known(cls, data))
 
 
+SHELL_TYPES = frozenset({
+    "powershell-core", "windows-powershell", "command-prompt", "cmd", "git-bash", "wsl",
+    "bash", "zsh", "fish", "nushell",
+})
+_SHELL_PROGRAMS = frozenset({
+    "pwsh", "powershell", "cmd", "bash", "zsh", "fish", "nu", "wsl", "sh",
+})
+_AGENT_PROGRAMS = frozenset({"claude", "claude.exe", "codex", "codex.exe"})
+PROFILE_KIND_ERROR = (
+    "profiles are for connections and custom commands; set the shell or the agents instead"
+)
+
+
+def _program_name(command: str) -> str:
+    name = command.strip().strip('"').replace("/", "\\").rsplit("\\", 1)[-1].casefold()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def is_shell_profile(profile: dict | Profile) -> bool:
+    """A profile that only starts a shell: a shell type, or no type and a
+    shell program as its command (configs from before terminal types)."""
+    get = profile.get if isinstance(profile, dict) else lambda key: getattr(profile, key, None)
+    kind = get("terminal_type")
+    if kind in SHELL_TYPES:
+        return True
+    command = get("cmd")
+    return kind is None and isinstance(command, str) and _program_name(command) in _SHELL_PROGRAMS
+
+
+def _starts_agent(start: str) -> bool:
+    words = start.split()
+    return bool(words) and words[0].strip("\"'").casefold().replace("/", "\\").rsplit(
+        "\\", 1
+    )[-1] in _AGENT_PROGRAMS
+
+
+def migrate_agents(raw: dict, notes: list[str] | None = None) -> dict:
+    """A pre-4.3 config with agents and shells taken out of its profiles.
+
+    The first claude-code and the first codex profile become `agents`; every
+    agent profile goes, every plain shell profile goes (the "+" menu has the
+    shells), and so does a shell whose start command only runs an agent. Such
+    a shell becomes the agent's settings, with the start command's arguments
+    and the profile's env, when no agent profile of that kind exists.
+    `default_profile` is dropped; `shell` takes its place. Pure: the stored
+    env values move as they are, protected or not. `notes`, when given,
+    receives one sentence per profile that went or lost something.
+    """
+    notes = notes if notes is not None else []
+    out = {key: value for key, value in raw.items() if key != "default_profile"}
+    profiles = raw.get("profiles")
+    listed = [p for p in profiles if isinstance(p, dict)] if isinstance(profiles, list) else []
+    agents: dict[str, dict] = {}
+    for profile in listed:
+        kind = profile.get("terminal_type")
+        if kind in AGENT_KINDS and kind not in agents:
+            mode = profile.get("agent_mode")
+            if mode is None:
+                mode = profile.get("claude_mode")
+            agents[kind] = {
+                "cmd": profile.get("cmd") or "",
+                "args": profile.get("args") or [],
+                "agent_mode": mode,
+                "agent": profile.get("agent") or {},
+                "env": profile.get("env") or {},
+            }
+            _note_became(notes, profile, kind)
+    from_profiles = set(agents)
+    kept = []
+    for profile in profiles if isinstance(profiles, list) else []:
+        if not isinstance(profile, dict):
+            kept.append(profile)
+            continue
+        name = profile.get("name")
+        kind = profile.get("terminal_type")
+        if kind in AGENT_KINDS:
+            if not any(n.startswith(f'Terminal "{name}" became') for n in notes):
+                notes.append(
+                    f'Terminal "{name}" was removed: only the first '
+                    f"{AGENT_LABELS[kind]} terminal became its settings."
+                )
+            continue
+        if is_shell_profile(profile):
+            start = profile.get("start_command")
+            if not isinstance(start, str) or not start.strip():
+                notes.append(
+                    f'Terminal "{name}" was removed: the shell is in the + menu'
+                    + _lost_suffix(profile)
+                )
+                continue
+            launch = _agent_start(start)
+            if launch is not None:
+                kind, program, words = launch
+                if kind in from_profiles or kind in agents:
+                    notes.append(
+                        f'Terminal "{name}" was removed: {AGENT_LABELS[kind]} starts '
+                        "from Settings > Agents" + _lost_suffix(profile)
+                    )
+                else:
+                    agents[kind] = {
+                        "cmd": program,
+                        "args": words,
+                        "agent_mode": "new",
+                        "agent": {},
+                        "env": profile.get("env") or {},
+                    }
+                    _note_became(notes, profile, kind)
+                continue
+        kept.append(profile)
+    if isinstance(profiles, list):
+        out["profiles"] = kept
+    out["agents"] = agents
+    return out
+
+
+def _lost_suffix(profile: dict) -> str:
+    lost = []
+    if profile.get("keybinding"):
+        lost.append(f"its shortcut {profile['keybinding']}")
+    if profile.get("autostart"):
+        lost.append("its autostart")
+    return f" ({' and '.join(lost)} not kept)." if lost else "."
+
+
+def _note_became(notes: list[str], profile: dict, kind: str) -> None:
+    notes.append(
+        f'Terminal "{profile.get("name")}" became the {AGENT_LABELS[kind]} settings'
+        + _lost_suffix(profile)
+    )
+
+
+def _agent_start(start: str) -> tuple[str, str, list[str]] | None:
+    """(kind, executable or "", arguments) when a start command only runs an agent."""
+    try:
+        words = shlex.split(start, posix=True)
+    except ValueError:
+        words = start.split()
+    if not words:
+        return None
+    first = words[0]
+    name = first.replace("/", "\\").rsplit("\\", 1)[-1].casefold()
+    if name not in _AGENT_PROGRAMS:
+        return None
+    kind = "codex" if name.startswith("codex") else "claude-code"
+    program = first if ("\\" in first or "/" in first) else ""
+    return kind, program, words[1:]
+
+
+def _parse_agents(raw: object) -> dict[str, AgentSettings]:
+    if not isinstance(raw, dict):
+        raise TypeError("agents must be a JSON object")
+    agents = _default_agents()
+    for kind in AGENT_KINDS:
+        value = raw.get(kind)
+        if value is None:
+            continue
+        if isinstance(value, AgentSettings):
+            agents[kind] = value
+            continue
+        if not isinstance(value, dict):
+            raise TypeError(f"agents.{kind} must be a JSON object")
+        parsed = dict(value)
+        if "env" in parsed:
+            parsed["env"] = _decode_environment(parsed["env"])
+        agents[kind] = _parse(AgentSettings, parsed)
+    return agents
+
+
+def agent_profile(cfg: AppConfig, kind: str) -> Profile:
+    """The agent's settings as the profile the launch code takes. Its name is
+    the kind, which is also how a request names it."""
+    settings = cfg.agents.get(kind) or AgentSettings()
+    return Profile(
+        name=kind,
+        cmd=settings.cmd,
+        description=AGENT_LABELS[kind],
+        args=list(settings.args),
+        env=dict(settings.env),
+        terminal_type=kind,
+        agent_mode=settings.agent_mode,
+        agent=dict(settings.agent),
+    )
+
+
 def config_from_dict(raw: dict) -> AppConfig:
     if not isinstance(raw, dict):
         raise TypeError("config must be a JSON object")
+    if "agents" not in raw:
+        raw = migrate_agents(raw)
     kwargs = _known(AppConfig, raw)
+    kwargs["agents"] = _parse_agents(raw.get("agents"))
     if isinstance(raw.get(_SUMMON_V4), str) and raw[_SUMMON_V4]:
         kwargs["summon_hotkey"] = raw[_SUMMON_V4]
     if "profiles" in kwargs:
@@ -379,6 +611,8 @@ def config_from_dict(raw: dict) -> AppConfig:
         kwargs["window"] = _parse(WindowConfig, kwargs["window"])
     if "overlay" in kwargs:
         kwargs["overlay"] = _parse(OverlayConfig, kwargs["overlay"])
+    if "notifications" in kwargs:
+        kwargs["notifications"] = _parse(NotificationsConfig, kwargs["notifications"])
     return AppConfig(**kwargs)
 
 
@@ -449,6 +683,47 @@ def _validate_window(cfg: AppConfig) -> None:
         raise ValueError("Overlay monitor must be cursor or primary")
 
 
+def _validate_attention(cfg: AppConfig) -> None:
+    notifications = getattr(cfg, "notifications", None) or NotificationsConfig()
+    if not isinstance(notifications, NotificationsConfig):
+        raise ValueError("Notifications must be an object")
+    for label, value in (
+        ("When an agent needs you", notifications.needs_you),
+        ("When an agent finishes", notifications.finished),
+    ):
+        if value not in NOTIFY_MODES:
+            raise ValueError(f"{label} must be off, flash or notify")
+    if not isinstance(notifications.sound, bool):
+        raise ValueError("Notification sound must be true or false")
+    if getattr(cfg, "keep_awake", "agents") not in ("agents", "always", "off"):
+        raise ValueError("Keep awake must be agents, always or off")
+
+
+def _validate_agents(cfg: AppConfig) -> None:
+    from .agents import validate as validate_agent
+
+    if not isinstance(cfg.agents, dict) or set(cfg.agents) != set(AGENT_KINDS):
+        raise ValueError("agents must hold claude-code and codex")
+    for kind in AGENT_KINDS:
+        settings = cfg.agents[kind]
+        label = AGENT_LABELS[kind]
+        if not isinstance(settings, AgentSettings):
+            raise ValueError(f"{label}: settings must be an object")
+        if not isinstance(settings.cmd, str):
+            raise ValueError(f"{label}: command must be a string")
+        if not isinstance(settings.args, list) or any(not isinstance(a, str) for a in settings.args):
+            raise ValueError(f"{label}: arguments must be strings")
+        if settings.agent_mode is not None and not isinstance(settings.agent_mode, str):
+            raise ValueError(f"{label}: launch mode must be a string")
+        if not isinstance(settings.agent, dict):
+            raise ValueError(f"{label}: agent options must be an object")
+        try:
+            validate_agent(agent_profile(cfg, kind))
+            validate_environment(settings.env)
+        except ValueError as exc:
+            raise ValueError(f"{label}: {exc}") from exc
+
+
 def validate_config(cfg: AppConfig) -> None:
     from .hotkeys import parse_binding
 
@@ -479,8 +754,10 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("Font family must be a non-empty string")
     if cfg.logo is not None and not isinstance(cfg.logo, str):
         raise ValueError("Logo must be a string or null")
-    if not isinstance(cfg.default_profile, str):
-        raise ValueError("Default profile must be a string")
+    from .shells import validate as validate_shell
+
+    validate_shell(cfg.shell)
+    _validate_agents(cfg)
     if not isinstance(cfg.scratch_dir, str):
         raise ValueError("Scratch folder must be a string")
     if cfg.scratch_dir.strip():
@@ -489,6 +766,9 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f"Scratch folder is not a folder: {cfg.scratch_dir}")
     if not isinstance(cfg.update_check, bool):
         raise ValueError("Update check must be true or false")
+    if not isinstance(cfg.update_auto_download, bool):
+        raise ValueError("Automatic update download must be true or false")
+    _validate_attention(cfg)
     if not isinstance(cfg.custom_theme, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
         for key, value in cfg.custom_theme.items()
@@ -505,7 +785,6 @@ def validate_config(cfg: AppConfig) -> None:
     profile_names: set[str] = set()
     for profile in cfg.profiles:
         from .agents import AGENT_TYPES as validate_agent_types
-        from .agents import validate as validate_agent
         from .connections import validate as validate_connection
 
         name = profile.name.strip() if isinstance(profile.name, str) else ""
@@ -535,12 +814,13 @@ def validate_config(cfg: AppConfig) -> None:
             raise ValueError(f'Terminal profile "{name}": agent options must be an object')
         if not isinstance(profile.autostart, bool):
             raise ValueError(f'Terminal profile "{name}": autostart must be true or false')
+        start = (profile.start_command or "").strip()
+        if profile.terminal_type in validate_agent_types or (
+            is_shell_profile(profile) and (not start or _starts_agent(start))
+        ):
+            raise ValueError(f'Terminal profile "{name}": {PROFILE_KIND_ERROR}')
         try:
             validate_connection(profile)
-            if profile.terminal_type in validate_agent_types:
-                # Agents need a project folder, and the workspace root is the
-                # only source of one: the spawn refuses when none resolves.
-                validate_agent(profile)
             if profile.terminal_type in ("ssh", "sftp"):
                 _validate_ssh(profile)
         except ValueError as exc:
@@ -612,6 +892,28 @@ def validate_new_bindings(cfg: AppConfig, previous: AppConfig | None = None) -> 
         raise ValueError(f"{label} needs Ctrl, Alt or Win")
 
 
+PRE_43_BACKUP = "config.pre-4.3.json"
+# What the 4.3 migration dropped, kept for the backend: on Windows the
+# launcher process loads (and migrates) the config before the backend starts,
+# and neither has logging set up yet when it does.
+MIGRATION_NOTES = "migration-4.3.txt"
+MIGRATION_PREFIX = "Settings moved to QuickTerm 4.3: "
+
+
+def take_migration_notice() -> str | None:
+    """The migration's notes, once: the file is deleted as it is read.
+
+    Best effort; a file that cannot be read or deleted says nothing.
+    """
+    path = config_dir() / MIGRATION_NOTES
+    try:
+        text = read_text(path).strip()
+        path.unlink()
+    except (OSError, UnicodeError):
+        return None
+    return MIGRATION_PREFIX + text if text else None
+
+
 def load_config() -> AppConfig:
     path = config_dir() / "config.json"
     if not path.exists():
@@ -620,8 +922,24 @@ def load_config() -> AppConfig:
         return cfg
     try:
         raw = json.loads(read_text(path))
-        cfg = config_from_dict(raw)
+        migrating = isinstance(raw, dict) and "agents" not in raw
+        notes: list[str] = []
+        cfg = config_from_dict(migrate_agents(raw, notes) if migrating else raw)
         validate_config(cfg)
+        if migrating:
+            # 4.3 moves agents out of the profiles and drops the shell
+            # profiles. The file as it was stays next to the new one, written
+            # before the first save that changes it.
+            backup = path.with_name(PRE_43_BACKUP)
+            if not backup.exists():
+                _atomic_write(backup, read_text(path))
+            save_config(cfg)
+            if notes:
+                try:
+                    _atomic_write(path.with_name(MIGRATION_NOTES), " ".join(notes) + "\n")
+                except OSError:
+                    pass  # the notice is an extra; the migrated config is saved
+            return cfg
         if _has_plaintext_environment(raw):
             try:
                 save_config(cfg)

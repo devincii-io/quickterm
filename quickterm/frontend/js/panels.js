@@ -2,6 +2,7 @@ import { closeConfirm, confirmIsOpen, confirmNear } from "./confirm_popover.js";
 import * as api from "./api.js";
 import { DASHBOARD_REFRESH_MS, TERMINAL_TYPES, make } from "./panel_shared.js";
 import { renderDashboard } from "./panel_dashboard.js";
+import { renderWorkspaceSettings } from "./panel_workspace.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { closeMenu, menuIsOpen } from "./menu.js";
 import { renderGeneralSettings } from "./panel_settings_general.js";
@@ -13,6 +14,7 @@ import { renderAboutSettings, renderAdvancedSettings } from "./panel_settings_ab
 import { settingsSearchResults } from "./panel_settings_kit.js";
 import { renderHelp } from "./panel_help.js";
 import { renderConnections, connectionProblems, profileTypeLabel } from "./panel_connections.js";
+import { renderAgentSettings } from "./panel_settings_agents.js";
 import { renderSetup } from "./setup.js";
 import { settingsPatch, settingsProblems } from "./global_settings.js";
 import { snapshotItems } from "./config_list.js";
@@ -60,6 +62,9 @@ export class Panels {
     this.subtitleEl = overlay.querySelector(".panel-subtitle");
     this.bodyEl = overlay.querySelector(".panel-body");
     this.closeButton = overlay.querySelector(".panel-close");
+    // Controls a view puts beside its title (the board's search).
+    this.headTools = make("div", "panel-head-tools");
+    this.closeButton.before(this.headTools);
 
     overlay.addEventListener("mousedown", (event) => {
       if (event.target === overlay) this.close();
@@ -160,10 +165,14 @@ export class Panels {
     this.open = name;
     this.overlay.hidden = false;
     this.panelEl.dataset.view = name;
-    if (name !== "dashboard") this._stopDashboardRefresh();
+    if (name !== "dashboard") {
+      this._stopDashboardRefresh();
+      this.headTools.replaceChildren();
+    }
     if (name !== "settings") this._settingsView = null;
     const titles = {
-      dashboard: ["Your workspaces", "Pick up where you left off, or start something new."],
+      dashboard: ["Workspace board", ""],
+      workspace: ["Workspace settings", this._workspaceName || ""],
       settings: ["Settings", "Make QuickTerm feel right for the way you work."],
       help: ["Quick guide", "Everything you need, without a manual."],
       setup: ["Set up QuickTerm", "Windows, workspaces and terminals"],
@@ -172,6 +181,8 @@ export class Panels {
     if (name === "dashboard") {
       this._dashboard();
       this._startDashboardRefresh();
+    } else if (name === "workspace") {
+      renderWorkspaceSettings.call(this, this._workspaceName);
     } else if (name === "settings") {
       this.bodyEl.textContent = "";
       this._settings();
@@ -191,50 +202,22 @@ export class Panels {
     }
   }
 
-  // Live data on the dashboard keeps itself fresh. A refresh patches the
-  // existing DOM in place (see render.js), so it no longer replaces the node
-  // under the pointer, the input under the caret, or the field the folder
-  // picker is holding a reference to.
+  // The board keeps itself fresh. A refresh patches the existing DOM in place
+  // (see render.js), so it never replaces the card under the pointer or the
+  // search box under the caret.
   _startDashboardRefresh() {
     this._stopDashboardRefresh();
     this._dashTimer = setInterval(() => {
-      // A hidden window must not keep issuing 2+N requests every 5 s.
+      // A hidden window must not keep issuing 3+N requests every 5 s.
       if (document.hidden) return;
       if (this.open !== "dashboard" || this._dashLoading) return;
-      // A destructive confirmation is a fixed box anchored to its trigger. A
-      // refresh that moved or removed the trigger would strand it.
-      if (confirmIsOpen()) return;
-      // Somebody is holding the dashboard still across an await (the folder
-      // picker disables Browse before awaiting, which drops focus to <body>).
-      if (this._dashBusy > 0) return;
       this._dashboard();
     }, DASHBOARD_REFRESH_MS);
-  }
-
-  // Counted, because two folder fields can be busy at once. The returned
-  // release is idempotent so a caller can wire it to both a completion signal
-  // and a timeout ceiling.
-  holdDashboardRefresh() {
-    this._dashBusy = (this._dashBusy || 0) + 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this._dashBusy -= 1;
-    };
   }
 
   _stopDashboardRefresh() {
     clearInterval(this._dashTimer);
     this._dashTimer = null;
-  }
-
-  // Collapse an element smoothly before a list refresh removes it.
-  _leave(el) {
-    el.style.height = `${el.offsetHeight}px`;
-    void el.offsetHeight; // commit the fixed height before transitioning
-    el.classList.add("leaving");
-    return new Promise((resolve) => setTimeout(resolve, 260));
   }
 
   _sectionHeading(title, subtitle) {
@@ -362,7 +345,10 @@ export class Panels {
       if (tab === "general") renderGeneralSettings.call(this, content);
       else if (tab === "window") renderWindowSettings.call(this, content);
       else if (tab === "shortcuts") renderShortcutSettings.call(this, content);
-      else if (tab === "connections") renderConnections.call(this, content);
+      else if (tab === "connections") {
+        renderAgentSettings.call(this, content);
+        renderConnections.call(this, content);
+      }
       else if (tab === "snippets") renderSnippetSettings.call(this, content);
       else if (tab === "about") renderAboutSettings.call(this, content);
       else renderAdvancedSettings.call(this, content);
@@ -518,10 +504,11 @@ export class Panels {
     await this._openSettingsTab(kind === "snippet" ? "snippets" : "connections");
   }
 
-  /** Open the Dashboard with the editor of workspace `name` open. */
+  /** Open the settings of workspace `name`: folder, logo, layout. */
   showWorkspace(name) {
-    this._revealWorkspace = name || null;
-    this.show("dashboard");
+    if (!name) return;
+    this._workspaceName = name;
+    this.show("workspace");
   }
 
   /** Every settings field for the palette's "setting:" rows. */

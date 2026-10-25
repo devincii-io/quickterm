@@ -9,7 +9,8 @@
 
 import { initLauncher } from "./launcher.js";
 import { isScratchWorkspace } from "./boot_context.js";
-import { agentState } from "./sidebar_model.js";
+import { agentState, loadView, sidebarGroups, visibleGroups } from "./sidebar_model.js";
+import { agentProfiles } from "./agent_profile.js";
 
 export { finishedAttachRecord } from "./shell_routing.js";
 
@@ -27,12 +28,18 @@ function wantsSeen(session) {
   return Boolean(session?.attention) || ["done", "failed"].includes(agentState(session));
 }
 
-// The folders POST /api/git/info is asked about: every saved workspace's,
-// once each, at most what the route takes.
+// The folders POST /api/git/info is asked about: every saved local
+// workspace's, once each, at most what the route takes. A folder on an SSH
+// host is not on this disk; its git facts come with the workspace record.
 export function gitPaths(folders) {
   const paths = new Set();
-  for (const folder of folders?.values?.() || []) if (folder?.path) paths.add(folder.path);
+  for (const folder of folders?.values?.() || []) if (folder?.path && !folder.host) paths.add(folder.path);
   return [...paths].slice(0, GIT_MAX_PATHS);
+}
+
+// The remote workspaces whose git facts are re-read with the local ones.
+export function remoteNames(folders) {
+  return [...(folders?.entries?.() || [])].filter(([, folder]) => folder?.host).map(([name]) => name);
 }
 
 // Which session, if any, the user is plainly looking at and the server still
@@ -85,8 +92,8 @@ export function sidebarModel({
   return {
     profiles: state.profiles,
     inventory: state.terminalInventory,
-    defaultProfile: state.cfg?.default_profile,
-    selectedTerminal: state.selectedTerminal || null,
+    shell: state.cfg?.shell ?? null,
+    agents: agentProfiles(state.cfg, state.terminalInventory),
     logoUrl,
     workspaces: (state.workspaceNames || [])
       .filter((name) => !isScratchWorkspace(name))
@@ -94,7 +101,8 @@ export function sidebarModel({
         name,
         path: folders.get(name)?.path ?? null,
         pathExists: folders.get(name)?.pathExists ?? null,
-        git: git.get(folders.get(name)?.path) ?? null,
+        host: folders.get(name)?.host ?? null,
+        git: (folders.get(name)?.host ? folders.get(name)?.git : git.get(folders.get(name)?.path)) ?? null,
       })),
     views: views.map(({ workspace, label, color, active }) => ({ workspace, label, color, active })),
     sessions,
@@ -132,11 +140,29 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   const git = new Map();
   let gitAsked = "";
   let gitTimer = null;
+  // The backend answers a remote workspace from a cache it fills in the
+  // background over ssh, so a first answer without git is asked again soon.
+  let remoteRetries = 0;
+  function refreshRemoteGit() {
+    const names = remoteNames(folders);
+    if (!names.length || typeof api.getWorkspace !== "function") return;
+    Promise.all(names.map((name) => api.getWorkspace(name).then((saved) => {
+      const folder = folders.get(name);
+      if (folder && saved) folder.git = saved.git || null;
+      return Boolean(saved?.git);
+    }, () => true))).then((answered) => {
+      render();
+      if (answered.every(Boolean) || remoteRetries >= 3) { remoteRetries = 0; return; }
+      remoteRetries += 1;
+      setTimeout(refreshRemoteGit, 5000);
+    });
+  }
   function refreshGit() {
     clearTimeout(gitTimer);
     gitTimer = null;
+    if (!document.hidden) refreshRemoteGit();
     const paths = gitPaths(folders);
-    gitAsked = paths.join("\n");
+    gitAsked = gitKey();
     if (!paths.length || document.hidden || typeof api.gitInfo !== "function") return;
     api.gitInfo(paths).then((answer) => {
       git.clear();
@@ -144,8 +170,9 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
       render();
     }).catch(() => {});
   }
+  const gitKey = () => [...gitPaths(folders), ...remoteNames(folders)].join("\n");
   function gitSoon() {
-    if (!gitTimer && gitPaths(folders).join("\n") !== gitAsked) gitTimer = setTimeout(refreshGit, GIT_SOON_MS);
+    if (!gitTimer && gitKey() !== gitAsked) gitTimer = setTimeout(refreshGit, GIT_SOON_MS);
   }
 
   function model() {
@@ -173,11 +200,11 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   function init() {
     state.launcherView = initLauncher($("launcher"), {
       actions: {
-        // The branch name is asked for in the palette, the one inline input
-        // the chrome has; there is no free-text prompt anywhere else.
-        newWorktree: (name) => {
+        // The host and folder are asked for in the palette, the one inline
+        // input the chrome has.
+        newRemoteWorkspace: () => {
           panels.close();
-          palette.worktreeMode?.(name);
+          palette.remoteWorkspaceMode?.();
         },
         ...actions,
       },
@@ -195,9 +222,11 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
           panels.close();
           palette.newWindowMode();
         }],
-        ["dashboard", () => panels.toggle("dashboard"), "alt+g"],
+        ["workspace board", () => panels.toggle("dashboard"), "alt+g"],
         ["settings", () => panels.toggle("settings"), "alt+s"],
         ["help", () => panels.toggle("help"), "alt+i"],
+        // Shows and hides the right panel; on while it shows (markNavToggle).
+        ["right panel", () => actions.toggleRightPanel?.(), "alt+shift+e"],
       ],
     });
     // Coming back to the window is looking at its focused terminal again.
@@ -213,6 +242,7 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
       const listed = new Set((list || []).map((session) => session?.id));
       for (const id of [...killed]) if (!listed.has(id)) killed.delete(id);
       lastSessions = visible(list);
+      for (const view of views?.views?.() || []) views.appFor(view)?.noteSessions?.(lastSessions);
       // Views call refreshSoon on every focus change, so this poll is also
       // the moment a pane that needs you gains focus.
       const focusedId = activeApp()?.focusedSessionId?.() || null;
@@ -250,5 +280,11 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
     init, render, refreshStatus, refreshSoon, markSeen, forget,
     sessions: () => lastSessions,
     context: () => collectViewContext(views),
+    // The groups as the sidebar draws them, in its order (Ctrl+Shift+1..9).
+    groups: () => {
+      const view = loadView();
+      const now = model();
+      return visibleGroups(sidebarGroups(now.sessions, { ...now, view }), view).groups;
+    },
   };
 }

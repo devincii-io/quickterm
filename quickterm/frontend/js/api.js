@@ -72,13 +72,18 @@ export const putWorkspace = (name, layout, logo, sessionIds = [], path, options)
     ...(path === undefined ? {} : { path }),
   }, options);
 export const deleteWorkspace = (name) => req("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
+// A workspace on an SSH host: `host` names an OpenSSH profile, `path` is a
+// folder there. The check runs `test -d` over ssh: {ok, message}.
+export const putRemoteWorkspace = (name, host, path) =>
+  req("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { layout: null, session_ids: [], host, path });
+export const checkRemoteFolder = (host, path) => req("POST", "/api/workspaces/remote-check", { host, path });
+// The workspace board's columns: {status: {"<workspace>": "todo"|...}};
+// a workspace without an entry is "in-progress".
+export const getBoard = () => req("GET", "/api/board");
+export const setBoardStatus = (name, status) => req("PUT", `/api/board/${encodeURIComponent(name)}`, { status });
 // Branch and worktree facts for up to 256 folders, read from .git without
 // starting git: {"<path as sent>": null | {branch, head, worktree, main_path}}.
 export const gitInfo = (paths) => req("POST", "/api/git/info", { paths: [...(paths || [])] });
-// A new branch checked out in its own folder, saved as workspace
-// "<from>/<branch slug>": {workspace, path, setup: null | {command, source}}.
-export const createWorktree = (from, branch, base) =>
-  req("POST", "/api/workspaces/worktree", { from, branch, ...(base ? { base } : {}) });
 // Directory-only listing for the in-app folder browser. A blank path lets the
 // backend choose the home folder, so the caller never has to know one.
 export const listDirs = (path) =>
@@ -149,7 +154,13 @@ export const openTarget = (target) => req("POST", "/api/open", { target });
 // when VS Code is not installed, so the banner can say that instead of
 // "no such path".
 export const openFolder = (path, app) => req("POST", "/api/open", { target: path, app });
+// The background update (update.py): its state, starting or joining the
+// download, and the hand-over to Setup once it is ready (409 before).
+export const updateStatus = () => req("GET", "/api/update/status");
+export const downloadUpdate = () => req("POST", "/api/update/download");
 export const installUpdate = () => req("POST", "/api/update/install");
+// Installed but this backend was kept: start the installed launcher (409 before).
+export const restartForUpdate = () => req("POST", "/api/update/restart");
 
 // Branding assets (logos). Uploads send the raw file with its own content-type.
 export const assetUrl = (id) => (id ? `/api/assets/${encodeURIComponent(id)}` : null);

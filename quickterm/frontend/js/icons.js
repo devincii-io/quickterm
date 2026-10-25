@@ -50,6 +50,7 @@ const PATHS = {
     '<path d="M11 3.5 12.9 8.6 18 10.5 12.9 12.4 11 17.5 9.1 12.4 4 10.5 9.1 8.6z"/>' +
     '<path d="M18.5 15.5v5M16 18h5"/>',
   window: '<rect x="3" y="4.5" width="18" height="15" rx="1.8"/><line x1="3" y1="9" x2="21" y2="9"/>',
+  "panel-right": '<rect x="3" y="4.5" width="18" height="15" rx="1.8"/><line x1="15" y1="4.5" x2="15" y2="19.5"/>',
 };
 
 const SVG_NS = "http://www.w3.org/2000/svg";

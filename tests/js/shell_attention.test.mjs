@@ -83,7 +83,7 @@ test("the sidebar model lists saved workspaces with their folders, the views and
   const state = {
     profiles: [{ name: "pwsh" }],
     terminalInventory: { types: [] },
-    cfg: { default_profile: "pwsh" },
+    cfg: { shell: "cmd", agents: {} },
     selectedTerminal: null,
     workspaceNames: ["api", "scratch-view-0123456789ab", "scratch", "docs"],
   };
@@ -99,18 +99,19 @@ test("the sidebar model lists saved workspaces with their folders, the views and
     logoUrl: "/logo",
   });
   assert.deepEqual(model.workspaces, [
-    { name: "api", path: "/work/api", pathExists: false, git: null },
-    { name: "docs", path: null, pathExists: null, git: null },
+    { name: "api", path: "/work/api", pathExists: false, host: null, git: null },
+    { name: "docs", path: null, pathExists: null, host: null, git: null },
   ], "scratch is never a saved workspace, and an unread folder is unknown, not missing");
   assert.deepEqual(model.views, [{ workspace: "api", label: "api", color: "#fff", active: true }]);
   assert.equal(model.sessions, sessions);
   assert.deepEqual(model.attached, { a: "api" });
   assert.deepEqual(model.owned, { a: "api" });
   assert.equal(model.here, here);
-  assert.equal(model.defaultProfile, "pwsh");
+  assert.equal(model.shell, "cmd");
+  assert.deepEqual(model.agents, [], "no agent is installed in this inventory");
   assert.equal(model.logoUrl, "/logo");
   assert.deepEqual(Object.keys(model).sort(), [
-    "attached", "defaultProfile", "focusedId", "here", "inventory", "logoUrl", "owned", "profiles", "selectedTerminal",
-    "sessions", "views", "workspaces",
-  ], "exactly the SidebarModel of spec 4.2");
+    "agents", "attached", "focusedId", "here", "inventory", "logoUrl", "owned", "profiles", "sessions", "shell",
+    "views", "workspaces",
+  ], "the SidebarModel of spec 4.2, with the shell and the agents of 4.3");
 });

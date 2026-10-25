@@ -47,7 +47,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "theme": cfg.theme,
             "custom_theme": dict(cfg.custom_theme),
             "logo": cfg.logo,
-            "default_profile": cfg.default_profile,
+            "shell": cfg.shell,
+            "agents": {kind: asdict(value) for kind, value in cfg.agents.items()},
             "profiles": [asdict(p) for p in cfg.profiles],
             "snippets": [asdict(s) for s in cfg.snippets],
             "voice_available": _voice_available(),
@@ -57,6 +58,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "elevated": elevated,
             "version": __version__,
             "update_check": cfg.update_check,
+            "update_auto_download": getattr(cfg, "update_auto_download", True),
             "idle_timeout_s": cfg.idle_timeout_s,
             "max_sessions": cfg.max_sessions,
             # Startup hotkey registration failure (another program owns the
@@ -113,6 +115,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         # Its shortcuts were accepted when it was saved. The rule that new
         # shortcuts need Ctrl, Alt or Win must not refuse a recovery, or a 3.x
         # "f12" kept profiles that were deleted since out of reach.
+        # A version from before 4.3 holds agent and shell profiles; merged
+        # onto today's config, which has `agents`, it would never migrate and
+        # its profiles would be refused. It migrates as that file would.
+        migrate = getattr(config_mod, "migrate_agents", None)
+        if isinstance(stored, dict) and "agents" not in stored and migrate is not None:
+            stored = migrate(stored)
         await save_and_apply(stored, check_new_bindings=False)
         return Response(status_code=204)
 
@@ -153,8 +161,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         # to the next summon, the hotkeys through the rebind below.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "max_sessions", "scrollback_bytes", "default_profile", "profiles", "snippets", "voice",
-            "update_check", "scratch_dir", "window", "overlay", "summon_hotkey",
+            "max_sessions", "scrollback_bytes", "shell", "agents", "profiles", "snippets", "voice",
+            "update_check", "update_auto_download", "scratch_dir", "window", "overlay", "summon_hotkey",
+            "notifications", "keep_awake",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))
@@ -164,6 +173,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         set_scrollback = getattr(manager, "set_scrollback_bytes", None)
         if set_scrollback:
             set_scrollback(cfg.scrollback_bytes)
+        check_keep_awake = getattr(manager, "check_keep_awake", None)
+        if check_keep_awake:
+            check_keep_awake()
         if ctx.rebind_hotkeys is not None and _hotkey_bindings(cfg) != before:
             # Waits for the hotkey thread, which may wait for the GUI thread.
             await asyncio.to_thread(ctx.rebind_hotkeys, cfg)

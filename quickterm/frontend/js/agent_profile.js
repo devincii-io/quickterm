@@ -102,6 +102,11 @@ export function pickerCommand(type) {
 // Ctrl+Enter on Windows, which Codex does not bind.
 export const AGENT_NEWLINE = "\x1b\r";
 
+// What the WSL agent wrap prints when the agent exits (quickterm/shells.py,
+// AGENT_EXIT_PRINTF): an OSC the pane swallows.
+export const AGENT_EXIT_OSC = 7770;
+export const AGENT_EXIT_MARK = "quickterm-agent-exit";
+
 // The sequence a key event should send instead of xterm's own, or null.
 // Only Shift+Enter in an agent pane: in a shell Shift+Enter keeps meaning
 // Enter, and ESC CR there would be a stray Alt+Enter.
@@ -109,6 +114,54 @@ export function agentNewlineFor(event, type) {
   if (!isAgentType(type) || !event || event.key !== "Enter" || !event.shiftKey) return null;
   if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return null;
   return AGENT_NEWLINE;
+}
+
+// Claude Code and Codex are settings (config `agents`), not profiles. The
+// launch code still takes a profile-shaped object, named by its kind, which is
+// also what a launch request sends as `profile`.
+export const AGENT_NAMES = Object.freeze({ "claude-code": "Claude Code", codex: "Codex" });
+
+export function agentProfile(kind, settings = {}) {
+  return {
+    name: kind,
+    label: AGENT_NAMES[kind],
+    builtin: true,
+    terminal_type: kind,
+    cmd: settings?.cmd || "",
+    args: [...(settings?.args || [])],
+    agent_mode: settings?.agent_mode ?? null,
+    agent: { ...(settings?.agent || {}) },
+  };
+}
+
+// Found by the inventory, or given an executable of its own in Settings.
+export function agentInstalled(inventory, kind, settings = null) {
+  if (String(settings?.cmd || "").trim()) return true;
+  return (inventory?.types || []).some((type) => type.id === kind && type.executable && type.available !== false);
+}
+
+export function agentProfiles(cfg, inventory) {
+  return AGENT_TYPES
+    .filter((kind) => agentInstalled(inventory, kind, cfg?.agents?.[kind]))
+    .map((kind) => agentProfile(kind, cfg?.agents?.[kind]));
+}
+
+// What the settings start, as a command line: Settings shows it on the
+// agent's row. Display only; the backend builds the real argv. `options` is
+// the type's schema from GET /api/system/agents, which names each flag.
+export function agentCommandLine(kind, settings = {}, options = []) {
+  const mode = settings?.agent_mode ?? defaultAgentMode(kind);
+  const quote = (word) => (/[\s"]/.test(word) ? `"${word.replace(/"/g, '\\"')}"` : word);
+  const flagOf = new Map((options || []).map((option) => [option.key, option.flag]));
+  const words = [String(settings?.cmd || "").trim() || AGENT_CLIS[kind], ...modeArgs(kind, mode)];
+  for (const [key, value] of Object.entries(settings?.agent || {})) {
+    if (value === "" || value === "false") continue;
+    const flag = flagOf.get(key) || `--${key.replace(/_/g, "-")}`;
+    if (value === "true") { words.push(flag); continue; }
+    for (const line of String(value).split(/\r?\n/).filter((item) => item.trim())) words.push(flag, quote(line.trim()));
+  }
+  words.push(...(settings?.args || []).map(quote));
+  return words.join(" ");
 }
 
 export function isAgentSessionId(value) {

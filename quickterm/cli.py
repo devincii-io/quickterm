@@ -200,6 +200,10 @@ def _parser() -> _Parser:
     ls.add_argument("--json", action="store_true", help="print the raw session list")
 
     new = verb("new", "Open a new terminal in the running app, or start the app with it.", _new)
+    new.add_argument(
+        "agent", nargs="?", choices=("claude-code", "codex"),
+        help="start Claude Code or Codex (from Settings > Agents) instead of the shell",
+    )
     new.add_argument("--profile", help="the terminal profile to start")
     new.add_argument(
         "--cwd", help="the starting folder (default: this folder, unless --profile is given)"
@@ -260,11 +264,14 @@ def new_launch(args: argparse.Namespace) -> dict[str, str]:
     a shell.
     """
     body: dict[str, str] = {}
-    if args.profile:
-        body["profile"] = args.profile
+    agent = getattr(args, "agent", None)
+    if agent and args.profile:
+        raise ValueError("name an agent or --profile, not both")
+    if args.profile or agent:
+        body["profile"] = args.profile or agent
     if args.cwd:
         body["cwd"] = os.path.abspath(os.path.expanduser(args.cwd))
-    elif not args.profile:
+    elif not body.get("profile"):
         body["cwd"] = os.getcwd()
     if args.workspace:
         body["workspace"] = args.workspace
@@ -272,7 +279,11 @@ def new_launch(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _new(client: Client, args: argparse.Namespace) -> int:
-    body = new_launch(args)
+    try:
+        body = new_launch(args)
+    except ValueError as exc:
+        sys.stderr.write(f"quickterm new: error: {exc}\n")
+        return EXIT_USAGE
     try:
         client.call("POST", "/api/launches", body)
     except NotRunning:

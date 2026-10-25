@@ -42,9 +42,6 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
     ]);
     if (!fresh) return;
     const previous = state.cfg;
-    // A new default terminal in Settings is what "+" starts from now on, not
-    // only after a restart.
-    if (fresh.default_profile !== state.cfg.default_profile) state.selectedTerminal = null;
     state.cfg = fresh;
     reportLaunchError(fresh.launch_error);
     state.scratchRoot = fresh.scratch_dir || null;

@@ -62,6 +62,7 @@ def test_panels_coordinator_stays_split_into_section_modules():
     assert len(source.splitlines()) < 600
     for module in (
         "panel_dashboard.js",
+        "panel_workspace.js",
         "panel_help.js",
         "panel_settings_general.js",
         "panel_settings_appearance.js",
@@ -110,7 +111,7 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     # One shared control backs every folder field. The primary picker is the
     # in-app browser; the native dialog is a secondary route where it exists.
     shared = read(FRONTEND_JS / "panel_shared.js")
-    dashboard = read(FRONTEND_JS / "panel_dashboard.js")
+    workspace_settings = read(FRONTEND_JS / "panel_workspace.js")
     browser = read(FRONTEND_JS / "folder_browser.js")
     app = read(ROOT / "quickterm" / "app.py")
 
@@ -126,9 +127,9 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     assert "nativeBtn.hidden = !(native && native.available())" in browser
     assert "claimFocus(FOCUS_OWNER)" in browser
     assert "releaseFocus(FOCUS_OWNER)" in browser
-    # Workspace folders are chosen on the dashboard. Terminal configs have no
-    # folder at all; the only other folder is scratch's, under Advanced.
-    assert dashboard.count("folderPickerControl(") >= 2
+    # Workspace folders are chosen in Workspace settings. Terminal configs have
+    # no folder at all; the only other folder is scratch's, under Advanced.
+    assert "folderPickerControl(input," in workspace_settings
     assert "folderPickerControl(" not in read(CONNECTIONS_JS)
     assert "folderPickerControl(scratch," in read(ABOUT_JS)
 
@@ -146,20 +147,24 @@ def test_the_scratch_folder_is_a_setting_that_round_trips():
     assert "state.scratchRoot = fresh.scratch_dir || null;" in sync
 
 
-def test_dashboard_refreshes_by_patching_instead_of_rebuilding():
-    dashboard = read(FRONTEND_JS / "panel_dashboard.js")
+def test_the_board_refreshes_by_patching_instead_of_rebuilding():
+    board = read(FRONTEND_JS / "panel_dashboard.js")
     panels = read(PANELS_JS)
 
-    assert 'from "./render.js"' in dashboard
-    assert "patchList(" in dashboard
-    assert 'this.bodyEl.textContent = ""' not in dashboard.split("function buildDashboard")[1]
+    assert 'from "./render.js"' in board
+    assert "patchList(" in board
+    assert 'this.bodyEl.textContent = ""' not in board.split("function buildBoard")[1]
     assert "this.bodyEl.contains(document.activeElement)" not in panels
-    assert "holdDashboardRefresh()" in panels
-    assert "this._dashBusy > 0" in panels
-    assert "panel.holdDashboardRefresh()" in dashboard
-    # "open workspace" is the wording; the app maps it to open or focus a view.
-    assert '"Open workspace"' in dashboard
-    assert "panel.app.loadWorkspace(" in dashboard
+    # A click shows the workspace through the app's own open, which opens a
+    # view or focuses the one already there; it never loads in place.
+    assert "view.panel.app.openWorkspace?.(name)" in board
+    # The board is the dashboard's panel, under the same name and key.
+    assert '["workspace board", () => panels.toggle("dashboard"), "alt+g"]' in read(
+        FRONTEND_JS / "sidebar.js"
+    )
+    assert 'dashboard: ["Workspace board", ""]' in panels
+    # Never a native select anywhere on it.
+    assert "<select" not in board and '"select"' not in board
 
 
 def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():

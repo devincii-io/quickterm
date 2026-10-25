@@ -93,6 +93,15 @@ def test_workspace_folder_reaches_every_spawn_path():
     assert "return state.scratchRoot || null;" in spawner
 
 
+def test_the_recovery_bar_finds_agents_beyond_the_saved_profiles():
+    """4.3 agents are settings, so the saved profiles alone hold none of them."""
+    switch = (FRONTEND_JS / "workspace_switch.js").read_text(encoding="utf-8")
+    main = (FRONTEND_JS / "main.js").read_text(encoding="utf-8")
+    assert "claudeProfileForPane(state.profiles" not in switch
+    assert switch.count("claudeProfileForPane(allProfiles(), pane)") == 2
+    assert "allProfiles: spawner.allProfiles," in main
+
+
 def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy():
     spawner = SPAWNER_JS.read_text(encoding="utf-8")
     commands = PANE_COMMANDS_JS.read_text(encoding="utf-8")
@@ -101,14 +110,19 @@ def test_splits_inherit_signalled_directory_without_changing_new_terminal_policy
 
     assert 'from "./split_policy.js"' in spawner
     assert "spawnSplitInto(pane, source)" in commands
-    assert "newTerminal:" in commands and "spawnDefaultInto(pane)" in commands
+    # Alt+N and "+" (4.3): the focused pane's folder only inside the
+    # workspace folder, else the workspace folder as before.
+    assert "newTerminal:" in commands and "spawnDefaultInto(pane, cwd)" in commands
+    assert "sameFolderCwd(source?.bestKnownCwd?.() || null, state.workspacePath)" in commands
+    assert "samePath(paneCwd, root) || insidePath(paneCwd, root) ? paneCwd : null" in spawner
     assert "registerOscHandler(7" in pane
     assert "registerOscHandler(9" in pane
     items = PALETTE_ITEMS_JS.read_text(encoding="utf-8")
     assert "...agentRows(p, a)" in palette
-    assert "label: `split agent view: ${profile.name}`" in items
+    assert "label: `split agent view${suffix || `: ${agent}`}`" in items
     assert 'agentMode: "agents"' in spawner
-    assert "normalAgentSplitMode(profile)" in spawner
+    # A split starts the shell (CONTRACTS 4.3), never the agent it sits beside.
+    assert "return spawnShellInto(pane, contextCwd(splitCwd(source, choice)), null);" in spawner
 
 
 def test_panes_move_by_dragging_their_header():
@@ -237,8 +251,11 @@ def test_the_palette_opens_workspaces_only_from_enumerated_rows():
         assert "loadWorkspace" not in source
     assert "label: `open workspace: ${name}`" in items
     assert "run: () => app?.openWorkspace?.(name)" in items
-    assert "label: `close workspace view: ${label}`" in items
-    assert 'label: "new scratch view"' in items
+    assert "label: `close workspace: ${label}`" in items
+    assert 'label: "open scratch"' in items
+    # The stage shows one workspace; the palette walks the open ones.
+    assert 'label: "next workspace"' in items and "app?.cycleWorkspace?.(1)" in items
+    assert 'label: "previous workspace"' in items and "app?.cycleWorkspace?.(-1)" in items
     assert "...workspaceRows(this.app, this.late.names, this.late.details)" in palette
     assert 'label: "move terminal here…"' in palette
     assert "run: () => this._foreignSessionMode()" in palette

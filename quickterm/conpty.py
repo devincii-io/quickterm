@@ -338,7 +338,19 @@ class PseudoConsole:
 
 
 def command_line(executable: str, args: list[str]) -> str:
-    """The CreateProcess command line: the program, then its arguments."""
+    """The CreateProcess command line: the program, then its arguments.
+
+    cmd.exe reads everything after /c or /k as its own command text, not as
+    C-runtime arguments. The agent wrap (shells.wrap) hands it one argument
+    that is already that text inside one pair of quotes; list2cmdline would
+    escape those quotes with backslashes, which cmd does not read, so that
+    one form goes in verbatim. Every other cmd.exe line keeps list2cmdline.
+    """
+    name = executable.replace("/", "\\").rsplit("\\", 1)[-1].casefold()
+    if name in ("cmd", "cmd.exe") and len(args) >= 2 and args[-2].casefold() in ("/c", "/k"):
+        text = args[-1]
+        if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+            return f"{subprocess.list2cmdline([executable, *args[:-1]])} {text}"
     line = subprocess.list2cmdline([executable])
     return f"{line} {subprocess.list2cmdline(args)}" if args else line
 

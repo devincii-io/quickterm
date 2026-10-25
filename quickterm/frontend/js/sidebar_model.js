@@ -3,9 +3,11 @@
 // and the per-machine storage behind the mode, width and folded groups.
 // launcher.js builds the DOM from it and re-exports its public names.
 
-import { agentModeOf, modeArgs, modeLabel } from "./agent_profile.js";
+import { agentModeOf, modeLabel } from "./agent_profile.js";
+import { DEFAULT_SHELL, availableShells } from "./shell_choice.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
 import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
+import { remoteCapable } from "./remote_workspace.js";
 
 export const SIDEBAR_MODES = ["full", "rail", "hidden"];
 export const SIDEBAR_MODE_KEY = "quickterm.sidebarMode";
@@ -54,6 +56,14 @@ export function isWideSidebar(width) {
 // Terminals nobody claims land here. panel_dashboard.js names the same set with
 // the same word, so the two views cannot describe one thing two ways.
 export const UNASSIGNED_GROUP = "Unassigned";
+
+// The sidebar footer's glyphs, keyed by the label the shell passes in
+// `chrome`, so a new footer entry is one map line away from its own glyph
+// instead of silently falling back to the terminal one.
+export const NAV_ICONS = Object.freeze({
+  "workspace board": "dashboard", settings: "settings", help: "help",
+  commands: "terminal", "new window": "new-window", "right panel": "panel-right",
+});
 
 // What one terminal is doing, in one word.
 //
@@ -327,7 +337,7 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
       path: info?.path ?? null,
       pathExists: info?.pathExists ?? null,
       git: info?.git ?? null,
-      parent: null,
+      host: info?.host ?? null,
       sessions: [],
       counts: emptyCounts(),
     };
@@ -360,48 +370,28 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
     group.sessions.sort(recent ? (a, b) => idleOf(a.session) - idleOf(b.session) || byName(a, b) : byName);
   }
   const ordered = [...groups.values()].filter((group) => !flat || group.kind === "flat");
-  return nestWorktrees(ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+  return ordered.sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
     || (recent ? groupIdle(a) - groupIdle(b) : 0)
     || byText(a.label, b.label)
-    || byText(a.key, b.key)));
-}
-
-function pathKey(path) {
-  return String(path || "").replace(/[\\/]+/g, "/").replace(/\/$/, "").toLowerCase();
-}
-
-// A worktree workspace hangs under the workspace whose folder is its main
-// checkout, the way terminals hang under a workspace; siblings keep the order
-// they already had. A worktree whose main checkout is no workspace stays a
-// group of its own.
-function nestWorktrees(groups) {
-  const mains = new Map();
-  for (const group of groups) {
-    if (group.kind === "workspace" && group.path && !group.git?.worktree) mains.set(pathKey(group.path), group);
-  }
-  const children = new Map();
-  const top = [];
-  for (const group of groups) {
-    const main = group.kind === "workspace" && group.git?.worktree && group.git.main_path
-      ? mains.get(pathKey(group.git.main_path)) : null;
-    if (!main || main === group) { top.push(group); continue; }
-    group.parent = main.key;
-    if (group.label.startsWith(`${main.label}/`)) group.shortLabel = group.label.slice(main.label.length + 1);
-    if (!children.has(main.key)) children.set(main.key, []);
-    children.get(main.key).push(group);
-  }
-  return top.flatMap((group) => [group, ...(children.get(group.key) || [])]);
+    || byText(a.key, b.key));
 }
 
 // The branch a workspace head shows, muted: a detached HEAD by its short sha.
-// Empty when it would only repeat the name (a worktree is named after its
-// branch slug).
+// Empty when it would only repeat the name.
 export function groupBranch(group) {
   const git = group?.git;
   const branch = git?.branch || (git?.head ? `@${git.head}` : "");
   const plain = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-  if (!branch || plain(branch) === plain(group.shortLabel || group.label)) return "";
+  if (!branch || plain(branch) === plain(group.label)) return "";
   return branch;
+}
+
+// A workspace whose folder is a linked worktree says so after its branch and
+// names the main checkout in the tooltip. QuickTerm creates no worktrees; it
+// only shows what the folder is.
+export function worktreeNote(git) {
+  if (!git?.worktree) return null;
+  return { word: "worktree", title: git.main_path ? `worktree of ${git.main_path}` : "a git worktree" };
 }
 
 // Seconds since a terminal last did anything. Busy and ringing terminals are
@@ -422,7 +412,7 @@ function ensureFlat(groups) {
   if (!group) {
     group = {
       key: "flat", name: null, label: "Terminals", kind: "flat", open: false, active: false,
-      color: null, path: null, pathExists: null, git: null, parent: null, sessions: [],
+      color: null, path: null, pathExists: null, git: null, host: null, sessions: [],
       counts: emptyCounts(),
     };
     groups.set("flat", group);
@@ -438,9 +428,6 @@ export function visibleGroups(groups = [], view) {
   const options = { ...SIDEBAR_VIEW_DEFAULTS, ...(view || {}) };
   if (options.empty) return { groups, hidden: 0 };
   const keep = new Set(groups.filter((group) => group.sessions.length > 0 || group.open || group.active).map((group) => group.key));
-  // A shown worktree keeps its main workspace drawn, or it would hang under
-  // whatever group happens to precede it.
-  for (const group of groups) if (group.parent && keep.has(group.key)) keep.add(group.parent);
   const shown = groups.filter((group) => keep.has(group.key));
   return { groups: shown, hidden: groups.length - shown.length };
 }
@@ -528,136 +515,48 @@ export function shellLabel(profile) {
   return labels[profile.terminal_type] || profile.cmd || "Terminal";
 }
 
-export const SYSTEM_META = {
-  "powershell-core": { args: ["-NoLogo"] },
-  "windows-powershell": { args: ["-NoLogo"] },
-  "command-prompt": { args: [] },
-  wsl: { args: ["--cd", "~"] },
-  bash: { args: ["-l"] },
-  zsh: { args: ["-l"] },
-  fish: { args: ["-l"] },
-  "git-bash": { args: ["-l"] },
-  nushell: { args: [] },
-};
-
-// Agents need no profile. When the inventory finds a CLI, its common modes
-// exist out of the box, each just the CLI plus its mode arguments; the
-// workspace folder is where they open, exactly like a shell.
-export const AGENT_CHOICES = {
-  "claude-code": {
-    group: "Claude",
-    prefix: "claude",
-    modes: [
-      ["continue", "Claude · continue", "Continue the latest conversation in this folder"],
-      ["new", "Claude · new", "Start a new conversation in this folder"],
-      ["resume", "Claude · resume", "Choose one of Claude's sessions in this folder"],
-    ],
-  },
-  codex: {
-    group: "Codex",
-    prefix: "codex",
-    modes: [
-      ["new", "Codex · new conversation", "Start a new Codex conversation in this folder"],
-      ["continue", "Codex · continue latest", "Continue the latest Codex conversation in this folder"],
-      ["resume", "Codex · choose session", "Choose one of Codex's sessions"],
-    ],
-  },
-};
-
-// Every choice carries its own `key`, and the selection is compared by that
-// key alone, so a choice object from an earlier model still selects the right
-// row after the list is recomputed.
-export function terminalChoices(options) {
-  const choices = [];
-  for (const profile of options.profiles || []) {
-    choices.push({
+// The "+" menu (CONTRACTS 4.3), as rows the launcher turns into menu.js
+// items: every available shell with the configured one marked, then Claude
+// Code and Codex when installed, then the saved profiles (connections and
+// custom commands only, since 4.3), then Terminal settings. Separators sit
+// between the parts; a part with nothing in it leaves no empty band.
+// A workspace on an SSH host (`host`) has no local shells: its first row is
+// the remote login shell, and only the profiles that make sense there follow.
+export function newTerminalMenu({ inventory = null, profiles = [], shell = DEFAULT_SHELL, agents = [], host = null } = {}) {
+  const current = shell ?? DEFAULT_SHELL;
+  const rows = host
+    ? [{ key: "remote-shell", kind: "remote-shell", label: `Shell on ${host}`, isDefault: true }]
+    : availableShells(inventory, current).map((entry) => ({
+      key: `shell:${entry.value}`,
+      kind: "shell",
+      value: entry.value,
+      label: entry.label,
+      isDefault: entry.value === current,
+    }));
+  const launchers = [
+    ...(agents || []).map((profile) => ({
+      key: `agent:${profile.name}`, kind: "agent", profile, label: profile.label || profile.name,
+    })),
+    ...(profiles || []).filter((profile) => !host || remoteCapable(profile)).map((profile) => ({
       key: `profile:${profile.name}`,
-      group: ["rdp", "vnc"].includes(profile.terminal_type) ? "Desktop windows" : "Saved terminals",
       kind: "profile",
       profile,
       label: profile.name,
-      // A description is why this profile exists; shellLabel only restates the
-      // command, which the name usually already implies. Profiles written
-      // before descriptions existed have none, so the shell label stays the
-      // fallback rather than leaving the row blank.
+      // A description is why this profile exists; the type label is the
+      // fallback for profiles written before descriptions.
       detail: (profile.description || "").trim() || shellLabel(profile),
-    });
-  }
-  if (options.configuredOnly) return choices.filter((choice) => !["rdp", "vnc"].includes(choice.profile.terminal_type));
-  const types = options.inventory?.types || [];
-  for (const type of types) {
-    if (!type.executable || type.available === false || ["custom", "ssh", "sftp", ...Object.keys(AGENT_CHOICES)].includes(type.id)) continue;
-    const meta = SYSTEM_META[type.id] || { args: [] };
-    if (type.id === "wsl" && (options.inventory?.wsl_distributions || []).length) {
-      for (const distro of options.inventory.wsl_distributions) {
-        choices.push({
-          key: `system:wsl:${distro}`,
-          group: "System",
-          kind: "system",
-          id: type.id,
-          cmd: type.executable,
-          args: ["-d", distro],
-          distro,
-          label: `WSL · ${distro}`,
-          detail: distro,
-        });
-      }
-      continue;
-    }
-    choices.push({
-      key: `system:${type.id}`,
-      group: "System",
-      kind: "system",
-      id: type.id,
-      cmd: type.executable,
-      args: meta.args,
-      label: type.label,
-      detail: type.executable,
-    });
-  }
-  for (const [id, agent] of Object.entries(AGENT_CHOICES)) {
-    const found = types.find((type) => type.id === id && type.executable && type.available !== false);
-    if (!found) continue;
-    for (const [mode, label, detail] of agent.modes) {
-      const prefix = agent.prefix;
-      choices.push({
-        key: prefix === "claude" ? `claude:${mode}` : `${prefix}:${mode}`,
-        group: agent.group,
-        kind: "system",
-        id,
-        cmd: found.executable,
-        args: modeArgs(id, mode),
-        mode,
-        label,
-        detail,
-      });
-    }
-  }
-  // A missing shell one step away (PowerShell 7 through winget, or its
-  // download page). Choosing it installs once; it is never what "+" starts,
-  // so it is not selected, cycled or remembered (`canLaunch`).
-  for (const install of options.inventory?.installs || []) {
-    choices.push({
-      key: `install:${install.id}`,
-      group: "Install",
-      kind: "install",
-      id: install.id,
-      cmd: install.cmd || null,
-      args: install.args || [],
-      url: install.url || null,
-      label: install.label,
-      detail: install.cmd ? "install with winget" : "open the download page",
-    });
-  }
-  return choices;
+    })),
+  ];
+  if (launchers.length) rows.push({ key: "separator:launchers", kind: "separator" }, ...launchers);
+  rows.push({ key: "separator:settings", kind: "separator" }, { key: "settings", kind: "settings", label: "Terminal settings…" });
+  return rows;
 }
 
-export function canLaunch(choice) {
-  return Boolean(choice) && choice.kind !== "install";
-}
-
-export function choiceKey(choice) {
-  return choice?.key || "";
+// What "+" itself starts: the configured shell.
+export function defaultShellRow(menu) {
+  const shellLike = (row) => row.kind === "shell" || row.kind === "remote-shell";
+  return (menu || []).find((row) => shellLike(row) && row.isDefault)
+    || (menu || []).find(shellLike) || null;
 }
 
 export function loadMode() {

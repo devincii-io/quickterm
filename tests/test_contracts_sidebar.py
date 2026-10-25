@@ -59,8 +59,9 @@ def test_sidebar_lists_every_live_terminal_grouped_by_workspace():
     assert "rank" not in groups and '"current"' not in launcher
     assert "const KIND_ORDER = { flat: 0, workspace: 0, scratch: 1, unassigned: 2 };" in launcher
     assert 'localeCompare(rowName(b), undefined, { numeric: true })' in groups
-    # Claude and Codex need no profile: the CLI found by the inventory is offered as is.
-    assert 'key: prefix === "claude" ? `claude:${mode}` : `${prefix}:${mode}`' in launcher
+    # Claude and Codex need no profile: the "+" menu offers them from the agent
+    # settings when the inventory finds the CLI (CONTRACTS 4.3).
+    assert 'key: `agent:${profile.name}`, kind: "agent"' in launcher
 
     rows = _block(launcher, "  const createRow = () => {", "\n  const updateRow =")
     assert 'row.addEventListener("click", () => {' in rows
@@ -156,6 +157,16 @@ def test_absolutely_positioned_sidebar_children_outrank_the_stretch_rule():
     # The hover trays are absolutely positioned inside rows, never direct
     # sidebar children, so the stretch rule cannot reach them.
     assert re.search(r"\.group-actions, \.session-actions \{\s*position: absolute;", sidebar_css)
+
+
+def test_the_left_rail_hides_only_its_own_footer_buttons():
+    """The right panel's rail reuses `.sidebar-nav-button`. An unscoped
+    `body.sidebar-collapsed .sidebar-nav-button` rule hid its three tab icons
+    whenever the left sidebar was a rail. Only caught by opening the app."""
+    sidebar_css = SIDEBAR_CSS.read_text(encoding="utf-8")
+    hiders = re.findall(r"body\.sidebar-collapsed[^,{]*\.sidebar-nav-button[^,{]*", sidebar_css)
+    assert hiders, "the rail rule that hides the footer buttons moved"
+    assert all(".launcher.sidebar .sidebar-nav-button" in rule for rule in hiders), hiders
 
 
 def test_the_chrome_is_the_sidebar_and_nothing_else():
