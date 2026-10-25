@@ -289,6 +289,7 @@ async function bootView() {
     attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
     focusedSessionId: () => layout.focused?.session?.id || null,
+    focusedTerminalType: () => layout.focused?.terminalType || null,
     focusSession: (id) => {
       const pane = layout.panes().find((item) => item.session?.id === id);
       if (pane) layout.focusPane(pane);
@@ -369,6 +370,7 @@ async function bootView() {
     zoom: app.zoom,
     closePane: app.closePane,
     killSession: () => app.killFocusedSession({ keyboard: true }),
+    nextNeedsYou: () => chrome.launcherView?.nextNeedsYou?.(),
     focusDir: (direction) => layout.focusDir(direction),
     toggleDashboard: () => { dropOverlays(); palette.close(); panels.toggle("dashboard"); },
     toggleSettings: () => { dropOverlays(); palette.close(); panels.toggle("settings"); },
@@ -422,6 +424,7 @@ async function bootView() {
   window.quicktermView = {
     workspace: () => state.currentWorkspace,
     suspend: suspendView,
+    setHidden: (hidden) => layout.setViewHidden(hidden),
     close: closeView,
     app,
     syncConfig: onConfigSaved,

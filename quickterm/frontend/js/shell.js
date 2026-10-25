@@ -38,7 +38,7 @@ import { createTerminalActions } from "./terminal_actions.js";
 import { createTerminalRouting, sessionOwner } from "./shell_routing.js";
 import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
-import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
+import { createWorkspaceActions, createWorktreeWorkspace, validateWorkspaceName } from "./workspace_actions.js";
 
 const $ = (id) => document.getElementById(id);
 const noop = () => {};
@@ -371,6 +371,10 @@ export async function bootShell() {
     moveSessionHere: viaView("moveSessionHere"),
     createWorkspaceHere: async () => false,
     saveWorkspace: async () => "Open a workspace view first.",
+    createWorktree: (from, branch) => createWorktreeWorkspace({
+      api, from, branch, showError, onWorkspacesChanged,
+      openView: (name) => views.open(name), appFor: (view) => views.appFor(view),
+    }),
   });
   const chromeApp = shellApp({ shell, facade, activeApp });
   palette = new Palette(chromeApp);
@@ -489,6 +493,7 @@ export async function bootShell() {
     zoom: () => chromeApp.zoom(),
     closePane: () => chromeApp.closePane(),
     killSession: () => chromeApp.killFocusedSession({ keyboard: true }),
+    nextNeedsYou: () => state.launcherView?.nextNeedsYou?.(),
     focusDir: (direction) => chromeApp.focusDir(direction),
     toggleDashboard: () => { dropSidebarOverlays(); palette.close(); panels.toggle("dashboard"); },
     toggleSettings: () => { dropSidebarOverlays(); palette.close(); panels.toggle("settings"); },

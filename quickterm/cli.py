@@ -280,7 +280,7 @@ def _new(client: Client, args: argparse.Namespace) -> int:
         # QuickTerm answered is a Failed or a Refused: starting a second app
         # then would repeat the launch.
         return _start_app(client, app_arguments(body, args.port))
-    _summon()
+    _summon(client)
     return EXIT_OK
 
 
@@ -336,7 +336,7 @@ def _start_app(client: Client, argv: list[str]) -> int:
     while True:
         state = client.probe()
         if state == QUICKTERM:
-            _summon()
+            _summon(client)
             return EXIT_OK
         if state == IMPOSTOR:
             print(_impostor_message(client.base), file=sys.stderr)
@@ -356,7 +356,7 @@ def _start_app(client: Client, argv: list[str]) -> int:
 
 def _open_workspace(client: Client, args: argparse.Namespace) -> int:
     client.call("POST", "/api/launches", {"workspace": args.workspace})
-    _summon()
+    _summon(client)
     return EXIT_OK
 
 
@@ -398,14 +398,35 @@ def match_session(sessions: list, wanted: str) -> tuple[list[dict], list[dict]]:
     return matches, (matches if matches else items)
 
 
-def _summon() -> None:
-    """Bring the app's window forward, as a second launch from Explorer does."""
+def _summon(client: Client | None = None) -> None:
+    """Bring the app's window forward, as a second launch from Explorer does.
+
+    The backend shows its windows, or starts its window process when none is
+    open (it may be running in the tray with no window at all). A backend
+    from before the PTY host has no such route; its window is found by title.
+    """
     if sys.platform != "win32":
         return
     try:
+        if client is not None:
+            _allow_foreground()
+            status, _payload = client.call_status("POST", "/api/host/summon", {})
+            if status == 200:
+                return
         from quickterm.hotkeys import summon_window
 
         summon_window()
+    except Exception:
+        pass
+
+
+def _allow_foreground() -> None:
+    # The window the backend shows must be allowed to come to the front: the
+    # user typed into this console, not into the backend.
+    try:
+        import ctypes
+
+        ctypes.windll.user32.AllowSetForegroundWindow(0xFFFFFFFF)
     except Exception:
         pass
 
@@ -522,16 +543,19 @@ class Client:
         if state == IMPOSTOR:
             raise Impostor()
 
-    def call(self, method: str, path: str, body: Any = None) -> Any:
+    def _request(self, method: str, path: str, body: Any) -> urllib.request.Request:
         self._ensure_running()
         headers = {"X-QuickTerm-Token": self._token()}
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
+        return urllib.request.Request(
             f"{self.base}{path}", data=data, headers=headers, method=method
         )
+
+    def call(self, method: str, path: str, body: Any = None) -> Any:
+        request = self._request(method, path, body)
         try:
             with _open(request, self._timeout) as resp:
                 payload = resp.read()
@@ -539,12 +563,32 @@ class Client:
             raise Refused(exc.code, _detail(exc)) from None
         except (OSError, http.client.HTTPException) as exc:
             raise Failed(str(exc) or type(exc).__name__) from exc
-        if not payload:
-            return None
+        return _json_or_none(payload)
+
+    def call_status(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        """Like `call`, but an error answer is returned with its status and
+        body instead of raised, for callers that read the refusal's fields."""
+        request = self._request(method, path, body)
         try:
-            return json.loads(payload.decode("utf-8"))
-        except ValueError:
-            return None
+            with _open(request, self._timeout) as resp:
+                return resp.status, _json_or_none(resp.read())
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read()
+            except (OSError, http.client.HTTPException):
+                raw = b""
+            return exc.code, _json_or_none(raw)
+        except (OSError, http.client.HTTPException) as exc:
+            raise Failed(str(exc) or type(exc).__name__) from exc
+
+
+def _json_or_none(payload: bytes) -> Any:
+    if not payload:
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except ValueError:
+        return None
 
 
 def _detail(exc: urllib.error.HTTPError) -> str:

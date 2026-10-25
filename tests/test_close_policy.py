@@ -1,8 +1,12 @@
-"""The hide-to-tray decision: closing the window only stays resident when a
-live, actually-used session would be lost. Fresh/untouched shells -> quit.
+"""The keep rule and the window process's side of closing.
 
-With several windows on one backend the same file also owns the far more
-dangerous question of WHICH close is allowed to end the process at all."""
+The keep rule: when the last window goes, the backend stays only when a live,
+actually-used session would be lost. Fresh/untouched shells -> it quits. The
+backend applies it (tests/test_pty_host.py); the window process never hides a
+window on close, it ends with its last one.
+
+With several windows in one process this file also owns the far more
+dangerous question of WHICH close does what."""
 
 import threading
 from dataclasses import dataclass
@@ -64,8 +68,8 @@ def test_mixed_sessions_keep_if_any_touched_alive():
     assert _sessions_worth_keeping(_Manager(infos)) is True
 
 
-# Fail safe: an unexpected error while evaluating the keep policy must hide to
-# tray, never quit and take the user's running terminals with it.
+# Fail safe: an unexpected error while evaluating the keep policy must keep the
+# backend, never quit and take the user's running terminals with it.
 def test_manager_error_defaults_to_hiding():
     assert _sessions_worth_keeping(_Broken()) is True
 
@@ -74,9 +78,7 @@ def test_missing_manager_defaults_to_hiding():
     assert _sessions_worth_keeping(None) is True
 
 
-# --- several windows on one backend ----------------------------------------
-# Closing a window is the most dangerous thing in a multi-window app: get it
-# wrong and one closed viewer takes down every terminal in every other window.
+# --- several windows in one window process ----------------------------------
 # None of it is reachable from a GUI test, so the policy is exercised here
 # against fakes shaped like pywebview's window and its events.
 
@@ -124,25 +126,34 @@ class _FakeWindow:
         self.title = title
 
 
-class _FakeTray:
-    def __init__(self):
-        self.balloons = []
+class _ReportingRegistry:
+    """The backend link as the window process sees it: the registry plus the
+    adopted/closed reports the backend uses to drop a dead process's claims."""
 
-    def balloon_once(self, title, text):
-        self.balloons.append((title, text))
+    def __init__(self):
+        from quickterm.windows import WindowRegistry
+
+        self.registry = WindowRegistry()
+        self.adopted_ids = []
+        self.forgotten = []
+
+    def owner_of(self, name):
+        return self.registry.owner_of(name)
+
+    def adopted(self, window_id):
+        self.adopted_ids.append(window_id)
+
+    def forget(self, window_id):
+        self.forgotten.append(window_id)
+        return self.registry.forget(window_id)
 
 
 @pytest.fixture
-def viewers(monkeypatch):
+def viewers():
     from quickterm import app as app_mod
-    from quickterm.windows import WindowRegistry
 
-    monkeypatch.setattr(app_mod, "_updating", threading.Event())
     cfg = SimpleNamespace(port=8620, host="127.0.0.1")
-    state = {"manager": _Manager([_Info(alive=True, touched=True)])}
-    return app_mod._ViewerWindows(
-        cfg, state, WindowRegistry(), elevated=False, base_title="QuickTerm"
-    )
+    return app_mod._ViewerWindows(cfg, _ReportingRegistry(), base_title="QuickTerm")
 
 
 def _open(viewers, uid, window_id, *, title="QuickTerm"):
@@ -162,87 +173,35 @@ def _close(window):
 def test_closing_a_secondary_window_never_touches_the_rest(viewers):
     first = _open(viewers, "master", "w1")
     second = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
-    viewers.tray = _FakeTray()
 
     assert _close(second) is True
-    # Sessions are backend-owned: nothing was quit, hidden, or killed.
-    assert second.hidden is False
     assert first.destroyed is False
     assert viewers.quitting.is_set() is False
-    assert viewers.tray.balloons == []
     assert viewers.count() == 1
 
 
-def test_the_last_window_still_hides_to_tray_when_work_would_be_lost(viewers):
-    first = _open(viewers, "master", "w1")
-    second = _open(viewers, "child_1", "w2")
-    viewers.tray = _FakeTray()
-
-    assert _close(second) is True
-    assert _close(first) is False  # last window: the tray rules apply again
-    assert first.hidden is True
-    assert len(viewers.tray.balloons) == 1
-
-
-def test_the_last_window_quits_when_nothing_is_worth_keeping(viewers):
+def test_the_last_window_closes_for_real_and_the_backend_decides(viewers):
+    # Hiding kept a whole WebView2 resident for the tray. The terminals live in
+    # the backend now, which sees this process end and applies the keep rule.
     window = _open(viewers, "master", "w1")
-    viewers.tray = _FakeTray()
-    viewers._state["manager"] = _Manager([_Info(alive=True, touched=False)])
-
     assert _close(window) is True
     assert window.hidden is False
+    assert viewers.count() == 0
 
 
-def test_an_elevated_window_always_quits_on_close(monkeypatch):
-    # A resident admin backend visible only in the notification area would be a
-    # foot-gun, so an elevated instance never hides, tray icon or not.
-    from quickterm import app as app_mod
-    from quickterm.windows import WindowRegistry
-
-    monkeypatch.setattr(app_mod, "_updating", threading.Event())
-    viewers = app_mod._ViewerWindows(
-        SimpleNamespace(port=8620, host="127.0.0.1"),
-        {"manager": _Manager([_Info(alive=True, touched=True)])},
-        WindowRegistry(),
-        elevated=True,
-        base_title="QuickTerm - Administrator",
-    )
-    window = _open(viewers, "master", "w1")
-    viewers.tray = _FakeTray()
-    assert _close(window) is True
-    assert window.hidden is False
+def test_every_window_reports_itself_to_the_backend(viewers):
+    _open(viewers, "master", "w1")
+    _open(viewers, "child_1", "w2", title="QuickTerm - dev")
+    # The backend drops these claims if this process dies without goodbyes.
+    assert viewers._registry.adopted_ids == ["w1", "w2"]
 
 
-def test_the_last_window_quits_when_no_tray_icon_exists(viewers):
-    # Hiding behind an icon that could not be created would look like a crash.
-    window = _open(viewers, "master", "w1")
-    viewers.tray = None
-    assert _close(window) is True
-    assert window.hidden is False
-
-
-def test_an_update_shutdown_lets_every_window_close(viewers):
-    from quickterm import app as app_mod
-
+def test_quit_destroys_every_window(viewers):
     first = _open(viewers, "master", "w1")
     second = _open(viewers, "child_1", "w2")
-    viewers.tray = _FakeTray()
-    # Hiding to tray here would leave Inno Setup asking a window that refuses
-    # to go away, so the updater's stand-down must reach every window.
-    app_mod._updating.set()
-    assert _close(second) is True
-    assert _close(first) is True
-    assert first.hidden is False
-
-
-def test_quit_destroys_every_window_and_close_stops_vetoing(viewers):
-    first = _open(viewers, "master", "w1")
-    second = _open(viewers, "child_1", "w2")
-    viewers.tray = _FakeTray()
 
     viewers.quit_all()
     assert (first.destroyed, second.destroyed) == (True, True)
-    # Destroy triggers the real close; with quitting set nothing may veto it.
     assert _close(first) is True
     assert _close(second) is True
     assert viewers.count() == 0
@@ -251,32 +210,41 @@ def test_quit_destroys_every_window_and_close_stops_vetoing(viewers):
 def test_a_closed_window_releases_its_workspace_at_once(viewers):
     _open(viewers, "master", "w1")
     window = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
-    viewers.tray = _FakeTray()
-    viewers._registry.register(window_id="w2", workspace="dev")
+    viewers._registry.registry.register(window_id="w2", workspace="dev")
 
     _close(window)
     # Waiting out the heartbeat TTL would block reopening the very workspace
     # the user just closed.
+    assert viewers._registry.forgotten == ["w2"]
     assert viewers._registry.owner_of("dev") is None
 
 
 def test_closing_the_first_window_hands_the_bare_title_on(viewers):
     first = _open(viewers, "master", "w1")
     second = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
-    viewers.tray = _FakeTray()
 
     _close(first)
     # hotkeys.py summons by exact title match, so exactly one window must hold
-    # it or the Explorer handoff has nothing to aim at.
+    # it or the summon key and the Explorer handoff have nothing to aim at.
     assert second.title == "QuickTerm"
 
 
 def test_show_all_restores_every_window(viewers):
     first = _open(viewers, "master", "w1")
     second = _open(viewers, "child_1", "w2")
-    first.hidden = True
+    first.hidden = second.hidden = True
     viewers.show_all()
     assert (first.hidden, second.hidden) == (False, False)
+
+
+def test_show_all_leaves_the_primary_to_the_backend_s_overlay(viewers):
+    # The backend owns the drop-down state, so when it dropped the primary down
+    # the window process must not show it a second time as a normal window.
+    first = _open(viewers, "master", "w1")
+    second = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
+    first.hidden = second.hidden = True
+    viewers.show_all(skip_primary=True)
+    assert (first.hidden, second.hidden) == (True, False)
 
 
 def test_a_window_cannot_be_opened_from_the_main_thread(viewers):
@@ -289,7 +257,7 @@ def test_a_window_cannot_be_opened_from_the_main_thread(viewers):
 def test_opening_a_workspace_another_window_owns_is_refused(viewers):
     from quickterm.windows import WorkspaceClaimed
 
-    viewers._registry.register(window_id="w1", workspace="dev")
+    viewers._registry.registry.register(window_id="w1", workspace="dev")
     failures = []
 
     def attempt():
@@ -304,62 +272,6 @@ def test_opening_a_workspace_another_window_owns_is_refused(viewers):
     # Refused before any window is drawn: an empty shell with no explanation is
     # worse than a clear refusal.
     assert isinstance(failures[0], WorkspaceClaimed)
-
-
-# --- the quake-style overlay is still just the primary window ---------------
-
-
-def _overlay_on(viewers):
-    viewers._cfg.overlay = SimpleNamespace(enabled=True)
-
-
-def test_a_hidden_overlay_primary_still_hides_to_tray_on_close(viewers):
-    _overlay_on(viewers)
-    first = _open(viewers, "master", "w1")
-    viewers.tray = _FakeTray()
-    first.hidden = True  # the overlay was dismissed with the summon key
-
-    assert _close(first) is False  # live work: the tray rules decide, as always
-    assert len(viewers.tray.balloons) == 1
-    assert viewers.quitting.is_set() is False
-
-
-def test_a_hidden_overlay_primary_quits_when_nothing_is_worth_keeping(viewers):
-    _overlay_on(viewers)
-    first = _open(viewers, "master", "w1")
-    viewers.tray = _FakeTray()
-    viewers._state["manager"] = _Manager([_Info(alive=True, touched=False)])
-    first.hidden = True
-    assert _close(first) is True
-
-
-def test_tray_open_drops_the_primary_down_as_the_overlay(viewers, monkeypatch):
-    from quickterm import app as app_mod
-
-    summoned = []
-    monkeypatch.setattr(
-        app_mod, "_summon_overlay", lambda title, cfg: summoned.append(title) or True
-    )
-    _overlay_on(viewers)
-    first = _open(viewers, "master", "w1")
-    second = _open(viewers, "child_1", "w2", title="QuickTerm - dev")
-    first.hidden = second.hidden = True
-
-    viewers.show_all()
-
-    assert summoned == ["QuickTerm"]
-    assert first.hidden is True  # shown by the overlay, not by pywebview
-    assert second.hidden is False
-
-
-def test_tray_open_shows_the_primary_normally_when_the_overlay_cannot(viewers, monkeypatch):
-    from quickterm import app as app_mod
-
-    monkeypatch.setattr(app_mod, "_summon_overlay", lambda title, cfg: False)
-    first = _open(viewers, "master", "w1")
-    first.hidden = True
-    viewers.show_all()
-    assert first.hidden is False
 
 
 def test_a_second_window_opens_at_the_configured_size_beside_the_primary(viewers, monkeypatch):
@@ -386,6 +298,72 @@ def test_a_minimized_primary_does_not_send_the_new_window_off_screen(viewers, mo
     first = _open(viewers, "master", "w1")
     first.x, first.y = -32000, -32000
     assert viewers._secondary_geometry() == {"width": 1440, "height": 900}
+
+
+# --- the control channel, as the window process runs it ----------------------
+
+
+class _Channel:
+    def __init__(self, commands):
+        self._commands = commands
+        self.sent = []
+
+    def commands(self):
+        yield from self._commands
+
+    def send(self, message):
+        self.sent.append(message)
+        return True
+
+
+def test_the_backend_s_commands_open_show_and_quit(viewers, monkeypatch):
+    from quickterm import app as app_mod
+
+    first = _open(viewers, "master", "w1")
+    first.hidden = True
+    opened = []
+
+    def fake_open(*, workspace=None, cwd=None, check_claim=True):
+        # The backend checked the claim before it asked.
+        opened.append((workspace, cwd, check_claim))
+        return "w9"
+
+    monkeypatch.setattr(viewers, "open", fake_open)
+    channel = _Channel([
+        {"op": "open", "request": "r1", "workspace": "dev", "cwd": None},
+        {"op": "show"},
+        {"op": "quit"},
+        {"op": "open", "request": "never"},
+    ])
+    app_mod._serve_viewer_control(channel, viewers)
+
+    assert opened == [("dev", None, False)]
+    assert channel.sent == [{"event": "opened", "request": "r1", "window_id": "w9"}]
+    assert first.hidden is False
+    assert first.destroyed is True  # quit closes every window, then nothing more runs
+
+
+def test_a_refused_open_is_an_answer_not_a_hang(viewers, monkeypatch):
+    from quickterm import app as app_mod
+    from quickterm.windows import WindowInfo, WorkspaceClaimed
+
+    def refuse(**_kwargs):
+        raise WorkspaceClaimed("dev", WindowInfo(id="w1", workspace="dev"))
+
+    monkeypatch.setattr(viewers, "open", refuse)
+    channel = _Channel([{"op": "open", "request": "r1", "workspace": "dev"}])
+    app_mod._serve_viewer_control(channel, viewers)
+    assert channel.sent[0]["event"] == "open_failed"
+    assert channel.sent[0]["error"] == "workspace_claimed"
+
+
+def test_a_backend_that_goes_away_closes_the_windows(viewers):
+    from quickterm import app as app_mod
+
+    window = _open(viewers, "master", "w1")
+    # EOF on the control pipe: a window onto a dead backend shows dead panes.
+    app_mod._serve_viewer_control(_Channel([]), viewers)
+    assert window.destroyed is True
 
 
 def test_window_url_carries_the_window_identity(monkeypatch):

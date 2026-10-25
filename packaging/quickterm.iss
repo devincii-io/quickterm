@@ -73,21 +73,38 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+; The new launcher finds the running backend. When it is an older build it is
+; replaced at once if no terminal is busy or touched; otherwise the launcher
+; asks, and a declined restart keeps the old backend until nothing is at risk.
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; The backend copies of the user who uninstalls. InitializeUninstall below
+; stops that user's backend first, after asking.
+Type: filesandordirs; Name: "{localappdata}\QuickTerm\host"
 
 [Code]
 // ------------------------------------------------------------------------
 // Closing a running QuickTerm before overwriting it.
 //
-// CloseApplications=yes alone does not do it. It asks the Restart Manager,
-// the Restart Manager asks the top-level window, and that request lands in
-// app.on_closing, where the close-to-tray policy CANCELS the close whenever a
-// session is touched, retained or busy. That is precisely the state of someone
-// who has been working. The window hides to the tray and answers "no", and
-// Setup then either stalls on "the following applications are in use", naming
-// a window that is no longer in the taskbar, or force-terminates the process
-// and takes every terminal with it. Either way the user sees
-// "DeleteFile failed; code 5 - access denied" on QuickTerm.exe mid-install.
+// Since 4.2 the backend that owns the terminals does not run from {app}: the
+// launcher copies the program to %LOCALAPPDATA%\QuickTerm\host\<build> and
+// starts it there as QuickTerm-host.exe, together with its window process.
+// Nothing of it holds a lock in {app}, and nothing here kills it, so an update
+// leaves every terminal running. What can still hold {app} is QuickTerm.exe
+// itself: a launcher for a moment, a backend whose copy could not be made, the
+// elevated instance (started from {app} on purpose, so an administrator process
+// never loads from the user-writable copy), or a version before 4.2, where one
+// process held the terminals and the window. Only then is the user asked.
+//
+// Every helper program runs by its absolute path from {sys}, with {sys} as the
+// working folder: cmd.exe looks for a bare program name in the current folder
+// first, which may be Downloads, and Setup may run elevated.
+//
+// CloseApplications=yes alone does not close those. Before 4.2 the Restart
+// Manager's request landed in the close-to-tray policy, which CANCELS the close
+// whenever a session is touched, retained or busy, and Setup then stalled on
+// "the following applications are in use" or force-terminated the process.
 //
 // Asked, not assumed: closing someone's terminals without warning is worse
 // than a failed install. Declining is a clean abort, not a half-written
@@ -113,11 +130,66 @@ function TaskKill(const Args: String): Integer;
 var
   ResultCode: Integer;
 begin
-  if not Exec(ExpandConstant('{sys}\taskkill.exe'), Args, '', SW_HIDE,
+  if not Exec(ExpandConstant('{sys}\taskkill.exe'), Args, ExpandConstant('{sys}'), SW_HIDE,
               ewWaitUntilTerminated, ResultCode) then
     Result := -1
   else
     Result := ResultCode;
+end;
+
+// The tasklist/taskkill filter for the user running Setup or Uninstall.
+function CurrentUserFilter(): String;
+begin
+  Result := '/FI "USERNAME eq ' + GetEnv('USERDOMAIN') + '\' + GetUserNameString() + '"';
+end;
+
+// True when a process with this image name runs (only the current user's with
+// CurrentUserOnly). tasklist writes one CSV line per match into a file, which
+// is read here: no `find`, and cmd.exe is only there for the redirection.
+function ImageRunning(const Image: String; CurrentUserOnly: Boolean): Boolean;
+var
+  ResultCode: Integer;
+  Listing, Filter: String;
+  Output: AnsiString;
+begin
+  Result := False;
+  Listing := AddBackslash(GetTempDir()) + 'quickterm-tasklist.txt';
+  DeleteFile(Listing);
+  Filter := '/FI "IMAGENAME eq ' + Image + '"';
+  if CurrentUserOnly then
+    Filter := Filter + ' ' + CurrentUserFilter();
+  if not Exec(ExpandConstant('{cmd}'),
+              '/C ""' + ExpandConstant('{sys}\tasklist.exe') + '" /NH /FO CSV ' + Filter
+              + ' > "' + Listing + '""',
+              ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if LoadStringFromFile(Listing, Output) then
+    Result := Pos('"' + Lowercase(Image) + '"', Lowercase(String(Output))) > 0;
+  DeleteFile(Listing);
+end;
+
+// Uninstalling stops this user's backend and with it every terminal, so it is
+// asked like an update that has to close QuickTerm. Other users' backends run
+// from their own copies, hold nothing in {app}, and are none of this
+// uninstaller's business.
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  if not (ImageRunning('QuickTerm-host.exe', True) or ImageRunning('{#AppExeName}', True)) then
+    Exit;
+  if not UninstallSilent() then
+    if MsgBox('QuickTerm is being removed, so it has to close first.'
+              + #13#10#13#10 + 'Terminals that are still open will be stopped.'
+              + #13#10#13#10 + 'Close QuickTerm now and continue?',
+              mbConfirmation, MB_YESNO) = IDNO then
+    begin
+      Result := False;
+      Exit;
+    end;
+  TaskKill('/F ' + CurrentUserFilter() + ' /IM QuickTerm-host.exe');
+  TaskKill('/F ' + CurrentUserFilter() + ' /IM {#AppExeName}');
+  // Windows releases the image locks a moment after the process goes.
+  Sleep(900);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -125,6 +197,9 @@ var
   Code: Integer;
 begin
   Result := '';
+  // The usual case since 4.2: only the backend copy runs, and it stays.
+  if not ImageRunning('{#AppExeName}', False) then
+    Exit;
   if not WizardSilent() then
     if MsgBox('QuickTerm is being replaced, so any running copy has to close first.'
               + #13#10#13#10 + 'Terminals that are still open will be stopped.'

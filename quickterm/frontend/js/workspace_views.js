@@ -244,6 +244,8 @@ export class WorkspaceViews {
     if (!view) return;
     view.markReady(true);
     try { view.frame.contentWindow.quicktermView.suspend(view !== this.active); } catch (_) { /* gone */ }
+    view.toldHidden = undefined; // a fresh document knows nothing yet
+    this._tellHidden(view);
     if (this.pendingFocus === view) {
       this.pendingFocus = null;
       this.focusView(view);
@@ -625,9 +627,26 @@ export class WorkspaceViews {
     for (const el of this.stage.querySelectorAll(".workspace-view-divider")) {
       if (!seen.has(el)) el.remove();
     }
+    for (const view of views) this._tellHidden(view);
     requestAnimationFrame(() => this.fit());
     if (!still) setTimeout(() => this.fit(), SLIDE_MS + 20);
     if (persist) this._persist();
+  }
+
+  // A view hidden behind a zoomed one lets its panes release their WebGL
+  // renderers (pane.js setOffscreen). Its document cannot tell on its own:
+  // `hidden` on the view element changes neither the iframe's
+  // visibilityState nor anything it can observe reliably. A view still
+  // booting is told by ready().
+  _tellHidden(view) {
+    const hidden = Boolean(view.el.hidden);
+    if (view.toldHidden === hidden) return;
+    try {
+      const child = view.frame?.contentWindow?.quicktermView;
+      if (!child?.setHidden) return;
+      child.setHidden(hidden);
+      view.toldHidden = hidden;
+    } catch (_) { /* loading or gone */ }
   }
 
   _dividerFor(node) {

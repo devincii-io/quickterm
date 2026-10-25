@@ -1,4 +1,10 @@
-"""Workspace routes: list, read, save and delete a workspace file."""
+"""Workspace routes: list, read, save and delete a workspace file, its git facts,
+and a new workspace on a fresh git worktree.
+
+Workspace names may contain `/` (a worktree workspace is `<from>/<branch>`),
+so the name routes use the `path` converter: Starlette decodes `%2F` before
+routing, and a plain `{name}` would never match such a name.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +14,70 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from quickterm import git_info, worktree
 from quickterm.api.common import asdict, kill_each, read_json
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
 
+MAX_GIT_INFO_PATHS = 256
+
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
     manager = ctx.manager
     workspace_write_lock = ctx.workspace_write_lock
+
+    @app.post("/api/git/info")
+    async def post_git_info(request: Request) -> dict:
+        body = await read_json(request)
+        paths = body.get("paths") if isinstance(body, dict) else None
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            raise HTTPException(400, "body must be {'paths': [str, ...]}")
+        if len(paths) > MAX_GIT_INFO_PATHS:
+            raise HTTPException(400, f"at most {MAX_GIT_INFO_PATHS} paths per request")
+        return await asyncio.to_thread(git_info.git_info_many, paths)
+
+    # Registered before the `{name:path}` routes, which would otherwise also
+    # match this path (they answer other methods, but order keeps it obvious).
+    @app.post("/api/workspaces/worktree", status_code=201)
+    async def post_worktree(request: Request) -> dict:
+        workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
+
+        body = await read_json(request)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be {'from': ..., 'branch': ...}")
+        source_name = body.get("from")
+        if not isinstance(source_name, str) or not source_name:
+            raise HTTPException(400, "from must be a workspace name")
+        source = await asyncio.to_thread(workspace.load_workspace, source_name)
+        if source is None:
+            raise HTTPException(404, "no such workspace")
+        try:
+            branch = worktree.validate_branch(body.get("branch"))
+            base = worktree.validate_base(body.get("base"))
+            new_name = f"{source_name}/{worktree.branch_slug(branch)}"
+        except worktree.WorktreeError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        if await asyncio.to_thread(workspace.load_workspace, new_name) is not None:
+            raise HTTPException(409, f"a workspace named {new_name!r} already exists")
+        try:
+            created = await asyncio.to_thread(
+                worktree.create_worktree, getattr(source, "path", None), branch, base
+            )
+        except worktree.WorktreeError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+        async with workspace_write_lock:
+            # Never overwrite a workspace that appeared while git was running.
+            if await asyncio.to_thread(workspace.load_workspace, new_name) is not None:
+                raise HTTPException(
+                    409, f"a workspace named {new_name!r} already exists; "
+                    f"the worktree was created at {created.path}",
+                )
+            await asyncio.to_thread(
+                workspace.save_workspace,
+                workspace.Workspace(name=new_name, layout={}, path=created.path),
+            )
+        return {"workspace": new_name, "path": created.path, "setup": created.setup}
 
     @app.get("/api/workspaces")
     def list_workspaces() -> list[str]:
@@ -24,7 +85,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
 
         return workspace.list_workspaces()
 
-    @app.get("/api/workspaces/{name}")
+    @app.get("/api/workspaces/{name:path}")
     def get_workspace(name: str) -> dict:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
@@ -36,9 +97,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         # back. Report it instead of letting every spawn silently land in the
         # home directory with no explanation.
         out["path_exists"] = workspace.root_exists(getattr(ws, "path", None))
+        # A sync handler runs in the threadpool, so these file reads stay off the loop.
+        out["git"] = git_info.git_info(getattr(ws, "path", None))
         return out
 
-    @app.put("/api/workspaces/{name}")
+    @app.put("/api/workspaces/{name:path}")
     async def put_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 
@@ -97,7 +160,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             manager.sync_workspace(name, set(session_ids))
         return Response(status_code=204)
 
-    @app.patch("/api/workspaces/{name}")
+    @app.patch("/api/workspaces/{name:path}")
     async def patch_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")
         body = await read_json(request)
@@ -121,7 +184,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             ))
         return Response(status_code=204)
 
-    @app.delete("/api/workspaces/{name}")
+    @app.delete("/api/workspaces/{name:path}")
     async def remove_workspace(name: str) -> Response:
         workspace = importlib.import_module("quickterm.workspace")  # via sys.modules so tests can stub it
 

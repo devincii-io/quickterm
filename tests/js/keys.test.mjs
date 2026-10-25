@@ -27,6 +27,7 @@ async function captureHandler({ paletteOpen = false, acceptKill = undefined } = 
     zoom: () => calls.push("zoom"),
     closePane: () => calls.push("closePane"),
     killSession: () => calls.push("killSession"),
+    nextNeedsYou: () => calls.push("nextNeedsYou"),
     focusDir: (dir) => calls.push(`focusDir:${dir}`),
     fontBigger: () => calls.push("fontBigger"),
     fontSmaller: () => calls.push("fontSmaller"),

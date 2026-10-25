@@ -1,7 +1,9 @@
 """Native Windows integration check with disposable config, workspaces, and PTYs.
 
-Run with uv run --no-sync python scripts/smoke_workspace_views.py. A test
-window appears briefly for capture, then verifies close-to-tray and exits.
+Run with uv run --no-sync python scripts/smoke_workspace_views.py. The backend
+runs as its own process (`--serve`), as in the app; this process is the
+window process. A test window appears briefly for capture, then closes, and
+the backend must still hold every terminal.
 
 The window's document is the shell and hosts no workspace. The check opens
 two workspace views, drives real terminals in both, closes one (a failed save
@@ -9,17 +11,22 @@ first, which must keep it open) while the other keeps running, then closes
 the last one and finds the empty stage.
 """
 
+import argparse
 import base64
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import threading
 import time
 import traceback
+import urllib.request
 from pathlib import Path
 
 import webview
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # Runs in the shell document. Each view is an iframe whose document has its
 # own panes, so the per-terminal checks run against the view's window.
@@ -164,16 +171,67 @@ return {checks, sizes};
 """
 
 
+def _backend_call(port, token, path, *, method="GET", payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"X-QuickTerm-Token": token, "Origin": f"http://127.0.0.1:{port}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method=method
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=15) as response:
+        raw = response.read()
+        return json.loads(raw) if raw else None
+
+
+def _start_backend(port, isolated):
+    from quickterm import cli
+
+    env = os.environ.copy()
+    env["QUICKTERM_HOST_DIR"] = str(Path(isolated) / "host")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    process = subprocess.Popen(
+        cli.app_command(["--serve", "--port", str(port)]),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    deadline = time.monotonic() + 30
+    while cli.probe(cli.base_url(port)) != cli.QUICKTERM:
+        if process.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError("the backend did not start")
+        time.sleep(0.2)
+    return process
+
+
+def _stop_backend(process, port, token):
+    try:
+        _backend_call(port, token, "/api/host/retire", method="POST", payload={"force": True})
+        process.wait(timeout=20)
+    except Exception:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=0, help="the backend's port (default: free)")
+    port = parser.parse_args().port
     with tempfile.TemporaryDirectory(
         prefix="quickterm-native-review-", ignore_cleanup_errors=True
     ) as isolated:
         os.environ["APPDATA"] = isolated
-        from quickterm import app, config, workspace
+        from quickterm import app, auth, config, workspace
 
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
+        if not port:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
         cfg = config.AppConfig(
             port=port,
             update_check=False,
@@ -252,28 +310,33 @@ def main():
                 output = Path(__file__).resolve().parents[1] / ".release-tools"
                 output.mkdir(exist_ok=True)
                 (output / "native-workspaces.png").write_bytes(base64.b64decode(screenshot["data"]))
-                supervisor = app._shutdown_hook.__self__
-                window.destroy()
-                time.sleep(0.7)
-                assert supervisor.count() == 1, "retained terminals must keep the native window in tray"
-                assert window.evaluate_js("Boolean(window.quicktermViews)"), (
-                    "tray keeps document alive"
-                )
-                print("Native close-to-tray with retained terminals passed", flush=True)
             except BaseException:
                 failures.append(traceback.format_exc())
                 print(failures[-1], flush=True)
             finally:
-                app._shutdown_hook()
+                # The last window closes for real: the window process ends and
+                # the backend keeps the terminals.
+                window.destroy()
 
         webview.create_window = create_test_window
-        webview.start = lambda **kwargs: start(verify, **kwargs)
+        webview.start = lambda *_args, **kwargs: start(verify, **kwargs)
+        backend = _start_backend(port, isolated)
+        token = auth.get_or_create_token()
         try:
-            if not app._run_desktop(cfg):
-                raise RuntimeError("native app failed to start")
+            app._run_viewer(cfg, control=False)
+            if not failures:
+                sessions = _backend_call(port, token, "/api/sessions?metrics=false")
+                if not sessions or not all(s.get("alive") for s in sessions):
+                    failures.append(f"closing the window process killed terminals: {sessions!r}")
+                else:
+                    print(
+                        f"Window process closed; the backend still runs {len(sessions)} terminals",
+                        flush=True,
+                    )
         finally:
             webview.create_window = create
             webview.start = start
+            _stop_backend(backend, port, token)
         if failures:
             raise RuntimeError("native workspace smoke failed")
 

@@ -9,11 +9,31 @@
 
 import { initLauncher } from "./launcher.js";
 import { isScratchWorkspace } from "./boot_context.js";
+import { agentState } from "./sidebar_model.js";
 
 export { finishedAttachRecord } from "./shell_routing.js";
 
 const $ = (id) => document.getElementById(id);
 const SIDEBAR_POLL_MS = 10000;
+// Branches change rarely and the heads only name them, so git facts are read
+// once a minute, and a moment after the workspace folders change.
+const GIT_POLL_MS = 60000;
+const GIT_SOON_MS = 1500;
+const GIT_MAX_PATHS = 256;
+
+// What a terminal still asks of whoever looks at it: an attention, or an
+// agent turn that ended unseen. Looking at it clears both on the server.
+function wantsSeen(session) {
+  return Boolean(session?.attention) || ["done", "failed"].includes(agentState(session));
+}
+
+// The folders POST /api/git/info is asked about: every saved workspace's,
+// once each, at most what the route takes.
+export function gitPaths(folders) {
+  const paths = new Set();
+  for (const folder of folders?.values?.() || []) if (folder?.path) paths.add(folder.path);
+  return [...paths].slice(0, GIT_MAX_PATHS);
+}
 
 // Which session, if any, the user is plainly looking at and the server still
 // flags. "Looking at" is the focused pane while the document is visible, and
@@ -24,7 +44,7 @@ export function sessionToMarkSeen({ sessions, focusedId, focusChanged, visible, 
   if (!focusedId || !visible) return null;
   if (!focusChanged && !windowFocused) return null;
   const session = (sessions || []).find((item) => item?.id === focusedId);
-  return session?.attention ? focusedId : null;
+  return wantsSeen(session) ? focusedId : null;
 }
 
 // Whether a document that hosts terminals itself has the keyboard.
@@ -60,6 +80,7 @@ export function collectViewContext(views) {
 // the facts and patches the answer in.
 export function sidebarModel({
   state, sessions = [], views = [], context = {}, folders = new Map(), here = null, logoUrl = null,
+  git = new Map(), focusedId = null,
 }) {
   return {
     profiles: state.profiles,
@@ -73,12 +94,14 @@ export function sidebarModel({
         name,
         path: folders.get(name)?.path ?? null,
         pathExists: folders.get(name)?.pathExists ?? null,
+        git: git.get(folders.get(name)?.path) ?? null,
       })),
     views: views.map(({ workspace, label, color, active }) => ({ workspace, label, color, active })),
     sessions,
     attached: { ...(context.attached || {}) },
     owned: { ...(context.owned || {}) },
     here,
+    focusedId,
   };
 }
 
@@ -100,7 +123,29 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
     if (!sessionId) return;
     const session = (lastSessions || []).find((item) => item?.id === sessionId);
     if (session?.attention) session.attention = null;
+    if (wantsSeen(session)) session.agent = { ...session.agent, state: "idle" };
     api.markSessionSeen(sessionId).catch(() => {});
+  }
+
+  // Git facts by folder, from POST /api/git/info. Never on the boot path:
+  // the folders arrive after boot, and the first read trails them.
+  const git = new Map();
+  let gitAsked = "";
+  let gitTimer = null;
+  function refreshGit() {
+    clearTimeout(gitTimer);
+    gitTimer = null;
+    const paths = gitPaths(folders);
+    gitAsked = paths.join("\n");
+    if (!paths.length || document.hidden || typeof api.gitInfo !== "function") return;
+    api.gitInfo(paths).then((answer) => {
+      git.clear();
+      for (const path of paths) if (answer?.[path]) git.set(path, answer[path]);
+      render();
+    }).catch(() => {});
+  }
+  function gitSoon() {
+    if (!gitTimer && gitPaths(folders).join("\n") !== gitAsked) gitTimer = setTimeout(refreshGit, GIT_SOON_MS);
   }
 
   function model() {
@@ -111,6 +156,8 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
       views: views.list(),
       context: collectViewContext(views),
       folders,
+      git,
+      focusedId: app?.focusedSessionId?.() || null,
       here: app?.hereState?.() || null,
       logoUrl: api.assetUrl(app?.workspaceLogo?.() || state.cfg.logo),
     });
@@ -119,12 +166,21 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   function render() {
     views.update();
     state.launcherView?.update(model());
+    gitSoon();
   }
 
   // Built once per shell document. Every later change is a patch.
   function init() {
     state.launcherView = initLauncher($("launcher"), {
-      actions,
+      actions: {
+        // The branch name is asked for in the palette, the one inline input
+        // the chrome has; there is no free-text prompt anywhere else.
+        newWorktree: (name) => {
+          panels.close();
+          palette.worktreeMode?.(name);
+        },
+        ...actions,
+      },
       elevated: Boolean(state.cfg.elevated),
       // One entry point each. The palette already has Alt+K, and the
       // Dashboard used to sit here and directly above as "Manage
@@ -147,6 +203,7 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
     // Coming back to the window is looking at its focused terminal again.
     window.addEventListener("focus", refreshSoon);
     setInterval(refreshStatus, SIDEBAR_POLL_MS);
+    setInterval(refreshGit, GIT_POLL_MS);
     render();
   }
 

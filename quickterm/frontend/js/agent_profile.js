@@ -95,6 +95,22 @@ export function pickerCommand(type) {
   return modeCommand(type, "resume");
 }
 
+// What Shift+Enter sends in an agent pane: ESC CR, the bytes of Alt+Enter.
+// xterm.js 6.0 sends a bare CR for Shift+Enter, so the agent submits. ConPTY
+// turns ESC CR into an Alt+Enter key event, which Claude Code reads as
+// meta+Enter and Codex binds to insert_newline; a bare LF arrives as
+// Ctrl+Enter on Windows, which Codex does not bind.
+export const AGENT_NEWLINE = "\x1b\r";
+
+// The sequence a key event should send instead of xterm's own, or null.
+// Only Shift+Enter in an agent pane: in a shell Shift+Enter keeps meaning
+// Enter, and ESC CR there would be a stray Alt+Enter.
+export function agentNewlineFor(event, type) {
+  if (!isAgentType(type) || !event || event.key !== "Enter" || !event.shiftKey) return null;
+  if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return null;
+  return AGENT_NEWLINE;
+}
+
 export function isAgentSessionId(value) {
   return typeof value === "string" && SESSION_ID.test(value);
 }

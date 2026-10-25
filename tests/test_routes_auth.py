@@ -23,6 +23,9 @@ BASE = "http://127.0.0.1:8620"
 # The complete list of API answers that need no token: the liveness probe, and
 # workspace logos, which <img> loads and cannot attach a header to.
 EXEMPT = {("GET", "/api/health"), ("GET", "/api/assets/{asset_id}")}
+# Gated too, but by either token, and it answers 401 so a hook can tell a
+# stale hook token from a refused origin.
+HOOK_ROUTE = ("POST", "/api/sessions/{sid}/agent-event")
 
 
 def _app():
@@ -53,13 +56,52 @@ def test_the_route_table_is_not_empty():
     assert len(_api_endpoints()) > 30
 
 
-@pytest.mark.parametrize("method,path", [e for e in _api_endpoints() if e not in EXEMPT])
+@pytest.mark.parametrize(
+    "method,path", [e for e in _api_endpoints() if e not in EXEMPT and e != HOOK_ROUTE]
+)
 def test_every_api_route_refuses_a_request_without_the_token(client, method, path):
     response = client.request(method, _concrete(path))
     assert response.status_code == 403, (method, path)
     assert response.text == "forbidden: bad token"
     wrong = client.request(method, _concrete(path), headers={"X-QuickTerm-Token": "nope"})
     assert wrong.status_code == 403
+    # The hook token every terminal carries opens nothing but the hook route.
+    hook = client.request(
+        method, _concrete(path), headers={"X-QuickTerm-Hook-Token": _hook_token(client)}
+    )
+    assert hook.status_code == 403, (method, path)
+
+
+def _hook_token(client) -> str:
+    for middleware in client.app.user_middleware:
+        if "ctx" in middleware.kwargs:
+            return middleware.kwargs["ctx"].hook_token
+    raise AssertionError("no guard")
+
+
+def test_the_hook_route_is_in_the_table():
+    assert HOOK_ROUTE in _api_endpoints()
+
+
+def test_the_hook_route_refuses_without_either_token(client):
+    path = _concrete(HOOK_ROUTE[1])
+    body = {"agent": "claude", "event": "Stop", "payload": {}}
+    assert client.post(path, json=body).status_code == 401
+    assert client.post(path, json=body, headers={"X-QuickTerm-Hook-Token": "nope"}).status_code == 401
+    assert client.post(path, json=body, headers={"X-QuickTerm-Token": "nope"}).status_code == 401
+    # Either token passes the guard; the fake registry then knows no "x".
+    hook = client.post(path, json=body, headers={"X-QuickTerm-Hook-Token": _hook_token(client)})
+    assert hook.status_code == 404
+    assert client.post(path, json=body, headers={"X-QuickTerm-Token": TOKEN}).status_code == 404
+
+
+def test_the_hook_token_is_new_for_every_backend():
+    first, second = _app(), _app()
+    tokens = {
+        m.kwargs["ctx"].hook_token for app in (first, second) for m in app.user_middleware
+        if "ctx" in m.kwargs
+    }
+    assert len(tokens) == 2 and TOKEN not in tokens
 
 
 def test_the_exemptions_answer_without_the_token(client, monkeypatch, tmp_path):

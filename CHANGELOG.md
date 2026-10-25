@@ -2,6 +2,47 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.2.0
+
+Released 2026-10-25.
+
+### Terminals outlive the window
+
+- Closing the window, a crash of the window, restarting QuickTerm and
+  installing an update no longer end your terminals. A background process
+  owns them, keeps the tray icon and the global hotkeys, and the next window
+  attaches to it with the scrollback intact.
+- An update takes over at once when no terminal is busy or typed into;
+  otherwise it asks, and the old terminals keep running until they are done.
+
+### Agent state
+
+- Claude Code and Codex started from QuickTerm report what they are doing.
+  A terminal's dot shows working, waiting for you, done or failed; its
+  tooltip shows the last prompt, the tool running now and the last answer;
+  running subagents appear as lines under it. Nothing is written to your own
+  Claude or Codex settings.
+- **Alt+J** jumps to the next terminal that needs you.
+- In the palette's `@` list, terminals that need you come first. The sidebar
+  order does not change.
+- Hovering a terminal row shows how long it has been quiet.
+- When your Codex `config.toml` has a `notify` program of its own, it still
+  runs: QuickTerm starts it with the same message and then reports the turn.
+
+### Worktrees
+
+- **new worktree...** in the palette, or in a git workspace's menu, creates a
+  branch in its own folder next to the checkout, opens it as a workspace and
+  types the setup command (`uv sync`, `npm ci`, ...) into a local shell there.
+- Workspace rows show their branch, and worktrees sit under their main
+  checkout.
+
+### Terminals
+
+- Shift+Enter in Claude Code and Codex is a new line in the prompt.
+- Terminals in a workspace you cannot see release their GPU renderer after a
+  few seconds and get it back when shown.
+
 ## QuickTerm 4.1.1
 
 Released 2026-10-04.

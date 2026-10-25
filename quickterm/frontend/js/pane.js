@@ -11,7 +11,7 @@ import { PaneAttachProtocol } from "./pane_protocol.js";
 import { claimFocus, releaseFocus, terminalMayFocus } from "./focus.js";
 import { RealInputGate } from "./broadcast.js";
 import { findInBuffer } from "./buffer_search.js";
-import { agentLabel, continueCommand, isAgentType, pickerCommand } from "./agent_profile.js";
+import { agentLabel, agentNewlineFor, continueCommand, isAgentType, pickerCommand } from "./agent_profile.js";
 
 const ENC = new TextEncoder();
 // Written between a dead session's last output and its restart, which
@@ -79,6 +79,7 @@ const ACTIVITY_IDLE_MS = 2500;
 const BACKOFF_MIN = 500;
 const BACKOFF_MAX = 8000;
 const FIT_DEBOUNCE_MS = 50;
+const RENDERER_RELEASE_MS = 5000;
 
 // The backend is always on this machine (loopback only), so the client's
 // platform is the platform every path is resolved on.
@@ -198,6 +199,9 @@ export class Pane {
     this.fit = null;
     this.ws = null;
     this._webgl = null;
+    this._webglBroken = false; // the addon could not be created at all
+    this._offscreen = false;   // nobody can see this pane (hidden view, zoom)
+    this._releaseTimer = null;
 
     this._protocol = new PaneAttachProtocol(CLIENT_QUEUE_LIMIT);
     this._queue = [];
@@ -351,6 +355,47 @@ export class Pane {
     button.textContent = zoomed ? "▣" : "□";
     button.title = zoomed ? "Show all panes (Alt+Z)" : "Zoom pane (Alt+Z)";
     button.classList.toggle("active", zoomed);
+  }
+
+  // A pane nobody can see (its workspace view is hidden behind a zoomed view,
+  // or a zoomed sibling pane covers it) gives its WebGL context back after a
+  // grace period. Browsers keep only about 16 live contexts per page and drop
+  // the oldest beyond that, and every context holds its own glyph atlas in
+  // GPU memory. Only the renderer goes: xterm falls back to its DOM renderer
+  // (and pauses drawing while its element is out of the viewport), while the
+  // buffer, the parser and the WebSocket keep running, so output keeps
+  // flowing and the pane looks the same when it comes back. The grace period
+  // keeps a quick zoom in and out from rebuilding contexts.
+  setOffscreen(offscreen) {
+    const hidden = Boolean(offscreen);
+    if (this._offscreen === hidden || this._disposed) return;
+    this._offscreen = hidden;
+    clearTimeout(this._releaseTimer);
+    this._releaseTimer = null;
+    if (hidden) {
+      this._releaseTimer = setTimeout(() => {
+        this._releaseTimer = null;
+        if (this._offscreen) this._releaseRenderer();
+      }, RENDERER_RELEASE_MS);
+    } else {
+      this._restoreRenderer();
+    }
+  }
+
+  _releaseRenderer() {
+    const gl = this._webgl;
+    if (!gl) return;
+    this._webgl = null;
+    try { gl.dispose(); } catch (e) { /* context already gone */ }
+  }
+
+  _restoreRenderer() {
+    if (!this.term || this._webgl) return;
+    this._loadWebgl();
+    // The new renderer starts with an empty canvas; draw every row now, and
+    // re-fit in case the box changed size while it was hidden.
+    try { this.term.refresh(0, this.term.rows - 1); } catch (e) { /* being recreated */ }
+    this.fitSoon();
   }
 
   focusSoon() {
@@ -998,6 +1043,7 @@ export class Pane {
     clearTimeout(this._closeArmTimer);
     clearTimeout(this._noticeTimer);
     clearTimeout(this._dropFallbackTimer);
+    clearTimeout(this._releaseTimer);
     this._pendingReveal = null;
     if (nativeDropPane === this) nativeDropPane = null;
     this.cancelConfirmation();
@@ -1009,6 +1055,74 @@ export class Pane {
   }
 
   // ---- internals ----
+
+  // xterm's custom key handler: false means xterm does nothing with the key.
+  _handleKey(e) {
+    // Enter on an exited pane restarts it: stdin is off, so the key had no
+    // other meaning, and the terminal keeps the keyboard throughout.
+    if (e.type === "keydown" && e.key === "Enter" && this.state === "exited"
+      && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      e.preventDefault();
+      this.requestRestart();
+      return false;
+    }
+    // Shift+Enter in Claude Code or Codex is a newline in the prompt. The
+    // keypress and keyup are swallowed too, or xterm would still send its CR.
+    const newline = agentNewlineFor(e, this.terminalType);
+    if (newline) {
+      if (e.type === "keydown") this._typeSequence(newline);
+      e.preventDefault();
+      return false;
+    }
+    if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
+    const key = e.key.toLowerCase();
+    if (key === "c") {
+      const selection = this.term.getSelection();
+      if (!selection) return true;
+      this.copySelection(selection);
+      e.preventDefault();
+      return false;
+    }
+    if (key === "v") {
+      // Do NOT intercept Ctrl+V or Ctrl+Shift+V: Chromium fires a native paste
+      // event on xterm's textarea and xterm handles it. Programmatic clipboard
+      // reads are permission-gated in WebView2, so this is the reliable path.
+      if (this._protocol.canSendInput() && !this._exited) this._markWrote();
+      return true;
+    }
+    return true;
+  }
+
+  _loadWebgl() {
+    if (!this.term || this._webgl || this._webglBroken || typeof WebglAddon === "undefined") return;
+    try {
+      const gl = new WebglAddon.WebglAddon();
+      // A lost context is disposed, so xterm falls back to its DOM renderer;
+      // the next time the pane is shown after being hidden it tries WebGL
+      // again (the browser drops the oldest context once too many exist).
+      gl.onContextLoss(() => {
+        try { gl.dispose(); } catch (e) {}
+        if (this._webgl === gl) this._webgl = null;
+      });
+      this.term.loadAddon(gl);
+      this._webgl = gl;
+    } catch (e) {
+      this._webgl = null; // DOM renderer fallback (much slower on heavy output)
+      this._webglBroken = true;
+      console.warn("QuickTerm: WebGL renderer unavailable, using DOM renderer", e);
+    }
+  }
+
+  // A key the handler above encoded itself, sent as xterm sends a typed key:
+  // touch first, then through onData, so it reaches the PTY only while live
+  // and a broadcast forwards it like any other keystroke.
+  _typeSequence(data) {
+    if (!this.acceptsInput() || !this.term) return false;
+    this._markWrote();
+    this._inputGate.arm();
+    this.term.input(data, true);
+    return true;
+  }
 
   _createTerm() {
     // Override xterm's default OSC hyperlink handler: the vendor default uses
@@ -1051,33 +1165,7 @@ export class Pane {
     // Windows-style selection-aware copy and native paste. Ctrl+C copies only
     // when xterm has a selection; otherwise it reaches the PTY as SIGINT.
     // Ctrl+Shift+C/V remain compatible aliases.
-    this.term.attachCustomKeyEventHandler((e) => {
-      // Enter on an exited pane restarts it: stdin is off, so the key had no
-      // other meaning, and the terminal keeps the keyboard throughout.
-      if (e.type === "keydown" && e.key === "Enter" && this.state === "exited"
-        && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
-        e.preventDefault();
-        this.requestRestart();
-        return false;
-      }
-      if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
-      const key = e.key.toLowerCase();
-      if (key === "c") {
-        const selection = this.term.getSelection();
-        if (!selection) return true;
-        this.copySelection(selection);
-        e.preventDefault();
-        return false;
-      }
-      if (key === "v") {
-        // Do NOT intercept Ctrl+V or Ctrl+Shift+V: Chromium fires a native paste
-        // event on xterm's textarea and xterm handles it. Programmatic clipboard
-        // reads are permission-gated in WebView2, so this is the reliable path.
-        if (this._protocol.canSendInput() && !this._exited) this._markWrote();
-        return true;
-      }
-      return true;
-    });
+    this.term.attachCustomKeyEventHandler((e) => this._handleKey(e));
     // Real keystrokes only: onData also fires for xterm's automatic replies
     // to terminal queries (DA/DSR), which must not count as user activity.
     this.term.onKey(() => this._markWrote());
@@ -1154,18 +1242,9 @@ export class Pane {
     this.termHost.addEventListener("contextmenu", (e) => {
       if (this.copySelection()) e.preventDefault();
     });
-    try {
-      const gl = new WebglAddon.WebglAddon();
-      gl.onContextLoss(() => {
-        try { gl.dispose(); } catch (e) {}
-        if (this._webgl === gl) this._webgl = null;
-      });
-      this.term.loadAddon(gl);
-      this._webgl = gl;
-    } catch (e) {
-      this._webgl = null; // DOM renderer fallback (much slower on heavy output)
-      console.warn("QuickTerm: WebGL renderer unavailable, using DOM renderer", e);
-    }
+    // A pane born offscreen (restored into a hidden view) gets its WebGL
+    // renderer when it is first shown.
+    if (!this._offscreen) this._loadWebgl();
     // Ctrl+click links: URLs via the web-links addon, file paths via the
     // custom provider above. Both open through the token-gated backend
     // (/api/open), which refuses non-http(s) URLs and reveals executables

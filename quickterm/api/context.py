@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -40,5 +41,9 @@ class ApiContext:
     # without a hotkey manager.
     rebind_hotkeys: Callable[[Any], None] | None = None
     suspend_hotkeys: Callable[[bool], None] | None = None
+    # Random per backend start, given to every PTY as QUICKTERM_HOOK_TOKEN.
+    # It opens POST /api/sessions/{sid}/agent-event and nothing else, so a
+    # program in a terminal never holds the full API token.
+    hook_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     inventory_cache: dict[str, Any] = field(default_factory=dict)
     workspace_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

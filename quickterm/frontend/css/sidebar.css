@@ -338,6 +338,42 @@ body.sidebar-collapsed .sidebar-grip { display: none; }
 .session-row.finished .session-state { border-style: dotted; background: transparent; }
 .session-row.finished.state-attention { opacity: .85; }
 .session-row.finished.state-attention .session-state { background: var(--accent); }
+/* An agent's turn ended and nobody has looked yet: a sage ring when it is
+   done, a danger dot when it failed. Working is the busy pulse above and
+   waiting the needs-you halo. */
+.session-row.state-done .session-state {
+  border-color: var(--sage);
+  background: var(--sage);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--sage);
+}
+.session-row.state-failed .session-state { border-color: var(--danger); background: var(--danger); }
+
+/* When it last did anything, on hover and focus only. */
+.session-age {
+  display: none;
+  flex: none;
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.session-entry:hover .session-age,
+.session-entry:focus-within .session-age { display: block; }
+
+/* An agent's running subagents: muted single lines under its row, on the
+   same guide as the terminals. Text, not controls. */
+.session-subagents { display: flex; flex-direction: column; padding: 0 6px 2px 20px; }
+.session-subagents[hidden] { display: none; }
+.session-subagent {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 9.5px/15px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-subagent::before { content: "\21b3  "; }
+/* The hover tray covers the row, not the subagent lines under it. */
+.session-entry.has-subagents > .session-actions { bottom: auto; height: 26px; }
 
 /* The folder follows the name on the same line, only once the sidebar has
    been dragged wide enough; below that the tooltip carries it. It shrinks
@@ -372,6 +408,8 @@ body .session-where[hidden] { display: none; }
 .chip-unread { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
 .chip-elsewhere { background: var(--surface); color: var(--muted); }
 .chip-attention { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.chip-done { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
+.chip-failed { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
 
 /* A workspace is a row like a terminal: an arrow, its colour, its name and,
    when it holds any, how many terminals. A click opens or focuses its view;
@@ -401,6 +439,20 @@ body .session-where[hidden] { display: none; }
 .session-group.unassigned > .session-group-headline > .session-group-head,
 .session-group.flat > .session-group-headline > .session-group-head { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: 8.5px; }
 .session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The checked-out branch, muted after the name; it gives way before the name. */
+.session-group-branch {
+  flex: 0 10 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-group-branch[hidden] { display: none; }
+/* A worktree workspace hangs under its main checkout like a terminal row. */
+.session-group.worktree { margin-left: 9px; padding-left: 5px; border-left: 1px solid var(--line); }
 .session-group-chevron { width: 12px; flex: none; display: grid; place-items: center; color: var(--muted); }
 .session-group-head:hover .session-group-chevron { color: var(--text); }
 /* Nothing to fold, but still a row that opens: the arrow stays, quieter. */
@@ -566,6 +618,8 @@ body.sidebar-collapsed .session-where,
 body.sidebar-collapsed .session-where.always,
 body.sidebar-collapsed .sidebar-hidden-note,
 body.sidebar-collapsed .session-chip,
+body.sidebar-collapsed .session-entry .session-age,
+body.sidebar-collapsed .session-subagents,
 body.sidebar-collapsed .session-group-headline,
 body.sidebar-collapsed .session-group-detail,
 body.sidebar-collapsed .session-actions,
@@ -574,6 +628,7 @@ body.sidebar-collapsed .sidebar-nav-button:not([data-nav="settings"]),
 body.sidebar-collapsed .sidebar-admin-badge { display: none; }
 body.sidebar-collapsed .sidebar-sessions { padding: 4px 0; }
 body.sidebar-collapsed .session-group { padding: 0; }
+body.sidebar-collapsed .session-group.worktree { margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-group > .session-group-rows,
 body.sidebar-collapsed .session-group.folded > .session-group-rows { display: flex; margin: 0; padding: 0; border: 0; }
 body.sidebar-collapsed .session-row { min-height: 20px; justify-content: center; padding: 0; }
@@ -638,7 +693,9 @@ body.sidebar-collapsed .update-pill { width: 24px; }
   .session-state, .session-group-dot, .sidebar-save { forced-color-adjust: none; border-color: CanvasText; }
   .session-row.attached .session-state,
   .session-row.state-attention .session-state,
+  .session-row.state-done .session-state,
   .session-group-dot:not(.hollow) { border-color: Highlight; background: Highlight; }
+  .session-row.state-failed .session-state { border-color: Mark; background: Mark; }
   .sidebar-save[data-state] { background: CanvasText; }
   .sidebar-save[data-state="error"] { background: Mark; }
   .group-actions, .session-actions { background: Canvas; }

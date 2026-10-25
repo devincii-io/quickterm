@@ -1,5 +1,5 @@
-"""Host-facing routes: health, profiles, shell inventory, elevation, updates,
-opening targets, reading a file and browsing folders."""
+"""Host-facing routes: health, the PTY host, profiles, shell inventory,
+elevation, updates, opening targets, reading a file and browsing folders."""
 
 from __future__ import annotations
 
@@ -13,12 +13,13 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from quickterm import browse, putty_tools
-from quickterm.api.common import asdict, read_json, resolve_request
+from quickterm.api.common import asdict, checked_dir, read_json, resolve_request
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
@@ -48,6 +49,57 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             ctx.token.encode("utf-8"), challenge.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         return answer
+
+    @app.get("/api/host")
+    async def host_info() -> dict:
+        """Which backend this is: the launcher compares builds before it
+        attaches a window, and replaces an older one (pty_host.py)."""
+        pty_host = importlib.import_module("quickterm.pty_host")  # stubbable in tests
+        host = pty_host.current()
+        if host is None:
+            return pty_host.unmanaged_info()
+        return await asyncio.to_thread(host.info)
+
+    @app.post("/api/host/summon")
+    async def host_summon(request: Request) -> dict:
+        """Show the windows, or start the window process when there is none."""
+        body = await read_json(request)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+        cwd = body.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str) or not cwd.strip():
+                raise HTTPException(400, "cwd must be a non-empty string")
+            cwd = await checked_dir(cwd)
+        pty_host = importlib.import_module("quickterm.pty_host")
+        host = pty_host.current()
+        if host is None:
+            return {"shown": "unavailable"}
+        # Starting the window process waits for its first window: seconds.
+        return {"shown": await asyncio.to_thread(host.summon, cwd)}
+
+    @app.post("/api/host/retire", response_model=None)
+    async def host_retire(request: Request) -> Any:
+        """Make way for another backend (an update). Refused with 409 while a
+        terminal is busy or touched, unless `force`; the refusal names them."""
+        body = await read_json(request)
+        if not isinstance(body, dict) or not isinstance(body.get("force", False), bool):
+            raise HTTPException(400, "body must be {'force': <bool>}")
+        pty_host = importlib.import_module("quickterm.pty_host")
+        host = pty_host.current()
+        if host is None:
+            raise HTTPException(409, "this backend is not managed by a PTY host")
+        retiring, sessions = await asyncio.to_thread(host.retire, bool(body.get("force")))
+        if not retiring:
+            return JSONResponse(
+                {
+                    "detail": "terminals are busy or in use",
+                    "retiring": False,
+                    "sessions": sessions,
+                },
+                status_code=409,
+            )
+        return JSONResponse({"retiring": True}, status_code=202)
 
     @app.get("/api/profiles")
     def list_profiles() -> list[dict]:

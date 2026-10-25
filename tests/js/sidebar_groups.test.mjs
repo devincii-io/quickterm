@@ -169,7 +169,7 @@ test("counts add up per group", () => {
     session("gone", { alive: false }),
   ], { workspaces: [{ name: "ws" }], attached: { open: "ws" }, owned: { asks: "ws", busy: "ws", unread: "ws", done: "ws", quiet: "ws", gone: "ws" } });
   const [ws] = groups;
-  assert.deepEqual(ws.counts, { attention: 1, open: 1, busy: 1, unread: 1, finished: 1 });
+  assert.deepEqual(ws.counts, { attention: 1, open: 1, busy: 1, unread: 1, finished: 1, done: 0, failed: 0 });
   assert.equal(ws.sessions.length, 6);
   assert.equal(groupSummary(ws), "1 needs you · 1 open · 1 new output · 1 busy · 1 background · 1 finished");
 });

@@ -2038,6 +2038,219 @@ recording, second press stop → transcribe → `manager.write(focused, text.enc
   surfaces and focus colors from the selected palette; terminal ANSI colors
   remain separate. Reduced-motion and forced-colors modes are supported.
 
+## Agent state, git worktrees and the PTY host (4.2, frozen 2026-10-24)
+
+Frozen before the 4.2 round so the backend and frontend parts can be built in
+parallel. Changing anything here goes through the integrator.
+
+### Agent state from hooks
+
+Every PTY QuickTerm spawns gets three environment variables:
+
+```
+QUICKTERM_SESSION_ID=<session id>
+QUICKTERM_PORT=<backend port>
+QUICKTERM_HOOK_TOKEN=<hook token>
+```
+
+The hook token is random per backend start and is accepted by exactly one
+route, so a program in a terminal does not get the full API token from its
+environment:
+
+```
+POST /api/sessions/{sid}/agent-event
+  header X-QuickTerm-Hook-Token: <hook token>   (the normal X-QuickTerm-Token also works)
+  body   {"agent": "claude" | "codex", "event": "<hook event name>", "payload": {...raw hook JSON...}}
+  -> 204; 404 unknown sid; 401 bad or missing token; 400 malformed body; body capped at 256 KiB
+
+POST /api/sessions/{sid}/agent-event?agent=claude|codex
+  body   the raw hook JSON alone; the event comes from `hook_event_name` (Claude) or `type` (Codex)
+```
+
+The bare form exists because Codex's `notify` passes its JSON as the last
+argument, which curl can only send as the whole body. Only this route answers
+401; every other route keeps 403, and the hook token is refused there.
+
+Transport: Claude gets one command hook per event, marked `async: true`, that
+runs `%SystemRoot%\System32\curl.exe -K <config>` from
+`%APPDATA%/quickterm/hooks/`; the configs read the three variables and stdin,
+so one static set serves every terminal. Claude's `"type": "http"` hooks
+cannot put an env var into the URL. Two `--settings` flags do not merge (the
+last wins), so a profile's own `settings` option is read, QuickTerm's hooks are
+appended, and the result is written to `hooks/claude-settings-<hash>.json` and
+passed as the only `--settings`; unreadable user settings leave the launch
+without hooks. Codex gets `-c notify=[curl, -K, codex-notify.curl,
+--data-binary]` before any subcommand. A per-launch `notify` replaces the
+user's, so when `config.toml` sets one (a list of strings) the launch gets
+`notify=[<this program>, --codex-notify, <their argv>...]` instead:
+`codex_notify.py` (handled first in `app.main`) starts their program with the
+JSON as Codex would, then posts it to `?agent=codex`; it always exits 0. A
+`notify` that cannot be read or is not a list of strings gets no hook. Codex hooks
+are not used: each must be trusted in `/hooks` before it runs. No hooks in
+the elevated backend, a backend whose `host` is not `127.0.0.1`, `localhost`
+or `0.0.0.0` (the configs post to 127.0.0.1), or when `curl --version` is
+older than 8.3 (`--variable`, `--expand-*`; checked once off the loop). Hook
+files are written under a lock with unique temp names; the 8 most recently
+used `claude-settings-<hash>.json` are kept. A SessionStart with source
+`compact` keeps the state; the other sources reset it to idle. No hooks for
+`agents` mode, a `.cmd`/`.bat` Codex shim, an explicit `cmd` or `args` in the
+request, or elevated terminals. `LaunchSpec.agent` ("claude" | "codex" | None)
+carries the choice to `SessionManager._build`, which adds the arguments there
+because the session id exists only at that point.
+
+Hook events run as separate processes and can arrive out of order: an event
+that would move the state back from a more final one within 1 s (a tool event
+after "waiting", anything after "done") is dropped.
+
+Claude Code agents launched through `launch.resolve` get QuickTerm's hooks
+for that launch only (never by editing the user's `~/.claude/settings.json`).
+Codex gets the equivalent through its per-launch config. A hook that runs
+without `QUICKTERM_SESSION_ID` does nothing and exits 0.
+
+`GET /api/sessions` items gain one field:
+
+```
+"agent": null | {
+  "kind": "claude" | "codex",
+  "state": "working" | "waiting" | "done" | "failed" | "idle",
+  "prompt": str | null,      # last user prompt, clean_text, <= 200 chars
+  "message": str | null,     # last assistant message, clean_text, <= 200 chars
+  "tool": str | null,        # tool running now while working, else null
+  "subagents": [{"id": str, "type": str | null, "description": str | null, "age_seconds": int}],
+  "age_seconds": int         # since the last state change
+}
+```
+
+Claude events map to states: SessionStart idle; UserPromptSubmit working
+(sets prompt, clears message); PreToolUse and PostToolUse working (tool);
+PermissionRequest and a permission Notification waiting; Stop done (message);
+StopFailure failed; SubagentStart adds and SubagentStop removes a subagent;
+SessionEnd sets `agent` back to null. Codex's turn-complete notification is
+done (message). `mark_seen` turns done and failed into idle; typing never
+changes the state. The process exiting sets `agent` to null. "waiting" also
+raises the existing attention with kind `"notify"` when nothing else did.
+
+### Git info and worktree workspaces
+
+Git facts come from reading `.git` (a folder, or a `gitdir:` file for a
+worktree) and `HEAD`; listing never starts a `git` process.
+
+```
+git_info := null | {
+  "branch": str | null,       # null on a detached HEAD
+  "head": str | null,         # short sha when detached
+  "worktree": bool,           # a linked worktree, not the main checkout
+  "main_path": str | null     # the main checkout's folder when worktree is true
+}
+
+POST /api/git/info  {"paths": [str, ...]}   (at most 256)
+  -> {"<path as sent>": git_info, ...}
+
+GET /api/workspaces/{name}  gains  "git": git_info   (for its path)
+
+POST /api/workspaces/worktree
+  {"from": "<workspace name>", "branch": "<new branch>", "base": "<ref>"?}
+  -> 201 {"workspace": "<new workspace name>", "path": str,
+          "setup": null | {"command": str, "source": str}}
+  -> 400 bad branch name, the workspace has no git folder; 404 unknown workspace;
+     409 the branch or the target folder already exists
+```
+
+The worktree goes to `<parent of main checkout>/<repo folder>-<branch slug>`
+and runs `git worktree add -b <branch> <path> [<base>]` off the event loop. The
+new workspace is named `<from>/<branch slug>`, its `path` the new folder, its
+layout empty. `setup` is the first match of uv.lock `uv sync`,
+package-lock.json `npm ci`, pnpm-lock.yaml `pnpm install`, yarn.lock
+`yarn install`, poetry.lock `poetry install`; the backend never runs it. The
+frontend opens the new workspace's view, starts the default terminal there
+and types `command` followed by Enter, so the user sees it run. Removing a
+worktree is not part of this round.
+
+Beyond the codes above: an existing branch, target folder or workspace name
+is 409 before git runs, and any other `git worktree add` failure is 500 with
+git's last stderr line. A worktree made from a linked worktree still lands
+next to the main checkout; the default base is the source checkout's HEAD.
+Workspace names may contain `/`, so the name routes are `{name:path}`
+(Starlette decodes `%2F` before routing).
+
+### Frontend for agent state and worktrees
+
+- Terminal rows: working pulses (the busy look), waiting has the needs-you
+  halo, done a ring, failed a red dot; the tooltip carries prompt, tool,
+  message and subagent count; running subagents are muted, non-focusable
+  lines under the row. Looking at a done or failed terminal marks it seen.
+- Relative idle time ("now", "5m") after the name on hover or focus only.
+- Alt+J focuses the next terminal that needs you (waiting, attention, done
+  or failed and unseen) in sidebar order and wraps.
+- The `@` palette, with nothing typed, ranks needs-you, done and failed,
+  working, then the rest; once typed, the match leads and rank breaks ties.
+- Workspace rows show the branch (detached `@sha`) unless it repeats the
+  name; worktree workspaces sit under their main checkout. Git info is one
+  batched `POST /api/git/info` 1.5 s after the folders arrive, then every 60 s.
+- "new worktree..." is a palette row and a row-menu entry for git
+  workspaces, with the branch typed in the palette; the setup command goes
+  through `POST /api/sessions/{id}/input`.
+- Shift+Enter in a Claude Code or Codex pane sends `ESC CR` (ConPTY turns it
+  into Alt+Enter, both CLIs' newline); other panes are unchanged.
+- A pane in a hidden view, or covered by a zoomed pane, drops its WebGL addon
+  5 s after it was hidden and loads a new one when shown; buffer and
+  WebSocket stay. The shell tells each view through
+  `window.quicktermView.setHidden(hidden)`.
+
+### The PTY host
+
+The process that owns the PTYs (the backend: server, session manager,
+hotkeys, tray) and the process that shows the window are separate. Closing
+or restarting the window process, and installing an update, leave the backend
+and its terminals running; the next window attaches to it on the same port
+with the same token, through the existing attach and replay. The HTTP and WS
+interfaces above do not change. An update replaces the program files, so the
+backend runs from a copy of the program that the installer does not lock;
+an update that changes the backend itself restarts it only when no terminal is
+busy or touched, otherwise it asks, and the new backend takes over the next
+time the old one has nothing to keep. Restoring scrollback after a reboot is
+not part of this round.
+
+As built (`pty_host.py`), one program has three roles chosen by `app.main()`:
+
+- **launcher** (`QuickTerm.exe`, no role flag): finds the backend through the
+  verified probe or starts it detached, asks it for a window
+  (`POST /api/host/summon`) and exits. A launcher of another, not older,
+  frozen build first calls `POST /api/host/retire`.
+- **backend** (`--serve`): server, sessions, global hotkeys and tray, which
+  must work while no window exists. Frozen, it runs from
+  `%LOCALAPPDATA%\QuickTerm\host\<version>-<hash>\QuickTerm-host.exe`
+  (`QUICKTERM_HOST_DIR` overrides the root). The renamed exe keeps Setup's
+  `taskkill /IM QuickTerm.exe` away from it. The running build plus one more
+  are kept; a copy whose exe cannot be deleted is in use and stays. The
+  `.complete` marker records the copy's file count and total size, and a copy
+  that no longer matches is copied again; a copied backend that exits before
+  it answers the probe is discarded and the backend starts once from the
+  install folder. The elevated instance starts the installed `QuickTerm.exe`
+  of the same build (an all-users install from Inno's uninstall key first,
+  then the copy's `.source`), never the user-writable copy; without one it
+  fails with 500. Uninstall asks before it stops the current user's
+  processes, and leaves other users' backends running from their copies.
+- **viewer** (`--viewer`): every pywebview window, one process, a child of the
+  backend, driven by JSON lines on its stdin/stdout (commands open, show,
+  quit; events ready, adopted, closed, opened). The backend dying closes the
+  pipe and the windows. Closing the last window ends the viewer; the backend
+  then applies the close-to-tray rule (a live session touched, retained or
+  busy keeps it in the tray, else it exits; elevated or tray-less, it exits).
+  A crashed viewer's workspace claims are freed at once.
+
+```
+GET  /api/host          -> {build, version, pid, viewer_pid, ...} which backend this is
+POST /api/host/summon   {"cwd"?: str} -> show the windows, or start the viewer
+POST /api/host/retire   {"force"?: bool} -> 202 leaving; 409 naming busy or touched terminals
+```
+
+A refused retire marks the old backend superseded: it leaves once it has no
+window and nothing at risk, and is not asked again. Uvicorn's graceful
+shutdown is bounded to 3 s, so terminals stop promptly after the port closes.
+Each role logs to its own file (`quickterm.log`, `viewer.log`,
+`launcher.log`).
+
 ## Testing
 
 `tests/` with pytest. Backend units must not require a real browser. PTY tests

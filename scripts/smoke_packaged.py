@@ -1,8 +1,15 @@
 """Release smoke test for the frozen Windows application folder.
 
-Starts the real packaged app with isolated configuration, creates a PTY through
-the authenticated API, verifies replay and live WebSocket traffic, then checks
-the importlib-backed routes that are easy to omit from a PyInstaller build.
+Starts the real packaged backend (`--serve`) with isolated configuration,
+creates a PTY through the authenticated API, verifies replay and live
+WebSocket traffic, then checks the importlib-backed routes that are easy to
+omit from a PyInstaller build.
+
+Then the update path, without a window: two copies of the build stand in for
+an installed version and its update. The first launcher starts its backend
+from a copy under an isolated host folder; its whole install folder is then
+deleted while a terminal runs, as Setup replaces it; the second launcher
+retires that backend (nothing is busy or touched) and starts its own.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -122,7 +130,10 @@ def smoke(executable: Path, port: int) -> None:
     with tempfile.TemporaryDirectory(prefix="quickterm-package-smoke-") as isolated:
         env = os.environ.copy()
         env["APPDATA"] = isolated
-        process = subprocess.Popen([str(executable), "--port", str(port)], env=env)
+        env["QUICKTERM_HOST_DIR"] = str(Path(isolated) / "host")
+        # The backend itself, in place: a plain QuickTerm.exe is the launcher,
+        # which would exit at once and leave a backend copy and a window.
+        process = subprocess.Popen([str(executable), "--serve", "--port", str(port)], env=env)
         try:
             health = _wait_ready(base)
             token_path = Path(isolated) / "quickterm" / "runtime.token"
@@ -248,6 +259,10 @@ def smoke(executable: Path, port: int) -> None:
                     "(quickterm.update missing from hiddenimports?)"
                 )
 
+            host_status, host = _request(base, "/api/host", token=token)
+            if host_status != 200 or not isinstance(host, dict) or not host.get("managed"):
+                raise RuntimeError(f"packaged host route returned {host_status}: {host!r}")
+
             package_bytes = sum(
                 path.stat().st_size for path in executable.parent.rglob("*") if path.is_file()
             )
@@ -258,14 +273,99 @@ def smoke(executable: Path, port: int) -> None:
                 f"{len(replay)} replay bytes, {len(live)} live bytes"
             )
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-            _wait_port_closed(port)
+            _stop(base, process, port, isolated)
+
+
+def _token(appdata: str) -> str:
+    return (Path(appdata) / "quickterm" / "runtime.token").read_text(encoding="utf-8").strip()
+
+
+def _stop(base: str, process: subprocess.Popen | None, port: int, appdata: str) -> None:
+    """Retire the backend the way the tray's Quit does, then make sure."""
+    try:
+        _request(base, "/api/host/retire", token=_token(appdata), method="POST",
+                 payload={"force": True})
+    except (OSError, urllib.error.URLError):
+        pass
+    if process is not None:
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    _wait_port_closed(port, timeout=20)
+
+
+def _install_copy(executable: Path, target: Path, *, stamp: float) -> Path:
+    """A second install of the same build with its own build id (its exe time)."""
+    shutil.copytree(executable.parent, target)
+    exe = target / executable.name
+    os.utime(exe, (stamp, stamp))
+    return exe
+
+
+def _host(base: str, appdata: str) -> dict:
+    status, info = _request(base, "/api/host", token=_token(appdata))
+    if status != 200 or not isinstance(info, dict):
+        raise RuntimeError(f"/api/host answered {status}: {info!r}")
+    return info
+
+
+def update_smoke(executable: Path, port: int) -> None:
+    executable = executable.resolve()
+    base = f"http://127.0.0.1:{port}"
+    with tempfile.TemporaryDirectory(
+        prefix="quickterm-update-smoke-", ignore_cleanup_errors=True
+    ) as isolated:
+        env = os.environ.copy()
+        env["APPDATA"] = isolated
+        host_dir = Path(isolated) / "host"
+        env["QUICKTERM_HOST_DIR"] = str(host_dir)
+        now = time.time()
+        old = _install_copy(executable, Path(isolated) / "old", stamp=now - 86400)
+        new = _install_copy(executable, Path(isolated) / "new", stamp=now)
+        try:
+            first = subprocess.run(
+                [str(old), "--background", "--port", str(port)], env=env, timeout=120, check=False
+            )
+            if first.returncode != 0:
+                raise RuntimeError(f"the first launcher exited {first.returncode}")
+            before = _host(base, isolated)
+            if not before.get("copy"):
+                raise RuntimeError(f"the backend does not run from its copy: {before!r}")
+            if not (host_dir / str(before["build"]) / "QuickTerm-host.exe").is_file():
+                raise RuntimeError("the backend copy is not where the launcher put it")
+            status, spawned = _request(
+                base, "/api/sessions", token=_token(isolated), method="POST",
+                payload={"cmd": "cmd.exe", "args": ["/q", "/k"], "cwd": isolated,
+                         "name": "Update smoke", "kind": "terminal"},
+            )
+            if status != 200 or not isinstance(spawned, dict):
+                raise RuntimeError(f"PTY spawn from the copy failed ({status}): {spawned!r}")
+
+            # What Setup does to the program folder: nothing in it may be held.
+            shutil.rmtree(old.parent)
+            status, sessions = _request(base, "/api/sessions?metrics=false", token=_token(isolated))
+            if not any(s.get("id") == spawned["id"] and s.get("alive") for s in sessions):
+                raise RuntimeError("the terminal died with the install folder")
+
+            second = subprocess.run(
+                [str(new), "--background", "--port", str(port)], env=env, timeout=120, check=False
+            )
+            if second.returncode != 0:
+                raise RuntimeError(f"the second launcher exited {second.returncode}")
+            after = _host(base, isolated)
+            if after["build"] == before["build"] or after["pid"] == before["pid"]:
+                raise RuntimeError(f"the new build did not take over: {before!r} -> {after!r}")
+            builds = sorted(p.name for p in host_dir.iterdir() if not p.name.startswith("."))
+            if builds != sorted([before["build"], after["build"]]):
+                raise RuntimeError(f"unexpected copies in the host folder: {builds}")
+            print(
+                "update smoke passed: install folder replaced under a running backend | "
+                f"{before['build']} -> {after['build']} | copies kept: {len(builds)}"
+            )
+        finally:
+            _stop(base, None, port, isolated)
 
 
 def main() -> None:
@@ -277,8 +377,11 @@ def main() -> None:
         default=Path("dist/QuickTerm/QuickTerm.exe"),
     )
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--skip-update", action="store_true", help="skip the update phase")
     args = parser.parse_args()
     smoke(args.executable, args.port or _free_port())
+    if not args.skip_update:
+        update_smoke(args.executable, args.port or _free_port())
 
 
 if __name__ == "__main__":

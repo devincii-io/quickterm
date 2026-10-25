@@ -176,10 +176,10 @@ class FakeSessionManager:
         return info
 
     def spawn(self, *, name=None, profile=None, cmd, args=(), cwd=None,
-              env=(), cols=120, rows=30, workspace=None) -> FakeSessionInfo:
+              env=(), cols=120, rows=30, workspace=None, agent=None) -> FakeSessionInfo:
         self.last_spawn = {"name": name, "profile": profile, "cmd": cmd,
                            "args": list(args), "cwd": cwd, "env": dict(env),
-                           "workspace": workspace}
+                           "workspace": workspace, "agent": agent}
         return self.add_session(name=name or "s", profile=profile, cols=cols,
                                 rows=rows, workspace=workspace)
 
@@ -258,6 +258,17 @@ class FakeSessionManager:
         if sid not in self.sessions:
             raise KeyError(sid)
         getattr(self, "attention", {}).pop(sid, None)
+
+    def set_agent_hooks(self, port: int, token: str) -> None:
+        self.hook_env = {"port": port, "token": token}
+
+    def agent_event(self, sid: str, agent: str, event: str, payload: dict) -> None:
+        if sid not in self.sessions:
+            raise KeyError(sid)
+        self.agent_events = [*getattr(self, "agent_events", []), (sid, agent, event, payload)]
+
+    def session_agent(self, sid: str) -> dict | None:
+        return getattr(self, "agents", {}).get(sid)
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -1067,7 +1078,7 @@ def test_workspace_crud(client, fake_workspace):
     ws = client.get("/api/workspaces/dev").json()
     assert ws == {
         "name": "dev", "layout": layout, "logo": None, "path": None,
-        "session_ids": [], "path_exists": False, "temporary": False,
+        "session_ids": [], "path_exists": False, "temporary": False, "git": None,
     }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
