@@ -4,7 +4,7 @@ Release history is also available on the [GitHub Releases page](https://github.c
 
 ## QuickTerm 4.2.0
 
-Not released yet.
+Released 2026-10-25.
 
 ### Terminals outlive the window
 
