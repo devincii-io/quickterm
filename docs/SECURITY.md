@@ -28,6 +28,14 @@ claim a certification or guarantee suitability for every regulated setting.
 - There are no accounts, analytics, advertising, or usage telemetry. Terminal
   I/O and resource measurements are not sent to the author or any other
   service.
+- To show usage limits, the backend reads the Claude Code and Codex sign-in
+  files on this computer and in running WSL distributions. From Codex it
+  reads only the account id, email and plan in the `id_token`. For each
+  Claude account it sends Claude Code's own access token to
+  `api.anthropic.com` (the usage route Claude Code calls, at most every two
+  minutes while the window asks); the token is not stored, logged, returned
+  by any route or refreshed. Settings > Agents > Usage limits turns this
+  request off.
 - Terminal scrollback is held in backend memory while a session lives. Saved
   workspace files retain layout, location, folder, the encrypted environment,
   startup items and live-session IDs, not a persistent transcript of

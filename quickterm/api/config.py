@@ -162,7 +162,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
             "max_sessions", "scrollback_bytes", "shell", "agents", "snippets", "voice",
             "update_check", "update_auto_download", "scratch_dir", "window", "overlay", "summon_hotkey",
-            "notifications", "keep_awake",
+            "notifications", "keep_awake", "usage_online",
         ):
             if hasattr(new_cfg, name):
                 setattr(cfg, name, getattr(new_cfg, name))

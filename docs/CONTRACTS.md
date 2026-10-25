@@ -2023,7 +2023,7 @@ def user_command(status: dict) -> str | None
   for the palette and search. `Panels#showWorkspace(name)` opens the
   `"workspace"` sheet for that workspace (the sidebar's "Workspace
   settings"): location, folder, Environment, Start with, logo and the saved
-  layout's preview, with Cancel, **Run setup now** and Save. Every chooser is
+  layout's preview, with Cancel, **Save and start them** and Save. Every chooser is
   `configChoice` (a `menu.js` menu); `Panels._select` and every native
   `<select>` are gone. Every field stamps `data-setting=<id>`.
 - Master and detail (`config_list.js`) serves the snippets since 4.5: on the
@@ -2808,6 +2808,51 @@ Backend:
   `"rate_limits"` in a `token_count` event, read from the end of the file
   (at most the last 256 KB), cached by file path and mtime. Never written.
 - Nothing is sent off the machine, and no credentials are read.
+  Superseded in 4.6 (below): the backend also reads the sign-ins themselves.
+
+### Every account's limits (4.6, 2026-10-25)
+
+- `usage_accounts.py` finds every Claude Code and Codex sign-in on this
+  computer: Claude's `~/.claude.json` with `~/.claude/.credentials.json`,
+  every `CLAUDE_CONFIG_DIR`-style folder (the process env, the agent
+  settings' env, `~/.claude-*` holding `.claude.json`/`.credentials.json`);
+  Codex's `~/.codex/auth.json`, `CODEX_HOME`, `~/.codex-*`; the same under
+  `/root` and `/home/*` of every running WSL distribution
+  (`\\wsl.localhost\<distro>`; a stopped one is never read). SSH hosts are
+  not searched: limits are per account, so an account also signed in here
+  covers its use over SSH, and one signed in only on a host is not shown.
+  Only local launches carry the status line today, so reports come from
+  `local`; the per-origin keys are ready for WSL and SSH reports.
+- Sign-ins are grouped by account (Claude `oauthAccount.accountUuid`, Codex
+  `chatgpt_account_id` from the `id_token` claims, else the email), so one
+  account in several places is one entry listing every place.
+- Claude's windows, newest first wins: the usage route Claude Code itself
+  calls (`GET https://api.anthropic.com/api/oauth/usage`, `Authorization:
+  Bearer <access token>`, `anthropic-beta: oauth-2025-04-20`) at most every
+  120 s per account and 600 s after a failure; a status-line report from a
+  place where that account is signed in (`ClaudeLimits` now keeps one per
+  origin: `local`, `wsl:<distro>`, `ssh:<destination>`); Claude Code's own
+  `cachedUsageUtilization`. The token is read for the one request and
+  dropped: never stored, logged, returned or refreshed, and a sign-in that
+  has expired is left to Claude Code with the note "sign-in expired; open
+  Claude Code to renew it". `usage_online` (config, Settings > Agents, default
+  true) turns the request off. Windows come from the answer's `limits` list
+  (`session` 5 hours, `weekly_all` 7 days, `weekly_scoped` 7 days · <model>),
+  else its `five_hour`/`seven_day`/`seven_day_opus`/`seven_day_sonnet`.
+- Codex's windows come from each home's newest rollout, as above.
+- `GET /api/usage` adds `"accounts": [{"agent": "claude"|"codex", "key",
+  "email", "organization", "plan", "where": [str], "windows": [{"id",
+  "label", "used_percent", "resets_at"}], "updated_at", "source": "live" |
+  "status line" | "Claude Code" | "session log" | null, "note"?}]`, and
+  `claude`/`codex` become the account closest to a limit (the footer line),
+  falling back to the 4.4 values. The handler never waits: a background
+  thread refreshes when the answer is older than 30 s, and only the real
+  backend turns discovery on (`app.py`), so app tests never read this
+  computer's sign-ins. A status-line report from a place with no sign-in
+  found here is its own entry, "on <host>" for an SSH destination.
+- The usage popover shows one block per account (agent and plan, email and
+  places, each window with its bar and reset, "updated 1m ago · from status
+  line" when not live, and the note) and asks again every 10 s while open.
 
 ### Workspace board replaces the dashboard (added 2026-10-25)
 
@@ -3069,14 +3114,16 @@ Workspace setup
   layout without a `startup` list is restored as before, with its Restart
   and Resume offers. A startup pane's saved launch keeps its `shell` and
   `command` (never its variables), so a restart after a reload repeats
-  them; a restart in the same session repeats the whole item. "Run setup" in the
-  workspace's sidebar menu and the palette starts the items again next to
-  what is open.
+  them; a restart in the same session repeats the whole item. The
+  workspace's sidebar menu row "Start <names>" (`startupMenuLabel`: up to
+  three names, then "+N"; hidden without a list) and the palette row "start
+  the Start with terminals" start the items again next to what is open
+  (4.6; was "Run setup").
 - UI: the workspace settings sheet shows the location and folder, an
   Environment section (name/value rows, values masked until focused) and a
   "Start with" list (type menu, name, command for a shell, agent mode and
   options for an agent through the existing agent fields, per-terminal env),
-  plus "Run setup now". The new-workspace dialog offers "Start with": Shell,
+  plus "Save and start them" (4.6; was "Run setup now"). The new-workspace dialog offers "Start with": Shell,
   Claude Code, Codex (any combination; default Shell), which fills
   `startup`.
 
@@ -3107,7 +3154,7 @@ The board sorts itself
   "PR #<n> closed".
 - Facts and cost: agent states and attention come from the session manager
   (free). Git comes from one `git status --porcelain=v2 --branch` per
-  workspace (`ws_exec`, so WSL and SSH work), cached 20 s and refreshed off
+  workspace (`ws_exec`, so WSL and SSH work), cached 30 s and refreshed off
   the loop; the board never waits for a refresh, it answers from the cache
   and the next poll shows the new state. The pull request comes from the
   same `gh` call the right panel uses, cached 120 s per workspace (with the
@@ -3462,8 +3509,22 @@ What the frozen "The right panel" part left open, as implemented.
   parsed from its link; the PR carries `headRefOid`. A folder outside git
   answers `reason: "not a git repository"` without asking gh. `GET
   .../pr/log` takes an optional `job`. `gh` runs on this machine with
-  `-R <host>/<owner>/<repo>` from `origin`'s URL, through `ws_exec` with the
-  home folder. The PR is found with `gh pr list --head=<branch> --state all`
+  `-R <host>/<owner>/<repo>` from the branch's upstream remote, else
+  `origin`, else `upstream`, else the push remote, else the first GitHub
+  remote (4.6; before, only `origin`), through `ws_exec` with the home
+  folder. The branch and every remote setting are read in two git calls
+  (`rev-parse --is-inside-work-tree --symbolic-full-name HEAD` and one
+  `config --null --get-regexp`); insteadOf, pushInsteadOf and pushurl apply
+  as in git, credentials in a URL are dropped, `ssh.github.com` and
+  `www.github.com` mean github.com, and an SSH alias is resolved through
+  `~/.ssh/config` (the distribution's own in WSL; by name only for an SSH
+  workspace). `reason` is one of: "not a git repository", "git could not
+  be asked: <why>", "this repository has no remote", "<remote> is a folder,
+  not a GitHub repository", "<remote> is on <host>; pull requests are shown
+  for GitHub repositories", "no branch checked out", "the branch has no
+  commits yet", "no pull request for this branch", or gh's own message with
+  credentials scrubbed. The base branch is found with one `for-each-ref`
+  and the branch's commits with `diff --raw --numstat <base>...HEAD`. The PR is found with `gh pr list --head=<branch> --state all`
   (an open one wins over older ones), never `gh pr view <branch>`, which
   reads an all-digit branch as a PR number; a branch starting with `-` has
   no PR. `POST .../pr/merge` takes `{"method", "number", "head_sha"}`, the PR

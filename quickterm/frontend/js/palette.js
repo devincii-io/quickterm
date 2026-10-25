@@ -259,7 +259,7 @@ export class Palette {
       { kind: "action", label: "settings", run: () => a.openPanel?.("settings") },
       { kind: "action", label: "color theme…", hint: "try the themes live", run: () => a.openThemeSwitcher?.() },
       {
-        kind: "action", label: "run workspace setup", hint: "starts its Start with list next to what is open",
+        kind: "action", label: "start the Start with terminals", hint: "the list in Workspace settings, next to what is open",
         run: () => a.runWorkspaceSetup?.(),
       },
       { kind: "action", label: "agent settings", hint: "Claude Code and Codex", run: () => a.setupTerminals?.() },

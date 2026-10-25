@@ -375,6 +375,11 @@ export function createChangesTab(ctx) {
       render();
       return;
     }
+    if (!data) {
+      note.replaceChildren(icon("spinner", 12), "Reading the changes…");
+      note.classList.add("busy");
+      note.hidden = false;
+    }
     try {
       const answer = await wsApi.getChanges(workspace);
       if (run !== generation) return;
@@ -383,11 +388,18 @@ export function createChangesTab(ctx) {
       note.hidden = true;
     } catch (error) {
       if (run !== generation) return;
-      data = null;
-      ctx.noteChanges?.(workspace, null);
-      setText(note, error.status === 409 ? "Not a git repository." : error.detail || "Could not read the changes.");
+      const why = error.status === 409 ? "Not a git repository." : error.detail || "Could not read the changes.";
+      if (data && error.status !== 409) {
+        // A slow or failed git keeps the last answer on screen.
+        setText(note, `${why.replace(/\.$/, "")}. Showing the last result.`);
+      } else {
+        data = null;
+        ctx.noteChanges?.(workspace, null);
+        setText(note, why);
+      }
       note.hidden = false;
     }
+    note.classList.remove("busy");
     setText(capNote, data?.truncated ? "Showing the first 5000 files of each kind." : "");
     capNote.hidden = !data?.truncated;
     render();

@@ -44,6 +44,7 @@ export const SETTINGS_INDEX = [
   { id: "idle_timeout_s", tab: "advanced", label: "Clean unused shells", keywords: "idle timeout cleanup reap", hint: "Only untouched, detached shells" },
   { id: "max_sessions", tab: "advanced", label: "Live terminal limit", keywords: "max sessions limit count", hint: "0 means unlimited" },
   { id: "scratch_dir", tab: "advanced", label: "Scratch folder", keywords: "scratch temp folder directory", hint: "Where scratch terminals start" },
+  { id: "usage_online", tab: "agents", label: "Usage limits from Anthropic", keywords: "usage limits claude account quota rate", hint: "Ask for each Claude account's current limits" },
   { id: "update_check", tab: "advanced", label: "Update notifications", keywords: "updates release version check notify", hint: "Tell me when a new version is out" },
   { id: "voice", tab: "advanced", label: "Voice input", keywords: "voice whisper speech dictation", hint: "Parked for now" },
   { id: "updates", tab: "about", label: "Check for updates", keywords: "update install version release", hint: "Compare with the latest release" },

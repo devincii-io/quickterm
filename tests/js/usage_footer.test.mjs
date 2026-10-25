@@ -121,3 +121,26 @@ test("resources list open workspaces, then their terminals, with metrics joined 
   assert.equal(rows[1].session.id, "a");
   assert.deepEqual(resourceRows([], []), []);
 });
+
+test("one block per account, Claude first and the busiest first, with plan, who and where", async () => {
+  const { accountBlocks, planLabel } = await import("../../quickterm/frontend/js/usage_footer.js");
+  assert.equal(planLabel("claude_max"), "Max");
+  assert.equal(planLabel("plus"), "Plus");
+  assert.equal(planLabel("some_new_plan"), "some new plan");
+  assert.equal(planLabel(null), null);
+  const window = (used) => ({ id: "session", label: "5 hours", used_percent: used, resets_at: NOW + 3600 });
+  const blocks = accountBlocks([
+    { agent: "codex", key: "c", email: "a@x", plan: "plus", where: ["This PC"], windows: [window(90)], updated_at: NOW, source: "session log" },
+    { agent: "claude", key: "1", email: "a@x", plan: "claude_max", where: ["This PC"], windows: [window(20)], updated_at: NOW - 120, source: "live" },
+    { agent: "claude", key: "2", email: "b@x", plan: "claude_team", where: ["This PC", "WSL: Ubuntu (b)"], windows: [window(70)], updated_at: NOW, source: "Claude Code", note: "sign-in expired; open Claude Code to renew it" },
+    { agent: "other", key: "z", windows: [] },
+  ], NOW);
+  assert.deepEqual(blocks.map((block) => block.title), ["Claude Code · Team", "Claude Code · Max", "Codex · Plus"]);
+  assert.equal(blocks[0].who, "b@x · This PC, WSL: Ubuntu (b)");
+  assert.equal(blocks[0].updated, "now · cached");
+  assert.equal(blocks[0].note, "sign-in expired; open Claude Code to renew it");
+  assert.equal(blocks[1].updated, "2m ago", "live numbers name no source");
+  assert.equal(blocks[2].windows[0].percent, "90%");
+  const empty = accountBlocks([{ agent: "claude", key: "3", windows: [] }], NOW);
+  assert.equal(empty[0].note, "No limits known yet.");
+});

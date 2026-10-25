@@ -54,8 +54,11 @@ body.sidebar-hidden .launcher.sidebar > .usage-footer { display: none; }
 
 .usage-block + .usage-block { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line-strong); }
 .usage-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 2px 4px; }
-.usage-block-title { font-weight: 600; }
-.usage-block-updated { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.usage-block-title { font-weight: 600; white-space: nowrap; }
+.usage-block-updated { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.usage-block-who { margin: -2px 2px 5px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-block-note { margin: 0 2px 5px; color: var(--muted); font-size: 10px; }
+.usage-block-who[hidden], .usage-block-note[hidden] { display: none; }
 .usage-window { margin: 0 2px 6px; }
 .usage-window-line { display: flex; justify-content: space-between; gap: 8px; }
 .usage-window-percent { font-variant-numeric: tabular-nums; }

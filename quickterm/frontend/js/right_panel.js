@@ -317,10 +317,9 @@ export function createRightPanel({
       if (inside) focusBack();
     }
     applyMode(previous);
-    if (mode !== "hidden") {
-      follow(true);
-      refreshShown();
-    }
+    // A workspace change refreshes inside follow; asking again would run
+    // every tab's git calls twice.
+    if (mode !== "hidden" && !follow(true)) refreshShown();
     schedule();
     fitAfterSlide();
   }
@@ -350,9 +349,10 @@ export function createRightPanel({
   collapse.addEventListener("click", () => setMode(chevronPanelMode(mode)));
 
   // The shown workspace changed (or the panel opened): start over on it.
+  // True when it refreshed the tabs.
   function follow(force = false) {
     const name = shownWorkspace();
-    if (!force && name === workspace) return;
+    if (!force && name === workspace) return false;
     const changed = name !== workspace;
     workspace = name;
     if (changed) {
@@ -369,6 +369,7 @@ export function createRightPanel({
       if (mode !== "hidden") refreshShown();
       schedule();
     }
+    return changed && mode !== "hidden";
   }
 
   // ---- the keyboard inside the panel ----

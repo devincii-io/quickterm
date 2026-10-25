@@ -290,3 +290,18 @@ test("a folder outside git says so in the PR tab", () => {
     text: "Not a git repository.", command: null,
   });
 });
+
+test("the PR tab shows why there is nothing, and offers gh pr create only for a missing PR", () => {
+  const line = (reason) => prEmptyLine({ gh: "ok", pr: null, reason });
+  assert.deepEqual(line("origin is on dev.azure.com; pull requests are shown for GitHub repositories"), {
+    text: "origin is on dev.azure.com; pull requests are shown for GitHub repositories.", command: null,
+  });
+  assert.equal(line("git could not be asked: git did not answer within 30 s").text,
+    "Git could not be asked: git did not answer within 30 s.");
+  assert.equal(line("this repository has no remote").text, "This repository has no remote.");
+  assert.equal(line("gh could not ask github.com: HTTP 502").text, "gh could not ask github.com: HTTP 502.");
+  assert.deepEqual(line("no branch checked out"), { text: "No branch is checked out (detached HEAD).", command: null });
+  assert.equal(line("the branch has no commits yet").command, null);
+  assert.equal(line(null).command, "gh pr create");
+  assert.equal(line("no pull request for this branch").command, "gh pr create");
+});

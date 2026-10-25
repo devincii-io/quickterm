@@ -323,3 +323,12 @@
   border-top: 1px solid var(--line);
 }
 .nw-foot-gap { flex: 1; }
+
+/* The folder browser's "Loading…" while a slow listing arrives. */
+.fb-msg-loading::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 1.5px solid var(--muted); border-right-color: transparent; border-radius: 50%;
+  animation: fb-spin .8s linear infinite;
+}
+@keyframes fb-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .fb-msg-loading::before { animation: none; } }

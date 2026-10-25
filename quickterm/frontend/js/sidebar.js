@@ -102,6 +102,7 @@ export function sidebarModel({
         path: folders.get(name)?.path ?? null,
         pathExists: folders.get(name)?.pathExists ?? null,
         host: folders.get(name)?.host ?? null,
+        startup: folders.get(name)?.startup ?? [],
         git: (folders.get(name)?.host ? folders.get(name)?.git : git.get(folders.get(name)?.path)) ?? null,
       })),
     views: views.map(({ workspace, label, color, active }) => ({ workspace, label, color, active })),

@@ -199,11 +199,20 @@ export function openFolderBrowser(options = {}) {
       msgEl.textContent = "";
       msgEl.classList.remove("fb-msg-error");
       listEl.setAttribute("aria-busy", "true");
+      // A WSL or network folder can take a while: say so after a moment, so
+      // a fast listing never flickers.
+      const slow = setTimeout(() => {
+        if (mine !== requestId || settled) return;
+        msgEl.textContent = "Loading…";
+        msgEl.classList.add("fb-msg-loading");
+      }, 150);
+      const done = () => { clearTimeout(slow); msgEl.classList.remove("fb-msg-loading"); };
       let data;
       try {
         data = await api.listDirs(path);
       } catch (err) {
         if (mine !== requestId || settled) return null;
+        done();
         listEl.removeAttribute("aria-busy");
         msgEl.textContent = err.detail || err.message || "could not read that folder";
         msgEl.classList.add("fb-msg-error");
@@ -212,6 +221,8 @@ export function openFolderBrowser(options = {}) {
         return null;
       }
       if (mine !== requestId || settled) return null;
+      done();
+      if (msgEl.textContent === "Loading…") msgEl.textContent = "";
       listEl.removeAttribute("aria-busy");
       here = data.path;
       parent = data.parent;

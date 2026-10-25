@@ -359,6 +359,9 @@ body.rp-mode-was-rail #app > .right-panel .rp-collapse svg { transform: rotate(1
 .pending .rp-check-icon { color: var(--warning); }
 .pending .rp-check-icon .icon { animation: rp-spin 1s linear infinite; }
 @keyframes rp-spin { to { transform: rotate(360deg); } }
+.rp-tree-row.loading .rp-chevron .icon, .busy > .icon { animation: rp-spin 1s linear infinite; }
+.busy > .icon { margin-right: 6px; vertical-align: -2px; }
+@media (prefers-reduced-motion: reduce) { .rp-tree-row.loading .rp-chevron .icon, .busy > .icon { animation: none; } }
 @media (prefers-reduced-motion: reduce) { .pending .rp-check-icon .icon { animation: none; } }
 .rp-log {
   max-height: 260px;

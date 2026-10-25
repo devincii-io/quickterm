@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -101,49 +102,83 @@ def _stored_windows(value: Any) -> list[dict[str, Any]] | None:
     return windows or None
 
 
-class ClaudeLimits:
-    """The latest Claude rate limits any QuickTerm terminal reported.
+# "local:<config folder>" names which Claude config folder on this PC.
+_ORIGIN = re.compile(r"^(local(:[^\x00-\x1f]{1,400})?|wsl:[A-Za-z0-9._-]{1,64}|ssh:\S{1,200})$")
 
-    With a ``path`` (``attach_file``), the snapshot is loaded from it and
+
+def config_key(folder: Any) -> str | None:
+    """A Claude config folder as origins compare it."""
+    if not isinstance(folder, str) or not folder.strip() or len(folder) > 400:
+        return None
+    return os.path.normcase(os.path.normpath(folder.strip()))
+
+
+def report_origin(info: Any, folder: Any = None) -> str:
+    """Where a session's Claude runs, as ``ClaudeLimits`` keys it: its SSH
+    destination, the WSL distribution its agent runs in, else this PC with
+    the config folder the status line named (two accounts on one PC)."""
+    host = getattr(info, "host", None)
+    if isinstance(host, str) and host:
+        return f"ssh:{host}"
+    shell = getattr(info, "agent_shell", None)
+    if isinstance(shell, str) and shell.startswith("wsl:"):
+        return shell
+    key = config_key(folder)
+    return f"local:{key}" if key else "local"
+
+
+class ClaudeLimits:
+    """The latest Claude rate limits QuickTerm terminals reported, one
+    snapshot per place they ran (``origin``: "local", "wsl:<distro>",
+    "ssh:<destination>"), so two accounts in two places do not overwrite
+    each other. ``usage_accounts`` joins each place to its account.
+
+    With a ``path`` (``attach_file``), the snapshots are loaded from it and
     written back whenever a window's numbers or reset time changed. The
     status line reports many times a minute, so an unchanged report never
     writes; the stored ``updated_at`` is then the time of the last change.
+    The file keeps the newest snapshot at its top level too, as 4.4 wrote it.
     """
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
-        self._latest: dict[str, Any] | None = None
+        self._latest: dict[str, dict[str, Any]] = {}
         self._path: Path | None = None
-        # The windows the file holds (or held when loaded).
-        self._saved: list[dict[str, Any]] | None = None
+        # The windows the file holds (or held when loaded), per origin.
+        self._saved: dict[str, list[dict[str, Any]]] = {}
 
     def attach_file(self, path: Path) -> None:
-        """Load the stored snapshot from ``path`` and save there from now on.
+        """Load the stored snapshots from ``path`` and save there from now on.
         Blocking: reads the file. A missing or broken file starts empty."""
-        loaded = None
+        loaded: dict[str, dict[str, Any]] = {}
         try:
             if path.stat().st_size <= CLAUDE_FILE_MAX_BYTES:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    windows = _stored_windows(data.get("windows"))
-                    updated = _number(data.get("updated_at"))
-                    if windows is not None and updated is not None:
-                        loaded = {"windows": windows, "updated_at": int(updated)}
+                    origins = data.get("origins")
+                    if not isinstance(origins, dict):
+                        origins = {"local": data}
+                    for origin, entry in origins.items():
+                        if not isinstance(entry, dict) or not isinstance(origin, str) or not _ORIGIN.match(origin):
+                            continue
+                        windows = _stored_windows(entry.get("windows"))
+                        updated = _number(entry.get("updated_at"))
+                        if windows is not None and updated is not None:
+                            loaded[origin] = {"windows": windows, "updated_at": int(updated)}
         except (OSError, ValueError, RecursionError):
-            loaded = None
+            loaded = {}
         with self._lock:
             self._path = path
-            if loaded is not None:
-                self._saved = [dict(w) for w in loaded["windows"]]
-                if self._latest is None:
-                    self._latest = loaded
+            self._saved = {origin: [dict(w) for w in entry["windows"]] for origin, entry in loaded.items()}
+            for origin, entry in loaded.items():
+                self._latest.setdefault(origin, entry)
 
-    def record(self, rate_limits: Any) -> bool:
-        """Keep ``rate_limits`` (the status line's object). False, keeping the
-        previous numbers, when it holds no usable window."""
-        if not isinstance(rate_limits, dict):
+    def record(self, rate_limits: Any, origin: str = "local") -> bool:
+        """Keep ``rate_limits`` (the status line's object) for ``origin``.
+        False, keeping the previous numbers, when it holds no usable window."""
+        if not isinstance(rate_limits, dict) or not _ORIGIN.match(origin):
             return False
         windows = []
         for window_id in CLAUDE_WINDOWS:
@@ -161,28 +196,32 @@ class ClaudeLimits:
         if not windows:
             return False
         with self._lock:
-            self._latest = {"windows": windows, "updated_at": int(self._clock())}
+            self._latest[origin] = {"windows": windows, "updated_at": int(self._clock())}
         return True
+
+    def _changed(self) -> bool:
+        return any(entry["windows"] != self._saved.get(origin) for origin, entry in self._latest.items())
 
     def needs_save(self) -> bool:
         """Whether the windows differ from what the file holds."""
         with self._lock:
-            return (
-                self._path is not None
-                and self._latest is not None
-                and self._latest["windows"] != self._saved
-            )
+            return self._path is not None and bool(self._latest) and self._changed()
 
     def save(self) -> None:
-        """Write the snapshot when it changed. Blocking: call it off the loop."""
+        """Write the snapshots when they changed. Blocking: call it off the loop."""
         with self._write_lock:
             with self._lock:
                 path = self._path
-                latest = self._latest
-                if path is None or latest is None or latest["windows"] == self._saved:
+                if path is None or not self._latest or not self._changed():
                     return
-                windows = [dict(w) for w in latest["windows"]]
-                text = json.dumps({"windows": windows, "updated_at": latest["updated_at"]})
+                saved = {origin: [dict(w) for w in entry["windows"]] for origin, entry in self._latest.items()}
+                # An unchanged origin keeps the time of its last change.
+                origins = {
+                    origin: {"windows": saved[origin], "updated_at": entry["updated_at"]}
+                    for origin, entry in self._latest.items()
+                }
+                newest = max(origins.values(), key=lambda entry: entry["updated_at"])
+                text = json.dumps({**newest, "origins": origins})
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
@@ -197,16 +236,22 @@ class ClaudeLimits:
                 log.warning("could not store Claude usage in %s", path, exc_info=True)
                 return
             with self._lock:
-                self._saved = windows
+                self._saved = saved
+
+    def snapshots(self) -> dict[str, dict[str, Any]]:
+        """Every origin's latest snapshot."""
+        with self._lock:
+            return {
+                origin: {"windows": [dict(w) for w in entry["windows"]], "updated_at": entry["updated_at"]}
+                for origin, entry in self._latest.items()
+            }
 
     def snapshot(self) -> dict[str, Any] | None:
-        with self._lock:
-            if self._latest is None:
-                return None
-            return {
-                "windows": [dict(window) for window in self._latest["windows"]],
-                "updated_at": self._latest["updated_at"],
-            }
+        """The newest snapshot of any origin."""
+        snapshots = self.snapshots()
+        if not snapshots:
+            return None
+        return max(snapshots.values(), key=lambda entry: entry["updated_at"])
 
 
 def codex_sessions_dir() -> Path:

@@ -341,11 +341,26 @@ export function prEmptyLine(answer) {
   if (answer.gh === "missing") return { text: "GitHub CLI is not installed.", command: "winget install GitHub.cli" };
   if (answer.gh === "unauthenticated") return { text: "GitHub CLI is not signed in.", command: "gh auth login" };
   if (!answer.pr) {
-    if (answer.reason === "not a git repository") return { text: "Not a git repository.", command: null };
-    if (answer.reason === "no GitHub remote named origin") return { text: "No GitHub remote named origin.", command: null };
-    return { text: "No pull request for this branch.", command: "gh pr create" };
+    const reason = String(answer.reason || "");
+    if (!reason || reason === "no pull request for this branch") {
+      return { text: "No pull request for this branch.", command: "gh pr create" };
+    }
+    if (reason === "no branch checked out") return { text: "No branch is checked out (detached HEAD).", command: null };
+    // Every other reason is the backend's own line: git could not be asked,
+    // no remote, a remote that is not on GitHub, gh failing.
+    return { text: sentence(reason), command: null };
   }
   return null;
+}
+
+// A reason as a sentence. One that starts with a remote's name ("origin is
+// on gitlab.com") or with gh keeps the name as spelled.
+function sentence(text) {
+  const trimmed = text.trim();
+  const first = trimmed.split(/[\s:]/, 1)[0];
+  const capital = ["git", "not", "this", "the", "no"].includes(first)
+    ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : trimmed;
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 // ---- prompts for "Fix with Claude" -----------------------------------------

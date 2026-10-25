@@ -300,3 +300,12 @@ test("a plain shell's pane type follows the workspace location", async () => {
   assert.equal(plainShellType(null, "git-bash"), "git-bash");
   assert.equal(plainShellType(null, "wsl:Debian"), "wsl");
 });
+
+test("the menu row names what it starts, and is hidden without a list", async () => {
+  const { startupMenuLabel } = await import("../../quickterm/frontend/js/workspace_setup.js");
+  assert.equal(startupMenuLabel([]), null);
+  assert.equal(startupMenuLabel(undefined), null);
+  assert.equal(startupMenuLabel([{ kind: "shell", name: "dev server" }, { kind: "claude-code" }]), "Start dev server, Claude Code");
+  assert.equal(startupMenuLabel([{ kind: "shell" }, { kind: "shell" }, { kind: "codex" }, { kind: "shell", name: "x" }]),
+    "Start Shell, Shell, Codex +1");
+});

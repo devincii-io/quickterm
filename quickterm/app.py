@@ -535,6 +535,11 @@ async def _serve(
     await asyncio.to_thread(
         api_usage.claude_limits(app).attach_file, usage.claude_usage_file()
     )
+    # Every sign-in on this computer and its limits, first read now so the
+    # footer has them when the window asks.
+    accounts = api_usage.accounts(app)
+    accounts.enabled = True
+    accounts.snapshot(ttl=0)
     server = UvicornServer(
         UvicornConfig(
             app,

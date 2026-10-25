@@ -337,6 +337,7 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
       pathExists: info?.pathExists ?? null,
       git: info?.git ?? null,
       host: info?.host ?? null,
+      startup: info?.startup ?? [],
       sessions: [],
       counts: emptyCounts(),
     };

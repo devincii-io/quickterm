@@ -27,7 +27,7 @@ from quickterm.config import config_dir
 log = logging.getLogger(__name__)
 
 STATUSES = ("needs-you", "working", "in-review", "changes", "done", "idle")
-GIT_TTL_S = 20.0
+GIT_TTL_S = 30.0
 PR_TTL_S = 120.0
 REASON_MAX_CHARS = 120
 _AGENT_LABELS = {"claude": "Claude", "codex": "Codex"}

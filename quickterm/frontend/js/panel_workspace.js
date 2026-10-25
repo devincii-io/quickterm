@@ -82,7 +82,7 @@ export async function renderWorkspaceSettings(name) {
   });
   envSection.append(env.el);
   const startSection = section("Start with",
-    "Started in order, each in its own pane, when the workspace opens with nothing running, and again with Run setup.");
+    "Started in order, each in its own pane, when the workspace opens with nothing running. The workspace's ⋮ menu starts them again.");
   const start = startupEditor({
     items: startupItems(saved.startup),
     catalog: () => agentCatalog(panel),
@@ -108,7 +108,7 @@ export async function renderWorkspaceSettings(name) {
   const message = make("span", "settings-message", "");
   const cancel = panel._button("Cancel", "secondary-button");
   cancel.addEventListener("click", () => panel.close());
-  const runNow = panel._button("Run setup now", "secondary-button");
+  const runNow = panel._button("Save and start them", "secondary-button");
   runNow.title = "Saves, then starts the Start with list next to what is open";
   const save = panel._button("Save", "primary-button");
   let busy = false;
