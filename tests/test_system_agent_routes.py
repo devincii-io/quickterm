@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from quickterm import agent_sessions, agents, putty_tools, ssh_config
+from quickterm import agent_sessions, agents, ssh_config
 from quickterm.api import system as system_routes
 from quickterm.server import create_app
 from tests.test_server import FakeConfig, FakeSessionManager
@@ -217,8 +217,6 @@ def _types(inventory: dict) -> dict[str, dict]:
 def clients(monkeypatch, tmp_path):
     monkeypatch.setattr(agents, "codex_executable", lambda: str(tmp_path / "codex.exe"))
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: tmp_path / "OpenSSH" / f"{kind}.exe")
-    monkeypatch.setattr(putty_tools, "plink_path", lambda: tmp_path / "putty" / "plink.exe")
-    monkeypatch.setattr(putty_tools, "psftp_path", lambda: tmp_path / "putty" / "psftp.exe")
     def no_wsl(*_args, **_kwargs):
         raise OSError("not asked in tests")
 
@@ -227,27 +225,16 @@ def clients(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the Windows inventory probes Windows paths")
-def test_windows_inventory_lists_codex_and_both_ssh_clients(clients):
+def test_windows_inventory_lists_codex_and_no_connection_types(clients):
     types_ = _types(system_routes._terminal_inventory())
     assert types_["codex"] == {
         "id": "codex", "label": "Codex CLI", "executable": str(clients / "codex.exe"), "available": True,
     }
-    assert types_["ssh"] == {
-        "id": "ssh", "label": "SSH", "executable": str(clients / "putty" / "plink.exe"), "available": True,
-        "openssh": str(clients / "OpenSSH" / "ssh.exe"), "putty": str(clients / "putty" / "plink.exe"),
-    }
-    assert types_["sftp"]["label"] == "SFTP"
-    assert types_["sftp"]["openssh"] == str(clients / "OpenSSH" / "sftp.exe")
-    assert types_["sftp"]["putty"] == str(clients / "putty" / "psftp.exe")
+    assert not set(types_) & {"ssh", "sftp", "custom"}
 
 
-def test_posix_inventory_lists_codex_and_openssh(clients, monkeypatch):
+def test_posix_inventory_lists_codex_and_no_connection_types(clients, monkeypatch):
     monkeypatch.setattr(system_routes.shutil, "which", lambda name: None)
     types_ = _types(system_routes._posix_inventory())
     assert types_["codex"]["available"] is True
-    assert types_["ssh"] == {
-        "id": "ssh", "label": "SSH", "executable": str(clients / "OpenSSH" / "ssh.exe"), "available": True,
-        "openssh": str(clients / "OpenSSH" / "ssh.exe"), "putty": None,
-    }
-    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
-    assert _types(system_routes._posix_inventory())["sftp"]["available"] is False
+    assert not set(types_) & {"ssh", "sftp", "custom"}

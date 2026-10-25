@@ -29,15 +29,16 @@ function wantsSeen(session) {
 }
 
 // The folders POST /api/git/info is asked about: every saved local
-// workspace's, once each, at most what the route takes. A folder on an SSH
-// host is not on this disk; its git facts come with the workspace record.
+// workspace's, once each, at most what the route takes. A folder in WSL or on
+// an SSH host is not read from here; its git facts come with the workspace
+// record.
 export function gitPaths(folders) {
   const paths = new Set();
   for (const folder of folders?.values?.() || []) if (folder?.path && !folder.host) paths.add(folder.path);
   return [...paths].slice(0, GIT_MAX_PATHS);
 }
 
-// The remote workspaces whose git facts are re-read with the local ones.
+// The WSL and SSH workspaces whose git facts are re-read with the local ones.
 export function remoteNames(folders) {
   return [...(folders?.entries?.() || [])].filter(([, folder]) => folder?.host).map(([name]) => name);
 }
@@ -90,7 +91,6 @@ export function sidebarModel({
   git = new Map(), focusedId = null,
 }) {
   return {
-    profiles: state.profiles,
     inventory: state.terminalInventory,
     shell: state.cfg?.shell ?? null,
     agents: agentProfiles(state.cfg, state.terminalInventory),
@@ -113,7 +113,7 @@ export function sidebarModel({
   };
 }
 
-export function createSidebar({ api, state, views, actions, panels, palette, folders }) {
+export function createSidebar({ api, state, views, actions, panels, folders }) {
   let lastSessions = [];
   let statusTimer = null;
   let lastFocusedId = null;
@@ -199,15 +199,7 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
   // Built once per shell document. Every later change is a patch.
   function init() {
     state.launcherView = initLauncher($("launcher"), {
-      actions: {
-        // The host and folder are asked for in the palette, the one inline
-        // input the chrome has.
-        newRemoteWorkspace: () => {
-          panels.close();
-          palette.remoteWorkspaceMode?.();
-        },
-        ...actions,
-      },
+      actions,
       elevated: Boolean(state.cfg.elevated),
       // One entry point each. The palette already has Alt+K, and the
       // Dashboard used to sit here and directly above as "Manage

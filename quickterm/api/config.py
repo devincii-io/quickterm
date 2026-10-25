@@ -49,7 +49,6 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             "logo": cfg.logo,
             "shell": cfg.shell,
             "agents": {kind: asdict(value) for kind, value in cfg.agents.items()},
-            "profiles": [asdict(p) for p in cfg.profiles],
             "snippets": [asdict(s) for s in cfg.snippets],
             "voice_available": _voice_available(),
             # Resolved root for the disposable scratch workspace, so the UI can
@@ -65,8 +64,9 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # combination). Settings shows it next to the shortcut field
             # instead of leaving the user with a silently dead shortcut.
             "hotkey_error": getattr(cfg, "hotkey_error", None),
-            # Latest autostart, hotkey or elevated first-terminal failure. Those
-            # launches have no request to answer, so this is how they are heard.
+            # Latest elevated first-terminal or `quickterm new` failure, or a
+            # migration notice. Nothing else answers for those, so this is how
+            # they are heard.
             "launch_error": getattr(cfg, "launch_error", None),
         }
 
@@ -112,12 +112,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(500, "could not read that settings version") from exc
         # The same path as a Settings save: validation, a new history entry
         # for the version this replaces, and the live apply.
-        # Its shortcuts were accepted when it was saved. The rule that new
-        # shortcuts need Ctrl, Alt or Win must not refuse a recovery, or a 3.x
-        # "f12" kept profiles that were deleted since out of reach.
-        # A version from before 4.3 holds agent and shell profiles; merged
-        # onto today's config, which has `agents`, it would never migrate and
-        # its profiles would be refused. It migrates as that file would.
+        # Its shortcut was accepted when it was saved. The rule that new
+        # shortcuts need Ctrl, Alt or Win must not refuse a recovery.
+        # A version from before 4.3 holds its agents as profiles; merged onto
+        # today's config, which has `agents`, it would never migrate. It
+        # migrates as that file would. Saved terminals are simply dropped.
         migrate = getattr(config_mod, "migrate_agents", None)
         if isinstance(stored, dict) and "agents" not in stored and migrate is not None:
             stored = migrate(stored)
@@ -134,11 +133,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(500, "could not read the saved configuration") from exc
         # Settings sends the whole object, but config_from_dict fills every
         # omitted key with its default, so a partial body from any other
-        # client wiped the profiles (and their protected env) and snippets.
+        # client wiped the agents (and their protected env) and snippets.
         # Omitted top-level keys keep their saved value instead.
         merged = {**asdict(on_disk), **body}
         try:
-            # Off the loop too: a restored history entry carries its profile
+            # Off the loop too: a restored history entry carries its agent
             # secrets DPAPI-protected, and decoding them calls into DPAPI.
             new_cfg = await asyncio.to_thread(config_mod.config_from_dict, merged)
             # A client holding a page rendered from the LIVE config (an older
@@ -155,13 +154,13 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             await asyncio.to_thread(config_mod.save_config, new_cfg)
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, f"invalid config: {exc}") from exc
-        before = _hotkey_bindings(cfg)
+        before = getattr(cfg, "summon_hotkey", None)
         # Apply in place. Only port and host need a restart: the server is
         # already bound. Window size applies to the next window, the overlay
-        # to the next summon, the hotkeys through the rebind below.
+        # to the next summon, the hotkey through the rebind below.
         for name in (
             "font_family", "font_size", "theme", "custom_theme", "logo", "idle_timeout_s",
-            "max_sessions", "scrollback_bytes", "shell", "agents", "profiles", "snippets", "voice",
+            "max_sessions", "scrollback_bytes", "shell", "agents", "snippets", "voice",
             "update_check", "update_auto_download", "scratch_dir", "window", "overlay", "summon_hotkey",
             "notifications", "keep_awake",
         ):
@@ -176,7 +175,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         check_keep_awake = getattr(manager, "check_keep_awake", None)
         if check_keep_awake:
             check_keep_awake()
-        if ctx.rebind_hotkeys is not None and _hotkey_bindings(cfg) != before:
+        if ctx.rebind_hotkeys is not None and getattr(cfg, "summon_hotkey", None) != before:
             # Waits for the hotkey thread, which may wait for the GUI thread.
             await asyncio.to_thread(ctx.rebind_hotkeys, cfg)
 
@@ -189,13 +188,3 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         if ctx.suspend_hotkeys is not None:
             await asyncio.to_thread(ctx.suspend_hotkeys, suspended)
         return Response(status_code=204)
-
-
-def _hotkey_bindings(cfg: Any) -> tuple[Any, list[str]]:
-    """What the global hotkeys depend on: the summon key and the profile keys."""
-    keys = sorted(
-        str(binding)
-        for binding in (getattr(p, "keybinding", None) for p in getattr(cfg, "profiles", []))
-        if binding
-    )
-    return getattr(cfg, "summon_hotkey", None), keys

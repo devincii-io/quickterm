@@ -24,13 +24,14 @@ import { createScratch } from "./scratch.js";
 import { createSessionOwnership } from "./session_ownership.js";
 import { bootShell } from "./shell.js";
 import { createSpawner } from "./spawner.js";
+import { createStartupRunner } from "./startup_runner.js";
 import { agentProfiles, isAgentType } from "./agent_profile.js";
 import { newTerminalMenu } from "./sidebar_model.js";
 import { createTerminalActions } from "./terminal_actions.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
 import { createWorkspaceSwitch } from "./workspace_switch.js";
-import { agentPresent } from "./remote_workspace.js";
+import { agentPresent, locationKind } from "./locations.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -55,15 +56,14 @@ async function bootView() {
   const identity = captureWindowIdentity();
   const requestedWorkspace = identity.workspace;
   captureToken();
-  let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, profiles: [], snippets: [], voice_available: false };
+  let cfg = { font_family: "JetBrains Mono", font_size: DEFAULT_FONT, snippets: [], voice_available: false };
   // The shell inventory probes the disk for every shell and asks WSL for its
   // distributions, a third of a second that used to sit in the boot path. The
   // last answer is kept in localStorage: boot draws with it and a fresh scan
   // replaces it in the background once the first terminal is up.
   const cachedInventory = loadInventoryCache();
-  const [loadedConfig, loadedProfiles, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
+  const [loadedConfig, loadedSessions, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
-    api.getProfiles().catch(() => null),
     api.getSessions({ metrics: false }).catch(() => []),
     api.listWorkspaces().catch(() => []),
     cachedInventory
@@ -73,7 +73,6 @@ async function bootView() {
   if (loadedConfig) cfg = loadedConfig;
   const state = createAppState({
     cfg,
-    profiles: loadedProfiles || cfg.profiles || [],
     snippets: cfg.snippets || [],
     workspaceNames: loadedWorkspaces || [],
     terminalInventory: loadedInventory,
@@ -187,6 +186,13 @@ async function bootView() {
     runProfile, runClaudeMode, splitClaudeAgentView, runSystemTerminal, runInstaller,
     elevateProfile, elevateSystemTerminal, attachSession, restartSavedPane, resumeClaudePane,
   } = spawner;
+  const startup = createStartupRunner({
+    api, state, layout, ownSession, scheduleWorkspaceSave, showError,
+    spawnWorkspaceTag: spawner.spawnWorkspaceTag,
+    contextCwd: spawner.contextCwd,
+    spawnDefaultInto,
+    refreshStatusSoon: () => refreshStatusSoon(),
+  });
   const { discardScratch, maybeAdoptScratch, ensureScratchWorkspace } =
     createScratch({
       api, state, layout,
@@ -200,6 +206,7 @@ async function bootView() {
     claimWorkspaceFor, discardScratch, ownedSessionIds, usableWorkspacePath,
     spawnInto, spawnSpecInto, spawnDefaultInto, profileTerminalType, restartSavedPane, resumeClaudePane,
     allProfiles: spawner.allProfiles,
+    runStartup: startup.runStartup,
     cancelWorkspaceSave, scheduleWorkspaceSave, showError, clearError,
     buildLauncher: () => buildLauncher(),
     refreshStatusSoon: () => refreshStatusSoon(),
@@ -234,7 +241,6 @@ async function bootView() {
   // The one object the shell's palette, panels and sidebar reach for this
   // view (through the shell's app proxy), and the pane header talks to.
   const app = {
-    profiles: state.profiles,
     snippets: state.snippets,
     idleTimeoutSeconds: state.cfg.idle_timeout_s ?? 300,
     runProfile,
@@ -280,11 +286,22 @@ async function bootView() {
     workspacePath: () => state.workspacePath,
     suggestedWorkspaceFolder,
     workspacePathExists: () => state.workspacePathExists,
+    workspaceHost: () => state.workspaceHost || null,
     scratchRoot: () => state.scratchRoot,
     setWorkspaceFolder: actions.setWorkspaceFolder,
     setWorkspacePath: actions.setWorkspacePath,
     setWorkspaceLogo: actions.setWorkspaceLogo,
     setWorkspaceAppearance: actions.setWorkspaceAppearance,
+    // "Run setup": the workspace's "Start with" list next to what is open.
+    runSetup: startup.runSetup,
+    // True once this view opened by running the list, so a "Run setup" that
+    // had to open it first does not start everything twice.
+    startupRan: () => Boolean(state.startupRan),
+    // The workspace settings' env and start list, saved with this view's
+    // live layout so the PUT cannot write back an older one.
+    saveSetup: (setup) => workspace.save(
+      state.currentWorkspace, layout.serialize(), undefined, [...ownedSessionIds()], undefined, undefined, setup,
+    ),
     attachedSessionIds,
     ownedSessionIds: () => [...ownedSessionIds()],
     focusedSessionId: () => layout.focused?.session?.id || null,
@@ -298,8 +315,11 @@ async function bootView() {
         const session = byId.get(pane.session?.id);
         if (session) pane.noteName?.(session.name);
         if (session && session.alive !== false && isAgentType(pane.terminalType)) {
-          const wsl = /^wsl(?::|$)/.test(session.agent_shell || "");
-          pane.noteAgent?.(agentPresent(session), { byMarker: wsl && !session.host });
+          // A WSL agent reports its end with the exit marker; over SSH the
+          // hooks say it.
+          const kind = locationKind(session.host);
+          const wsl = kind === "wsl" || (kind === "local" && /^wsl(?::|$)/.test(session.agent_shell || ""));
+          pane.noteAgent?.(agentPresent(session), { byMarker: wsl });
         }
       }
     },
@@ -342,7 +362,7 @@ async function bootView() {
   // The "+" menu's entries, for the palette's new-terminal rows.
   app.agentProfiles = () => agentProfiles(state.cfg, state.terminalInventory);
   app.newTerminalMenu = () => newTerminalMenu({
-    inventory: state.terminalInventory, profiles: state.profiles, shell: state.cfg?.shell ?? null,
+    inventory: state.terminalInventory, shell: state.cfg?.shell ?? null,
     agents: app.agentProfiles(), host: state.workspaceHost || null,
   });
 
@@ -350,7 +370,7 @@ async function bootView() {
   const panels = chrome.panels;
   app.openPanel = (name) => panels.show(name);
   app.setupTerminals = () => {
-    panels.settingsTab = "connections";
+    panels.settingsTab = "agents";
     panels.show("settings");
   };
 
@@ -430,8 +450,8 @@ async function bootView() {
       await spawnDefaultInto(pane, openDir);
     }
   }
-  // Do not sweep unknown sessions here: backend autostart profiles exist
-  // before this view and intentionally have no saved workspace yet. The
+  // Do not sweep unknown sessions here: terminals started from the CLI or a
+  // hotkey exist before this view and have no saved workspace yet. The
   // backend idle reaper already removes only safe, untouched, non-busy shells.
   state.transitioning = false;
   if (!state.currentWorkspace) await ensureScratchWorkspace();

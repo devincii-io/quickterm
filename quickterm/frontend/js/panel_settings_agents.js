@@ -1,13 +1,23 @@
-// Settings > Terminals: the Agents section. Claude Code and Codex are one
-// settings entry each (config `agents`, CONTRACTS 4.3): a row that
-// shows the command the settings start, opening into the option editor. Both
-// run inside the configured shell. Edits go into `settingsDraft.agents`; the
-// footer Save persists them like every other setting.
+// Settings > Agents. Claude Code and Codex are one settings entry each
+// (config `agents`, CONTRACTS 4.3): a row that shows the command the
+// settings start, opening into the option editor. Both run inside the
+// configured shell. Edits go into `settingsDraft.agents`; the footer Save
+// persists them like every other setting.
 
+import * as api from "./api.js";
 import { AGENT_NAMES, AGENT_TYPES, agentCommandLine, agentInstalled } from "./agent_profile.js";
+import { icon } from "./icons.js";
 import { make } from "./panel_shared.js";
-import { agentCatalog, renderEnvironment } from "./panel_connections.js";
 import { renderAgentFields } from "./panel_agent_fields.js";
+
+// The option schema (GET /api/system/agents), read once per opening of
+// Settings; Settings never waits for it.
+export function agentCatalog(panel) {
+  panel.agentCatalogLoad ||= Promise.resolve()
+    .then(() => (panel.services || api).getAgentCatalog?.())
+    .catch(() => null);
+  return panel.agentCatalogLoad;
+}
 
 export function emptyAgentSettings() {
   return { cmd: "", args: [], agent_mode: null, agent: {}, env: {} };
@@ -81,4 +91,56 @@ function agentRow(kind, settings) {
     body.append(more);
   });
   return row;
+}
+
+// The agent's environment variables as key and value rows.
+export function renderEnvironment(profile, touched) {
+  const box = make("div", "connection-environment-field");
+  box.dataset.setting = "environment";
+  box.append(make("span", "field-label", "Environment"));
+  const rowsHost = make("div", "connection-environment");
+  const rows = Object.entries(profile.env || {}).map(([key, value]) => ({ key, value }));
+  const sync = () => {
+    profile.env = Object.fromEntries(rows.filter((row) => row.key).map((row) => [row.key, row.value]));
+    touched();
+  };
+  const draw = () => {
+    rowsHost.textContent = "";
+    for (const row of rows) {
+      const line = make("div", "connection-env-row");
+      for (const part of ["key", "value"]) {
+        const input = this._textInput(row[part], part === "key" ? "Variable" : "Value");
+        input.setAttribute("aria-label", part === "key" ? "Environment variable name" : "Environment variable value");
+        input.addEventListener("input", () => { row[part] = input.value; sync(); });
+        line.append(input);
+      }
+      const remove = this._button("", "icon-button");
+      remove.append(icon("x", 14));
+      remove.title = "Remove variable";
+      remove.setAttribute("aria-label", remove.title);
+      remove.addEventListener("click", () => {
+        const index = rows.indexOf(row);
+        rows.splice(index, 1);
+        sync();
+        draw();
+        // draw() rebuilt every row and dropped focus to <body>, outside the
+        // modal sheet. Keep the place: the row that moved up, else the one
+        // before, else Add variable.
+        const next = rowsHost.children[Math.min(index, rowsHost.children.length - 1)];
+        (next?.children?.[0] || add).focus();
+      });
+      line.append(remove);
+      rowsHost.append(line);
+    }
+  };
+  const add = this._button("Add variable", "secondary-button compact");
+  add.title = "Values are encrypted on disk with your Windows account.";
+  add.addEventListener("click", () => {
+    rows.push({ key: "", value: "" });
+    draw();
+    rowsHost.lastElementChild?.querySelector?.("input")?.focus();
+  });
+  box.append(rowsHost, add);
+  draw();
+  return box;
 }

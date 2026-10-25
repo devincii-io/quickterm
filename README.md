@@ -1,8 +1,9 @@
 # QuickTerm
 
-A local terminal workspace: split panes, named workspaces, persistent
-sessions, quick-launch profiles, and WSL integration. Everything stays on
-your computer. No Electron, accounts, or telemetry.
+A terminal workspace for Windows: one sidebar, workspaces that are folders on
+this PC, in WSL or on an SSH host, terminals that keep running when the window
+closes, and Claude Code and Codex with their state in view. Everything stays
+on your computer. No Electron, accounts or telemetry.
 
 ## Install
 
@@ -10,362 +11,206 @@ your computer. No Electron, accounts, or telemetry.
 
 Download `QuickTerm-v*-Setup.exe` from the
 [latest release](https://github.com/devincii-io/quickterm/releases/latest) and
-run it. The per-user installer adds Start Menu and Desktop shortcuts,
-supports in-place upgrades, and includes an uninstaller. It does not require
-administrator access. A portable `.zip` is also available.
+run it. The per-user installer adds Start Menu and Desktop shortcuts, upgrades
+in place and includes an uninstaller. It needs no administrator rights. A
+portable `.zip` is also published.
 
-Windows may show a SmartScreen warning because current release binaries are
-unsigned. A trusted Authenticode signature identifies the publisher and lets
-reputation carry between releases. Even then a new signing identity can warn
-until that reputation builds. Microsoft Store distribution is the most
-reliable no-warning path. See
+Windows may show a SmartScreen warning because the release binaries are
+unsigned. See
 [Signing releases](docs/SECURITY.md#smartscreen-and-release-signing).
 
-The installed build uses a normal application folder instead of a
-self-extracting one-file executable. One QuickTerm process and viewer own the
-runtime; repeated launches hand work to that process instead of duplicating the
-Python/WebView runtime in memory. The frozen server also drops Uvicorn's unused
-reloaders and alternative protocol parsers.
-
-QuickTerm opens as its own native desktop window. The installer adds an
-optional **Open QuickTerm here** entry to the right-click menu, both on a folder
-and inside one. It opens a terminal in that directory. When a new
-version is published, the app shows a small **Update** pill; Settings → About
-has the details and a one-click, checksum-verified install. On first run,
-the setup tour opens the terminal and connection manager. Detected shells
-populate its setup forms; only saved configurations appear under **+**.
-Choose local PowerShell, Command Prompt, WSL, Git Bash, Nushell, another shell,
-Claude Code, Codex, or a remote connection. The palette offers to install missing
-PowerShell 7: winget runs in a new terminal, where you answer its prompts
-yourself; without winget, the download page opens. The shield beside **+** starts the
-selected terminal in a separate UAC-approved window. Both the
-window and the session are labeled `Administrator`.
+The installer can add **Open QuickTerm here** to Explorer's right-click menu,
+on a folder and inside one. New versions download in the background; a card
+in the sidebar offers to install and restart.
 
 ### From source
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Windows 10 1809+
-uses ConPTY; Linux uses the native POSIX PTY backend.
-
-## Run
+uses ConPTY; Linux uses the POSIX PTY backend.
 
 ```
 uv sync
 uv run quickterm
 ```
 
-The backend starts on `127.0.0.1:8620` and opens a chromeless browser app
-window. Ordinary launches are single-instance: starting QuickTerm again summons
-the existing window instead of creating a second viewer with ambiguous session
-ownership. Explorer **Open QuickTerm here** queues that folder to the running
-viewer over the authenticated local API, which opens a new scratch view with a
-terminal in that folder. You can then save or move it deliberately.
+The backend listens on `127.0.0.1:8620`. Starting QuickTerm again brings the
+running window back instead of starting a second copy.
 
-**A workspace is a folder.** Give a workspace the directory you work in and
-every terminal it opens starts there, so switching workspace switches project.
-Set or change the folder and logo from Dashboard's workspace Settings editor.
-Browse uses the in-app folder browser, with a native picker also available.
-Terminal profiles carry no folder of their own, so one "Claude Code" or
-"PowerShell" profile is usable in every project and none of them can point
-somewhere you cannot see. A folder that has been moved or deleted is reported
-in the Dashboard and sidebar rather than silently failing the next terminal.
+## Workspaces
 
-The sidebar is the whole interface: there is no status bar and no header on
-a lone pane. `Alt+Shift+S` cycles it through full, a 30 px rail of state dots,
-and hidden; hidden leaves a small **+** over the terminal's left edge. The
-sidebar is one list in a fixed order: the workspaces that hold a terminal or
-are open, alphabetically, then scratch views, then **Unassigned**, each with
-its terminals sorted by name on a guide line under it. Empty workspaces sit
-behind a **Show N empty workspaces** line. The view button next to search
-shows empty workspaces and finished terminals, drops the grouping for one
-list, or sorts by recent activity instead. State never reorders the default
-list; a terminal that needs you gets a chip instead. The search button opens
-the palette on `@`, the workspaces and terminals. The active workspace's row shows its folder and
-the save dot, and on hover two buttons that open the focused terminal's folder
-in Explorer or VS Code (`Alt+Shift+E` / `Alt+Shift+C`). A named workspace
-autosaves its exact split arrangement and live session IDs for reattachment
-with in-memory scrollback, for as long as those processes are alive. If a
-saved process is gone, QuickTerm restores an explicitly unavailable pane and
-never starts a replacement shell under the old identity. Claude Code and Codex
-profiles also offer explicit **Continue latest** and **Choose session**
-recovery actions.
+A workspace is a folder and its terminals. The window shows one workspace at a
+time; the sidebar lists them all, and the others keep running behind the one
+on screen. Each workspace is a card in the sidebar with its terminals inside.
 
-Every workspace opens as its own view in the window, and there is no main
-workspace. Click a workspace in the sidebar, use **open workspace** in
-`Alt+K`, or the **+** beside the Workspaces label for a new scratch view. A
-workspace that is already open gets the focus; otherwise the new view takes
-half of the active view, cut along its longer side, the way a tiling window
-manager places a window, and there is no limit on how many you open. Every
-view has its own colour, terminal splits and autosave, and one sidebar serves
-all views of a native window. Drag a view's header onto another view to dock
-it on that side or swap the two, drag a divider (or use its arrow keys) to
-resize, **zoom** to see one view alone, and **close** (on the view, or
-**Close view** on the workspace in the sidebar) to save that workspace and
-leave its terminals running. Closing the last view leaves an empty area with
-a **New scratch** button. The arrangement of named workspaces is restored
-after a restart; disposable scratch views are not. A workspace's menu in the
-sidebar offers Open in new window, Workspace settings and Delete workspace.
+**New workspace…** in the Workspaces **+** menu (or the palette, `Alt+K`)
+asks where:
 
-`Alt+N` places a new terminal the same way: it takes half of the focused pane
-along its longer side, so repeated presses spiral inward instead of stacking
-slivers, and every split, close and rebalance slides into place.
+- **This PC**: a Windows folder, chosen in the folder browser.
+- **WSL**: a folder in one of your WSL distributions, browsed through
+  `\\wsl.localhost`. Its terminals open the distribution's shell in that
+  folder.
+- **SSH host**: a host from `~/.ssh/config`, or any `user@host` you type,
+  and a folder there. Its terminals are SSH sessions that start in that
+  folder. Port, key and jump host come from `~/.ssh/config`.
 
-When the focused terminal has `cd`'d somewhere outside the workspace's
-folder, the sidebar offers **workspace here: <folder>**. One click makes that
-folder a workspace named after it, moves the terminal into it and opens its
-view; if the folder already is a workspace's root the offer reads
-**open <name>** and takes the terminal along instead.
+The workspace is named after its folder. Files, changes and the pull request
+in the right panel, the branch in the sidebar and the board work the same at
+every location.
 
-**Scratch** is a temporary workspace. It opens in a throwaway folder under your
-system temp directory and autosaves during the current run. Each additional
-scratch view gets its own identity and layout; opening one never replaces
-another view. Closing a scratch view keeps its busy terminals and the ones you
-typed into running; idle untouched shells are left to the idle cleanup.
-Quitting the application ends the backend and discards temporary layouts. QuickTerm does
-not delete the scratch folder's contents. Naming a scratch in the Dashboard offers the folder the focused terminal
-is actually in, so a shell you `cd`'d into your project suggests that project,
-never the temp folder.
+**Scratch** is a throwaway workspace in a temp folder. `cd` into a project in
+a scratch terminal and the sidebar offers **make <folder> a workspace**,
+which moves the terminal into the new workspace. PowerShell, Command Prompt
+and Git Bash report their folder at each prompt, which is how QuickTerm
+follows a `cd`.
 
-Closing the window does not end your work. If any terminal you have typed into
-is still open, or any shell still has a running child process (an SSH session, a
-dev server), QuickTerm hides to the system tray and keeps everything alive.
-Click the tray icon or press the summon hotkey to bring it back, or
-right-click → **Quit** to exit for real. If only untouched shells are open,
-closing the window quits and frees the memory. Terminal I/O is streamed with
-coalesced reads and writes end to end, so a noisy build renders fast without
-making typing lag.
+A workspace remembers its split layout and its terminals. Closing the window
+leaves the terminals running in the background; QuickTerm stays in the tray
+while any of them holds work.
 
-URLs and file paths printed in a terminal are clickable. Hold **Ctrl** and
-click to open them with your default browser or file handler; executables are
-revealed in Explorer, never launched. **×** / `Alt+D` is a true detach and
-keeps the terminal process alive. The separate **Kill** button and `Alt+W` are
-the destructive path, and always ask before killing the whole process tree.
-Every live terminal in the sidebar has **Detach** and **Kill** on hover or
-keyboard focus too. Kill asks in a small box beside the row: after a click,
-Cancel has the focus; after the `Delete` key, Kill has it and Enter confirms.
-A failed kill keeps the row and offers Retry.
-Files and images can also be dropped onto a pane. QuickTerm inserts shell-safe,
-quoted paths without pressing Enter. Its native WebView bridge supplies the
-real Explorer path; WSL paths are translated to `/mnt/<drive>/...`, while
-remote SSH/SFTP panes refuse a misleading local path. Standard Chromium can
-withhold the original desktop path outside that native bridge. In that case
-QuickTerm suggests Copy as path plus native `Ctrl+V` instead of pasting a
-misleading filename.
+### Workspace setup
+
+**Workspace settings** in a workspace's **⋮** menu holds its setup:
+
+- **Environment**: variables every terminal of the workspace gets. Values
+  are encrypted on disk and masked until you click into them. In an SSH
+  workspace they are set on the host by the command ssh runs, where other
+  users of that machine can see them.
+- **Start with**: up to eight terminals the workspace starts with, in
+  order, each in its own pane: a shell, optionally running one command
+  first (`npm run dev`), Claude Code or Codex with their own options, each
+  with its own extra variables.
+
+A workspace that opens with nothing running starts its Start with list.
+**Run setup** in the **⋮** menu, the palette (`run workspace setup`) and
+the settings sheet (**Run setup now**) starts it again next to what is
+open. The New workspace dialog fills the list from its **Start with**
+toggles: Shell, Claude Code, Codex.
+
+A shell in the list can use any shell installed on this PC (PowerShell,
+Command Prompt, Git Bash, a WSL distribution) or the one from Settings >
+General. In a WSL or SSH workspace every shell is that location's own.
+
+Variables apply in this order, later wins: Settings > Agents, the
+workspace, the terminal's own. Settings > Agents variables are not sent to
+an SSH host.
+
+## Terminals and agents
+
+The **+** at the top of the sidebar starts a terminal in your shell
+(PowerShell unless Settings > General names another: Command Prompt, Git Bash
+or a WSL distribution). Its arrow starts another shell, Claude Code or Codex,
+and **+** remembers that pick. In a WSL or SSH workspace it starts that
+location's shell. There are no saved terminal configurations: the shell is a
+setting and the agents are settings.
+
+Claude Code and Codex run inside the shell, so leaving the agent leaves you at
+a prompt in the same folder. Settings > Agents holds their options (model,
+permissions, effort and more, read from the installed CLI). The sidebar shows
+each agent's state: working, waiting for you, done or failed. `Alt+J` jumps
+to the next terminal that needs you. A `claude` or `codex` you type yourself
+in a QuickTerm PowerShell reports its state the same way. The sidebar footer
+shows Claude and Codex usage and the memory your terminals use.
+
+Splits place themselves: a new pane takes half of the focused one along its
+longer side. `×` on a pane detaches it and the terminal keeps running; kill
+is a separate action that always asks first.
+
+## Right panel and board
+
+`Alt+Shift+E` opens the right panel for the shown workspace: its files (click
+to read, Alt+click to paste the path), its git changes with stage, commit,
+push and pull, and the branch's pull request with its checks.
+
+`Alt+G` opens the workspace board. It sorts itself: each workspace is a
+card in the first column that applies, and moves on its own when that
+changes.
+
+| Column | Means |
+|---|---|
+| Needs you | An agent asks, or a terminal rang |
+| Working | An agent is busy |
+| In review | The branch has an open pull request |
+| Changes | Uncommitted or unpushed work |
+| Done | The pull request was merged |
+| Idle | Nothing running, nothing to ship |
+
+Each card says why it is where it is ("3 files changed · 2 commits not
+pushed", "PR #12 open · checks passing") and lists its terminals; click it
+to show the workspace. The Agents tab lists every agent session.
 
 ## Command line
 
 The same `quickterm` command drives the running app:
 
 ```
-quickterm ls [--json]                  list terminals: id, name, workspace, state, folder
-quickterm new [--profile NAME] [--cwd DIR] [--workspace NAME]
-quickterm open WORKSPACE               open or focus that workspace's view
+quickterm ls [--json]                         list terminals: id, name, workspace, state, folder
+quickterm new [claude-code|codex] [--cwd DIR] [--workspace NAME]
+quickterm open WORKSPACE                      show that workspace
 quickterm send SESSION TEXT... [--enter]
 quickterm --version
 ```
 
-`new` opens a terminal in the running app, or starts the app with it. Without
-`--cwd` a profile starts in the workspace's folder and a plain `new` starts in
-the folder you typed it in. `send` types into the session whose id starts with
-SESSION or whose name is exactly SESSION; `--enter` presses Enter after it.
-Every verb takes `--port N` when the app does not run on the configured port.
+`new` opens a terminal in the running app, or starts the app with it. `send`
+types into the session whose id starts with SESSION or whose name is exactly
+SESSION. Every verb takes `--port N`.
 
-Exit codes: 0 done, 1 usage error or a SESSION that matches no session or
-several (the candidates are listed), 2 QuickTerm is not running, or something
-else answers on its port, 3 the app refused the request or it failed after
-QuickTerm answered (the reason is printed). `quickterm new` with no app
-running starts QuickTerm in the background and returns once it is up. The installed `QuickTerm.exe` is
-a windowed program, so `cmd` and PowerShell do not wait for it: use
-`start /wait quickterm ls` in cmd, or pipe it (`quickterm ls | Out-Host`) in
-PowerShell, to read the output and the exit code in order.
+Exit codes: 0 done, 1 usage error or an ambiguous SESSION, 2 QuickTerm is not
+running, 3 the app refused the request. The installed `QuickTerm.exe` is a
+windowed program, so `cmd` and PowerShell do not wait for it: use
+`start /wait quickterm ls` in cmd, or `quickterm ls | Out-Host` in PowerShell.
 
 ## Keys
 
-QuickTerm uses familiar Windows copy, paste, and text-size conventions while
-leaving shell and TUI bindings intact. `Ctrl+C` copies when text is selected
-and otherwise reaches the terminal as interrupt. `Ctrl+P`, `Alt+V` (Claude Code
-image paste), `Alt+P` (Claude Code model switch), `Alt+M`/`Alt+T`/`Alt+O`
-(Claude modes), `Alt+H` (PSReadLine help), `Alt+0..9`/`Alt+-` (readline digit
-arguments) and the `Alt+B`/`F` word motions all pass through untouched.
+QuickTerm takes only Alt combinations your shell does not use, plus a few
+Ctrl keys. `Ctrl+C` copies a selection and otherwise interrupts; `Alt+V`,
+`Alt+P`, `Alt+B`/`Alt+F`, `Alt+0..9` and other shell and agent keys pass
+through.
 
 | Key | Action |
 |---|---|
-| `Alt+K` | Command palette (profiles, actions, snippets, workspaces, terminals, settings, file viewer); `>` `@` `#` `!` narrow it to actions, workspaces and terminals, settings and configs, or snippets |
-| `Alt+G` / `Alt+S` / `Alt+I` | Open or close the Dashboard / Settings / Help panel |
-| `Alt+N` | Open a new default terminal in half of the focused pane, cut along its longer side |
-| `Alt+Shift+Left` / `Alt+Shift+Up` | Cycle previous / next profile used by new terminals |
-| `Alt+Shift+Right` / `Alt+Shift+Down` | Split pane to the right / below (`H` / `V` aliases) |
-| `Alt+Shift+S` | Sidebar: full, rail, hidden |
-| `Alt+Shift+E` / `Alt+Shift+C` | Open the focused terminal's folder in Explorer / VS Code |
+| `Alt+K` | Command palette: actions, workspaces, terminals, settings, snippets |
+| `Alt+N` | New terminal (what **+** starts) |
+| `Alt+Shift+Right` / `Alt+Shift+Down` | Split right / below |
+| `Alt+Shift+Left` / `Alt+Shift+Up` | Open the new-terminal menu |
 | `Alt+Arrows` | Move focus between panes |
-| `Alt+Z` | Zoom focused pane |
-| `Alt+D` | Detach pane; the terminal keeps running in the background |
-| `Alt+W` | Kill the focused terminal process tree and close its pane (always asks first) |
-| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Grow / shrink / reset terminal text size |
-| `Ctrl+C` / `Ctrl+V` | Copy selection (or interrupt when none) / paste in a terminal |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Compatible copy / paste aliases |
-| `Ctrl+Click` | Open a URL or file path printed in the terminal |
-| Drop file/image | Paste its quoted local path without submitting it |
-| Drag a pane header | Move the pane: an edge of another pane docks it there, the middle swaps the two |
-| `Ctrl+Alt+`` ` | Summon/hide the window, or slide the overlay in and out (global, configurable, also restores from tray) |
-| `/` in Settings | Search every setting, terminal and snippet |
-| `Delete` / `F2` on a sidebar row | Kill the terminal (asks first, Kill focused) / rename it |
-| `Shift+F10` on a sidebar row | Row menu: Open, Move to the active workspace, Detach, Rename, Kill |
-
-Split actions open the currently selected terminal profile in the focused
-pane's best-known directory. QuickTerm tracks that directory from OSC 7 and
-OSC 9;9 shell-integration signals and otherwise falls back to the pane's launch
-folder. It never scrapes prompt text. Sidebar **Open** and `Alt+N` open in the
-workspace folder instead. Claude Code and Codex splits stay bound to their
-workspace project, and a split of an agent-manager pane starts a normal
-conversation; use Alt+K → **split agent view** for an explicit project-scoped
-manager.
-
-`Ctrl+±` changes the focused pane's text size for this session and `Ctrl+0`
-puts it back; the saved default for every pane is in Settings. Split dividers
-are wide, keyboard-adjustable, and can be double-clicked to balance them.
-
-Per-terminal global hotkeys, such as `Ctrl+Alt+1` to launch Claude Code, are
-set in the terminal's editor or in **Settings → Shortcuts**, which also lists
-the summon key and the in-app keys. A shortcut field records the keys you
-press; while it records, QuickTerm's global hotkeys pause, so a key it
-already uses is recorded instead of fired. A new global shortcut needs Ctrl,
-Alt or Win, and QuickTerm warns when it would take an Alt key from your shell
-or agent. A changed shortcut works as soon as you save; a key another program
-holds is reported beside the field.
-
-Every live terminal appears in the sidebar, grouped by the workspace that owns
-it, as a state dot and a name; double-click a row (or `F2`) to rename it.
-Clicking a row focuses the terminal where it is shown, opens its workspace when
-that is closed, or moves an **Unassigned** terminal into the active view.
-Dashboard statistics show **this workspace** and **all live** separately;
-unowned sessions are labelled **Unassigned** instead of looking like a hidden
-workspace. Detailed detached sessions stay under **Dashboard → Detached
-sessions** with **Attach** and **Kill** controls. In `Alt+K`, **go to
-terminal** reaches any live terminal and **kill terminal…** lists them for a
-confirmed kill from the keyboard. Taking a terminal from another workspace into
-this view is the explicit **move terminal here…** action. Scratch follows the
-same ownership rule during the current run, but Scratch and all of its sessions
-are discarded when QuickTerm quits.
-
-**Dashboard → Terminal usage** shows the host process tree's current working
-set, sampled CPU, process count, and uptime for every live terminal. The
-sidebar uses a cheap liveness query and do not continuously take an OS
-process snapshot. WSL is labelled **host side only**, because Linux processes
-inside the WSL VM cannot be attributed reliably to one Windows terminal. Output
-produced after a terminal is detached is marked **New output** with its byte
-count and age, then acknowledged automatically when you attach it. Settings can
-cap live terminals from 1 to 100; `0` keeps the default unlimited behavior.
-Reaching the cap blocks new spawns and never kills an existing terminal. The
-dashboard also has a confirmed **Kill all terminals** action for intentionally
-stopping every live session. It removes only terminals the backend verifies as
-stopped; any failure stays visible and is reported for retry. Kill
-confirmations stay visible beside their trigger and are clamped inside the
-window, including for sessions near the bottom of a scrolled dashboard.
+| `Alt+Z` | Zoom the focused pane |
+| `Alt+D` | Detach the pane; the terminal keeps running |
+| `Alt+W` | Kill the focused terminal (asks first; a second `Alt+W` confirms) |
+| `Alt+J` | Next terminal that needs you |
+| `Alt+G` / `Alt+S` / `Alt+I` | Workspace board / Settings / Help |
+| `Alt+Shift+S` | Sidebar: full, rail, hidden |
+| `Alt+Shift+E` | Right panel |
+| `Alt+Shift+C` | Open the focused terminal's folder in VS Code |
+| `Ctrl+Shift+1..9` | Show the nth workspace in the sidebar |
+| `Alt+PageDown` / `Alt+PageUp` | Next / previous open workspace |
+| `Ctrl+Tab` | Recent terminals (release Ctrl to choose) |
+| `Ctrl+Shift+F` | Find in the terminal |
+| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Terminal text size |
+| `Ctrl+Alt+`` ` | Summon or hide the window (global, configurable) |
 
 ## Configuration
 
-`%APPDATA%\quickterm\config.json` is created with defaults on first run.
-Manage saved configurations in **Settings → Terminals**: a filterable list
-with the editor beside it, where rows mark problems and unsaved changes.
-**Add** offers Claude Code, Codex, PowerShell 7, Windows PowerShell, Command
-Prompt, WSL, Git Bash, Bash, Zsh, Fish, Nushell, or any custom executable.
-Typed forms also cover SSH/SFTP through OpenSSH or the bundled PuTTY tools,
-Telnet, serial consoles, Docker, Podman, Kubernetes, Remote Desktop and VNC.
-Remote desktops open external client windows rather than terminal panes.
-Settings has the tabs General, Window, Shortcuts, Terminals, Snippets,
-Advanced and About, a search box above them, and one **Save** (also
-`Ctrl+S`) that stores every change. A profile sets a command to run inside the shell,
-environment variables, a global shortcut and autostart. It has no folder: the
-workspace you launch it from supplies that, which is what makes one profile
-usable in every project. Set the workspace folder in the Dashboard. With no workspace folder at all, Windows shells
-start in the Windows user home and WSL in the distro's Linux home.
+`%APPDATA%\quickterm\config.json` is created on first run; every field has a
+control in Settings (General, Window, Shortcuts, Agents, Snippets, Advanced,
+About), with a search box (`/`). Workspaces live in the `workspaces` folder
+next to it. Settings > Window sets the window size and the drop-down overlay
+that the summon key slides in from a screen edge. There are 54 themes plus
+a custom one: the theme row in Settings > General, or **color theme…** in
+the palette, opens a switcher that previews each theme on the whole window
+as you move through it and applies it on Enter or a click. On Windows 11
+the title bar follows the theme too.
 
-Claude Code and Codex are agent profile types rather than name conventions.
-An agent opens in the folder of the workspace you launch it from, and its
-launch mode is **new conversation**, **continue latest**, **choose session**
-(the CLI's own picker), the **agent manager**, or for Codex also **fork a
-session**. Typed options come from QuickTerm's list for each CLI: model,
-permission mode or approval and sandbox, effort, extra folders and more, with
-the rarer ones under Advanced. The palette offers every mode of every agent
-profile, and lists the workspace folder's recent conversations as **resume
-Claude session: <title>** or **resume Codex session: <title>**; a restart of
-such a pane resumes the same conversation. If an agent's PTY has died, the
-restored pane stays blank and offers both explicit **Continue latest** and
-**Choose session** recovery. It never shows cached terminal history or
-silently substitutes a new process. When Codex is installed through npm,
-QuickTerm starts its native `codex.exe` rather than the `.cmd` shim.
-
-SSH and SFTP profiles take a host, optional port, username and private key,
-and run through either Windows' OpenSSH client or the bundled PuTTY tools. New
-profiles use OpenSSH when it is installed; profiles from 3.x keep PuTTY.
-QuickTerm reads the host aliases in `~/.ssh/config`: **Add** lists them under
-**From ~/.ssh/config**, the Host field suggests them, and picking one shows
-the user, port, key and ProxyJump that OpenSSH resolves for it. **Fill from
-~/.ssh/config** copies those values into the form. OpenSSH profiles can set a
-ProxyJump and need an OpenSSH key; PuTTY needs a `.ppk` key. Passphrases are
-never stored; you are prompted in the terminal.
-The bundled PuTTY tools are pinned and hash-verified at build time, and their
-folder is appended to every terminal's `PATH`, so `pscp`, `plink` and `psftp`
-work as commands in any QuickTerm shell (for example
-`pscp file.txt user@host:/tmp/`). See `THIRD-PARTY-NOTICES.md` for licenses.
-
-Profile environment values are encrypted at rest with Windows DPAPI and can be
-decrypted only by the same Windows account. Existing plaintext profile values
-are migrated automatically. Every program launched inside that terminal still
-inherits them, so use a dedicated profile when a credential should have a
-narrow scope. On POSIX, QuickTerm relies on `0700`/`0600` directory and file
-permissions instead of storing an encryption key beside the data.
-
-Configuration fields have controls in Settings; no JSON editing is required.
-Server binding and stored voice preferences are under Advanced. Voice capture
-is currently unavailable. Arguments are entered one per line and environment
-variables as name/value rows. Profiles have no starting-folder field.
-
-**Settings → Window** sets the default window size, from presets, custom
-values or **Use this window's size**. QuickTerm remembers the last size and
-position in `window_state.json` unless you turn that off, and restores them
-only when they still fit on a monitor. The same tab turns on the drop-down
-overlay: the summon key then slides the window in from the top or bottom edge
-of the monitor under the cursor (or the primary monitor), at the width and
-height you set, and slides it out again. It can stay on top and hide when
-another program takes the focus. Changes to the window size, the overlay and
-every shortcut apply without a restart; only host and port need one.
-
-Snippets, custom themes, the app logo, idle-session timeout, summon hotkey,
-port, scrollback size, and font defaults live in the app configuration.
-Workspace folders, logos, layouts and terminal ownership live in workspace
-files. Sidebar mode, width, selected launch configuration and focus belong to
-the native window. Text zoom is temporary and belongs to a pane.
-The full validated 64 KB to 64 MB in-memory scrollback range is available in
-the normal settings UI and applies to live sessions immediately. Settings offers 20
-themes from their upstream palettes, 13 dark and 7 light, among them
-Catppuccin, Tokyo Night, Rosé Pine, Kanagawa, Gruvbox, Everforest, Nord,
-Dracula and GitHub, plus a Custom theme built from six colors. The sidebar
-and Settings follow the theme's own palette. Theme previews update the whole
-window and its terminals immediately, then revert on Cancel. Saving updates
-other native windows. Settings sends only changed fields and reports conflicting
-edits from another window instead of silently overwriting them. Changing an
-unrelated setting preserves pane-local text zoom.
-
-Named workspaces are saved under the QuickTerm config directory and can be
-opened from the sidebar, the palette or the dashboard. Terminal output is never written to
-disk: scrollback exists only in process memory and is released when the session
-is removed. The small rotating log under `logs/` accepts only warnings and
-errors, redacts common user-local path prefixes, and never contains transcripts
-or session IDs. Upgrading once removes legacy verbose rotations. Only the
-explicit `QUICKTERM_DEBUG_IO=1` diagnostic mode records raw terminal input and
-output, and it may contain secrets.
+Terminal output is never written to disk: scrollback lives in memory and goes
+with the session. The log under `logs/` keeps only warnings and errors.
+`QUICKTERM_DEBUG_IO=1` records raw terminal I/O for debugging and may contain
+secrets.
 
 ## Security and company use
 
-QuickTerm is designed for local workstation use and can fit a company-managed
-Windows environment when its documented controls match that company's policy.
-It is not a sandbox, an EDR product, or a compliance certification. Terminals
-run arbitrary commands with the signed-in user's permissions, so normal OS
-controls still apply: least privilege, application allowlisting, patching, and
-endpoint monitoring. See [Security and company deployment](docs/SECURITY.md)
-for the implemented boundaries, data handling, tracker accuracy, and an IT
-review checklist.
+QuickTerm is built for local workstation use. It is not a sandbox: terminals
+run commands with your own permissions. The server binds to `127.0.0.1` and
+every request needs a per-install token. See
+[Security and company deployment](docs/SECURITY.md).
 
 ## Development
 
@@ -377,20 +222,9 @@ uv run --no-sync python scripts/smoke_packaged.py
 uv build --no-sources
 ```
 
-Architecture: one backend process owns all PTYs (`pty_session.py` /
-`pty_posix.py`, `session_manager.py`); views attach over a binary WebSocket
-protocol (`server.py`); the packaged frontend is plain ES modules plus vendored
-xterm.js with no Node build step. The pane protocol has headless Node tests,
-and the dashboard and settings sections live in focused modules rather than one
-UI god class. See `docs/SESSION_MODEL.md` for the tmux-inspired ownership model
-and planned scope, and `docs/CONTRACTS.md` for the binding interfaces.
-
-Run the manual-CI command above before merging changes. Release artifacts are
-built locally: the Windows application folder, per-user installer, portable
-archive, Python distributions, generated notes, and SHA-256 checksums. After
-every frozen build, the packaged smoke command starts an isolated copy, spawns
-a real ConPTY, verifies authenticated attach, replay, live I/O and exit, and
-exercises the dynamically imported open and update routes. Release history is
-consolidated in `CHANGELOG.md` and on GitHub Releases.
+One backend process owns every PTY; windows attach over a WebSocket; the
+frontend is plain ES modules with vendored xterm.js and no Node build.
+`AGENTS.md` describes the architecture and the rules, `docs/CONTRACTS.md` the
+interfaces, `CHANGELOG.md` the release history.
 
 MIT licensed.

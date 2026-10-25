@@ -1,14 +1,16 @@
 """Turn a launch request into the exact command a terminal starts with.
 
 Every way of starting a terminal resolves it here: POST /api/sessions, POST
-/api/elevate, autostart, global hotkeys, and the first terminal of an elevated
-instance. They used to carry their own copies of this logic and drifted apart:
-a Claude Code profile on a hotkey always failed because nothing gave it a
-folder, and the bundled PuTTY tools were on PATH only for REST launches.
+/api/elevate, and the first terminal of an elevated instance. They used to
+carry their own copies of this logic and drifted apart.
+
+A terminal is either the configured shell (no profile) or an agent (profile
+"claude-code" or "codex", from Settings > Agents), and it runs where its
+workspace lives: on this PC, in a WSL distribution, or on an SSH host.
 
 Nothing here touches the session registry. Resolving does block on the file
-system (a folder check, a PATH scan, the PuTTY tools stat, a workspace file),
-so async callers run it in a worker thread.
+system (a folder check, a PATH scan, a workspace file), so async callers run
+it in a worker thread.
 """
 
 from __future__ import annotations
@@ -17,19 +19,14 @@ import dataclasses
 import importlib
 import os
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from quickterm import putty_tools, shells
+from quickterm import shells
 from quickterm.config import AGENT_KINDS, AGENT_LABELS, agent_profile, validate_environment
 
 CLAUDE_MODES = ("new", "continue", "resume", "agents")
-OPENSSH_MISSING = (
-    "OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client."
-)
-START_COMMAND_MAX_CHARS = 8192
 ARGS_MAX = 1024
 NAME_MAX_CHARS = 80
 
@@ -38,7 +35,7 @@ class LaunchError(ValueError):
     """A launch that cannot start. `status` is the HTTP status that reports it.
 
     `label` is set when the failure belongs to one terminal (its folder, its
-    profile, its tools) rather than to the shape of the request, so every
+    agent, its tools) rather than to the shape of the request, so every
     caller names the terminal the same way.
     """
 
@@ -53,6 +50,8 @@ class LaunchError(ValueError):
 class LaunchSpec:
     cmd: str
     args: list[str] = field(default_factory=list)
+    # The folder the terminal starts in. In a WSL workspace (`wsl` set) a
+    # path in that distribution, which the PTY itself never starts in.
     cwd: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     # Display name the caller asked for, if any. SessionManager falls back to
@@ -61,8 +60,8 @@ class LaunchSpec:
     profile: str | None = None
     # What errors call this terminal: profile name, else requested name, else cmd.
     label: str = ""
-    # "claude" or "codex" when this starts an agent profile's own command:
-    # the session manager then adds QuickTerm's hooks to the launch.
+    # "claude" or "codex" when this starts an agent's own command: the
+    # session manager then adds QuickTerm's hooks to the launch.
     agent: str | None = None
     # The shell an agent runs inside. The session manager wraps the command
     # after the hooks are added, since those belong to the agent's argv.
@@ -76,6 +75,11 @@ class LaunchSpec:
     # The effective shell value of a plain shell launch whose shell gets
     # QuickTerm's integration (shells.INTEGRATED); the session manager adds it.
     shell: str | None = None
+    # The distribution of a terminal in a WSL workspace.
+    wsl: str | None = None
+    # What a plain local shell runs once before its prompt; the session
+    # manager builds the argv again when it adds the shell integration.
+    command: str | None = None
 
     def spawn_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -94,6 +98,10 @@ class LaunchSpec:
             kwargs["remote"] = self.remote
         if self.shell is not None:
             kwargs["shell"] = self.shell
+        if self.wsl is not None:
+            kwargs["wsl"] = self.wsl
+        if self.command is not None:
+            kwargs["command"] = self.command
         return kwargs
 
 
@@ -121,7 +129,7 @@ def validate_dir(value: str, label: str | None = None) -> str:
 
 
 def workspace_start(name: str | None) -> str | None:
-    """The folder a workspace's terminals start in, or None.
+    """The folder a local workspace's terminals start in, or None.
 
     A workspace whose folder has gone missing yields None, so the spawn falls
     back to the home folder instead of failing.
@@ -132,206 +140,18 @@ def workspace_start(name: str | None) -> str | None:
     workspace = importlib.import_module("quickterm.workspace")
     saved = workspace.load_workspace(name)
     if saved is None or getattr(saved, "host", None):
-        # A remote workspace's folder is a path on its host (workspace_target).
+        # A WSL or SSH workspace's folder is a path there (workspace_target).
         return None
     return workspace.resolve_start_dir(getattr(saved, "path", None))
 
 
-def append_tools_path(env: dict[str, str]) -> dict[str, str]:
-    """Put the bundled PuTTY tools on the child's PATH, after everything else.
-
-    Appended rather than prepended so a user-installed plink or pscp still
-    wins. The key is matched case-insensitively because a Windows profile
-    usually spells it ``Path``; a second ``PATH`` entry would shadow it.
-    """
-    tools = putty_tools.tools_dir()
-    if tools is None:
-        return env
-    merged = dict(env)
-    path_key = next((key for key in merged if key.casefold() == "path"), "PATH")
-    base_path = merged.get(path_key) or os.environ.get("PATH", "")
-    merged[path_key] = f"{base_path}{os.pathsep}{tools}" if base_path else str(tools)
-    return merged
-
-
-def _posix_word(program: str) -> str:
-    """`program` as one word of a POSIX shell command line.
-
-    The shell reads the `exec` after a start command itself, so an msys
-    C:\\msys64\\usr\\bin\\bash.exe lost its backslashes there and the terminal
-    exited once the start command finished. msys and Cygwin shells accept the
-    same path with forward slashes, and quoting keeps a space in one word.
-    """
-    if "\\" in program or re.match(r"[A-Za-z]:", program):
-        program = program.replace("\\", "/")
-    return shlex.quote(program)
-
-
-def _without_login_flags(args: list[str]) -> list[str]:
-    return [arg for arg in args if arg not in ("-l", "--login")]
-
-
-def resolve_profile(
-    prof: Any,
-    cwd: str | None = None,
-    *,
-    agent_mode: str | None = None,
-    agent_session: str | None = None,
-    prompt: str | None = None,
-) -> tuple[str, list[str], str | None]:
-    """Command, arguments and process folder for one profile.
-
-    `cwd` is what the caller resolved from the request or the workspace root;
-    a profile has no folder of its own. `agent_mode` and `agent_session`
-    override an agent profile's launch for this one start, and `prompt` is its
-    first message. Raises ValueError
-    only when nothing can resolve (an agent profile without a folder, a
-    missing SSH client).
-    """
-    terminal_type = getattr(prof, "terminal_type", None)
-    start = (getattr(prof, "start_command", None) or "").strip()
-    configured = (getattr(prof, "cmd", None) or "").strip()
-    existing_args = list(getattr(prof, "args", []) or [])
-    from .agents import AGENT_TYPES, resolve as resolve_agent
-    from .connections import CONNECTION_TYPES, DESKTOP_TYPES, resolve as resolve_connection
-
-    if terminal_type in DESKTOP_TYPES:
-        raise ValueError("Desktop connections open in a separate client window from Connections")
-    if terminal_type in CONNECTION_TYPES:
-        return resolve_connection(prof, cwd)
-    if terminal_type in AGENT_TYPES:
-        return resolve_agent(prof, cwd, mode=agent_mode, session=agent_session, prompt=prompt)
-    if terminal_type in ("powershell-core", "windows-powershell"):
-        # The inventory resolves an absolute path on purpose (PATH is stale in
-        # a tray-resident app) and Settings stores it in `cmd`; the bare name
-        # is only the fallback for a profile that has none.
-        default = "pwsh.exe" if terminal_type == "powershell-core" else "powershell.exe"
-        # The profile's own arguments go BEFORE -Command: PowerShell reads
-        # everything after -Command as the command text, so an argument placed
-        # after it would run as part of the start command.
-        args = ["-NoLogo"] + [arg for arg in existing_args if arg.casefold() != "-nologo"]
-        if start:
-            args += ["-NoExit", "-Command", start]
-        return configured or default, args, cwd
-    if terminal_type == "command-prompt":
-        # Same ordering reason as PowerShell: cmd reads the rest of the line
-        # after /K as the command.
-        args = existing_args + (["/K", start] if start else [])
-        return configured or "cmd.exe", args, cwd
-    if terminal_type == "wsl":
-        args = []
-        distro = (getattr(prof, "wsl_distro", None) or "").strip()
-        if distro:
-            args += ["-d", distro]
-        # wsl.exe otherwise inherits QuickTerm's Windows process directory and
-        # opens under /mnt/c.  A blank profile belongs in the distro's own
-        # home; explicit Linux and Windows paths are both accepted by --cd.
-        args += ["--cd", cwd or "~"]
-        args += existing_args
-        if start:
-            args += ["--", "bash", "-lc", f"{start}; exec bash -l"]
-        return configured or "wsl.exe", args, None
-    if terminal_type in ("bash", "zsh", "fish"):
-        shell = configured or terminal_type
-        # Same rule as Git Bash below: the profile's own arguments go first,
-        # because the shell reads the operand after -c as the command, and the
-        # login flag is ours, so a profile that repeats it does not get two.
-        extra = _without_login_flags(existing_args)
-        if start:
-            return shell, extra + ["-lc", f"{start}; exec {_posix_word(shell)} -l"], cwd
-        return shell, extra + ["-l"], cwd
-    if terminal_type == "git-bash":
-        # `cmd` is a Windows path such as C:\Program Files\Git\bin\bash.exe;
-        # inside the login shell plain `bash` is the same program, and it has
-        # no space to quote.
-        shell = configured or "bash"
-        # The profile's own arguments first, as for cmd and nushell: bash
-        # reads the operand after -c as the command. The login flag is ours.
-        extra = _without_login_flags(existing_args)
-        if start:
-            return shell, extra + ["-lc", f"{start}; exec bash -l"], cwd
-        return shell, extra + ["-l"], cwd
-    if terminal_type == "nushell":
-        # `nu -e` runs the command and then stays interactive.
-        args = existing_args + (["-e", start] if start else [])
-        return configured or "nu", args, cwd
-    if terminal_type in ("ssh", "sftp"):
-        host = (getattr(prof, "ssh_host", None) or "").strip()
-        user = (getattr(prof, "ssh_user", None) or "").strip()
-        port = getattr(prof, "ssh_port", None)
-        key = (getattr(prof, "ssh_key", None) or "").strip()
-        if host.startswith("-") or user.startswith("-"):
-            raise ValueError("SSH host and user must not start with -")
-        if getattr(prof, "ssh_client", None) == "openssh":
-            return _openssh(terminal_type, prof, host, user, port, key, start, existing_args, cwd)
-        tool = putty_tools.plink_path() if terminal_type == "ssh" else putty_tools.psftp_path()
-        if tool is None:
-            raise ValueError("PuTTY tools are not installed (run scripts/fetch_putty.py)")
-        args = ["-ssh"] if terminal_type == "ssh" else []
-        if port:
-            args += ["-P", str(port)]
-        if key:
-            args += ["-i", key]
-        args += existing_args
-        args.append(f"{user}@{host}" if user else host)
-        # plink runs a trailing command on the remote host instead of a shell.
-        if terminal_type == "ssh" and start:
-            args.append(start)
-        return str(tool), args, cwd
-    return prof.cmd, existing_args, cwd
-
-
-def _openssh(
-    kind: str, prof: Any, host: str, user: str, port: Any, key: str, start: str,
-    extra: list[str], cwd: str | None,
-) -> tuple[str, list[str], str | None]:
-    # Through sys.modules so tests can stub the client lookup.
-    ssh_config = importlib.import_module("quickterm.ssh_config")
-    tool = ssh_config.openssh_path(kind)
-    if tool is None:
-        raise ValueError(OPENSSH_MISSING)
-    args: list[str] = []
-    if port:
-        # sftp spells the port flag in capitals, like scp.
-        args += ["-p" if kind == "ssh" else "-P", str(port)]
-    if key:
-        args += ["-i", key]
-    jump = (getattr(prof, "ssh_proxy_jump", None) or "").strip()
-    if jump.startswith("-"):
-        raise ValueError("ProxyJump must not start with -")
-    if jump:
-        args += ["-J", jump]
-    args += extra
-    # An alias in `host` lets ssh apply its own ssh_config entry; the fields
-    # set here override it.
-    args.append(f"{user}@{host}" if user else host)
-    if kind == "ssh" and start:
-        args.append(start)
-    return str(tool), args, cwd
-
-
-def openssh_args(prof: Any, options: list[str]) -> tuple[str, list[str]]:
-    """ssh and its arguments up to the target for an OpenSSH profile, with
-    `options` before the profile's own arguments. ValueError when the client
-    is missing or a field could pass as an option."""
-    host = (getattr(prof, "ssh_host", None) or "").strip()
-    user = (getattr(prof, "ssh_user", None) or "").strip()
-    if host.startswith("-") or user.startswith("-"):
-        raise ValueError("SSH host and user must not start with -")
-    extra = [*options, *list(getattr(prof, "args", []) or [])]
-    tool, args, _cwd = _openssh(
-        "ssh", prof, host, user, getattr(prof, "ssh_port", None),
-        (getattr(prof, "ssh_key", None) or "").strip(), "", extra, None,
-    )
-    return tool, args
-
-
-# --- terminals of a workspace on an SSH host -----------------------------------
+# --- terminals of a workspace in WSL or on an SSH host ----------------------------
 
 
 @dataclass(frozen=True)
 class RemoteTarget:
-    """Where a remote workspace lives: an SSH profile's name and a folder there."""
+    """Where a WSL or SSH workspace lives: its location (`Workspace.host`)
+    and a folder there."""
 
     host: str
     path: str | None
@@ -339,12 +159,12 @@ class RemoteTarget:
 
 @dataclass(frozen=True)
 class RemoteLaunch:
-    """A terminal of a remote workspace, before the session id exists.
+    """A terminal of a workspace on an SSH host, before the session id exists.
 
     `program` and `options` are ssh up to and including the target. `agent`
-    ("claude" | "codex") with `command` is an agent run; `command` alone is a
-    start command; neither is the plain remote shell. The session manager
-    calls `remote_args` again with the hook pieces once it has an id.
+    ("claude" | "codex") with `command` is an agent run; without them it is
+    the plain remote shell. The session manager calls `remote_args` again
+    with the hook pieces once it has an id.
     """
 
     host: str
@@ -353,8 +173,12 @@ class RemoteLaunch:
     target: str
     folder: str | None
     command: tuple[str, ...] | None = None
-    start: str | None = None
     agent: str | None = None
+    # The workspace's and the terminal's variables, exported by the remote
+    # command (so visible in the host's process list), and what a plain shell
+    # runs once before its prompt.
+    env: tuple[tuple[str, str], ...] = ()
+    shell_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -396,16 +220,21 @@ def remote_script(remote: RemoteLaunch, hooks: RemoteHooks | None = None) -> str
     from quickterm import ws_exec
 
     cd = f"cd {ws_exec.folder_word(remote.folder)}; " if remote.folder else ""
+    exports = "".join(
+        f"export {name}={ws_exec.posix_quote(value)}; " for name, value in remote.env
+    )
     if remote.command is None:
-        if remote.start:
-            return f'{cd}{remote.start}; exec "$SHELL" -l'
-        return f'{cd}exec "$SHELL" -l'
+        if remote.shell_command is None:
+            return f'{cd}{exports}exec "$SHELL" -l'
+        # The login shell runs it, for the same PATH an agent gets.
+        run = f"{_LOGIN_SHELL} -lc {ws_exec.posix_quote(remote.shell_command)}"
+        return f'{cd}{exports}{run}; exec "$SHELL" -l'
     agent = " ".join(ws_exec.posix_quote(word) for word in remote.command)
     # The login shell runs the agent, so its PATH (~/.local/bin, nvm, ...)
     # applies even though ssh starts the command without a login.
     run_agent = f"{_LOGIN_SHELL} -lc {ws_exec.posix_quote(agent)}"
     if hooks is None:
-        return f'{cd}{run_agent}; exec "$SHELL" -l'
+        return f'{cd}{exports}{run_agent}; exec "$SHELL" -l'
     from quickterm import agent_hooks
 
     nonce = hooks.nonce
@@ -430,6 +259,7 @@ def remote_script(remote: RemoteLaunch, hooks: RemoteHooks | None = None) -> str
         f"QUICKTERM_SESSION_ID={ws_exec.posix_quote(hooks.session_id)}",
         f"QUICKTERM_HOOK_SOCKET={ws_exec.posix_quote(hooks.socket)}",
         "export QUICKTERM_HOOK_TOKEN QUICKTERM_SESSION_ID QUICKTERM_HOOK_SOCKET",
+        *(f"export {name}={ws_exec.posix_quote(value)}" for name, value in remote.env),
         # Not INT: Ctrl+C in the agent must not take its state away.
         "trap 'rm -f \"$QUICKTERM_HOOK_SOCKET\"' EXIT HUP TERM",
         f"({agent_hooks.remote_lifecycle_command(remote.agent or 'claude', hooks.port, agent_hooks.AGENT_START)}) 2>/dev/null",
@@ -457,7 +287,7 @@ def remote_args(remote: RemoteLaunch, hooks: RemoteHooks | None = None) -> list[
 
 
 def workspace_target(name: str | None) -> RemoteTarget | None:
-    """The host and folder of a remote workspace, or None for a local one."""
+    """The location and folder of a WSL or SSH workspace, or None on this PC."""
     if not name:
         return None
     workspace = importlib.import_module("quickterm.workspace")
@@ -469,39 +299,14 @@ def workspace_target(name: str | None) -> RemoteTarget | None:
 
 
 _WINDOWS_PATH = re.compile(r"^[A-Za-z]:|\\|\.exe$|\.cmd$|\.bat$", re.IGNORECASE)
-REMOTE_SHELL_TYPES = frozenset({"bash", "zsh", "fish", "git-bash"})
-
-
-def remote_start(prof: Any) -> str | None:
-    """The POSIX command a saved profile runs on a host, or None when it only
-    makes sense on this computer (a Windows shell, WSL, a Windows program).
-
-    A POSIX shell profile with a start command runs that command; a custom
-    command whose program is not a Windows path runs with its arguments.
-    """
-    kind = getattr(prof, "terminal_type", None)
-    start = (getattr(prof, "start_command", None) or "").strip()
-    if kind in REMOTE_SHELL_TYPES:
-        return start or None
-    if kind == "custom":
-        program = (getattr(prof, "cmd", None) or "").strip()
-        if not program or _WINDOWS_PATH.search(program):
-            return None
-        from quickterm import ws_exec
-
-        try:
-            return " ".join(ws_exec.posix_quote(w) for w in [program, *(getattr(prof, "args", []) or [])])
-        except ValueError:
-            return None
-    return None
 
 
 def _remote_agent_command(
     prof: Any, folder: str, mode: str | None, session: str | None, prompt: str | None = None,
 ) -> list[str]:
-    """The agent's argv on the host: the CLI name (or a POSIX `cmd` from the
-    settings) and the same arguments a local launch gets, the first prompt
-    last."""
+    """The agent's argv in WSL or on a host: the CLI name (or a POSIX `cmd`
+    from the settings) and the same arguments a local launch gets, the first
+    prompt last."""
     from quickterm import agents
 
     agents.validate(prof)
@@ -519,7 +324,7 @@ def _remote_agent_command(
     if prompt is not None:
         if mode == "agents":
             raise ValueError("prompt does not apply to the agents mode")
-        args.append(flat_prompt(prompt))
+        args.append(prompt)
     return [program, *args]
 
 
@@ -530,8 +335,19 @@ def flat_prompt(prompt: str) -> str:
     return " | ".join(line for line in lines if line)
 
 
-def _resolve_remote(
-    cfg: Any,
+def _location_folder(target: RemoteTarget, request_cwd: str | None) -> str | None:
+    """The workspace folder, or where a split's source pane is now when the
+    request names a POSIX folder there (a Windows path is no place there)."""
+    workspace_mod = importlib.import_module("quickterm.workspace")
+    if request_cwd:
+        try:
+            return workspace_mod.normalize_remote_root(request_cwd) or target.path
+        except ValueError:
+            pass
+    return target.path
+
+
+def _resolve_ssh(
     target: RemoteTarget,
     prof: Any,
     *,
@@ -540,49 +356,41 @@ def _resolve_remote(
     requested_name: str | None,
     request_cwd: str | None,
     prompt: str | None = None,
-) -> LaunchSpec | None:
-    """The spec of a terminal in a remote workspace, or None when the profile
-    is one that runs on this computer anyway (a connection)."""
-    from quickterm import workspace as workspace_mod
+    env: dict[str, str] | None = None,
+    command: str | None = None,
+) -> LaunchSpec:
+    """A terminal of a workspace on an SSH host: `ssh -t <destination>` and
+    the remote script. Port, key and the rest come from ~/.ssh/config. `env`
+    is exported by the remote command; the local ssh gets none of it."""
     from quickterm import ws_exec
 
-    from .agents import AGENT_TYPES
-
-    kind = getattr(prof, "terminal_type", None) if prof is not None else None
-    start = None
-    if prof is not None and kind not in AGENT_TYPES:
-        start = remote_start(prof)
-        if start is None:
-            return None
-    folder = target.path
-    if request_cwd:
-        # A split from a remote pane hands in where that shell is now.
-        try:
-            folder = workspace_mod.normalize_remote_root(request_cwd) or folder
-        except ValueError:
-            pass
+    folder = _location_folder(target, request_cwd)
     label = prof.name if prof is not None else (requested_name or target.host)
     try:
-        ssh_profile = ws_exec.find_profile(target.host, list(getattr(cfg, "profiles", []) or []))
-        program, options = openssh_args(ssh_profile, ["-t"])
-    except (FileNotFoundError, ValueError) as exc:
+        program = ws_exec.ssh_program()
+    except FileNotFoundError as exc:
         raise LaunchError(str(exc), label=label) from exc
-    command = None
+    options = ("-t", target.host)
+    agent_command = None
     agent = None
     name = requested_name
-    if kind in AGENT_TYPES:
+    if prof is not None:
+        kind = prof.terminal_type
         try:
-            command = tuple(_remote_agent_command(prof, folder or "~", mode, agent_session, prompt))
+            agent_command = tuple(_remote_agent_command(
+                prof, folder or "~", mode, agent_session,
+                flat_prompt(prompt) if prompt is not None else None,
+            ))
         except ValueError as exc:
             raise LaunchError(str(exc), label=prof.name) from exc
         agent = _HOOK_AGENTS[kind]
-        if prof.name == kind and name is None:
-            name = AGENT_LABELS[kind]
-    elif prof is None:
+        name = name or AGENT_LABELS[kind]
+    else:
         name = name or target.host
     remote = RemoteLaunch(
-        host=target.host, program=program, options=tuple(options), target=options[-1],
-        folder=folder, command=command, start=start, agent=agent,
+        host=target.host, program=program, options=options, target=target.host,
+        folder=folder, command=agent_command, agent=agent,
+        env=tuple(_checked_env(env, label).items()), shell_command=command,
     )
     try:
         args = remote_args(remote)
@@ -601,19 +409,142 @@ def _resolve_remote(
     )
 
 
+def _resolve_wsl(
+    target: RemoteTarget,
+    prof: Any,
+    *,
+    mode: str | None,
+    agent_session: str | None,
+    requested_name: str | None,
+    request_cwd: str | None,
+    prompt: str | None = None,
+    env: dict[str, str] | None = None,
+    command: str | None = None,
+) -> LaunchSpec:
+    """A terminal of a workspace in a WSL distribution: the distribution's
+    login shell (`wsl.exe -d <distro> --cd <folder>`), or an agent from the
+    distribution's PATH inside the WSL wrap. `env` reaches Linux through
+    WSLENV."""
+    from quickterm import workspace as workspace_mod
+    from quickterm import ws_exec
+
+    distro = workspace_mod.wsl_distro(target.host) or ""
+    value = f"wsl:{distro}"
+    folder = _location_folder(target, request_cwd) or "~"
+    label = prof.name if prof is not None else (requested_name or shells.label(value))
+    own = _checked_env(env, label)
+    try:
+        program = ws_exec.wsl_program()
+    except FileNotFoundError as exc:
+        raise LaunchError(str(exc), label=label) from exc
+    if prof is None:
+        cmd, args, _cwd = shells.interactive(value, program, folder, command=command)
+        return LaunchSpec(
+            cmd=cmd,
+            args=args,
+            cwd=folder,
+            env=shells.with_wslenv(own, list(own)) if own else {},
+            name=requested_name or shells.label(value),
+            label=label,
+            terminal_type="wsl",
+            wsl=distro,
+        )
+    kind = prof.terminal_type
+    try:
+        cli, *args = _remote_agent_command(prof, folder, mode, agent_session, prompt)
+        env = validate_environment({**prof.env, **own})
+    except ValueError as exc:
+        raise LaunchError(str(exc), label=prof.name) from exc
+    # The agent settings' variables are meant for the agent, which runs in
+    # Linux; PATH stays Windows' own (WSL builds its PATH itself).
+    names = [name for name in env if name in own or (name in prof.env and name.upper() != "PATH")]
+    if names:
+        env = shells.with_wslenv(env, names)
+    return LaunchSpec(
+        cmd=cli,
+        args=args,
+        cwd=folder,
+        env=env,
+        name=requested_name or AGENT_LABELS[kind],
+        profile=prof.name,
+        label=prof.name,
+        agent=_HOOK_AGENTS[kind],
+        wrap=shells.Wrap(value, program, cli),
+        wsl=distro,
+    )
+
+
+def _checked_env(env: dict[str, str] | None, label: str) -> dict[str, str]:
+    """The workspace's and the terminal's variables together, within the
+    limits every launch environment has."""
+    if not env:
+        return {}
+    try:
+        return dict(validate_environment(dict(env)))
+    except ValueError as exc:
+        raise LaunchError(f"invalid env: {exc}", label=label) from exc
+
+
+def workspace_env(name: str | None) -> dict[str, str]:
+    """The variables every terminal of workspace `name` gets. Blocking (the
+    workspace file, DPAPI)."""
+    if not name:
+        return {}
+    workspace = importlib.import_module("quickterm.workspace")
+    saved = workspace.load_workspace(name)
+    return dict(getattr(saved, "env", None) or {}) if saved is not None else {}
+
+
+def _terminal_env(workspace: Any, env: Any) -> dict[str, str] | None:
+    """The workspace's variables with the request's own on top, or None when
+    there are none. The API checks a request's names (workspace.validate_env);
+    here they only have to be an environment at all."""
+    if workspace is not None and not isinstance(workspace, dict):
+        raise LaunchError("invalid env: the workspace environment is not an object")
+    if env is not None and not isinstance(env, dict):
+        raise LaunchError("invalid env: environment must be an object")
+    if not workspace and env is None:
+        return None
+    return {**(workspace or {}), **(env or {})}
+
+
+def _shell_command(command: Any, prof: Any, cmd: Any, args: Any) -> str | None:
+    """A request's `command`, checked; only a plain shell takes one."""
+    from quickterm import workspace as workspace_mod
+
+    try:
+        text = workspace_mod.validate_command(command)
+    except ValueError as exc:
+        raise LaunchError(str(exc)) from exc
+    if text is not None and (prof is not None or cmd is not None or args is not None):
+        raise LaunchError("command is for a plain shell and takes no profile, cmd or args")
+    return text
+
+
+def _agent_options(prof: Any, options: Any) -> Any:
+    """`prof` with one launch's agent options over the saved ones."""
+    if options is None:
+        return prof
+    if prof is None:
+        raise LaunchError("agent requires a Claude Code or Codex profile")
+    if not isinstance(options, dict):
+        raise LaunchError("agent options must be an object")
+    return dataclasses.replace(prof, agent={**prof.agent, **options})
+
+
 AGENT_MODE_PROFILE = "agent_mode requires a Claude Code or Codex profile"
 _HOOK_AGENTS = {"claude-code": "claude", "codex": "codex"}
 
 
 def _agent_mode(prof: Any, claude_mode: Any, agent_mode: Any, agent_session: Any) -> str | None:
-    """The launch-mode override of one request, or None for the profile's own.
+    """The launch-mode override of one request, or None for the agent's own.
 
     `claude_mode` keeps its pre-4.0 checks and messages word for word, since
     older clients match on them.
     """
-    from .agents import AGENT_TYPES, MODES, SESSION_ID
+    from .agents import MODES, SESSION_ID
 
-    kind = getattr(prof, "terminal_type", None)
+    kind = prof.terminal_type
     if agent_mode is not None and claude_mode is not None and agent_mode != claude_mode:
         raise LaunchError("agent_mode and claude_mode disagree")
     if agent_mode is None and claude_mode is not None:
@@ -623,14 +554,10 @@ def _agent_mode(prof: Any, claude_mode: Any, agent_mode: Any, agent_session: Any
             raise LaunchError("claude_mode must be new, continue, resume, or agents")
         agent_mode = claude_mode
     elif agent_mode is not None:
-        if kind not in AGENT_TYPES:
-            raise LaunchError(AGENT_MODE_PROFILE)
         if not isinstance(agent_mode, str) or agent_mode not in MODES[kind]:
             names = ", ".join(MODES[kind][:-1]) + f", or {MODES[kind][-1]}"
             raise LaunchError(f"agent_mode must be {names}")
     if agent_session is not None:
-        if kind not in AGENT_TYPES:
-            raise LaunchError(AGENT_MODE_PROFILE)
         if not isinstance(agent_session, str) or not SESSION_ID.fullmatch(agent_session):
             raise LaunchError("agent_session must be a session id")
         if agent_mode not in (None, "resume") and not (kind == "codex" and agent_mode == "fork"):
@@ -648,7 +575,7 @@ def _prompt(prompt: Any, prof: Any, cmd: Any, args: Any) -> str | None:
         raise LaunchError(str(exc)) from exc
     if text is None:
         return None
-    if prof is None or getattr(prof, "terminal_type", None) not in AGENT_KINDS:
+    if prof is None:
         raise LaunchError("prompt requires a Claude Code or Codex profile")
     if cmd is not None or args is not None:
         raise LaunchError("prompt takes no cmd or args")
@@ -670,16 +597,13 @@ def _check_cmd_length(prompt: str | None, shell: str, executable: str, label: st
 
 
 def find_profile(cfg: Any, name: Any) -> Any:
+    """The agent a request names: "claude-code" or "codex". Saved terminals
+    are gone (4.5), so any other name is a 404."""
     if not isinstance(name, str) or not name.strip():
         raise LaunchError("profile must be a non-empty string")
-    prof = next((p for p in cfg.profiles if p.name == name), None)
-    if prof is None and name in AGENT_KINDS and hasattr(cfg, "agents"):
-        # "claude-code" and "codex" name the agents from Settings; a saved
-        # profile of that exact name still wins, as it did before 4.3.
-        return agent_profile(cfg, name)
-    if prof is None:
+    if name not in AGENT_KINDS:
         raise LaunchError(f"unknown profile: {name}", status=404)
-    return prof
+    return agent_profile(cfg, name)
 
 
 def shell_value(cfg: Any, requested: Any = None) -> str:
@@ -708,46 +632,44 @@ def resolve(
     args: Any = None,
     env: Any = None,
     name: Any = None,
-    start_command: Any = None,
     claude_mode: Any = None,
     agent_mode: Any = None,
     agent_session: Any = None,
     request_cwd: str | None = None,
     workspace_root: str | None = None,
-    append_tools: bool = True,
     shell: Any = None,
     prompt: Any = None,
     remote: RemoteTarget | None = None,
+    command: Any = None,
+    workspace_env: dict[str, str] | None = None,
+    agent_options: Any = None,
 ) -> LaunchSpec:
     """Resolve one launch request. Blocking: call it off the event loop.
 
-    `profile` is a profile name (a request) or a profile object (autostart,
-    hotkeys). An explicit `cmd`, `args` or `env` overrides the profile's own.
-    `agent_mode` overrides an agent profile's launch mode (`claude_mode` is
-    its pre-4.0 name); `agent_session` resumes one session by id; `prompt`
-    is an agent's first message (Fix with Claude).
+    `profile` names an agent ("claude-code" or "codex"); without one the
+    terminal is the configured shell, or `cmd`. An explicit `cmd` or `args`
+    overrides the agent's own. `agent_mode` overrides the agent's launch
+    mode (`claude_mode` is its pre-4.0 name), `agent_options` its saved
+    options; `agent_session` resumes one session by id; `prompt` is an
+    agent's first message (Fix with Claude). `command` is what a plain shell
+    runs once before its prompt.
+    Environment, later wins: the agent's settings, `workspace_env`, the
+    request's `env`; the session manager adds QuickTerm's variables last.
     Folder precedence: `request_cwd`, else `workspace_root`, else None (the
-    session manager then uses the home folder). `remote` (a workspace on an
-    SSH host) turns a shell, agent or remote-capable profile into ssh. `append_tools=False` leaves
-    the PuTTY tools off PATH, for a spec that another instance resolves again.
+    session manager then uses the home folder). `remote` (a WSL or SSH
+    workspace) starts the shell or agent there.
     """
     prof = None
     mode = None
     if profile is not None:
-        # A request carries a name (or garbage, which find_profile refuses).
-        is_object = hasattr(profile, "name") and hasattr(profile, "cmd")
-        prof = profile if is_object else find_profile(cfg, profile)
-        if start_command is not None:
-            if not isinstance(start_command, str) or len(start_command) > START_COMMAND_MAX_CHARS:
-                raise LaunchError(
-                    f"start_command must be a string of at most {START_COMMAND_MAX_CHARS} characters"
-                )
-            prof = dataclasses.replace(prof, start_command=start_command)
+        prof = _agent_options(find_profile(cfg, profile), agent_options)
         mode = _agent_mode(prof, claude_mode, agent_mode, agent_session)
-    elif start_command is not None or claude_mode is not None:
-        raise LaunchError("start_command and claude_mode require a profile")
+    elif claude_mode is not None:
+        raise LaunchError("claude_mode requires a profile")
     elif agent_mode is not None or agent_session is not None:
         raise LaunchError(AGENT_MODE_PROFILE)
+    else:
+        _agent_options(None, agent_options)
     if name is not None and not isinstance(name, str):
         raise LaunchError("name must be a string")
     requested_name = name.strip()[:NAME_MAX_CHARS] if name and name.strip() else None
@@ -755,40 +677,50 @@ def resolve(
     if shell is not None and (profile is not None or cmd is not None):
         raise LaunchError("shell starts a plain shell and takes no profile or cmd")
     prompt = _prompt(prompt, prof, cmd, args)
+    command = _shell_command(command, prof, cmd, args)
+    env = _terminal_env(workspace_env, env)
     if remote is not None and cmd is None and (prof is not None or args is None):
-        # The workspace is on an SSH host: the shell setting does not apply
-        # there, so a requested local shell starts the remote one.
-        spec = _resolve_remote(
-            cfg, remote, prof, mode=mode, agent_session=agent_session,
+        # The shell setting does not apply in WSL or on an SSH host, so a
+        # requested local shell starts the location's own.
+        location = importlib.import_module("quickterm.workspace").location_kind(remote.host)
+        resolve_location = _resolve_wsl if location == "wsl" else _resolve_ssh
+        return resolve_location(
+            remote, prof, mode=mode, agent_session=agent_session,
             requested_name=requested_name, request_cwd=request_cwd, prompt=prompt,
+            env=env, command=command,
         )
-        if spec is not None:
-            return spec
+    # What wsl.exe has to hand to Linux: the workspace's and the request's names.
+    own_names = list(env or {})
+    in_wsl = False
     folder = request_cwd or workspace_root
     hook_agent = None
     wrap = None
     terminal_type = None
     plain_shell = None
     if prof is not None:
-        kind = getattr(prof, "terminal_type", None)
-        if kind in AGENT_KINDS and prof.name == kind and requested_name is None:
-            requested_name = AGENT_LABELS[kind]
+        kind = prof.terminal_type
+        requested_name = requested_name or AGENT_LABELS[kind]
         if cmd is None and args is None:
-            hook_agent = _HOOK_AGENTS.get(kind)
+            hook_agent = _HOOK_AGENTS[kind]
+        from .agents import resolve as resolve_agent
+
         try:
-            resolved_cmd, resolved_args, cwd = resolve_profile(
-                prof, folder, agent_mode=mode, agent_session=agent_session, prompt=prompt
+            resolved_cmd, resolved_args, cwd = resolve_agent(
+                prof, folder, mode=mode, session=agent_session, prompt=prompt
             )
         except ValueError as exc:
             raise LaunchError(str(exc), label=prof.name) from exc
-        if kind in AGENT_KINDS:
-            value = shell_value(cfg)
-            wrap = shells.Wrap(value, shell_program(value, prof.name), _HOOK_AGENTS[kind])
-            _check_cmd_length(prompt, value, resolved_cmd, prof.name)
+        value = shell_value(cfg)
+        wrap = shells.Wrap(value, shell_program(value, prof.name), _HOOK_AGENTS[kind])
+        in_wsl = shells.is_wsl(value)
+        _check_cmd_length(prompt, value, resolved_cmd, prof.name)
         cmd = cmd or resolved_cmd
         args = args if args is not None else resolved_args
-        env = env if env is not None else dict(prof.env)
-        if getattr(prof, "terminal_type", None) == "codex" and isinstance(cmd, str):
+        env = {**prof.env, **(env or {})}
+        if in_wsl:
+            # As in a WSL workspace: the agent runs in Linux (PATH stays).
+            own_names += [name for name in prof.env if name not in own_names and name.upper() != "PATH"]
+        if kind == "codex" and isinstance(cmd, str):
             # The native exe replaces npm's shim; keep what the shim sets.
             from .agents import codex_launch_env
 
@@ -797,7 +729,11 @@ def resolve(
         # No profile and no command: the configured shell (or the one the
         # request names) in the workspace folder.
         value = shell_value(cfg, shell)
-        cmd, args, cwd = shells.interactive(value, shell_program(value), folder)
+        try:
+            cmd, args, cwd = shells.interactive(value, shell_program(value), folder, command=command)
+        except ValueError as exc:
+            raise LaunchError(str(exc), label=requested_name or shells.label(value)) from exc
+        in_wsl = shells.is_wsl(value)
         terminal_type = shells.terminal_type(value)
         requested_name = requested_name or shells.label(value)
         if value in shells.INTEGRATED:
@@ -817,17 +753,16 @@ def resolve(
             env = validate_environment(env)
         except ValueError as exc:
             raise LaunchError(f"invalid env: {exc}") from exc
+        if in_wsl and own_names:
+            env = shells.with_wslenv(env, own_names)
     label = prof.name if prof is not None else (requested_name or cmd)
     if cwd:
         cwd = validate_dir(cwd, label)
-    env = dict(env or {})
-    if append_tools:
-        env = append_tools_path(env)
     return LaunchSpec(
         cmd=cmd,
         args=list(args or []),
         cwd=cwd or None,
-        env=env,
+        env=dict(env or {}),
         name=requested_name,
         profile=prof.name if prof is not None else None,
         label=label,
@@ -835,4 +770,5 @@ def resolve(
         wrap=wrap,
         terminal_type=terminal_type,
         shell=plain_shell,
+        command=command if plain_shell is not None else None,
     )

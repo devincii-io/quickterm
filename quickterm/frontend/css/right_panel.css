@@ -56,7 +56,7 @@ body.rp-mode-rail .rp-grip, body.rp-mode-hidden .rp-grip { display: none; }
 /* The header row is as tall as the left's top row (sidebar-launch: 6 + 26 +
    4); the tabs are the left footer's icon buttons. */
 .rp-tabs { flex: none; height: 36px; display: flex; align-items: center; gap: 1px; padding: 0 5px; }
-.rp-tab.active { background: var(--surface-raised); color: var(--accent-text); }
+.rp-tab.active { background: var(--surface-active); color: var(--accent-text); }
 
 /* The rail: the three tab icons stacked, with the left rail's state dots. */
 .rp-railbar { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 7px 0; }

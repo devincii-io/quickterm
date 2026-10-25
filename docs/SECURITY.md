@@ -12,20 +12,26 @@ claim a certification or guarantee suitability for every regulated setting.
 - Sensitive HTTP and WebSocket routes require a random per-install token. The
   token is stored under the signed-in user's `%APPDATA%\quickterm` directory;
   POSIX installs enforce mode `0600` on the token and `0700` on the directory.
-- Windows profile environment values are encrypted at rest with current-user
-  DPAPI. Plaintext values from older configs are migrated automatically. UAC
-  launches carry a DPAPI ciphertext instead of embedding recoverable JSON in
-  the process command line.
+- Environment values on Windows are encrypted at rest with current-user
+  DPAPI: the agent settings' environment (Settings > Agents) in
+  `config.json`, and a workspace's environment and each of its startup
+  terminals' environment in that workspace's file. Plaintext values from
+  older configs are migrated automatically. Only the settings editor reads
+  a workspace's values back in plaintext, through the token-gated workspace
+  route. UAC launches carry a DPAPI ciphertext instead of embedding
+  recoverable JSON in the process command line.
 - Environment overrides reject empty/malformed names, NUL characters,
-  case-insensitive duplicates, and excessive sizes. JSON configuration and
+  case-insensitive duplicates, and excessive sizes. A workspace environment
+  also refuses QuickTerm's own variable names (`QUICKTERM_*`, `WSLENV`). JSON configuration and
   session-spawn requests are capped before buffering, and configuration API
   responses use `Cache-Control: no-store`.
 - There are no accounts, analytics, advertising, or usage telemetry. Terminal
   I/O and resource measurements are not sent to the author or any other
   service.
 - Terminal scrollback is held in backend memory while a session lives. Saved
-  workspace files retain layout, profile, folder, and live-session IDs, not a
-  persistent transcript of terminal output.
+  workspace files retain layout, location, folder, the encrypted environment,
+  startup items and live-session IDs, not a persistent transcript of
+  terminal output.
 - The bounded local diagnostic log records warning/error events only, omits
   session IDs, and redacts common user-local path prefixes. A one-time migration
   removes verbose rotations created by older builds.
@@ -40,9 +46,17 @@ claim a certification or guarantee suitability for every regulated setting.
 - Every shell and program runs with the QuickTerm user's OS permissions.
   QuickTerm does not sandbox commands, inspect scripts, filter terminal output,
   or prevent a user from exfiltrating data through tools they launch.
-- A profile environment value is available to the shell and every descendant
-  process in that terminal. DPAPI protects the value at rest; it cannot protect
-  it from programs that the user intentionally launches with that environment.
+- An agent or workspace environment value is available to the shell and every
+  descendant process in that terminal. DPAPI protects the value at rest; it
+  cannot protect it from programs that the user intentionally launches with
+  that environment.
+- In a workspace on an SSH host, the workspace's and the terminal's
+  environment values are exported by the remote command that ssh runs, so
+  they are part of a command line on that host and other users of that
+  machine can read them in its process list. The
+  workspace settings say so. The agent settings' environment is never sent
+  to an SSH host. In a WSL workspace the values reach Linux through the
+  process environment (`WSLENV`), not a command line.
 - The local token protects against web pages and accidental API access. It is
   not protection against malware, administrators, or another program already
   running as the same Windows user and able to read that user's files or memory.
@@ -86,8 +100,10 @@ Before broad deployment, an administrator should:
    and define an update policy (in-app checks can be disabled).
 3. Apply least privilege, application control, endpoint protection, logging,
    and data-loss controls at the OS level.
-4. Review allowed terminal profiles, environment variables, starting folders,
-   global hotkeys, and the live-terminal cap.
+4. Review the agent settings and their environment variables, workspace
+   locations (WSL distributions and SSH destinations from `~/.ssh/config`),
+   workspace environment variables and startup commands, starting folders,
+   the summon hotkey, and the live-terminal cap.
 5. Confirm that in-memory scrollback and local workspace metadata meet the
    organization's retention and incident-response requirements.
 

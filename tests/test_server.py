@@ -27,30 +27,6 @@ from quickterm.server import create_app
 
 
 @dataclass
-class FakeProfile:
-    name: str
-    cmd: str
-    args: list = field(default_factory=list)
-    env: dict = field(default_factory=dict)
-    keybinding: str | None = None
-    autostart: bool = False
-    terminal_type: str | None = None
-    wsl_distro: str | None = None
-    start_command: str | None = None
-    # Legacy alias, kept so the request tests still exercise claude_mode.
-    claude_mode: str | None = None
-    agent_mode: str | None = None
-    agent: dict = field(default_factory=dict)
-    ssh_host: str | None = None
-    ssh_port: int | None = None
-    ssh_user: str | None = None
-    ssh_key: str | None = None
-    ssh_client: str | None = None
-    ssh_proxy_jump: str | None = None
-    connection: dict = field(default_factory=dict)
-
-
-@dataclass
 class FakeSnippet:
     name: str
     text: str
@@ -100,7 +76,6 @@ class FakeConfig:
     scratch_dir: str = ""
     shell: str = "cmd"
     agents: dict = field(default_factory=real_config._default_agents)
-    profiles: list = field(default_factory=list)
     snippets: list = field(default_factory=list)
     voice: FakeVoiceConfig = field(default_factory=FakeVoiceConfig)
     window: FakeWindowConfig = field(default_factory=FakeWindowConfig)
@@ -178,11 +153,11 @@ class FakeSessionManager:
 
     def spawn(self, *, name=None, profile=None, cmd, args=(), cwd=None,
               env=(), cols=120, rows=30, workspace=None, agent=None, wrap=None,
-              shell=None) -> FakeSessionInfo:
+              shell=None, remote=None, wsl=None, command=None) -> FakeSessionInfo:
         self.last_spawn = {"name": name, "profile": profile, "cmd": cmd,
                            "args": list(args), "cwd": cwd, "env": dict(env),
                            "workspace": workspace, "agent": agent, "wrap": wrap,
-                           "shell": shell}
+                           "shell": shell, "remote": remote, "wsl": wsl, "command": command}
         return self.add_session(name=name or "s", profile=profile, cols=cols,
                                 rows=rows, workspace=workspace)
 
@@ -284,42 +259,18 @@ def manager() -> FakeSessionManager:
 
 @pytest.fixture
 def cfg() -> FakeConfig:
-    return FakeConfig(
-        profiles=[
-            FakeProfile(name="powershell", cmd="powershell.exe", args=["-NoLogo"]),
-            FakeProfile(name="claude", cmd="claude", env={"X": "1"}),
-        ],
-        snippets=[FakeSnippet(name="greet", text="echo hi\n")],
-    )
+    agents = real_config._default_agents()
+    agents["claude-code"] = real_config.AgentSettings(cmd="claude", env={"X": "1"})
+    return FakeConfig(agents=agents, snippets=[FakeSnippet(name="greet", text="echo hi\n")])
 
 
 @pytest.fixture(autouse=True)
-def no_putty_tools(monkeypatch):
-    # Hermetic default: tests must not depend on whether vendor/putty exists on
-    # the machine. Tests that need the tools use the putty_dir fixture.
-    from quickterm import putty_tools, ssh_config
+def no_ssh_client(monkeypatch):
+    # Hermetic default: tests must not depend on whether this machine has the
+    # OpenSSH client.
+    from quickterm import ssh_config
 
-    monkeypatch.setattr(putty_tools, "tools_dir", lambda: None)
-    monkeypatch.setattr(putty_tools, "plink_path", lambda: None)
-    monkeypatch.setattr(putty_tools, "psftp_path", lambda: None)
-    monkeypatch.setattr(putty_tools, "pscp_path", lambda: None)
-    # Nor on whether this machine has the OpenSSH client.
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
-
-
-@pytest.fixture
-def putty_dir(no_putty_tools, monkeypatch, tmp_path):
-    from quickterm import putty_tools
-
-    base = tmp_path / "putty"
-    base.mkdir()
-    for name in ("plink.exe", "pscp.exe", "psftp.exe"):
-        (base / name).write_bytes(b"")
-    monkeypatch.setattr(putty_tools, "tools_dir", lambda: base)
-    monkeypatch.setattr(putty_tools, "plink_path", lambda: base / "plink.exe")
-    monkeypatch.setattr(putty_tools, "psftp_path", lambda: base / "psftp.exe")
-    monkeypatch.setattr(putty_tools, "pscp_path", lambda: base / "pscp.exe")
-    return base
 
 
 @pytest.fixture
@@ -469,57 +420,18 @@ def test_spawn_resolves_profile(client, manager, tmp_path):
     project = tmp_path / "dev"
     project.mkdir()
     # The profile carries no folder, so the request supplies one.
-    r = client.post("/api/sessions", json={"profile": "claude", "cwd": str(project)})
+    r = client.post("/api/sessions", json={"profile": "claude-code", "cwd": str(project)})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "claude"
     assert manager.last_spawn["cwd"] == str(project)
     assert manager.last_spawn["env"] == {"X": "1"}
-    assert r.json()["profile"] == "claude"
+    assert r.json()["profile"] == "claude-code"
 
 
-def test_spawn_cmd_overrides_profile(client, manager):
-    r = client.post("/api/sessions", json={"profile": "claude", "cmd": "other.exe"})
+def test_spawn_cmd_overrides_profile(client, manager, tmp_path):
+    r = client.post("/api/sessions", json={"profile": "claude-code", "cmd": "other.exe", "cwd": str(tmp_path)})
     assert r.status_code == 200
     assert manager.last_spawn["cmd"] == "other.exe"
-
-
-def test_spawn_profile_start_command(client, manager, cfg, tmp_path):
-    project_cwd = tmp_path / "project"
-    project_cwd.mkdir()
-    cfg.profiles.append(FakeProfile(
-        name="project",
-        cmd="pwsh.exe",
-        terminal_type="powershell-core",
-        start_command="uv run dev",
-    ))
-    r = client.post("/api/sessions", json={"profile": "project", "cwd": str(project_cwd)})
-    assert r.status_code == 200
-    assert manager.last_spawn["cmd"] == "pwsh.exe"
-    assert manager.last_spawn["args"] == ["-NoLogo", "-NoExit", "-Command", "uv run dev"]
-    assert manager.last_spawn["cwd"] == str(project_cwd)
-
-
-def test_spawn_profile_allows_explicit_recovery_command(client, manager, cfg, tmp_path):
-    project_cwd = tmp_path / "recover"
-    project_cwd.mkdir()
-    cfg.profiles.append(FakeProfile(
-        name="claude-shell",
-        cmd="pwsh.exe",
-        terminal_type="powershell-core",
-        start_command="claude",
-    ))
-    response = client.post(
-        "/api/sessions",
-        json={
-            "profile": "claude-shell",
-            "start_command": "claude --continue",
-            "cwd": str(project_cwd),
-        },
-    )
-    assert response.status_code == 200
-    assert manager.last_spawn["args"] == [
-        "-NoLogo", "-NoExit", "-Command", "claude --continue",
-    ]
 
 
 def test_spawn_first_class_claude_profile_supports_continue_and_picker(
@@ -527,15 +439,10 @@ def test_spawn_first_class_claude_profile_supports_continue_and_picker(
 ):
     project_cwd = tmp_path / "claude-project"
     project_cwd.mkdir()
-    cfg.profiles.append(FakeProfile(
-        name="project-agent",
-        cmd="claude.exe",
-        terminal_type="claude-code",
-        claude_mode="resume",
-    ))
+    cfg.agents["claude-code"] = real_config.AgentSettings(cmd="claude.exe", agent_mode="resume")
 
     response = client.post(
-        "/api/sessions", json={"profile": "project-agent", "cwd": str(project_cwd)}
+        "/api/sessions", json={"profile": "claude-code", "cwd": str(project_cwd)}
     )
     assert response.status_code == 200
     assert manager.last_spawn["cmd"] == "claude.exe"
@@ -544,169 +451,40 @@ def test_spawn_first_class_claude_profile_supports_continue_and_picker(
 
     response = client.post(
         "/api/sessions",
-        json={"profile": "project-agent", "claude_mode": "continue", "cwd": str(project_cwd)},
+        json={"profile": "claude-code", "claude_mode": "continue", "cwd": str(project_cwd)},
     )
     assert response.status_code == 200
     assert manager.last_spawn["args"] == ["--continue"]
 
     response = client.post(
         "/api/sessions",
-        json={"profile": "project-agent", "claude_mode": "agents", "cwd": str(project_cwd)},
+        json={"profile": "claude-code", "claude_mode": "agents", "cwd": str(project_cwd)},
     )
     assert response.status_code == 200
     assert manager.last_spawn["args"] == ["agents", "--cwd", str(project_cwd)]
 
 
 def test_claude_profile_rejects_missing_project_folder(client, cfg):
-    cfg.profiles.append(FakeProfile(
-        name="unscoped-agent",
-        cmd="claude.exe",
-        terminal_type="claude-code",
-        claude_mode="continue",
-    ))
-    response = client.post("/api/sessions", json={"profile": "unscoped-agent"})
+    response = client.post("/api/sessions", json={"profile": "claude-code"})
     assert response.status_code == 400
     assert "project folder" in response.json()["detail"]
 
 
 def test_claude_mode_override_is_bounded_to_claude_profiles(client):
     response = client.post(
-        "/api/sessions", json={"profile": "powershell", "claude_mode": "resume"}
+        "/api/sessions", json={"profile": "codex", "claude_mode": "resume"}
     )
     assert response.status_code == 400
     assert "Claude Code profile" in response.json()["detail"]
 
 
-def test_spawn_recovery_command_requires_profile(client):
-    response = client.post(
-        "/api/sessions",
-        json={"cmd": "cmd.exe", "start_command": "claude --continue"},
-    )
-    assert response.status_code == 400
-
-
-def test_spawn_wsl_profile_resolves_distribution_and_folder(client, manager, cfg):
-    cfg.profiles.append(FakeProfile(
-        name="ubuntu",
-        cmd="wsl.exe",
-        terminal_type="wsl",
-        wsl_distro="Ubuntu-24.04",
-        start_command="source .venv/bin/activate",
-    ))
-    r = client.post("/api/sessions", json={"profile": "ubuntu", "cwd": "~/dev/project"})
-    assert r.status_code == 200
-    assert manager.last_spawn["cmd"] == "wsl.exe"
-    assert manager.last_spawn["args"] == [
-        "-d", "Ubuntu-24.04", "--cd", "~/dev/project", "--", "bash", "-lc",
-        "source .venv/bin/activate; exec bash -l",
-    ]
-    assert manager.last_spawn["cwd"] is None
-
-
-def test_spawn_wsl_profile_defaults_to_linux_home(client, manager, cfg):
-    cfg.profiles.append(FakeProfile(
-        name="ubuntu-home",
-        cmd="wsl.exe",
-        terminal_type="wsl",
-        wsl_distro="Ubuntu-24.04",
-    ))
-    response = client.post("/api/sessions", json={"profile": "ubuntu-home"})
-    assert response.status_code == 200
-    assert manager.last_spawn["args"] == ["-d", "Ubuntu-24.04", "--cd", "~"]
-    assert manager.last_spawn["cwd"] is None
-
-
-def test_spawn_wsl_profile_request_folder_becomes_wsl_cd(client, manager, cfg):
-    cfg.profiles.append(FakeProfile(
-        name="ubuntu-project",
-        cmd="wsl.exe",
-        terminal_type="wsl",
-    ))
-    response = client.post(
-        "/api/sessions",
-        json={"profile": "ubuntu-project", "cwd": "~/requested", "cols": 80, "rows": 24},
-    )
-    assert response.status_code == 200
-    assert manager.last_spawn["args"] == ["--cd", "~/requested"]
-    assert manager.last_spawn["cwd"] is None
-
-
-def test_spawn_ssh_profile_builds_plink_argv(client, manager, cfg, putty_dir):
-    cfg.profiles.append(FakeProfile(
-        name="server",
-        cmd="",
-        terminal_type="ssh",
-        ssh_host="host.example.com",
-        ssh_port=2222,
-        ssh_user="deploy",
-        ssh_key="C:\\keys\\id.ppk",
-        start_command="uptime",
-    ))
-    r = client.post("/api/sessions", json={"profile": "server"})
-    assert r.status_code == 200
-    assert manager.last_spawn["cmd"] == str(putty_dir / "plink.exe")
-    assert manager.last_spawn["args"] == [
-        "-ssh", "-P", "2222", "-i", "C:\\keys\\id.ppk", "deploy@host.example.com", "uptime",
-    ]
-
-
-def test_spawn_sftp_profile_builds_psftp_argv(client, manager, cfg, putty_dir):
-    cfg.profiles.append(FakeProfile(
-        name="files", cmd="", terminal_type="sftp", ssh_host="box", ssh_user="u",
-    ))
-    r = client.post("/api/sessions", json={"profile": "files"})
-    assert r.status_code == 200
-    assert manager.last_spawn["cmd"] == str(putty_dir / "psftp.exe")
-    assert manager.last_spawn["args"] == ["u@box"]
-
-
-def test_spawn_ssh_profile_without_tools_is_400(client, cfg):
-    cfg.profiles.append(FakeProfile(name="server", cmd="", terminal_type="ssh", ssh_host="h"))
-    r = client.post("/api/sessions", json={"profile": "server"})
-    assert r.status_code == 400
-    assert "PuTTY" in r.json()["detail"]
-
-
-def test_spawn_appends_putty_dir_to_path(client, manager, putty_dir, monkeypatch):
-    monkeypatch.setenv("PATH", "C:\\base")
-    r = client.post("/api/sessions", json={"cmd": "cmd.exe"})
-    assert r.status_code == 200
-    path = manager.last_spawn["env"]["PATH"]
-    assert path == f"C:\\base{os.pathsep}{putty_dir}"
-
-
-def test_spawn_appends_putty_dir_after_profile_path(client, manager, cfg, putty_dir):
-    cfg.profiles[0].env = {"PATH": "C:\\profile"}
-    r = client.post("/api/sessions", json={"profile": "powershell"})
-    assert r.status_code == 200
-    assert manager.last_spawn["env"]["PATH"] == f"C:\\profile{os.pathsep}{putty_dir}"
-
-
-@pytest.mark.skipif(os.name != "nt", reason="bundled PuTTY inventory is Windows-only")
-def test_terminal_inventory_lists_putty_types(client, putty_dir):
-    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
-    assert entries["ssh"]["available"] is True
-    assert entries["ssh"]["executable"] == str(putty_dir / "plink.exe")
-    assert entries["sftp"]["available"] is True
-    assert entries["sftp"]["executable"] == str(putty_dir / "psftp.exe")
-
-
-@pytest.mark.skipif(os.name != "nt", reason="bundled PuTTY inventory is Windows-only")
-def test_terminal_inventory_marks_putty_missing(client):
-    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
-    assert entries["ssh"]["available"] is False
-    assert entries["ssh"]["executable"] is None
-
-
-def test_terminal_inventory_offers_ssh_through_openssh_without_putty(client, monkeypatch):
+def test_the_inventory_lists_no_connection_types(client, monkeypatch):
     from quickterm import ssh_config
 
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: rf"C:\OpenSSH\{kind}.exe")
-    entries = {t["id"]: t for t in client.get("/api/system/terminals").json()["types"]}
-    assert entries["ssh"]["available"] is True
-    assert entries["ssh"]["openssh"] == r"C:\OpenSSH\ssh.exe"
-    assert entries["ssh"]["putty"] is None
-    assert entries["sftp"]["executable"] == r"C:\OpenSSH\sftp.exe"
+    ids = {t["id"] for t in client.get("/api/system/terminals").json()["types"]}
+    assert not ids & {"ssh", "sftp", "custom"}
+    assert "claude-code" in ids and "codex" in ids
 
 
 def _inventory_with(monkeypatch, found: dict[str, str | None]) -> dict:
@@ -766,38 +544,10 @@ def test_fresh_inventory_skips_the_cache(client, monkeypatch):
     assert client.get("/api/system/terminals").json()["scan"] == 2  # the fresh scan is cached
 
 
-def test_desktop_connection_uses_the_client_not_a_pty(client, manager, cfg, monkeypatch):
-    from quickterm import connections
-
-    cfg.profiles.append(FakeProfile("Desktop", "viewer.exe", terminal_type="vnc", connection={"host": "server"}))
-    threads = []
-
-    def open_client(profile):
-        threads.append(threading.current_thread().name)
-        return {"pid": 42, "profile": profile.name, "type": "vnc", "external": True}
-
-    monkeypatch.setattr(connections, "open_desktop", open_client)
-    response = client.post("/api/connections/Desktop/open")
-    assert response.status_code == 200
-    assert response.json()["external"] is True
-    assert not manager.sessions
-    assert threads and not threads[0].startswith("asyncio-portal")
-    assert client.post("/api/connections/missing/open").status_code == 404
-
-
-def test_desktop_connection_rejects_terminal_and_missing_client(client, cfg, monkeypatch):
-    from quickterm import connections
-
-    assert client.post("/api/connections/powershell/open").status_code == 400
-    cfg.profiles.append(FakeProfile("Desktop", "viewer.exe", terminal_type="vnc", connection={"host": "server"}))
-    monkeypatch.setattr(connections.shutil, "which", lambda executable: None)
-    response = client.post("/api/connections/Desktop/open")
-    assert response.status_code == 400
-    assert "Client not found" in response.json()["detail"]
-
-
 def test_spawn_unknown_profile_404(client):
-    assert client.post("/api/sessions", json={"profile": "nope"}).status_code == 404
+    response = client.post("/api/sessions", json={"profile": "nope"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "unknown profile: nope"
 
 
 def test_spawn_without_profile_or_cmd_starts_the_configured_shell(client, manager, cfg, tmp_path):
@@ -1003,12 +753,12 @@ def test_spawn_tags_workspace(client, manager):
     assert manager.last_spawn["workspace"] is None
 
 
-# --- REST: profiles / snippets / config ------------------------------------
+# --- REST: snippets / config ------------------------------------------------
 
 
-def test_profiles_are_listed_and_snippets_ride_on_the_config(client):
-    profs = client.get("/api/profiles").json()
-    assert [p["name"] for p in profs] == ["powershell", "claude"]
+def test_saved_terminals_are_gone_and_snippets_ride_on_the_config(client):
+    assert client.get("/api/profiles").status_code == 404
+    assert client.post("/api/connections/x/open").status_code in (404, 405)
     # GET /api/snippets had no client: /api/config already carries them.
     assert client.get("/api/snippets").status_code == 404
     assert client.get("/api/config").json()["snippets"] == [
@@ -1021,7 +771,7 @@ def test_config_endpoint(client, cfg):
     assert body["font_family"] == cfg.font_family
     assert body["shell"] == "cmd"
     assert set(body["agents"]) == {"claude-code", "codex"}
-    assert [p["name"] for p in body["profiles"]] == ["powershell", "claude"]
+    assert "profiles" not in body
     assert body["snippets"][0]["name"] == "greet"
     assert body["voice_available"] is False  # voice module absent in tests
     assert client.get("/api/config").headers["cache-control"] == "no-store"
@@ -1058,8 +808,6 @@ def fake_config_mod(monkeypatch, cfg):
                 parsed.window = FakeWindowConfig(**v)
             elif k == "overlay":
                 parsed.overlay = FakeOverlayConfig(**v)
-            elif k == "profiles":
-                parsed.profiles = [FakeProfile(**p) for p in v]
         return parsed
 
     mod.config_from_dict = config_from_dict
@@ -1117,6 +865,7 @@ def test_workspace_crud(client, fake_workspace):
     assert ws == {
         "name": "dev", "layout": layout, "logo": None, "path": None,
         "session_ids": [], "path_exists": False, "temporary": False, "git": None, "host": None,
+        "env": {}, "startup": [],
     }
     assert client.get("/api/workspaces/missing").status_code == 404
     assert client.delete("/api/workspaces/dev").status_code == 204
@@ -1673,25 +1422,21 @@ def test_session_spawns_in_its_workspace_folder(client, manager, fake_workspace,
     assert manager.last_spawn["workspace"] == "dev"
 
 
-def test_a_profile_opens_in_the_workspace_root(
+def test_an_agent_opens_in_the_workspace_root(
     client, manager, fake_workspace, cfg, tmp_path
 ):
-    """A profile has no folder, so the workspace root is the whole answer."""
+    """An agent has no folder, so the workspace root is the whole answer."""
     root = tmp_path / "repo"
     (root / "backend").mkdir(parents=True)
-    cfg.profiles.append(
-        FakeProfile(name="api", cmd="cmd.exe", terminal_type="command-prompt")
-    )
     client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
-    client.post("/api/sessions", json={"profile": "api", "workspace": "dev"})
+    client.post("/api/sessions", json={"profile": "claude-code", "workspace": "dev"})
     assert manager.last_spawn["cwd"] == str(root)
 
-    # The same profile in another workspace follows that one instead. This is
-    # the point of dropping profile folders: one profile, every project.
+    # The same agent in another workspace follows that one instead.
     other = tmp_path / "other"
     other.mkdir()
     client.put("/api/workspaces/other", json={"layout": {"type": "pane"}, "path": str(other)})
-    client.post("/api/sessions", json={"profile": "api", "workspace": "other"})
+    client.post("/api/sessions", json={"profile": "claude-code", "workspace": "other"})
     assert manager.last_spawn["cwd"] == str(other)
 
 
@@ -1711,14 +1456,11 @@ def test_explicit_cwd_beats_the_workspace_folder(client, manager, fake_workspace
 def test_a_workspace_without_a_folder_leaves_the_spawn_unplaced(
     client, manager, fake_workspace, cfg, tmp_path
 ):
-    """Nothing else can place a terminal now that profiles carry no folder."""
+    """Nothing else places a terminal: the workspace folder is the only one."""
     root = tmp_path / "repo"
     root.mkdir()
-    cfg.profiles.append(
-        FakeProfile(name="plainshell", cmd="cmd.exe", terminal_type="command-prompt")
-    )
     client.put("/api/workspaces/plain", json={"layout": {"type": "pane"}})
-    client.post("/api/sessions", json={"profile": "plainshell", "workspace": "plain"})
+    client.post("/api/sessions", json={"cmd": "cmd.exe", "workspace": "plain"})
     assert manager.last_spawn["cwd"] is None
 
     # An explicit request directory still wins over the workspace root.
@@ -1727,7 +1469,7 @@ def test_a_workspace_without_a_folder_leaves_the_spawn_unplaced(
     elsewhere.mkdir()
     client.post(
         "/api/sessions",
-        json={"profile": "plainshell", "workspace": "dev", "cwd": str(elsewhere)},
+        json={"cmd": "cmd.exe", "workspace": "dev", "cwd": str(elsewhere)},
     )
     assert manager.last_spawn["cwd"] == str(elsewhere)
 
@@ -1744,9 +1486,6 @@ def test_elevated_terminal_opens_in_the_workspace_folder(
         pytest.skip("administrator terminals are Windows-only")
     root = tmp_path / "repo"
     root.mkdir(parents=True)
-    cfg.profiles.append(
-        FakeProfile(name="api", cmd="cmd.exe", terminal_type="command-prompt")
-    )
     client.put("/api/workspaces/dev", json={"layout": {"type": "pane"}, "path": str(root)})
 
     launched: list[dict] = []
@@ -1754,10 +1493,10 @@ def test_elevated_terminal_opens_in_the_workspace_folder(
     elevation.launch = launched.append
     monkeypatch.setitem(sys.modules, "quickterm.elevation", elevation)
 
-    assert client.post("/api/elevate", json={"profile": "api", "workspace": "dev"}).status_code == 200
+    assert client.post("/api/elevate", json={"workspace": "dev"}).status_code == 200
     assert launched[-1]["cwd"] == str(root)
 
-    # A system shell carries no profile, so the workspace root is all it has.
+    # An explicit command has no folder either, so the workspace root is all it has.
     assert client.post(
         "/api/elevate", json={"cmd": "cmd.exe", "name": "Command Prompt", "workspace": "dev"}
     ).status_code == 200
@@ -2049,9 +1788,9 @@ def test_a_spawn_failure_is_a_400_that_names_the_terminal(client, manager, monke
         raise SpawnError(f"command not found: {kwargs['cmd']}")
 
     monkeypatch.setattr(manager, "spawn", fail)
-    by_profile = client.post("/api/sessions", json={"profile": "claude", "cwd": str(tmp_path)})
+    by_profile = client.post("/api/sessions", json={"profile": "claude-code", "cwd": str(tmp_path)})
     assert by_profile.status_code == 400
-    assert by_profile.json()["detail"] == 'Terminal "claude": command not found: claude'
+    assert by_profile.json()["detail"] == 'Terminal "claude-code": command not found: claude'
     by_name = client.post("/api/sessions", json={"cmd": "nope-xyz", "name": "Tools"})
     assert by_name.json()["detail"] == 'Terminal "Tools": command not found: nope-xyz'
     by_cmd = client.post("/api/sessions", json={"cmd": "nope-xyz"})
@@ -2165,15 +1904,6 @@ def test_a_changed_summon_key_rebinds_and_reports(hotkey_client, cfg, fake_confi
     )
 
 
-def test_a_changed_profile_key_rebinds(hotkey_client, cfg, fake_config_mod, hotkey_calls):
-    profiles = [dataclasses.asdict(p) for p in cfg.profiles]
-    profiles[0]["keybinding"] = "ctrl+alt+1"
-
-    assert hotkey_client.put("/api/config", json={"profiles": profiles}).status_code == 204
-    assert len(hotkey_calls["rebind"]) == 1
-    assert cfg.profiles[0].keybinding == "ctrl+alt+1"
-
-
 def test_a_save_that_leaves_the_keys_alone_does_not_rebind(
     hotkey_client, cfg, fake_config_mod, hotkey_calls
 ):
@@ -2243,18 +1973,17 @@ def test_a_partial_config_put_keeps_every_omitted_setting(client, cfg, monkeypat
     from quickterm import config as real_config
 
     monkeypatch.setenv("APPDATA", str(tmp_path))
-    real_config.save_config(real_config.AppConfig(
-        theme="dusk",
-        profiles=[real_config.Profile(name="work", cmd="sh", terminal_type="custom")],
-    ))
+    saved = real_config.AppConfig(theme="dusk")
+    saved.agents["codex"].args = ["--search"]
+    real_config.save_config(saved)
 
     assert client.put("/api/config", json={"font_size": 15}).status_code == 204
 
     stored = real_config.load_config()
     assert stored.font_size == 15
     assert stored.theme == "dusk"
-    assert [p.name for p in stored.profiles] == ["work"]
-    assert [p.name for p in cfg.profiles] == ["work"]  # the live config too
+    assert stored.agents["codex"].args == ["--search"]
+    assert cfg.agents["codex"].args == ["--search"]  # the live config too
 
 
 def test_scratch_dir_applies_live(client, cfg, fake_config_mod, tmp_path):

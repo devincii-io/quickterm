@@ -282,9 +282,9 @@ async def test_the_agent_functions_need_the_hook_environment(monkeypatch):
 @WINDOWS
 def test_a_plain_shell_launch_names_its_shell(monkeypatch):
     monkeypatch.setattr(shells, "program", lambda value: f"{value}.exe")
-    cfg = SimpleNamespace(shell="powershell", profiles=[])
+    cfg = SimpleNamespace(shell="powershell")
     for value, expected in (("powershell", "powershell"), ("cmd", "cmd"), ("wsl", None)):
-        spec = launch.resolve(cfg, shell=value, append_tools=False)
+        spec = launch.resolve(cfg, shell=value)
         assert spec.shell == expected
         assert spec.spawn_kwargs().get("shell") == expected
 

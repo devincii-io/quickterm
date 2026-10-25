@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -79,18 +78,6 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     _wire_notifier(ctx)
     _wire_keep_awake(ctx)
 
-    @app.post("/api/connections/{name}/open")
-    async def open_desktop_connection(name: str) -> dict:
-        connections = importlib.import_module("quickterm.connections")
-
-        try:
-            profile = launch.find_profile(ctx.cfg, name)
-            return await asyncio.to_thread(connections.open_desktop, profile)
-        except launch.LaunchError as exc:
-            raise HTTPException(exc.status, str(exc)) from exc
-        except (ValueError, OSError) as exc:
-            raise HTTPException(400, str(exc)) from exc
-
     @app.get("/api/sessions")
     def list_sessions(metrics: bool = True) -> list[dict]:
         # Sidebar polling skips usage sampling, the expensive half: one handle
@@ -148,8 +135,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 await asyncio.to_thread(store.save)
             return Response(status_code=204)
         title = None
-        # An agent on an SSH host has its files there: paths in its hooks are
-        # never read here, only what the payload itself carries.
+        # An agent on an SSH host or in WSL has its files there: paths in its
+        # hooks are never read here, only what the payload itself carries.
         local = not getattr(manager, "is_remote", lambda _sid: False)(sid)
         if local and event in ("Stop", agent_hooks.CODEX_TURN_COMPLETE):
             # The answer may only be in the transcript, and the title is in

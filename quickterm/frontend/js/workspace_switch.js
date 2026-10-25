@@ -3,15 +3,16 @@
 // live terminals and offering recovery for dead ones), or fall back to a
 // fresh scratch layout.
 
-import { SCRATCH_WS, rememberWorkspace } from "./boot_context.js";
+import { SCRATCH_WS, isScratchWorkspace, rememberWorkspace } from "./boot_context.js";
 import { sessionIdsInLayout } from "./layout_sessions.js";
 import { claudeProfileForPane, commandTerminalType } from "./spawner.js";
+import { startupDecision, startupItems } from "./workspace_setup.js";
 
 export function createWorkspaceSwitch({
   api, workspace, state, layout,
   claimWorkspaceFor, discardScratch, ownedSessionIds, usableWorkspacePath,
   spawnInto, spawnSpecInto, spawnDefaultInto, profileTerminalType, restartSavedPane, resumeClaudePane,
-  allProfiles = () => state.profiles,
+  allProfiles = () => [], runStartup = null,
   cancelWorkspaceSave, scheduleWorkspaceSave, buildLauncher, refreshStatusSoon, showError, clearError,
 }) {
   async function restoreWorkspace(name) {
@@ -36,6 +37,20 @@ export function createWorkspaceSwitch({
     state.workspaceSessionIds = new Set(saved.session_ids || []);
     for (const sessionId of sessionIdsInLayout(savedLayout)) {
       if (byId.has(sessionId)) state.workspaceSessionIds.add(sessionId);
+    }
+    // Nothing to restore (a new workspace), or a Start with list and every
+    // terminal it had is gone: the list, else one plain shell.
+    if (!isScratchWorkspace(name) && startupDecision(saved, (id) => byId.has(id)) === "startup") {
+      const first = layout.restore(null)[0];
+      const items = startupItems(saved.startup);
+      if (runStartup && items.length) {
+        state.startupRan = true;
+        await runStartup(items, { first });
+      } else {
+        await spawnDefaultInto(first);
+      }
+      layout.focusPane(first);
+      return true;
     }
     const panes = layout.restore(savedLayout);
     for (const pane of panes) {

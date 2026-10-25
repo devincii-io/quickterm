@@ -8,7 +8,7 @@ PANELS_JS = FRONTEND_JS / "panels.js"
 CONFIG_SYNC_JS = FRONTEND_JS / "config_sync.js"
 KEYS_JS = FRONTEND_JS / "keys.js"
 PALETTE_JS = FRONTEND_JS / "palette.js"
-CONNECTIONS_JS = FRONTEND_JS / "panel_connections.js"
+AGENTS_JS = FRONTEND_JS / "panel_settings_agents.js"
 SNIPPETS_JS = FRONTEND_JS / "panel_settings_snippets.js"
 ABOUT_JS = FRONTEND_JS / "panel_settings_about.js"
 CONFIG_LIST_JS = FRONTEND_JS / "config_list.js"
@@ -22,6 +22,7 @@ SETTINGS_SOURCES = (
     "panel_settings_shortcuts.js",
     "panel_settings_about.js",
     "panel_settings_kit.js",
+    "panel_settings_agents.js",
 )
 
 
@@ -68,14 +69,14 @@ def test_panels_coordinator_stays_split_into_section_modules():
         "panel_settings_appearance.js",
         "panel_settings_window.js",
         "panel_settings_shortcuts.js",
-        "panel_connections.js",
+        "panel_settings_agents.js",
         "panel_settings_snippets.js",
         "panel_settings_about.js",
     ):
         assert f'from "./{module}"' in source
-    # The card editor is gone; its pure rules live in profile_model.js.
-    assert not (FRONTEND_JS / "panel_settings_terminals.js").exists()
-    assert "export function runLine" in read(FRONTEND_JS / "profile_model.js")
+    # Saved terminals are gone (4.5), editor, rules and all.
+    for gone in ("panel_settings_terminals.js", "panel_connections.js", "profile_model.js", "remote_workspace.js"):
+        assert not (FRONTEND_JS / gone).exists(), gone
 
 
 def test_shortcuts_keep_detach_and_confirmed_kill_distinct():
@@ -90,21 +91,20 @@ def test_shortcuts_keep_detach_and_confirmed_kill_distinct():
     assert 'label: "kill session and close pane", hint: "Alt+W"' in palette
 
 
-def test_agents_are_explicit_profile_types_with_schema_driven_options():
-    connections = read(CONNECTIONS_JS)
+def test_agents_are_settings_with_schema_driven_options():
+    agents = read(AGENTS_JS)
     fields = read(FRONTEND_JS / "panel_agent_fields.js")
-    assert '{ id: "claude-code", label: "Claude Code", group: "Agents", cmd: "claude" }' in connections
-    assert '{ id: "codex", label: "Codex", group: "Agents", cmd: "codex" }' in connections
+    assert "for (const kind of AGENT_TYPES) section.append(agentRow.call(this, kind, cfg.agents[kind]));" in agents
     # The options come from GET /api/system/agents through the api namespace;
     # the frontend names no CLI flag of its own.
-    assert "getAgentCatalog?.()" in connections
-    assert 'import * as api from "./api.js";' in connections
+    assert "getAgentCatalog?.()" in agents
+    assert 'import * as api from "./api.js";' in agents
     for flag in ("permission_mode", "approve_for_me", "--model", "bypassPermissions"):
         assert flag not in fields, flag
-        assert flag not in connections, flag
+        assert flag not in agents, flag
     # No folder field of any kind: the workspace places every agent session.
-    assert "profile.cwd" not in connections
-    assert "profile.subpath" not in connections
+    assert "profile.cwd" not in agents
+    assert "profile.subpath" not in agents
 
 
 def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog():
@@ -127,10 +127,10 @@ def test_every_folder_field_browses_in_app_and_still_reaches_the_native_dialog()
     assert "nativeBtn.hidden = !(native && native.available())" in browser
     assert "claimFocus(FOCUS_OWNER)" in browser
     assert "releaseFocus(FOCUS_OWNER)" in browser
-    # Workspace folders are chosen in Workspace settings. Terminal configs have
+    # Workspace folders are chosen in Workspace settings. The agents have
     # no folder at all; the only other folder is scratch's, under Advanced.
     assert "folderPickerControl(input," in workspace_settings
-    assert "folderPickerControl(" not in read(CONNECTIONS_JS)
+    assert "folderPickerControl(" not in read(AGENTS_JS)
     assert "folderPickerControl(scratch," in read(ABOUT_JS)
 
 
@@ -167,6 +167,22 @@ def test_the_board_refreshes_by_patching_instead_of_rebuilding():
     assert "<select" not in board and '"select"' not in board
 
 
+def test_the_board_sorts_itself_and_slides_a_moved_card():
+    """4.5 wave 2: the column is derived; nobody drags or keys a card over."""
+    board = read(FRONTEND_JS / "panel_dashboard.js")
+    css = read(FRONTEND_CSS / "dashboard.css")
+    for gone in ("setBoardStatus", "pointerdown", "startDrag", "movedStatus", "drop-target", "board-drag-ghost"):
+        assert gone not in board, gone
+    assert "drop-target" not in css and "board-drag-ghost" not in css
+    # A card that changes column keeps its node and slides from where it was.
+    apply = board[board.index("function applyBoard(view)"):board.index("\nfunction slide(")]
+    assert apply.index("getBoundingClientRect()") < apply.index(".list.append(move.node)")
+    assert apply.index(".list.append(move.node)") < apply.index("patchList(list, column.cards, view.cardSpec)")
+    assert "slide(move.node, move.from)" in apply
+    assert "prefers-reduced-motion: reduce" in board
+    assert ".board-card-ghost { transition: none; }" in css
+
+
 def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():
     keys = read(KEYS_JS)
     assert 'if (key === "arrowleft") return done(() => actions.cycleTerminal(-1));' in keys
@@ -177,13 +193,13 @@ def test_profile_cycle_uses_free_alt_shift_arrows_not_shell_ctrl_arrows():
 
 
 def test_every_configurable_thing_carries_its_own_description():
-    """Terminals and snippets each declare what they are for and say what they run.
+    """Snippets declare what they are for and say what they run.
 
-    Both are a master-detail list: a compact row with the problem marker, and
+    They are a master-detail list: a compact row with the problem marker, and
     an editor with a Description field. A problem is marked at the item; the
     footer check stays as the backstop that refuses the save.
     """
-    for source in (read(CONNECTIONS_JS), read(SNIPPETS_JS)):
+    for source in (read(SNIPPETS_JS),):
         assert 'from "./config_list.js"' in source
         assert "renderConfigList({" in source
         assert '"Description"' in source
@@ -192,7 +208,6 @@ def test_every_configurable_thing_carries_its_own_description():
         assert re.search(r"\bproblems[,:]", source)
         assert "summary:" in source
         assert "itemDirty(this.savedSnapshots," in source
-    assert 'description: ""' in read(CONNECTIONS_JS)
     assert 'description: ""' in read(SNIPPETS_JS)
     assert "settingsProblems(this.settingsDraft" in read(PANELS_JS)
 
@@ -211,7 +226,7 @@ def test_config_pages_are_rows_and_a_side_editor_not_cards():
     select = config_list[config_list.index("function select(") :]
     select = select[: select.index("\n  }\n")]
     assert "if (item !== current)" in select
-    for source in (read(CONNECTIONS_JS), read(SNIPPETS_JS)):
+    for source in (read(SNIPPETS_JS),):
         assert 'make("article"' not in source
         assert "rerender()" not in source
     for selector in (".terminal-profile-card", ".profile-main", ".profile-more", ".snippet-card", ".connection-type"):
@@ -229,13 +244,10 @@ def test_config_pages_are_rows_and_a_side_editor_not_cards():
 
 
 def test_one_save_persists_everything():
-    connections = read(CONNECTIONS_JS)
     panels = read(PANELS_JS)
-    assert "putConfig" not in connections
-    assert "Save connection" not in connections
+    assert "putConfig" not in read(AGENTS_JS)
     assert panels.count("api.putConfig(") == 1
     # The editors' Save and Ctrl+S in the sheet reach the same method.
-    assert "this._saveSettings?.()" in connections
     assert "this._saveSettings?.()" in read(SNIPPETS_JS)
     assert 'event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "s"' in panels
     assert '"ctrl+s"' not in read(KEYS_JS)
@@ -261,6 +273,8 @@ def test_every_settings_field_stamps_its_search_id():
     sources = "\n".join(read(FRONTEND_JS / name) for name in SETTINGS_SOURCES)
     for setting in ids:
         stamped = f'"{setting}"' in sources
+        if setting.startswith("agents.") and not stamped:
+            stamped = "row.dataset.setting = `agents.${kind}`;" in read(AGENTS_JS)
         if setting.startswith("overlay.") and not stamped:
             stamped = f'["{setting.split(".", 1)[1]}",' in read(FRONTEND_JS / "panel_settings_window.js")
         assert stamped, setting
@@ -294,18 +308,18 @@ def test_text_zoom_leaves_readline_undo_and_star_to_the_shell():
         assert "unnamed" in line, line
 
 
-def test_settings_infers_a_profile_type_for_display_only():
-    """Loading Settings must not stamp the inferred type onto every profile.
-
-    A hand-edited profile without a type launches as a plain command; the
-    stamp saved it with the inferred type on the next Save and changed how it
-    starts. Only an edit of a type-bound field in the editor sets it.
-    """
+def test_settings_has_no_saved_terminals_and_maps_the_old_tab_to_agents():
+    """4.5 removed saved terminals; the Terminals tab became Agents."""
     panels = read(PANELS_JS)
-    assert "profile.terminal_type = inferTerminalType(profile)" not in panels
-    assert "profile.terminal_type =" not in panels
-    connections = read(CONNECTIONS_JS)
-    assert "if (!profile.terminal_type) profile.terminal_type = kind;" in connections
+    index = read(FRONTEND_JS / "settings_index.js")
+    assert '["agents", "Agents", "Claude Code and Codex"]' in index
+    assert 'if (id === "connections" || id === "terminals") return "agents";' in index
+    assert 'else if (tab === "agents") renderAgentSettings.call(this, content);' in panels
+    assert "this.settingsTab = settingsTabId(this.settingsTab);" in panels
+    for gone in ("renderConnections", "profiles", "terminal_shortcuts"):
+        assert gone not in panels, gone
+        assert gone not in index, gone
+    assert "keybinding" not in read(FRONTEND_JS / "panel_settings_shortcuts.js")
 
 
 def test_menus_draw_above_the_sheet_and_below_the_error_banner():

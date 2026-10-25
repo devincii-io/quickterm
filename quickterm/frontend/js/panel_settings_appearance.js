@@ -1,124 +1,54 @@
 import * as api from "./api.js";
-import { icon } from "./icons.js";
-import { panelMenu } from "./panel_settings_kit.js";
 import { make } from "./panel_shared.js";
-import {
-  CUSTOM_THEME, CUSTOM_THEME_DEFAULTS, customColors, getTheme, resolveThemeId, themeGroups,
-} from "./themes.js";
+import { openThemeSwitcher, themeMiniature } from "./theme_switcher.js";
+import { CUSTOM_THEME, customColors, getTheme, resolveThemeId } from "./themes.js";
 
-// What a swatch shows: the theme's accent, then the eight normal ANSI
-// colours, all on the terminal background, so a row reads like a prompt.
-const SWATCH_KEYS = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
-
-function paintSwatch(swatch, def) {
-  swatch.textContent = "";
-  swatch.style.setProperty("--swatch-bg", def.xterm.background);
-  const accent = make("i", "theme-swatch-accent");
-  accent.style.setProperty("--swatch", def.accent);
-  swatch.append(accent);
-  for (const key of SWATCH_KEYS) {
-    const dot = make("i");
-    dot.style.setProperty("--swatch", def.xterm[key]);
-    swatch.append(dot);
-  }
-}
-
-function themeSwatch(def) {
-  const swatch = make("span", "theme-swatch");
-  swatch.setAttribute("aria-hidden", "true");
-  paintSwatch(swatch, def);
-  return swatch;
-}
-
-// The theme chooser is a menu.js menu like every other chooser (AGENTS.md):
-// Dark, Light and Custom sections, a swatch on every row, the current theme
-// checked. Choosing previews at once; Save keeps it.
+// Settings > General shows the current theme as a miniature with its name and
+// opens the switcher sheet, which saves on its own: a theme is tried and
+// applied there, with the whole window as the preview. Each save there is
+// written into this sheet's draft and baseline too, so Save here neither
+// repeats it nor reports it as changed in another window.
 export function renderThemePicker(cfg) {
   const wrap = make("div", "theme-picker");
   wrap.append(
     make("h4", "theme-picker-title", "Color theme"),
-    make("p", "field-hint", "Previews the workbench and every open terminal instantly. Press Save to keep it."),
+    make("p", "field-hint", "Opens the theme switcher: try themes on the whole window, apply one, and keep the sheet open."),
   );
-  cfg.custom_theme = customColors(cfg.custom_theme || {});
   // A saved id from an older release resolves through THEME_ALIASES; the
   // config keeps that id until the user picks another theme.
   const selectedId = () => (cfg.theme === CUSTOM_THEME ? CUSTOM_THEME : resolveThemeId(cfg.theme));
-  const definition = (id) => getTheme(id, cfg.custom_theme);
 
-  const button = make("button", "config-choice theme-choice");
+  const button = make("button", "theme-row");
   button.type = "button";
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", "false");
-  button.setAttribute("aria-label", "Color theme");
-  const swatch = make("span", "theme-swatch");
-  swatch.setAttribute("aria-hidden", "true");
-  const name = make("span", "config-choice-label");
-  const detail = make("small", "theme-choice-detail");
-  const copy = make("span", "theme-choice-copy");
+  button.setAttribute("aria-haspopup", "dialog");
+  const copy = make("span", "theme-row-copy");
+  const name = make("strong");
+  const detail = make("small");
   copy.append(name, detail);
-  button.append(swatch, copy, icon("chevron-down", 12));
+  const action = make("span", "theme-row-action", "Change…");
   const paint = () => {
-    const def = definition(selectedId());
-    paintSwatch(swatch, def);
+    const custom = customColors(cfg.custom_theme || {});
+    const def = getTheme(selectedId(), custom);
+    button.textContent = "";
+    button.append(themeMiniature(selectedId(), custom), copy, action);
     name.textContent = def.label;
     detail.textContent = `${def.light ? "Light" : "Dark"} · ${def.note}`;
+    button.setAttribute("aria-label", `Color theme: ${def.label}. Change`);
   };
-
-  const editor = make("div", "custom-theme-editor");
-  const choose = (id) => {
-    cfg.theme = id;
-    paint();
-    editor.hidden = id !== CUSTOM_THEME;
-    this._themePreviewDirty = true;
-    this.app.previewTheme(id, cfg.custom_theme);
-  };
-
   button.addEventListener("click", () => {
-    const current = selectedId();
-    const items = [];
-    for (const [heading, ids] of [...themeGroups(), ["Custom", [CUSTOM_THEME]]]) {
-      items.push({ heading });
-      for (const id of ids) {
-        const def = definition(id);
-        items.push({
-          label: def.label,
-          detail: def.note,
-          trailing: () => themeSwatch(def),
-          selected: id === current,
-          run: () => choose(id),
-        });
-      }
-    }
-    panelMenu({
-      anchor: button,
-      label: "Color theme",
-      items,
-      width: 380,
-      onClose: (reason) => {
-        if (reason === "run" || reason === "escape") button.focus();
+    openThemeSwitcher(this.app, {
+      returnFocus: button,
+      onApplied: (theme, custom) => {
+        for (const draft of [cfg, this.settingsBaseline].filter(Boolean)) {
+          draft.theme = theme;
+          draft.custom_theme = structuredClone(custom);
+        }
+        if (button.isConnected) paint();
       },
     });
   });
-
-  for (const [key, fallback] of Object.entries(CUSTOM_THEME_DEFAULTS)) {
-    const label = make("label", "custom-color-field");
-    const input = make("input");
-    input.type = "color";
-    input.value = cfg.custom_theme[key] || fallback;
-    label.append(input, make("span", "", key.replace(/^./, (char) => char.toUpperCase())));
-    input.addEventListener("input", () => {
-      cfg.custom_theme[key] = input.value.toUpperCase();
-      if (cfg.theme === CUSTOM_THEME) {
-        paint();
-        this._themePreviewDirty = true;
-        this.app.previewTheme(CUSTOM_THEME, cfg.custom_theme);
-      }
-    });
-    editor.append(label);
-  }
-  editor.hidden = selectedId() !== CUSTOM_THEME;
   paint();
-  wrap.append(button, editor);
+  wrap.append(button);
   return wrap;
 }
 

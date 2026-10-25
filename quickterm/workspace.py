@@ -1,8 +1,8 @@
 """Workspace models + JSON persistence in %APPDATA%/quickterm/workspaces.
 
 A workspace is a folder first and a layout second: `Workspace.path` is the
-root directory every session in that workspace starts in. Profiles carry no
-folder of their own, so the workspace is the only thing that places a terminal.
+root directory every session in that workspace starts in, at the workspace's
+location (`Workspace.host`): this PC, a WSL distribution, or an SSH host.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import config_dir, read_text, replace_file
+from .config import config_dir, protect_environment, read_text, replace_file, unprotect_value
 
 
 MAX_PATH_CHARS = 4096
@@ -36,16 +36,222 @@ class Workspace:
     # removes it from `layout` but its live session remains here for reattach.
     session_ids: list[str] = field(default_factory=list)
     temporary: bool = False
-    # The name of an OpenSSH profile when the workspace lives on that host;
-    # `path` is then a POSIX path there. None is a local workspace.
+    # The location: None is this PC, "wsl:<distro>" a WSL distribution, any
+    # other value an SSH destination. Away from this PC `path` is POSIX.
     host: str | None = None
+    # Variables every terminal of the workspace gets (decrypted in memory,
+    # sealed with DPAPI in the file) and what a fresh view starts.
+    env: dict[str, str] = field(default_factory=dict)
+    startup: list[dict] = field(default_factory=list)
+
+
+# --- workspace setup: environment and startup items --------------------------------
+
+ENV_MAX_ENTRIES = 64
+ENV_MAX_NAME_CHARS = 255
+ENV_MAX_VALUE_BYTES = 8 * 1024
+STARTUP_MAX_ITEMS = 8
+STARTUP_KINDS = ("shell", "claude-code", "codex")
+STARTUP_KEYS = ("kind", "name", "shell", "command", "agent_mode", "agent", "env")
+COMMAND_MAX_CHARS = 4096
+STARTUP_NAME_MAX_CHARS = 80
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def validate_env(value: object) -> dict[str, str]:
+    """A workspace's or one terminal's own variables. ValueError says why not.
+
+    QuickTerm's own names (`QUICKTERM_*`) and `WSLENV` are refused in any
+    spelling: Windows reads names without case, and both are set per launch.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("env must be an object of NAME: value")
+    if len(value) > ENV_MAX_ENTRIES:
+        raise ValueError(f"env takes at most {ENV_MAX_ENTRIES} variables")
+    seen: set[str] = set()
+    out: dict[str, str] = {}
+    for name, text in value.items():
+        if not isinstance(name, str) or not _ENV_NAME.fullmatch(name):
+            raise ValueError(f"not a variable name: {str(name)[:40]!r}")
+        if len(name) > ENV_MAX_NAME_CHARS:
+            raise ValueError(f"variable names cannot exceed {ENV_MAX_NAME_CHARS} characters")
+        folded = name.upper()
+        if folded.startswith("QUICKTERM_") or folded == "WSLENV":
+            raise ValueError(f"{name} is set by QuickTerm")
+        if folded in seen:
+            raise ValueError(f"{name} is given twice")
+        seen.add(folded)
+        if not isinstance(text, str):
+            raise ValueError(f"{name} must be text")
+        if "\0" in text:
+            raise ValueError(f"{name} must not contain NUL")
+        if len(text.encode("utf-8", "surrogatepass")) > ENV_MAX_VALUE_BYTES:
+            raise ValueError(f"{name} cannot exceed 8 KB")
+        out[name] = text
+    return out
+
+
+def validate_command(value: object) -> str | None:
+    """What a plain shell runs once before its prompt: one line of the
+    shell's own language, or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("command must be a string")
+    if any(char in value for char in ("\0", "\r", "\n")):
+        raise ValueError("command must be one line")
+    text = value.strip()
+    if len(text) > COMMAND_MAX_CHARS:
+        raise ValueError(f"command cannot exceed {COMMAND_MAX_CHARS} characters")
+    return text or None
+
+
+def _startup_item(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("each startup item must be an object")
+    unknown = sorted(str(key) for key in value if key not in STARTUP_KEYS)
+    if unknown:
+        raise ValueError(f"unknown startup field: {unknown[0][:40]}")
+    kind = value.get("kind")
+    if kind not in STARTUP_KINDS:
+        raise ValueError("startup kind must be shell, claude-code or codex")
+    name = value.get("name")
+    if name is not None and not isinstance(name, str):
+        raise ValueError("startup name must be a string or null")
+    name = (name or "").strip()[:STARTUP_NAME_MAX_CHARS] or None
+    command = validate_command(value.get("command"))
+    shell = value.get("shell") or None
+    mode = value.get("agent_mode")
+    options = value.get("agent")
+    if kind == "shell":
+        if mode is not None or options:
+            raise ValueError("agent_mode and agent are for claude-code and codex")
+        options = None
+        if shell is not None:
+            from . import shells
+
+            # Which installed shell on this PC; null is the configured one.
+            # In WSL or over SSH the location's own shell starts instead.
+            shells.validate(shell)
+            if shell == "cmd" and command is not None:
+                shells.check_cmd_command(command)
+    else:
+        if command is not None:
+            raise ValueError("command is for a shell")
+        if shell is not None:
+            raise ValueError("shell is for a shell item")
+        from . import agents
+
+        if mode is not None and (not isinstance(mode, str) or mode not in agents.MODES[kind]):
+            raise ValueError(agents._mode_error(kind))
+        if options is not None and not isinstance(options, dict):
+            raise ValueError("agent options must be an object")
+        options = dict(options) if options else None
+        agents.validate(_AgentOptions(kind, mode, options or {}))
+    env = validate_env(value.get("env"))
+    return {
+        "kind": kind, "name": name, "shell": shell, "command": command, "agent_mode": mode,
+        "agent": options, "env": env or None,
+    }
+
+
+@dataclass(frozen=True)
+class _AgentOptions:
+    """The fields agents.validate reads, for one startup item."""
+
+    terminal_type: str
+    agent_mode: str | None
+    agent: dict
+
+
+def validate_startup(value: object) -> list[dict]:
+    """The `startup` list, each item with all seven keys. ValueError says why not."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("startup must be a list")
+    if len(value) > STARTUP_MAX_ITEMS:
+        raise ValueError(f"startup takes at most {STARTUP_MAX_ITEMS} items")
+    return [_startup_item(item) for item in value]
+
+
+def _sealed_env(env: dict[str, str]) -> dict:
+    return protect_environment(env)
+
+
+def _opened_env(raw: object) -> dict[str, str]:
+    """Stored variables as text. A value this user cannot decrypt (the file
+    came from another account) is left out rather than failing the load."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for name, value in raw.items():
+        try:
+            out[name] = unprotect_value(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _stored_setup(env: object, startup: object) -> tuple[dict[str, str], list[dict]]:
+    """`env` and `startup` of a workspace file; a hand-edited mistake drops
+    only the entry it is in."""
+    # Entry by entry: one hand-edited bad name must not take the rest along
+    # (the next autosave would write the file without them).
+    clean_env: dict[str, str] = {}
+    for name, value in _opened_env(env).items():
+        if len(clean_env) >= ENV_MAX_ENTRIES:
+            break
+        try:
+            clean_env.update(validate_env({**clean_env, name: value}))
+        except ValueError:
+            continue
+    items = []
+    for item in startup if isinstance(startup, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("env"), dict):
+            item = {**item, "env": _opened_env(item["env"])}
+        items.append(item)
+    clean_startup: list[dict] = []
+    for item in items[:STARTUP_MAX_ITEMS]:
+        try:
+            clean_startup.append(_startup_item(item))
+        except ValueError:
+            continue
+    return clean_env, clean_startup
 
 
 MAX_HOST_CHARS = 200
+WSL_PREFIX = "wsl:"
+# The distribution name rule of shells._DISTRO: wsl.exe takes it after -d.
+_DISTRO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SSH_URI = re.compile(
+    r"^ssh://(?:[^@/?#]+@)?(?:\[[^\]/]+\]|[^@/:?#\[\]]+)(?::(\d{1,5}))?$", re.IGNORECASE
+)
+
+
+def location_kind(host: str | None) -> str:
+    """"local", "wsl" or "ssh" for a stored `Workspace.host`."""
+    if not host:
+        return "local"
+    return "wsl" if host.startswith(WSL_PREFIX) else "ssh"
+
+
+def wsl_distro(host: str | None) -> str | None:
+    """The distribution of a WSL location, else None."""
+    if host and host.startswith(WSL_PREFIX):
+        return host[len(WSL_PREFIX):]
+    return None
 
 
 def normalize_host(value: object) -> str | None:
-    """A stored host: the name of an SSH profile, or None for local."""
+    """A stored location: None for this PC, "wsl:<distro>", or an SSH
+    destination (`~/.ssh/config` alias, `[user@]host`, `ssh://[user@]host[:port]`).
+
+    The destination reaches ssh as an argument, so a leading `-` (an option),
+    whitespace and control characters are refused.
+    """
     if value is None:
         return None
     if not isinstance(value, str):
@@ -53,13 +259,29 @@ def normalize_host(value: object) -> str | None:
     text = value.strip()
     if not text:
         return None
-    if len(text) > MAX_HOST_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in text):
-        raise ValueError("host must be the name of an SSH profile")
+    if len(text) > MAX_HOST_CHARS:
+        raise ValueError(f"host must be at most {MAX_HOST_CHARS} characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise ValueError("host must not contain control characters")
+    if text.startswith(WSL_PREFIX):
+        if not _DISTRO.fullmatch(text[len(WSL_PREFIX):]):
+            raise ValueError("a WSL location is wsl:<distribution name>")
+        return text
+    if text.startswith("-"):
+        raise ValueError("an SSH destination must not start with -")
+    if any(char.isspace() for char in text):
+        raise ValueError("an SSH destination must not contain spaces")
+    if text.lower().startswith("ssh://"):
+        match = _SSH_URI.fullmatch(text)
+        if match is None or (match.group(1) and not 1 <= int(match.group(1)) <= 65535):
+            raise ValueError("an SSH URL is ssh://[user@]host[:port]")
+    elif text.startswith("@") or text.endswith("@"):
+        raise ValueError("an SSH destination is a host alias or [user@]host")
     return text
 
 
 def normalize_remote_root(value: object) -> str | None:
-    """A folder on an SSH host: an absolute POSIX path, `~` or `~/...`.
+    """A folder in WSL or on an SSH host: an absolute POSIX path, `~` or `~/...`.
 
     Kept as typed apart from a trailing slash; it is never resolved against
     this computer. NUL, newlines and other control characters are refused,
@@ -77,14 +299,14 @@ def normalize_remote_root(value: object) -> str | None:
     if any(ord(char) < 32 or ord(char) == 127 for char in text):
         raise ValueError("workspace folder path contains control characters")
     if not (text.startswith("/") or text == "~" or text.startswith("~/")):
-        raise ValueError("a folder on an SSH host must start with / or ~/")
+        raise ValueError("a folder in WSL or on an SSH host must start with / or ~/")
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
     return text
 
 
 def normalize_folder(value: object, host: str | None) -> str | None:
-    """`normalize_root` for a local workspace, `normalize_remote_root` on a host."""
+    """`normalize_root` on this PC, `normalize_remote_root` in WSL or over SSH."""
     return normalize_remote_root(value) if host else normalize_root(value)
 
 
@@ -349,6 +571,7 @@ def _workspace_from(raw: dict, name: str) -> Workspace:
         path = normalize_folder(raw.get("path"), host)
     except ValueError:
         path = None
+    env, startup = _stored_setup(raw.get("env"), raw.get("startup"))
     return Workspace(
         name=raw.get("name", name),
         layout=raw.get("layout", {}),
@@ -357,6 +580,8 @@ def _workspace_from(raw: dict, name: str) -> Workspace:
         session_ids=[sid for sid in session_ids if isinstance(sid, str) and sid],
         temporary=raw.get("temporary") is True,
         host=host,
+        env=env,
+        startup=startup,
     )
 
 
@@ -382,9 +607,25 @@ def save_workspace(ws: Workspace) -> None:
         "temporary": ws.temporary,
     }
     if host:
-        # Only remote workspaces carry the key, so a local file reads the
-        # same to an older build.
+        # Only a workspace away from this PC carries the key, so a local file
+        # reads the same to an older build.
         document["host"] = host
+    # The same for the setup: only a workspace that has one stores it.
+    try:
+        env = validate_env(getattr(ws, "env", None))
+    except ValueError:
+        env = {}
+    try:
+        startup = validate_startup(getattr(ws, "startup", None))
+    except ValueError:
+        startup = []
+    if env:
+        document["env"] = _sealed_env(env)
+    if startup:
+        document["startup"] = [
+            {**item, "env": _sealed_env(item["env"]) if item["env"] else None}
+            for item in startup
+        ]
     text = json.dumps(document, indent=2)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:

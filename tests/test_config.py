@@ -4,7 +4,7 @@ import pytest
 
 from quickterm import config as cfgmod
 from quickterm.config import (
-    AppConfig, Profile, Snippet, load_config, save_config, validate_environment,
+    AppConfig, Snippet, load_config, save_config, validate_environment,
 )
 
 
@@ -35,9 +35,8 @@ def test_load_config_writes_default_file(fake_appdata):
     cfg = load_config()
     path = fake_appdata / "quickterm" / "config.json"
     assert path.exists()
-    # personal profiles are user-created only; system shells come from the
-    # live inventory, so a fresh config starts empty
-    assert cfg.profiles == []
+    # Saved terminals are gone (4.5).
+    assert not hasattr(cfg, "profiles")
     assert cfg.shell == "powershell"
     assert cfg.agents == {"claude-code": cfgmod.AgentSettings(), "codex": cfgmod.AgentSettings()}
     assert not hasattr(cfg, "default_profile")
@@ -54,23 +53,10 @@ def test_load_config_writes_default_file(fake_appdata):
 
 def test_save_load_roundtrip(fake_appdata):
     cfg = AppConfig(port=9999, shell="wsl:Ubuntu")
-    cfg.profiles.append(Profile(
-        name="ubuntu",
-        cmd="wsl.exe",
-        autostart=True,
-        terminal_type="wsl",
-        wsl_distro="Ubuntu",
-        start_command="source .venv/bin/activate",
-    ))
     save_config(cfg)
     loaded = load_config()
     assert loaded.port == 9999
     assert loaded.shell == "wsl:Ubuntu"
-    ubuntu = next(p for p in loaded.profiles if p.name == "ubuntu")
-    assert ubuntu.autostart is True
-    assert ubuntu.terminal_type == "wsl"
-    assert ubuntu.wsl_distro == "Ubuntu"
-    assert ubuntu.start_command == "source .venv/bin/activate"
 
 
 def test_agent_settings_round_trip_and_launch_mode_validation(fake_appdata):
@@ -98,7 +84,7 @@ def _write_raw(fake_appdata, raw):
     return path
 
 
-def test_the_real_4_2_shape_migrates_to_agents_and_ssh_profiles_only(fake_appdata):
+def test_the_real_4_2_shape_migrates_to_agents_and_no_saved_terminals(fake_appdata):
     ssh = [
         {"name": f"server {n}", "cmd": "", "terminal_type": "ssh", "ssh_host": f"h{n}"}
         for n in range(3)
@@ -120,15 +106,16 @@ def test_the_real_4_2_shape_migrates_to_agents_and_ssh_profiles_only(fake_appdat
 
     cfg = load_config()
 
-    assert [p.name for p in cfg.profiles] == ["server 0", "server 1", "server 2"]
+    assert not hasattr(cfg, "profiles")
     assert cfg.agents["claude-code"].agent_mode == "new"
     # The "codex" shell that only ran codex becomes the Codex settings.
     assert cfg.agents["codex"] == cfgmod.AgentSettings(agent_mode="new")
     assert cfg.shell == "powershell"
     # The file as it was, next to the migrated one, which is saved at once.
     assert (path / cfgmod.PRE_43_BACKUP).read_text(encoding="utf-8") == before
+    assert (path / cfgmod.PRE_45_BACKUP).read_text(encoding="utf-8") == before
     stored = json.loads((path / "config.json").read_text(encoding="utf-8"))
-    assert "default_profile" not in stored and "agents" in stored
+    assert "default_profile" not in stored and "agents" in stored and "profiles" not in stored
     # Once: the next load changes nothing and keeps the first copy.
     (path / cfgmod.PRE_43_BACKUP).write_text("first", encoding="utf-8")
     assert load_config() == cfg
@@ -219,26 +206,13 @@ def test_migration_keeps_the_first_agent_of_each_kind_and_special_profiles():
         {"name": "tool", "cmd": "htop"},
         {"name": "db", "cmd": "", "terminal_type": "docker", "connection": {"container": "db"}},
     ]}
+    assert [p["name"] for p in cfgmod.migrate_agents(raw)["profiles"]] == ["dev", "tool", "db"]
     cfg = cfgmod.config_from_dict(raw)
-    assert [p.name for p in cfg.profiles] == ["dev", "tool", "db"]
     claude = cfg.agents["claude-code"]
     assert (claude.agent_mode, claude.agent, claude.args, claude.env) == (
         "agents", {"model": "opus"}, ["--verbose"], {"A": "1"}
     )
     assert cfg.agents["codex"].cmd == "codex"
-
-
-@pytest.mark.parametrize("profile", [
-    Profile(name="a", cmd="claude", terminal_type="claude-code"),
-    Profile(name="a", cmd="codex", terminal_type="codex"),
-    Profile(name="a", cmd="pwsh.exe", terminal_type="powershell-core"),
-    Profile(name="a", cmd="bash", terminal_type="git-bash", start_command="codex"),
-    Profile(name="a", cmd="pwsh.exe"),
-])
-def test_a_profile_of_a_removed_kind_is_refused_on_save(fake_appdata, profile):
-    with pytest.raises(ValueError, match='Terminal profile "a": profiles are for connections and '
-                       "custom commands; set the shell or the agents instead"):
-        save_config(AppConfig(profiles=[profile]))
 
 
 @pytest.mark.parametrize("value", ["powershell", "cmd", "git-bash", "wsl", "wsl:Ubuntu-22.04", ""])
@@ -282,28 +256,14 @@ _V4_ONLY_KEYS = [
 def test_a_4_0_shortcut_never_makes_the_config_unreadable_for_3_x(fake_appdata, key):
     with pytest.raises(ValueError):
         _parse_3x(f"ctrl+alt+{key}")
-    save_config(AppConfig(
-        summon_hotkey=f"ctrl+alt+{key}",
-        profiles=[Profile(name="a", cmd="cmd.exe", terminal_type="custom", keybinding=f"ctrl+shift+{key}"),
-                  Profile(name="b", cmd="cmd.exe", terminal_type="custom", keybinding="ctrl+alt+1")],
-    ))
+    save_config(AppConfig(summon_hotkey=f"ctrl+alt+{key}"))
     stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
 
-    # What 3.x reads parses: the legacy fields are empty or legacy keys.
-    if stored["summon_hotkey"].strip():
-        _parse_3x(stored["summon_hotkey"])
-    for profile in stored["profiles"]:
-        if profile["keybinding"]:
-            _parse_3x(profile["keybinding"])
+    # What 3.x reads parses: the legacy field is empty.
     assert stored["summon_hotkey"] == "" and stored["summon_hotkey_v4"] == f"ctrl+alt+{key}"
-    assert stored["profiles"][0]["keybinding"] is None
-    assert stored["profiles"][1]["keybinding"] == "ctrl+alt+1"
-    assert "keybinding_v4" not in stored["profiles"][1]
 
     # 4.0 reads its own key back.
-    loaded = load_config()
-    assert loaded.summon_hotkey == f"ctrl+alt+{key}"
-    assert [p.keybinding for p in loaded.profiles] == [f"ctrl+shift+{key}", "ctrl+alt+1"]
+    assert load_config().summon_hotkey == f"ctrl+alt+{key}"
 
 
 def test_a_legacy_shortcut_is_stored_where_3_x_reads_it(fake_appdata):
@@ -400,56 +360,6 @@ def test_window_bounds_are_inclusive(fake_appdata):
     save_config(cfg)
 
 
-@pytest.mark.parametrize(("fields", "message"), [
-    ({"ssh_host": "-oProxyCommand=calc"}, "host must not start with -"),
-    ({"ssh_host": "two words", "ssh_client": "openssh"}, "host must not contain spaces"),
-    ({"ssh_user": "-l"}, "username must not start with -"),
-    ({"ssh_user": "-l", "ssh_client": "putty"}, "username must not start with -"),
-    ({"ssh_user": "a\tb", "ssh_client": "openssh"}, "username must not"),
-    ({"ssh_client": "dropbear"}, "SSH client must be openssh or putty"),
-    ({"ssh_proxy_jump": "jump"}, "ProxyJump needs the OpenSSH client"),
-    ({"ssh_proxy_jump": "jump", "ssh_client": "putty"}, "ProxyJump needs the OpenSSH client"),
-    ({"ssh_proxy_jump": "-J", "ssh_client": "openssh"}, "ProxyJump must be"),
-    ({"ssh_proxy_jump": "a b", "ssh_client": "openssh"}, "ProxyJump must be"),
-    ({"ssh_key": r"C:\k\id.PPK", "ssh_client": "openssh"}, "OpenSSH cannot read PuTTY .ppk keys"),
-])
-def test_ssh_fields_that_could_become_options_are_refused(fake_appdata, fields, message):
-    profile = Profile(name="box", cmd="", terminal_type="ssh", ssh_host="box")
-    for key, value in fields.items():
-        setattr(profile, key, value)
-    with pytest.raises(ValueError, match=f'Terminal profile "box": {message}'):
-        save_config(AppConfig(profiles=[profile]))
-
-
-def test_pre_40_putty_profile_with_spaces_still_loads(fake_appdata):
-    # plink loads a saved session whose name matches the host, and Windows
-    # account names may hold a space; 3.x accepted both, so loading must too.
-    path = cfgmod.config_dir() / "config.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"profiles": [{
-        "name": "prod", "cmd": "", "terminal_type": "ssh",
-        "ssh_host": "Prod Server", "ssh_user": "John Smith",
-    }]}), encoding="utf-8")
-    loaded = load_config().profiles[0]
-    assert (loaded.ssh_host, loaded.ssh_user) == ("Prod Server", "John Smith")
-    assert not list(path.parent.glob("config.invalid-*.json"))
-
-
-def test_openssh_profile_with_jump_round_trips(fake_appdata):
-    save_config(AppConfig(profiles=[Profile(
-        name="box", cmd="", terminal_type="sftp", ssh_host="devbox", ssh_client="openssh",
-        ssh_proxy_jump="admin@bastion:2222,[fe80::1%eth0]", ssh_key="~/.ssh/id_ed25519",
-    )]))
-    loaded = load_config().profiles[0]
-    assert (loaded.ssh_client, loaded.ssh_proxy_jump) == ("openssh", "admin@bastion:2222,[fe80::1%eth0]")
-    # A pre-4.0 profile has no client and keeps PuTTY with its .ppk key.
-    legacy = cfgmod.config_from_dict({"profiles": [
-        {"name": "old", "cmd": "", "terminal_type": "ssh", "ssh_host": "h", "ssh_key": "k.ppk"},
-    ]})
-    assert legacy.profiles[0].ssh_client is None
-    cfgmod.validate_config(legacy)
-
-
 def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
     fake_appdata, monkeypatch
 ):
@@ -462,16 +372,14 @@ def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
     )
     path = fake_appdata / "quickterm"
     path.mkdir()
-    legacy = {
-        "profiles": [{"name": "secure", "cmd": "cmd.exe", "terminal_type": "custom", "env": {"API_TOKEN": "secret"}}]
-    }
+    legacy = {"agents": {"codex": {"env": {"API_TOKEN": "secret"}}}}
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
     loaded = load_config()
 
-    assert loaded.profiles[0].env == {"API_TOKEN": "secret"}
+    assert loaded.agents["codex"].env == {"API_TOKEN": "secret"}
     stored = json.loads((path / "config.json").read_text(encoding="utf-8"))
-    protected = stored["profiles"][0]["env"]["API_TOKEN"]
+    protected = stored["agents"]["codex"]["env"]["API_TOKEN"]
     assert protected["protected"] == "dpapi-v1"
     assert "secret" not in json.dumps(stored)
 
@@ -490,73 +398,6 @@ def test_environment_values_are_protected_at_rest_and_plaintext_configs_migrate(
 def test_environment_validation_rejects_unsafe_values(env):
     with pytest.raises(ValueError):
         validate_environment(env)
-
-
-def test_a_stored_profile_folder_is_dropped_on_load(fake_appdata):
-    """Profiles lost their folder in 3.3.0; older configs must still load.
-
-    The keys are simply unknown now, so `_known()` drops them and the next
-    save writes them out. A config written by an older build must not become
-    unloadable, which would cost the user every profile they had.
-    """
-    path = fake_appdata / "quickterm"
-    path.mkdir(parents=True, exist_ok=True)
-    legacy = {
-        "profiles": [{
-            "name": "Standard",
-            "cmd": "powershell.exe",
-            "terminal_type": "windows-powershell",
-            "start_command": "npm run dev",
-            "cwd": str(fake_appdata / "does-not-exist"),
-            "subpath": "../escape",
-        }],
-    }
-    (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
-
-    loaded = load_config().profiles[0]
-    assert loaded.name == "Standard"
-    assert not hasattr(loaded, "cwd")
-    assert not hasattr(loaded, "subpath")
-    # A folder that no longer exists used to make the whole config invalid.
-    assert (path / "config.json").exists()
-
-
-def test_ssh_profile_roundtrip(fake_appdata):
-    cfg = AppConfig()
-    cfg.profiles.append(Profile(
-        name="server",
-        cmd="",
-        terminal_type="ssh",
-        ssh_host="host.example.com",
-        ssh_port=2222,
-        ssh_user="deploy",
-        ssh_key="C:\\keys\\id.ppk",
-    ))
-    save_config(cfg)
-    loaded = load_config()
-    server = next(p for p in loaded.profiles if p.name == "server")
-    assert server.terminal_type == "ssh"
-    assert server.ssh_host == "host.example.com"
-    assert server.ssh_port == 2222
-    assert server.ssh_user == "deploy"
-    assert server.ssh_key == "C:\\keys\\id.ppk"
-
-
-def test_save_rejects_ssh_profile_without_host(fake_appdata):
-    cfg = AppConfig(profiles=[
-        Profile(name="server", cmd="", terminal_type="ssh")
-    ])
-    with pytest.raises(ValueError, match="host is required"):
-        save_config(cfg)
-
-
-@pytest.mark.parametrize("port", [0, 65536, True, "22"])
-def test_save_rejects_ssh_profile_with_bad_port(fake_appdata, port):
-    cfg = AppConfig(profiles=[
-        Profile(name="server", cmd="", terminal_type="sftp", ssh_host="h", ssh_port=port)
-    ])
-    with pytest.raises(ValueError, match="port must be between"):
-        save_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -582,13 +423,13 @@ def test_unknown_keys_ignored(fake_appdata):
     data = {
         "port": 7000,
         "totally_unknown": {"nested": 1},
-        "profiles": [{"name": "x", "cmd": "cmd.exe", "terminal_type": "custom", "mystery_key": True}],
+        "agents": {"codex": {"cmd": "codex", "mystery_key": True}},
         "voice": {"model_size": "base", "bogus": "yes"},
     }
     (path / "config.json").write_text(json.dumps(data), encoding="utf-8")
     cfg = load_config()
     assert cfg.port == 7000
-    assert cfg.profiles[0].name == "x"
+    assert cfg.agents["codex"].cmd == "codex"
     assert cfg.voice.model_size == "base"
 
 
@@ -622,15 +463,14 @@ def config_text(fake_appdata, name="config.json"):
 
 
 def test_save_keeps_the_previous_config_as_a_backup(fake_appdata):
-    # A partial PUT used to replace every profile and snippet with nothing to
+    # A partial PUT used to replace every setting and snippet with nothing to
     # go back to.
-    save_config(AppConfig(profiles=[Profile(name="work", cmd="cmd.exe", terminal_type="custom")]))
+    save_config(AppConfig(snippets=[Snippet(name="work", text="w\r")]))
     before = config_text(fake_appdata)
     save_config(AppConfig())
 
     assert config_text(fake_appdata, "config.prev.json") == before
-    assert json.loads(config_text(fake_appdata, "config.prev.json"))["profiles"][0]["name"] == "work"
-    assert json.loads(config_text(fake_appdata))["profiles"] == []
+    assert json.loads(config_text(fake_appdata, "config.prev.json"))["snippets"][0]["name"] == "work"
 
 
 def test_an_identical_save_does_not_overwrite_the_backup(fake_appdata):
@@ -654,10 +494,14 @@ def test_a_save_that_changes_nothing_keeps_the_backup_even_with_secrets(
     monkeypatch.setattr(
         cfgmod.secret_store, "unprotect", lambda data: data.split(b":", 1)[1],
     )
-    profiles = [Profile(name="work", cmd="cmd.exe", terminal_type="custom", env={"API_TOKEN": "secret"})]
-    save_config(AppConfig(profiles=profiles, font_size=12))
-    save_config(AppConfig(profiles=profiles, font_size=15))
-    save_config(AppConfig(profiles=profiles, font_size=15))
+    def with_secret(font_size):
+        cfg = AppConfig(font_size=font_size)
+        cfg.agents["codex"].env = {"API_TOKEN": "secret"}
+        return cfg
+
+    save_config(with_secret(12))
+    save_config(with_secret(15))
+    save_config(with_secret(15))
 
     assert json.loads(config_text(fake_appdata, "config.prev.json"))["font_size"] == 12
 
@@ -688,7 +532,7 @@ def test_the_backup_never_keeps_secrets_the_save_is_encrypting(fake_appdata, mon
     )
     path = fake_appdata / "quickterm"
     path.mkdir()
-    legacy = {"profiles": [{"name": "secure", "cmd": "cmd.exe", "terminal_type": "custom", "env": {"API_TOKEN": "secret"}}]}
+    legacy = {"agents": {"codex": {"env": {"API_TOKEN": "secret"}}}}
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
     load_config()  # migrates the plaintext value to a protected one
@@ -698,8 +542,10 @@ def test_the_backup_never_keeps_secrets_the_save_is_encrypting(fake_appdata, mon
     assert not backup.exists() or "secret" not in backup.read_text(encoding="utf-8")
 
     # Once protected, later backups are protected copies too.
-    save_config(AppConfig(profiles=load_config().profiles, font_size=16))
-    backup_env = json.loads(config_text(fake_appdata, "config.prev.json"))["profiles"][0]["env"]
+    again = load_config()
+    again.font_size = 16
+    save_config(again)
+    backup_env = json.loads(config_text(fake_appdata, "config.prev.json"))["agents"]["codex"]["env"]
     assert backup_env["API_TOKEN"]["protected"] == "dpapi-v1"
 
 
@@ -726,8 +572,8 @@ def test_a_config_replace_refused_by_a_reader_is_retried(fake_appdata, monkeypat
 def test_load_quarantines_structurally_invalid_config(fake_appdata):
     path = fake_appdata / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
-    (path / "config.json").write_text(json.dumps({"profiles": "bad"}), encoding="utf-8")
-    assert load_config().profiles == []
+    (path / "config.json").write_text(json.dumps({"agents": {}, "snippets": "bad"}), encoding="utf-8")
+    assert load_config().snippets == AppConfig().snippets
     assert len(list(path.glob("config.invalid-*.json"))) == 1
 
 
@@ -757,15 +603,11 @@ def test_a_config_without_descriptions_still_loads(fake_appdata):
     """
     path = fake_appdata / "quickterm"
     path.mkdir(parents=True, exist_ok=True)
-    legacy = {
-        "profiles": [{"name": "Standard", "cmd": "htop"}],
-        "snippets": [{"name": "git status", "text": "git status\r"}],
-    }
+    legacy = {"agents": {}, "snippets": [{"name": "git status", "text": "git status\r"}]}
     (path / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
 
     loaded = load_config()
 
-    assert loaded.profiles[0].description == ""
     assert loaded.snippets[0].description == ""
     # An older config must still be a valid one, not a quarantined one.
     assert not list(path.glob("config.invalid-*.json"))
@@ -773,12 +615,6 @@ def test_a_config_without_descriptions_still_loads(fake_appdata):
 
 def test_descriptions_survive_save_and_reload(fake_appdata):
     cfg = AppConfig()
-    cfg.profiles.append(Profile(
-        name="Dev shell",
-        cmd="pwsh.exe",
-        start_command="npm run dev",
-        description="PowerShell 7 with the project's dev server already running.",
-    ))
     cfg.snippets.append(Snippet(
         name="tail logs",
         text="Get-Content -Wait app.log\r",
@@ -788,30 +624,19 @@ def test_descriptions_survive_save_and_reload(fake_appdata):
 
     loaded = load_config()
 
-    assert loaded.profiles[0].description == "PowerShell 7 with the project's dev server already running."
     assert loaded.snippets[-1].description == "Follow the running app's log until you stop it."
     # The shipped defaults keep their own descriptions through the round trip.
     assert loaded.snippets[0].description == AppConfig().snippets[0].description
     stored = json.loads((fake_appdata / "quickterm" / "config.json").read_text(encoding="utf-8"))
-    assert stored["profiles"][0]["description"]
     assert stored["snippets"][0]["description"]
 
 
 @pytest.mark.parametrize("payload, message", [
-    ({"profiles": [{"name": "x", "cmd": "cmd.exe", "terminal_type": "custom", "description": 5}]}, "description must be a string"),
     ({"snippets": [{"name": "x", "text": "x\r", "description": []}]}, "description must be a string"),
 ])
 def test_save_rejects_non_string_descriptions(fake_appdata, payload, message):
     cfg = cfgmod.config_from_dict(payload)
     with pytest.raises(ValueError, match=message):
-        save_config(cfg)
-
-
-def test_save_rejects_conflicting_global_shortcuts(fake_appdata):
-    cfg = AppConfig(profiles=[
-        Profile(name="Conflict", cmd="cmd.exe", terminal_type="custom", keybinding=cfgmod.AppConfig().summon_hotkey),
-    ])
-    with pytest.raises(ValueError, match="conflicts"):
         save_config(cfg)
 
 
@@ -832,23 +657,126 @@ def test_save_rejects_wrong_global_field_types(fake_appdata, field, value, messa
         save_config(cfg)
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("terminal_type", [], "terminal type"),
-        ("wsl_distro", 24, "WSL distribution"),
-        ("start_command", ["echo", "ready"], "startup command"),
-        ("agent_mode", 3, "launch mode"),
-        ("agent", [], "agent options"),
-        ("ssh_client", 1, "SSH client"),
-        ("autostart", "false", "autostart"),
-        ("keybinding", 0, "shortcut"),
-    ],
-)
-def test_save_rejects_profile_fields_that_would_break_runtime(
-    fake_appdata, field, value, message
-):
-    profile = Profile(name="Broken", cmd="cmd.exe", terminal_type="custom")
-    setattr(profile, field, value)
-    with pytest.raises(ValueError, match=message):
-        save_config(AppConfig(profiles=[profile]))
+# --- 4.5: saved terminals go, SSH workspace hosts become destinations ----------
+
+
+def _write_workspace(fake_appdata, name, document, folder=""):
+    path = fake_appdata / "quickterm" / "workspaces" / folder
+    path.mkdir(parents=True, exist_ok=True)
+    (path / f"{name}.json").write_text(json.dumps({"name": name, "layout": {}, **document}), encoding="utf-8")
+    return path / f"{name}.json"
+
+
+def _a_4_4_config():
+    return {
+        "agents": {},
+        "profiles": [
+            {"name": "prod", "cmd": "", "terminal_type": "ssh", "ssh_host": "prod.example",
+             "ssh_user": "deploy", "ssh_port": 2222, "ssh_key": r"C:\keys\id", "ssh_client": "openssh"},
+            {"name": "devbox", "cmd": "", "terminal_type": "ssh", "ssh_host": "devbox", "ssh_client": "openssh"},
+            {"name": "jumpy", "cmd": "", "terminal_type": "ssh", "ssh_host": "10.0.0.5", "ssh_user": "me",
+             "ssh_proxy_jump": "bastion", "ssh_client": "openssh"},
+            {"name": "db", "cmd": "", "terminal_type": "docker", "connection": {"container": "db"}},
+        ],
+    }
+
+
+def test_ssh_destination_of_a_stored_profile():
+    assert cfgmod.ssh_destination({"ssh_host": "h"}) == "h"
+    assert cfgmod.ssh_destination({"ssh_host": "h", "ssh_user": "u"}) == "u@h"
+    assert cfgmod.ssh_destination({"ssh_host": "h", "ssh_user": "u", "ssh_port": 2222}) == "ssh://u@h:2222"
+    assert cfgmod.ssh_destination({"ssh_host": "fe80::1", "ssh_port": 22}) == "ssh://[fe80::1]:22"
+    assert cfgmod.ssh_destination({"ssh_host": " "}) is None
+    assert cfgmod.ssh_destination({"ssh_host": "h", "ssh_port": True}) == "h"
+
+
+def test_a_4_4_config_loses_its_profiles_and_ssh_workspaces_keep_their_host(fake_appdata):
+    path = _write_raw(fake_appdata, _a_4_4_config())
+    before = (path / "config.json").read_text(encoding="utf-8")
+    prod = _write_workspace(fake_appdata, "api", {"path": "/srv/api", "host": "prod"})
+    dev = _write_workspace(fake_appdata, "dev", {"path": "~/x", "host": "devbox"})
+    jumpy = _write_workspace(fake_appdata, "j", {"path": "/x", "host": "jumpy"})
+    elevated = _write_workspace(fake_appdata, "e", {"path": "/x", "host": "prod"}, folder="elevated")
+    local = _write_workspace(fake_appdata, "local", {"path": str(fake_appdata)})
+    unknown = _write_workspace(fake_appdata, "other", {"path": "/y", "host": "alias-in-ssh-config"})
+
+    cfg = load_config()
+
+    assert not hasattr(cfg, "profiles")
+    stored = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    assert "profiles" not in stored
+    assert (path / cfgmod.PRE_45_BACKUP).read_text(encoding="utf-8") == before
+    host = lambda file: json.loads(file.read_text(encoding="utf-8")).get("host")  # noqa: E731
+    assert host(prod) == "ssh://deploy@prod.example:2222"
+    assert host(dev) == "devbox"
+    assert host(jumpy) == "me@10.0.0.5"
+    assert host(elevated) == "ssh://deploy@prod.example:2222"
+    assert host(local) is None
+    assert host(unknown) == "alias-in-ssh-config"  # a name no profile had stays
+    notice = cfgmod.take_migration_notice()
+    assert notice.startswith(cfgmod.MIGRATION_PREFIX_45)
+    assert 'Workspaces on "prod" now connect to ssh://deploy@prod.example:2222' in notice
+    assert "private key could not be kept, so put them in ~/.ssh/config" in notice
+    assert 'Workspaces on "jumpy"' in notice and "ProxyJump" in notice
+    assert '"devbox"' not in notice
+    assert "4 saved terminal(s) are kept in config.pre-4.5.json only." in notice
+    assert cfgmod.take_migration_notice() is None
+
+
+def test_the_4_5_migration_runs_once_and_keeps_the_first_backup(fake_appdata):
+    path = _write_raw(fake_appdata, _a_4_4_config())
+    load_config()
+    (path / cfgmod.PRE_45_BACKUP).write_text("first", encoding="utf-8")
+    cfgmod.take_migration_notice()
+    load_config()
+    assert (path / cfgmod.PRE_45_BACKUP).read_text(encoding="utf-8") == "first"
+    assert cfgmod.take_migration_notice() is None
+
+
+def test_a_profile_host_that_cannot_be_a_destination_is_named(fake_appdata):
+    _write_raw(fake_appdata, {"agents": {}, "profiles": [
+        {"name": "Prod Server", "cmd": "", "terminal_type": "ssh", "ssh_host": "Prod Server"},
+    ]})
+    ws = _write_workspace(fake_appdata, "p", {"path": "/x", "host": "Prod Server"})
+    load_config()
+    assert json.loads(ws.read_text(encoding="utf-8"))["host"] == "Prod Server"
+    assert 'Workspaces on "Prod Server" could not keep their host' in cfgmod.take_migration_notice()
+
+
+def test_wsl_and_other_terminals_as_hosts_and_what_they_lose_are_named(fake_appdata):
+    _write_raw(fake_appdata, {"agents": {}, "profiles": [
+        {"name": "ubuntu", "cmd": "wsl.exe", "terminal_type": "wsl", "wsl_distro": "Ubuntu",
+         "start_command": "cd ~/app"},
+        {"name": "notes", "cmd": "notepad.exe", "terminal_type": "custom"},
+        {"name": "box", "cmd": "", "terminal_type": "ssh", "ssh_host": "box", "ssh_port": 99999,
+         "env": {"TOKEN": "x"}},
+    ]})
+    in_wsl = _write_workspace(fake_appdata, "w", {"path": "/home/me", "host": "ubuntu"})
+    custom = _write_workspace(fake_appdata, "n", {"path": "/x", "host": "notes"})
+    on_box = _write_workspace(fake_appdata, "b", {"path": "/srv", "host": "box"})
+    load_config()
+    host = lambda file: json.loads(file.read_text(encoding="utf-8")).get("host")  # noqa: E731
+    assert host(in_wsl) == "wsl:Ubuntu"
+    assert host(custom) is None
+    assert host(on_box) == "box"
+    notice = cfgmod.take_migration_notice()
+    assert 'Workspaces on "ubuntu" now open in wsl:Ubuntu; its start command could not be kept' in notice
+    assert 'Workspaces on "notes" were not on an SSH host or in WSL and now open on this PC.' in notice
+    assert 'Workspaces on "box" now connect to box; its environment variables, port 99999 could not be kept' in notice
+
+
+def test_a_4_2_config_gets_both_backups_and_both_notices(fake_appdata):
+    path = _write_raw(fake_appdata, {"profiles": [
+        {"name": "Windows PowerShell", "cmd": "powershell.exe", "terminal_type": "windows-powershell"},
+        {"name": "box", "cmd": "", "terminal_type": "ssh", "ssh_host": "box"},
+    ]})
+    load_config()
+    assert (path / cfgmod.PRE_43_BACKUP).exists() and (path / cfgmod.PRE_45_BACKUP).exists()
+    notice = cfgmod.take_migration_notice()
+    assert notice.startswith(cfgmod.MIGRATION_PREFIX_43)
+    assert cfgmod.MIGRATION_PREFIX_45 + "1 saved terminal(s)" in notice
+
+
+def test_a_config_put_with_profiles_ignores_them(fake_appdata):
+    cfg = cfgmod.config_from_dict({"agents": {}, "profiles": [{"name": "x", "cmd": "y"}], "font_size": 15})
+    assert cfg.font_size == 15 and not hasattr(cfg, "profiles")

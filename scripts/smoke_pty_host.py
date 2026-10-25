@@ -137,9 +137,6 @@ def smoke(launcher: list[str], port: int) -> None:
             "update_check": False,
             "summon_hotkey": "",
             "scratch_dir": isolated,
-            "profiles": [
-                {"name": "Smoke cmd", "cmd": "cmd.exe", "args": ["/q", "/k"], "terminal_type": "custom"}
-            ],
             "agents": {},
             "shell": "cmd",
         }

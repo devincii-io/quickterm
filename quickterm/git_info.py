@@ -3,8 +3,8 @@
 The sidebar asks for every workspace folder on each refresh, so this stays a
 handful of small, bounded file reads. Nothing in the local half writes,
 locks or runs a process. Callers keep it off the event loop: a folder on a
-network share can still stall a read. A workspace on an SSH host has its own
-half at the end, which runs git there in the background.
+network share can still stall a read. A workspace in WSL or on an SSH host
+has its own half at the end, which runs git there in the background.
 """
 
 from __future__ import annotations
@@ -138,9 +138,9 @@ def git_info_many(paths: list[str]) -> dict[str, dict | None]:
     return {path: git_info(path) for path in paths}
 
 
-# --- a workspace on an SSH host ----------------------------------------------
+# --- a workspace in WSL or on an SSH host -------------------------------------
 #
-# Over ssh there are no files to read, so git itself answers, once a minute
+# There are no files to read here, so git itself answers, once a minute
 # per workspace and never on a request's path: a request gets what is cached
 # and, when that is stale, starts a refresh in a background thread. A host
 # that wants a password fails quietly (BatchMode) and shows no branch.
@@ -192,7 +192,11 @@ def _read_remote(ws: object) -> dict | None:
 
 
 def _refresh_remote(key: tuple[str, str], ws: object) -> None:
+    from quickterm import ws_exec
+
     try:
+        if ws_exec.asleep(ws):
+            return  # keep the last answer rather than boot the distribution
         info = _read_remote(ws)
         with _remote_lock:
             _remote_cache[key] = (time.monotonic(), info)

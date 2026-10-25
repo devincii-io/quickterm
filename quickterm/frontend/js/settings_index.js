@@ -2,12 +2,13 @@
 // (in the sheet and in the palette) can find a setting and reveal it.
 // Pure: no DOM, testable on its own.
 
-// [id, label, note]. The ids are frozen; Terminals keeps the id "connections".
+// [id, label, note]. The ids are frozen. "agents" replaced the Terminals tab
+// ("connections") in 4.5; settingsTabId maps the old ids to it.
 export const SETTINGS_TABS = [
   ["general", "General", "Appearance and default terminal"],
   ["window", "Window", "Size and overlay"],
   ["shortcuts", "Shortcuts", "Global and in-app keys"],
-  ["connections", "Terminals", "Saved terminal configs"],
+  ["agents", "Agents", "Claude Code and Codex"],
   ["snippets", "Snippets", "Palette commands"],
   ["advanced", "Advanced", "Server, cleanup, updates"],
   ["about", "About", "Version and history"],
@@ -34,8 +35,9 @@ export const SETTINGS_INDEX = [
   { id: "overlay.monitor", tab: "window", label: "Overlay monitor", keywords: "screen display cursor primary", hint: "Where the overlay appears" },
   { id: "overlay.animate", tab: "window", label: "Overlay animation", keywords: "slide animate motion", hint: "Slide in and out" },
   { id: "summon_hotkey", tab: "shortcuts", label: "Summon shortcut", keywords: "hotkey global show hide summon key", hint: "Show or hide QuickTerm from anywhere" },
-  { id: "terminal_shortcuts", tab: "shortcuts", label: "Terminal shortcuts", keywords: "hotkey global keybinding profile key", hint: "A global key per saved terminal" },
   { id: "app_keys", tab: "shortcuts", label: "In-app keys", keywords: "keyboard alt keys reference help", hint: "The keys QuickTerm uses inside the window" },
+  { id: "agents.claude-code", tab: "agents", label: "Claude Code", keywords: "agent claude anthropic mode continue resume options executable", hint: "How the + menu starts Claude Code" },
+  { id: "agents.codex", tab: "agents", label: "Codex", keywords: "agent codex openai mode resume fork sandbox approval executable", hint: "How the + menu starts Codex" },
   { id: "host", tab: "advanced", label: "Loopback address", keywords: "server host bind ip localhost", hint: "Applies after restart" },
   { id: "port", tab: "advanced", label: "Local server port", keywords: "server port network", hint: "Applies after restart" },
   { id: "scrollback_bytes", tab: "advanced", label: "In-memory scrollback", keywords: "history buffer memory lines", hint: "Per live terminal" },
@@ -50,6 +52,13 @@ export const SETTINGS_INDEX = [
 ];
 
 const TAB_ORDER = SETTINGS_TABS.map(([id]) => id);
+
+// A tab id from before 4.5 (a stored tab, an old link): Terminals became
+// Agents, so neither lands on a blank tab.
+export function settingsTabId(id) {
+  if (id === "connections" || id === "terminals") return "agents";
+  return TAB_ORDER.includes(id) ? id : "general";
+}
 
 // Higher is better; 0 means no match. Whole-label and word-start matches beat
 // a hit somewhere in the keywords, and a subsequence ("ovh" for "overlay
@@ -77,20 +86,11 @@ export function matchScore(query, { label = "", keywords = "", hint = "" }) {
 }
 
 /**
- * Settings fields, terminals and snippets matching `query`, best first. A
- * terminal or snippet row carries `kind` and `name` so the sheet can select it
- * in its list.
+ * Settings fields and snippets matching `query`, best first. A snippet row
+ * carries `kind` and `name` so the sheet can select it in its list.
  */
 export function searchSettings(query, draft = {}) {
   const rows = SETTINGS_INDEX.map((entry) => ({ ...entry, kind: "setting" }));
-  for (const profile of draft.profiles || []) {
-    if (!profile?.name) continue;
-    rows.push({
-      id: `terminal:${profile.name}`, tab: "connections", kind: "terminal", name: profile.name,
-      label: `terminal: ${profile.name}`, keywords: `${profile.terminal_type || ""} ${profile.cmd || ""} ${profile.ssh_host || ""}`,
-      hint: profile.description || profile.terminal_type || "",
-    });
-  }
   for (const snippet of draft.snippets || []) {
     if (!snippet?.name) continue;
     rows.push({

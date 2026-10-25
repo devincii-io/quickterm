@@ -1,6 +1,11 @@
 // The workspace board without a DOM: which column each saved workspace sits
 // in, what its card says, and what the search keeps. panel_dashboard.js draws
 // it and patches it every refresh.
+//
+// The column is derived, never set (CONTRACTS 4.5 wave 2): GET /api/board
+// names each workspace's status and the reason for it. A workspace the
+// answer does not name (just created, or the board could not be read) is
+// Idle until the next poll says otherwise.
 
 import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
 import {
@@ -8,25 +13,31 @@ import {
 } from "./sidebar_model.js";
 
 export const BOARD_COLUMNS = Object.freeze([
-  Object.freeze({ id: "todo", label: "Todo" }),
-  Object.freeze({ id: "in-progress", label: "In progress" }),
-  Object.freeze({ id: "in-review", label: "In review" }),
-  Object.freeze({ id: "done", label: "Done" }),
+  Object.freeze({ id: "needs-you", label: "Needs you", meaning: "An agent asks, or a terminal rang" }),
+  Object.freeze({ id: "working", label: "Working", meaning: "An agent is busy" }),
+  Object.freeze({ id: "in-review", label: "In review", meaning: "The branch has an open pull request" }),
+  Object.freeze({ id: "changes", label: "Changes", meaning: "Uncommitted or unpushed work" }),
+  Object.freeze({ id: "done", label: "Done", meaning: "The pull request was merged" }),
+  Object.freeze({ id: "idle", label: "Idle", meaning: "Nothing running, nothing to ship" }),
 ]);
 export const BOARD_STATUSES = BOARD_COLUMNS.map((column) => column.id);
-export const DEFAULT_STATUS = "in-progress";
+export const DEFAULT_STATUS = "idle";
 
 const AGENT_GLYPHS = { claude: "✳", codex: "◎" };
 
-export function statusOf(name, status) {
-  const value = status?.[name];
+// `board` is the answer's `workspaces` object.
+export function statusOf(name, board) {
+  const value = board?.[name]?.status;
   return BOARD_STATUSES.includes(value) ? value : DEFAULT_STATUS;
 }
 
-// The column `delta` steps away, held at the board's edges.
-export function movedStatus(status, delta) {
-  const index = BOARD_STATUSES.indexOf(BOARD_STATUSES.includes(status) ? status : DEFAULT_STATUS);
-  return BOARD_STATUSES[Math.max(0, Math.min(BOARD_STATUSES.length - 1, index + delta))];
+export function reasonOf(name, board) {
+  const value = board?.[name]?.reason;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function columnLabel(status) {
+  return BOARD_COLUMNS.find((column) => column.id === status)?.label || "Idle";
 }
 
 // The repository a card names: the workspace folder. Nothing outside a
@@ -61,9 +72,10 @@ export function cardLines(sessions = [], attached = {}) {
     .sort((a, b) => byText(a.label, b.label) || byText(a.id, b.id));
 }
 
-// `workspaces`: [{name, path, git, host}]; `owners`: session id -> workspace name.
-// Scratch is disposable and never a card.
-export function boardCards(workspaces = [], { sessions = [], owners = {}, attached = {} } = {}) {
+// `workspaces`: [{name, path, git, host}]; `owners`: session id -> workspace
+// name; `board`: GET /api/board's `workspaces`. Scratch is disposable and
+// never a card.
+export function boardCards(workspaces = [], { sessions = [], owners = {}, attached = {}, board = {} } = {}) {
   const bySpace = new Map();
   for (const session of sessions || []) {
     const owner = owners?.[session?.id] ?? session?.workspace ?? null;
@@ -73,31 +85,41 @@ export function boardCards(workspaces = [], { sessions = [], owners = {}, attach
   }
   return (workspaces || [])
     .filter((entry) => entry?.name && !isScratchWorkspace(entry.name))
-    .map(({ name, path = null, git = null, host = null }) => ({
-      name,
-      path,
-      host: host || null,
-      repo: repoName(git, path),
-      branch: branchName(git),
-      worktree: git?.worktree ? (git.main_path ? `worktree of ${git.main_path}` : "a git worktree") : null,
-      lines: cardLines(bySpace.get(name), attached),
-    }))
+    .map(({ name, path = null, git = null, host = null }) => {
+      // The board's own git facts name a branch the folder scan may not
+      // have yet (a remote workspace before its first check).
+      const boardGit = board?.[name]?.git || null;
+      return {
+        name,
+        path,
+        host: host || null,
+        status: statusOf(name, board),
+        reason: reasonOf(name, board),
+        repo: repoName(git || boardGit, path),
+        branch: branchName(git) || branchName(boardGit),
+        worktree: git?.worktree ? (git.main_path ? `worktree of ${git.main_path}` : "a git worktree") : null,
+        lines: cardLines(bySpace.get(name), attached),
+      };
+    })
     .sort((a, b) => byText(a.name, b.name));
 }
 
-// Every word of the query must appear in the name, the repo or the branch.
+// Every word of the query must appear in the name, the repo, the branch or
+// the reason.
 export function matchesSearch(card, query) {
   const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
-  const haystack = [card?.name, card?.repo, card?.branch].filter(Boolean).join(" ").toLowerCase();
+  const haystack = [card?.name, card?.repo, card?.branch, card?.reason].filter(Boolean).join(" ").toLowerCase();
   return words.every((word) => haystack.includes(word));
 }
 
-export function boardColumns(cards = [], status = {}, query = "") {
+// The six columns in the contract's order, cards by name inside each, so a
+// card only moves when its status does.
+export function boardColumns(cards = [], query = "") {
   const shown = (cards || []).filter((card) => matchesSearch(card, query));
-  return BOARD_COLUMNS.map(({ id, label }) => {
-    const inColumn = shown.filter((card) => statusOf(card.name, status) === id);
-    return { id, label, cards: inColumn, count: inColumn.length };
+  return BOARD_COLUMNS.map(({ id, label, meaning }) => {
+    const inColumn = shown.filter((card) => (BOARD_STATUSES.includes(card.status) ? card.status : DEFAULT_STATUS) === id);
+    return { id, label, meaning, cards: inColumn, count: inColumn.length };
   });
 }
 

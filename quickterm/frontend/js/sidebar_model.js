@@ -3,11 +3,10 @@
 // and the per-machine storage behind the mode, width and folded groups.
 // launcher.js builds the DOM from it and re-exports its public names.
 
-import { agentModeOf, modeLabel } from "./agent_profile.js";
 import { DEFAULT_SHELL, availableShells } from "./shell_choice.js";
 import { formatBytes, formatUptime } from "./panel_shared.js";
 import { isScratchWorkspace, workspaceLabel } from "./boot_context.js";
-import { remoteCapable } from "./remote_workspace.js";
+import { locationLabel } from "./locations.js";
 
 export const SIDEBAR_MODES = ["full", "rail", "hidden"];
 export const SIDEBAR_MODE_KEY = "quickterm.sidebarMode";
@@ -510,38 +509,18 @@ export function folderName(path) {
 }
 
 
-export function shellLabel(profile) {
-  const target = profile.ssh_host
-    ? (profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host)
-    : "";
-  const mode = modeLabel(agentModeOf(profile));
-  const labels = {
-    "claude-code": `Claude Code · ${mode}`,
-    codex: `Codex · ${mode}`,
-    "powershell-core": "PowerShell 7",
-    "windows-powershell": "Windows PowerShell",
-    "command-prompt": "Command Prompt",
-    wsl: profile.wsl_distro ? `WSL · ${profile.wsl_distro}` : "WSL",
-    ssh: target ? `SSH · ${target}` : "SSH",
-    sftp: target ? `SFTP · ${target}` : "SFTP",
-    custom: "Custom command",
-  };
-  return labels[profile.terminal_type] || profile.cmd || "Terminal";
-}
-
-// The "+" menu (CONTRACTS 4.3), as rows the launcher turns into menu.js
+// The "+" menu (CONTRACTS 4.5), as rows the launcher turns into menu.js
 // items: every available shell with the configured one marked, then Claude
-// Code and Codex when installed, then the saved profiles (connections and
-// custom commands only, since 4.3), then Terminal settings. Separators sit
+// Code and Codex when installed, then "As administrator". Separators sit
 // between the parts; a part with nothing in it leaves no empty band.
-// A workspace on an SSH host (`host`) has no local shells: its first row is
-// the remote login shell, and only the profiles that make sense there follow.
+// A workspace in WSL or on an SSH host (`host`) has no local shells and no
+// administrator: its first row is the login shell there.
 export function newTerminalMenu({
-  inventory = null, profiles = [], shell = DEFAULT_SHELL, agents = [], host = null, admin = false,
+  inventory = null, shell = DEFAULT_SHELL, agents = [], host = null, admin = false,
 } = {}) {
   const current = shell ?? DEFAULT_SHELL;
   const rows = host
-    ? [{ key: "remote-shell", kind: "remote-shell", label: `Shell on ${host}`, isDefault: true }]
+    ? [{ key: "remote-shell", kind: "remote-shell", label: `Shell in ${locationLabel(host)}`, isDefault: true }]
     : availableShells(inventory, current).map((entry) => ({
       key: `shell:${entry.value}`,
       kind: "shell",
@@ -549,26 +528,13 @@ export function newTerminalMenu({
       label: entry.label,
       isDefault: entry.value === current,
     }));
-  const launchers = [
-    ...(agents || []).map((profile) => ({
-      key: `agent:${profile.name}`, kind: "agent", profile, label: profile.label || profile.name,
-    })),
-    ...(profiles || []).filter((profile) => !host || remoteCapable(profile)).map((profile) => ({
-      key: `profile:${profile.name}`,
-      kind: "profile",
-      profile,
-      label: profile.name,
-      // A description is why this profile exists; the type label is the
-      // fallback for profiles written before descriptions.
-      detail: (profile.description || "").trim() || shellLabel(profile),
-    })),
-  ];
+  const launchers = (agents || []).map((profile) => ({
+    key: `agent:${profile.name}`, kind: "agent", profile, label: profile.label || profile.name,
+  }));
   if (launchers.length) rows.push({ key: "separator:launchers", kind: "separator" }, ...launchers);
-  rows.push({ key: "separator:settings", kind: "separator" });
   // The sidebar's menu (`admin`) also starts the chosen row elevated; the
-  // admin instance itself and an SSH host cannot.
-  if (admin && !host) rows.push({ key: "admin", kind: "admin", label: "As administrator…" });
-  rows.push({ key: "settings", kind: "settings", label: "Terminal settings…" });
+  // admin instance itself, WSL and an SSH host cannot.
+  if (admin && !host) rows.push({ key: "separator:admin", kind: "separator" }, { key: "admin", kind: "admin", label: "As administrator…" });
   return rows;
 }
 
@@ -579,12 +545,12 @@ export function defaultShellRow(menu) {
     || (menu || []).find(shellLike) || null;
 }
 
-// The rows a new terminal can be started from (no separators, no settings).
-const LAUNCHABLE = new Set(["shell", "remote-shell", "agent", "profile"]);
+// The rows a new terminal can be started from (no separators, no admin).
+const LAUNCHABLE = new Set(["shell", "remote-shell", "agent"]);
 
 // What "+" and Alt+N start: the row picked last in the "+" menu, while the
-// menu still has it (a remote workspace has no local shells, a deleted
-// profile is gone), else the configured shell.
+// menu still has it (a WSL or SSH workspace has no local shells, a saved
+// terminal from before 4.5 is gone), else the configured shell.
 export function chosenRow(menu, key) {
   const picked = key ? (menu || []).find((row) => row.key === key && LAUNCHABLE.has(row.kind)) : null;
   return picked || defaultShellRow(menu);

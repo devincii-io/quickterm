@@ -15,13 +15,19 @@ Every failure becomes a `BrowseError` with a sentence a person can read.
 from __future__ import annotations
 
 import os
+import re
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 # A folder with 200k children would otherwise become a 20 MB JSON body that no
 # picker can render. Deep enough that no real project tree hits it.
 MAX_ENTRIES = 2000
+# \\wsl.localhost\<distro>\... and \\wsl$\<distro>\...; the name follows
+# shells._DISTRO.
+_WSL_SHARE = re.compile(r"^[\\/]{2}wsl(?:\.localhost|\$)[\\/]([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:[\\/]|$)", re.IGNORECASE)
+WSL_START_TIMEOUT_S = 20
 
 
 class BrowseError(Exception):
@@ -131,14 +137,54 @@ def roots() -> list[dict[str, str]]:
     return entries
 
 
+def wsl_share_distro(path: str | None) -> str | None:
+    """The distribution a ``\\\\wsl.localhost\\<d>\\...`` or ``\\\\wsl$\\<d>\\...``
+    path is in, else None."""
+    match = _WSL_SHARE.match(path.strip()) if path else None
+    return match.group(1) if match else None
+
+
+def _start_distro(distro: str) -> bool:
+    """Start a stopped WSL distribution (``wsl.exe -d <d> --exec true``).
+    Blocking, up to WSL_START_TIMEOUT_S. False when it did not start."""
+    from quickterm.shells import wsl_program
+
+    program = wsl_program()
+    if program is None:
+        return False
+    try:
+        done = subprocess.run(
+            [program, "-d", distro, "--exec", "true"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=WSL_START_TIMEOUT_S,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def list_dirs(path: str | None = None) -> dict[str, Any]:
     """One level of sub-directories of ``path`` (the home folder when absent).
 
     Raises ``BrowseError`` and nothing else. A ``.git`` child is reported as a
     flag on its parent row rather than as a row of its own: hidden entries are
     skipped, but "this folder is a repository" is the single most useful thing
-    to know while picking a project folder.
+    to know while picking a project folder. A WSL path whose distribution is
+    stopped starts it once and lists again.
     """
+    try:
+        return _list_dirs(path)
+    except BrowseError:
+        distro = wsl_share_distro(path)
+        if distro is None or not _start_distro(distro):
+            raise
+    return _list_dirs(path)
+
+
+def _list_dirs(path: str | None) -> dict[str, Any]:
     base = _resolve_dir(path) if path and path.strip() else _resolve_dir(Path.home())
     try:
         with os.scandir(base) as scan:

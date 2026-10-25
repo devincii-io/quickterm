@@ -402,24 +402,78 @@ def bash_prompt_command(current: str | None) -> str:
     return f"{own}; {GIT_BASH_PROMPT_COMMAND}"
 
 
+def check_cmd_command(command: str) -> None:
+    """ValueError when cmd.exe would read more into `command` than one plain
+    command line (the rule the agent wrap applies to its arguments)."""
+    if _CMD_UNSAFE.search(command):
+        raise ValueError("the command contains characters cmd.exe would reinterpret")
+
+
+def posix_then_shell(command: str, shell: str) -> str:
+    """POSIX text that runs `command` once and then becomes `shell` as a login
+    shell. `eval` reads the command as typed, so a trailing `&` or a comment
+    in it cannot swallow the part that keeps the terminal open."""
+    return f"eval {shlex.quote(command)}; exec {shell} -l"
+
+
+def wsl_login_shell() -> str:
+    """The distribution's login shell, which bash set from the user's entry."""
+    return '"${SHELL:-bash}"'
+
+
 def interactive(
     value: str, prog: str, cwd: str | None, integration: Integration | None = None,
+    command: str | None = None,
 ) -> tuple[str, list[str], str | None]:
     """The plain shell: command, arguments, process folder.
 
     With `integration`, PowerShell runs QuickTerm's integration script
-    (`integration_env` carries it) and stays interactive."""
+    (`integration_env` carries it) and stays interactive. `command` (one
+    line, see workspace.validate_command) runs once before the prompt.
+    ValueError when cmd.exe would re-parse it."""
     if value == "powershell":
+        if command is not None:
+            text = f"{PS_BOOT}\n{command}" if integration is not None else command
+            return prog, ["-NoLogo", "-NoExit", "-Command", text], cwd
         if integration is not None:
             return prog, ["-NoLogo", "-NoExit", "-Command", PS_BOOT], cwd
         return prog, ["-NoLogo"], cwd
     if value == "cmd":
+        if command is not None:
+            check_cmd_command(command)
+            # Verbatim after /k (conpty.command_line); cmd strips these quotes.
+            return prog, ["/k", f'"{command}"'], cwd
         return prog, [], cwd
     if is_wsl(value):
         # wsl.exe opens under /mnt/c otherwise; --cd also takes a Windows path.
         name = distro(value)
-        return prog, [*(["-d", name] if name else []), "--cd", cwd or "~"], None
+        head = [*(["-d", name] if name else []), "--cd", cwd or "~"]
+        if command is not None:
+            # --exec: no shell reads the line before bash does.
+            text = posix_then_shell(command, wsl_login_shell())
+            return prog, [*head, "--exec", "bash", "-lc", text], None
+        return prog, head, None
+    if command is not None:
+        shell = "bash" if value == "git-bash" else posix_word(prog)
+        return prog, ["-lc", posix_then_shell(command, shell)], cwd
     return prog, ["-l"], cwd
+
+
+def with_wslenv(env: dict[str, str], names: list[str] | tuple[str, ...]) -> dict[str, str]:
+    """`env` with `names` added to WSLENV, so wsl.exe hands them to Linux.
+    The WSLENV in `env` (else this process's) keeps its own entries."""
+    out = dict(env)
+    key = next((name for name in out if name.casefold() == "wslenv"), None)
+    current = out.pop(key) if key is not None else os.environ.get("WSLENV", "")
+    entries = [entry for entry in current.split(":") if entry]
+    have = {entry.split("/")[0].upper() for entry in entries}
+    for name in names:
+        if name.upper() not in have:
+            entries.append(name)
+            have.add(name.upper())
+    if entries:
+        out["WSLENV"] = ":".join(entries)
+    return out
 
 
 @dataclass(frozen=True)

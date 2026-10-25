@@ -430,7 +430,7 @@ body .session-where[hidden] { display: none; }
 .session-group:hover { border-color: var(--line-strong); }
 .session-group.active {
   border-color: var(--accent-border);
-  background: var(--surface);
+  background: var(--surface-active);
 }
 .session-group.unassigned,
 .session-group.flat {

@@ -122,20 +122,20 @@ function fakePane(overrides = {}) {
 }
 
 test("a Claude pane started as a new conversation restarts as one", async () => {
-  const profiles = [{ name: "Claude", terminal_type: "claude-code" }];
+  const profiles = [{ name: "claude-code", terminal_type: "claude-code" }];
   const { spawner, requests } = spawnerHarness(profiles);
   const pane = fakePane();
-  await spawner.spawnInto(pane, "Claude", null, { claudeMode: "new" });
+  await spawner.spawnInto(pane, "claude-code", null, { claudeMode: "new" });
   assert.deepEqual(pane.launchOptions, { agentMode: "new" });
   await spawner.restartSavedPane(pane);
   assert.equal(requests.at(-1).agent_mode, "new");
   assert.equal("claude_mode" in requests.at(-1), false);
-  assert.equal(requests.at(-1).profile, "Claude");
+  assert.equal(requests.at(-1).profile, "claude-code");
   assert.equal(requests.at(-1).cwd, "C:\\work");
 });
 
 test("a new terminal with no profile is the configured shell, whatever the pane held", async () => {
-  const profiles = [{ name: "Claude", terminal_type: "claude-code" }];
+  const profiles = [{ name: "claude-code", terminal_type: "claude-code" }];
   const { spawner, requests, state } = spawnerHarness(profiles);
   state.cfg.shell = "wsl:Ubuntu";
   const pane = fakePane({ profileName: "Claude", launchOptions: { agentMode: "new" } });
@@ -230,7 +230,7 @@ function withLayout(harness) {
 }
 
 test("Codex launches in its modes and resumes or forks a chosen session", async () => {
-  const codex = { name: "Codex", terminal_type: "codex" };
+  const codex = { name: "codex", terminal_type: "codex" };
   const { spawner, requests, pane } = withLayout(spawnerHarness([codex]));
   await spawner.runAgentMode(codex, "fork");
   assert.equal(requests.at(-1).agent_mode, "fork");
@@ -244,7 +244,7 @@ test("Codex launches in its modes and resumes or forks a chosen session", async 
 });
 
 test("Claude resumes a chosen session and never forks one", async () => {
-  const claude = { name: "Claude", terminal_type: "claude-code" };
+  const claude = { name: "claude-code", terminal_type: "claude-code" };
   const { spawner, requests } = withLayout(spawnerHarness([claude]));
   await spawner.resumeAgentSession(claude, SESSION, { fork: true });
   assert.deepEqual([requests.at(-1).agent_mode, requests.at(-1).agent_session], ["resume", SESSION]);
@@ -253,7 +253,7 @@ test("Claude resumes a chosen session and never forks one", async () => {
 });
 
 test("a resume starts in the folder its conversation was listed for", async () => {
-  const claude = { name: "Claude", terminal_type: "claude-code" };
+  const claude = { name: "claude-code", terminal_type: "claude-code" };
   const harness = withLayout(spawnerHarness([claude]));
   harness.state.scratchRoot = "C:\\scratch";
   // A named workspace: no folder from here, the backend resolves it by name.
@@ -276,7 +276,7 @@ test("a resume starts in the folder its conversation was listed for", async () =
 });
 
 test("the agent view splits beside the focused pane, and ordinary splits do not open it", async () => {
-  const codex = { name: "Codex", terminal_type: "codex", agent_mode: "agents" };
+  const codex = { name: "codex", terminal_type: "codex", agent_mode: "agents" };
   const harness = withLayout(spawnerHarness([codex]));
   await harness.spawner.splitAgentView(codex);
   assert.equal(harness.splits.length, 1);
@@ -287,23 +287,14 @@ test("the agent view splits beside the focused pane, and ordinary splits do not 
 });
 
 test("a dead Codex pane is recovered through its own continue", async () => {
-  const codex = { name: "Codex", terminal_type: "codex" };
+  const codex = { name: "codex", terminal_type: "codex" };
   const { spawner, requests } = spawnerHarness([codex]);
-  const pane = fakePane({ profileName: "Codex", cwd: "C:\\work" });
+  const pane = fakePane({ profileName: "codex", cwd: "C:\\work" });
   assert.equal(claudeProfileForPane([codex], pane), codex);
   await spawner.resumeClaudePane(pane);
   assert.equal(requests.at(-1).agent_mode, "continue");
   await spawner.resumeClaudePane(pane, "resume");
   assert.equal(requests.at(-1).agent_mode, "resume");
-});
-
-test("a restored pane node repeats its saved start command", async () => {
-  const profiles = [{ name: "Shell", terminal_type: "bash", cmd: "bash" }];
-  const { spawner, requests } = spawnerHarness(profiles);
-  const pane = fakePane({ profileName: "Shell", launchOptions: launchOptionsFromNode({ start_command: "claude --continue" }) });
-  // workspace_switch.js restores with spawnInto(pane, profile, cwd): no options.
-  await spawner.spawnInto(pane, pane.profileName, null);
-  assert.equal(requests.at(-1).start_command, "claude --continue");
 });
 
 test("a system terminal restarts from its launch spec and carries no profile options", async () => {

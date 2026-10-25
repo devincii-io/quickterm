@@ -9,19 +9,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quickterm import agents, launch
-from quickterm.config import Profile
+from quickterm.config import AgentProfile, AgentSettings
 from quickterm.server import create_app
 from tests.test_server import FakeConfig, FakeSessionManager
 
 CWD = os.path.join(os.sep, "work", "project")
 
 
-def claude(mode="new") -> Profile:
-    return Profile(name="claude-code", cmd="C:/bin/claude.exe", terminal_type="claude-code", agent_mode=mode)
+def claude(mode="new") -> AgentProfile:
+    return AgentProfile(name="claude-code", cmd="C:/bin/claude.exe", terminal_type="claude-code", agent_mode=mode)
 
 
-def codex(mode="new") -> Profile:
-    return Profile(name="codex", cmd="C:/bin/codex.exe", terminal_type="codex", agent_mode=mode)
+def codex(mode="new") -> AgentProfile:
+    return AgentProfile(name="codex", cmd="C:/bin/codex.exe", terminal_type="codex", agent_mode=mode)
 
 
 def test_the_prompt_is_the_last_positional_argument():
@@ -54,13 +54,12 @@ def test_the_agents_mode_takes_no_prompt():
 
 
 class Cfg:
-    def __init__(self) -> None:
-        self.profiles = [claude(), Profile(name="shell", cmd="cmd.exe", terminal_type="command-prompt")]
+    def __init__(self, cmd="C:/bin/claude.exe") -> None:
+        self.agents = {"claude-code": AgentSettings(cmd=cmd, agent_mode="new"), "codex": AgentSettings()}
         self.shell = "cmd"
 
 
 @pytest.mark.parametrize(("fields", "message"), [
-    ({"profile": "shell"}, "prompt requires a Claude Code or Codex profile"),
     ({}, "prompt requires a Claude Code or Codex profile"),
     ({"profile": "claude-code", "args": []}, "prompt takes no cmd or args"),
     ({"profile": "claude-code", "prompt": "-x"}, "must not start with -"),
@@ -74,13 +73,12 @@ def test_launch_refuses_a_prompt_where_it_does_not_belong(tmp_path, fields, mess
 
 def test_a_remote_launch_carries_a_multiline_prompt_on_one_line(monkeypatch):
     from quickterm import ssh_config
-    from tests.test_remote_workspace import SSH, box
+    from tests.test_remote_workspace import SSH
     from tests.test_remote_workspace import resolve as resolve_remote
 
-    # The stubs test_remote_workspace.py applies to all its tests: the ssh
-    # client and the saved profile, so the test needs no OpenSSH installed.
+    # The stub test_remote_workspace.py applies to all its tests, so the test
+    # needs no OpenSSH installed.
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: SSH)
-    monkeypatch.setattr("quickterm.ws_exec._saved_profiles", lambda: [box()])
 
     spec = resolve_remote(profile="claude-code", agent_mode="new",
                           prompt="The hook failed.\r\n\nlint: x.py:1\nFix it.")
@@ -88,26 +86,19 @@ def test_a_remote_launch_carries_a_multiline_prompt_on_one_line(monkeypatch):
     assert "\n" not in spec.args[-1]
 
 
-class CmdCfg(Cfg):
-    def __init__(self, cmd="C:/bin/claude.exe") -> None:
-        super().__init__()
-        self.profiles = [Profile(name="claude-code", cmd=cmd, terminal_type="claude-code", agent_mode="new")]
-        self.shell = "cmd"
-
-
 @pytest.mark.skipif(os.name != "nt", reason="POSIX always launches the login shell, never cmd.exe")
 def test_cmd_takes_at_most_7000_prompt_characters(tmp_path):
     folder = str(tmp_path)
-    ok = launch.resolve(CmdCfg(), profile="claude-code", request_cwd=folder, prompt="x" * 7000)
+    ok = launch.resolve(Cfg(), profile="claude-code", request_cwd=folder, prompt="x" * 7000)
     assert ok.args[-1] == "x" * 7000
     with pytest.raises(launch.LaunchError, match="too long for cmd.exe: at most 7000"):
-        launch.resolve(CmdCfg(), profile="claude-code", request_cwd=folder, prompt="x" * 7001)
+        launch.resolve(Cfg(), profile="claude-code", request_cwd=folder, prompt="x" * 7001)
 
 
 def test_a_batch_agent_takes_at_most_7000_prompt_characters_under_any_shell(tmp_path):
     shim = tmp_path / "claude.cmd"
     shim.write_text("@echo off\n", encoding="utf-8")
-    cfg = CmdCfg(cmd=str(shim))
+    cfg = Cfg(cmd=str(shim))
     cfg.shell = "powershell"
     with pytest.raises(launch.LaunchError, match="too long for cmd.exe"):
         launch.resolve(cfg, profile="claude-code", request_cwd=str(tmp_path), prompt="y" * 7001)

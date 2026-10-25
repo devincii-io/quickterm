@@ -1,16 +1,17 @@
-"""Run a program in a workspace's folder, on this computer or on its SSH host.
+"""Run a program in a workspace's folder: on this computer, in WSL, or over SSH.
 
 The one way backend code runs something like `git status` for a workspace, so
-the same caller works for a local folder and for a folder on the host named
-by `Workspace.host`. No local shell: `argv` is passed as a list. On a host the
-remote command is `cd <folder> && <argv>`, every word POSIX-quoted, run by
-OpenSSH with `-o BatchMode=yes` so a password prompt can never hang a request.
+the same caller works wherever `Workspace.host` puts the folder. No local
+shell: `argv` is passed as a list. In WSL it is
+`wsl.exe -d <distro> --cd <folder> --exec ...`, which hands Linux the words as
+they are. Over SSH the remote command is `cd <folder> && <argv>`, every word
+POSIX-quoted, run by OpenSSH with `-o BatchMode=yes` so a password prompt can
+never hang a request.
 """
 
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import re
 import shlex
@@ -21,13 +22,20 @@ from typing import Any
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-NEEDS_OPENSSH = "remote workspaces need an OpenSSH profile"
+OPENSSH_MISSING = (
+    "OpenSSH client not found. Install it under Settings > Apps > Optional features > OpenSSH Client."
+)
+WSL_MISSING = "WSL is not installed"
 # A folder check and `exists` answer from memory for this long.
 EXISTS_TTL_S = 30.0
+# wsl.exe --cd on a folder that is not there says so on stderr and runs the
+# program in / anyway; this refuses to go on there. The words after it are
+# only ever "$@", never read by the shell.
+_WSL_GUARD = 'if [ "$(pwd -P)" = / ]; then printf "%s is not a folder\\n" "$0" >&2; exit 1; fi; exec "$@"'
 
 
 class RemoteUnavailable(FileNotFoundError):
-    """The workspace's host cannot be reached through a usable SSH profile."""
+    """The workspace's location cannot be reached from here (no ssh, no WSL)."""
 
 
 # --- quoting ----------------------------------------------------------------
@@ -57,60 +65,39 @@ def remote_command(folder: str | None, argv: list[str]) -> str:
     return f"cd {folder_word(folder)} && {words}" if folder else words
 
 
-# --- the SSH profile behind a host ---------------------------------------------
-
-_config_cache: dict[str, Any] = {"key": None, "profiles": []}
-_config_lock = threading.Lock()
+# --- the programs that reach a location ----------------------------------------
 
 
-def _saved_profiles() -> list[Any]:
-    """The profiles in config.json, read without migrating or writing it.
-
-    The running server holds the config in memory, but this module is called
-    from places that have no handle on it; the file is the same truth, read
-    again only when it changed.
-    """
-    config = importlib.import_module("quickterm.config")
-    path = config.config_dir() / "config.json"
-    try:
-        stat = path.stat()
-    except OSError:
-        return []
-    key = (stat.st_mtime_ns, stat.st_size)
-    with _config_lock:
-        if _config_cache["key"] == key:
-            return list(_config_cache["profiles"])
-    try:
-        cfg = config.config_from_dict(json.loads(config.read_text(path)))
-        profiles = list(cfg.profiles)
-    except (OSError, ValueError, TypeError, AttributeError):
-        profiles = []
-    with _config_lock:
-        _config_cache.update(key=key, profiles=profiles)
-    return profiles
+def ssh_program() -> str:
+    """OpenSSH's ssh. RemoteUnavailable when it is not installed."""
+    # Through sys.modules so tests can stub the client lookup.
+    found = importlib.import_module("quickterm.ssh_config").openssh_path("ssh")
+    if found is None:
+        raise RemoteUnavailable(OPENSSH_MISSING)
+    return str(found)
 
 
-def find_profile(host: str, profiles: list[Any] | None = None) -> Any:
-    """The OpenSSH profile named `host`. RemoteUnavailable with a sentence
-    for the user when there is none, or it uses PuTTY."""
-    listed = _saved_profiles() if profiles is None else profiles
-    profile = next((item for item in listed if getattr(item, "name", None) == host), None)
-    if profile is None or getattr(profile, "terminal_type", None) != "ssh":
-        raise RemoteUnavailable(f'no SSH profile named "{host}"')
-    if getattr(profile, "ssh_client", None) != "openssh":
-        raise RemoteUnavailable(NEEDS_OPENSSH)
-    return profile
+def wsl_program() -> str:
+    found = importlib.import_module("quickterm.shells").wsl_program()
+    if found is None:
+        raise RemoteUnavailable(WSL_MISSING)
+    return str(found)
 
 
-def ssh_argv(profile: Any, options: list[str], command: str | None = None) -> list[str]:
-    """The full OpenSSH argv for a profile: program, `options`, the profile's
-    port, key, ProxyJump and own arguments, the target, then `command`."""
-    launch = importlib.import_module("quickterm.launch")
-    try:
-        program, args = launch.openssh_args(profile, options)
-    except ValueError as exc:
-        raise RemoteUnavailable(str(exc)) from exc
-    return [program, *args, *([command] if command is not None else [])]
+def ssh_argv(destination: str, options: list[str], command: str | None = None) -> list[str]:
+    """ssh, `options`, the destination (checked by workspace.normalize_host,
+    so it cannot pass as an option), then `command`."""
+    return [ssh_program(), *options, destination, *([command] if command is not None else [])]
+
+
+def wsl_argv(distro: str, folder: str | None, argv: list[str]) -> list[str]:
+    """`argv` in `folder` (`~` without one) of a WSL distribution. --cd
+    expands `~` itself; nothing reads the words of `argv` again."""
+    where = folder or "~"
+    head = [wsl_program(), "-d", distro, "--cd", where, "--exec"]
+    if where == "/":
+        return [*head, *argv]
+    return [*head, "sh", "-c", _WSL_GUARD, where, *argv]
 
 
 def _host(ws: Any) -> str | None:
@@ -118,27 +105,84 @@ def _host(ws: Any) -> str | None:
     return host if isinstance(host, str) and host.strip() else None
 
 
+def _distro(host: str) -> str | None:
+    return importlib.import_module("quickterm.workspace").wsl_distro(host)
+
+
 def _folder(ws: Any) -> str | None:
     path = getattr(ws, "path", None)
     return path if isinstance(path, str) and path.strip() else None
 
 
+# --- sleeping WSL distributions -------------------------------------------------
+
+RUNNING_TTL_S = 15.0
+_running: tuple[float, frozenset[str]] | None = None
+_running_lock = threading.Lock()
+
+
+def _running_distros() -> frozenset[str]:
+    """The running WSL distributions, cached briefly. Listing them starts none."""
+    global _running
+    with _running_lock:
+        if _running is not None and time.monotonic() - _running[0] < RUNNING_TTL_S:
+            return _running[1]
+    names: frozenset[str] = frozenset()
+    try:
+        result = subprocess.run(
+            [wsl_program(), "--list", "--running", "--quiet"],
+            capture_output=True, timeout=3, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        # With none running wsl.exe exits non-zero and prints a sentence.
+        if result.returncode == 0:
+            raw = result.stdout or b""
+            text = raw.decode("utf-16-le" if b"\x00" in raw else "utf-8", errors="replace")
+            names = frozenset(line.strip() for line in text.splitlines() if line.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    with _running_lock:
+        _running = (time.monotonic(), names)
+    return names
+
+
+def asleep(ws: Any) -> bool:
+    """True for a workspace in a WSL distribution that is not running.
+
+    Background checks (folder, git, the board) skip such a workspace: any
+    wsl.exe call into a distribution boots it and keeps its VM in memory.
+    Blocking (wsl.exe --list), so only background threads call it."""
+    host = _host(ws)
+    distro = _distro(host) if host else None
+    return distro is not None and distro not in _running_distros()
+
+
 def _batch_options(timeout: float) -> list[str]:
     seconds = max(1, min(int(timeout), 15))
-    # No forwardings: a background call must not fight a terminal of the same
-    # profile over a port the profile forwards.
+    # No forwardings: a background call must not fight a terminal to the same
+    # host over a port its ssh_config forwards.
     return ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={seconds}", "-o", "ClearAllForwardings=yes", "-T"]
 
 
 def remote_argv(ws: Any, argv: list[str], *, timeout: float = 10.0) -> list[str]:
+    """The local argv that runs `argv` in the folder of a WSL or SSH workspace."""
     host = _host(ws)
     if host is None:
-        raise ValueError("not a remote workspace")
-    profile = find_profile(host)
-    return ssh_argv(profile, _batch_options(timeout), remote_command(_folder(ws), argv))
+        raise ValueError("not a WSL or SSH workspace")
+    distro = _distro(host)
+    if distro is not None:
+        return wsl_argv(distro, _folder(ws), argv)
+    return ssh_argv(host, _batch_options(timeout), remote_command(_folder(ws), argv))
 
 
-def _run(argv: list[str], timeout: float, input: str | None) -> subprocess.CompletedProcess[str]:
+def _wsl_env() -> dict[str, str]:
+    # wsl.exe writes its own messages in UTF-16 unless told otherwise.
+    return {**os.environ, "WSL_UTF8": "1"}
+
+
+def _run(
+    argv: list[str], timeout: float, input: str | None, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         input=input,
@@ -149,6 +193,7 @@ def _run(argv: list[str], timeout: float, input: str | None) -> subprocess.Compl
         errors="replace",
         timeout=timeout,
         creationflags=_NO_WINDOW,
+        env=env,
     )
 
 
@@ -169,15 +214,20 @@ GIT_ENV: dict[str, str | None] = {
 def _with_env(argv: list[str], env: dict[str, str | None]) -> list[str]:
     """`argv` behind POSIX `env`: `-u NAME` for a None value, NAME=value else.
 
-    ssh carries no environment of its own (SendEnv needs the server's
-    consent), so on a host the variables travel as words of the command.
+    The options come first: env reads everything after the first assignment
+    as the command. Neither ssh nor wsl.exe carries this process's
+    environment, so the variables travel as words of the command.
     """
-    prefix = ["env"]
+    unset: list[str] = []
+    assign: list[str] = []
     for name, value in env.items():
         if not _ENV_NAME.fullmatch(name):
             raise ValueError(f"not an environment variable name: {name!r}")
-        prefix += ["-u", name] if value is None else [f"{name}={value}"]
-    return [*prefix, *argv]
+        if value is None:
+            unset += ["-u", name]
+        else:
+            assign.append(f"{name}={value}")
+    return ["env", *unset, *assign, *argv]
 
 
 def _local_env(env: dict[str, str | None]) -> dict[str, str]:
@@ -198,17 +248,19 @@ def run(
     """Run `argv` in the workspace folder and return the finished process.
 
     `env` sets (a string) or removes (None) variables for this one program,
-    on this computer and on a host alike. Never put a secret in it: on a host
-    the values are part of the remote command line.
+    wherever it runs. Never put a secret in it: in WSL and over SSH the
+    values are part of the command line.
 
     Raises FileNotFoundError when the program or the local folder is missing,
-    or the host has no usable OpenSSH profile (RemoteUnavailable), and
-    subprocess.TimeoutExpired after `timeout` seconds. On a host, a missing
-    folder is a non-zero exit with the remote shell's message.
+    or there is no ssh or WSL to reach the location (RemoteUnavailable), and
+    subprocess.TimeoutExpired after `timeout` seconds. In WSL and over SSH a
+    missing folder is a non-zero exit with a message on stderr.
     """
-    if _host(ws) is not None:
-        remote = _with_env(argv, env) if env else argv
-        return _run(remote_argv(ws, remote, timeout=timeout), timeout, input)
+    host = _host(ws)
+    if host is not None:
+        words = _with_env(argv, env) if env else argv
+        local_env = _wsl_env() if _distro(host) is not None else None
+        return _run(remote_argv(ws, words, timeout=timeout), timeout, input, local_env)
     folder = _folder(ws)
     if folder is None or not os.path.isdir(folder):
         raise FileNotFoundError(f"workspace folder not found: {folder}")
@@ -231,46 +283,53 @@ def run(
 
 _exists_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 _checking: set[tuple[str, str]] = set()
+_lock = threading.Lock()
 
 
-def _ssh_message(result: subprocess.CompletedProcess[str]) -> str:
+def _message(result: subprocess.CompletedProcess[str]) -> str:
     lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
     return " ".join(lines[-3:])[:500]
 
 
-def check_folder(
-    host: str, path: str, *, profiles: list[Any] | None = None, timeout: float = 10.0
-) -> tuple[bool, str]:
-    """`ssh -o BatchMode=yes <profile args> <host> test -d <path>`.
+def check_folder(host: str, path: str, *, timeout: float = 10.0) -> tuple[bool, str]:
+    """Is `path` a folder at the location `host` (WSL or SSH)?
 
-    Returns (found, what ssh said). Blocking. A profile that is missing or
-    uses PuTTY raises RemoteUnavailable.
+    Over SSH `ssh -o BatchMode=yes <destination> test -d <path>`; in WSL
+    `wsl.exe -d <distro> --cd <path>` and the guard. Returns (found, what was
+    said). Blocking. RemoteUnavailable when ssh or WSL is not installed.
     """
-    profile = find_profile(host, profiles)
-    argv = ssh_argv(profile, _batch_options(timeout), f"test -d {folder_word(path)}")
+    distro = _distro(host)
+    if distro is not None:
+        argv = wsl_argv(distro, path, ["true"])
+        where, env = f"in WSL: {distro}", _wsl_env()
+        program = "WSL"
+    else:
+        argv = ssh_argv(host, _batch_options(timeout), f"test -d {folder_word(path)}")
+        where, env = f"on {host}", None
+        program = f"ssh to {host}"
     try:
-        result = _run(argv, timeout + 5, None)
+        result = _run(argv, timeout + 5, None, env)
     except subprocess.TimeoutExpired:
-        return False, f"ssh to {host} did not answer within {int(timeout)} s"
+        return False, f"{program} did not answer within {int(timeout)} s"
     except OSError as exc:
         raise RemoteUnavailable(str(exc)) from exc
     if result.returncode == 0:
         _exists_cache[(host, path)] = (time.monotonic(), True)
         return True, ""
-    message = _ssh_message(result)
+    message = _message(result)
     if result.returncode == 1:
-        # `test -d` said no (stderr may only hold the host's login noise);
-        # ssh itself fails with 255.
+        # `test -d` or the WSL guard said no (stderr may only hold login
+        # noise); ssh itself fails with 255, wsl.exe with its own codes.
         _exists_cache[(host, path)] = (time.monotonic(), False)
-        return False, f"{path} is not a folder on {host}"
-    return False, message or f"ssh exited with {result.returncode}"
+        return False, f"{path} is not a folder {where}"
+    return False, message or f"{program} exited with {result.returncode}"
 
 
 def cached_exists(ws: Any) -> bool:
     """`exists` for a request handler: what the last check found, never a
-    wait for ssh. Unknown counts as present (a password-only host never
-    answers a background check), and a stale entry is checked again in the
-    background."""
+    wait for ssh or WSL. Unknown counts as present (a password-only host
+    never answers a background check), and a stale entry is checked again in
+    the background."""
     host, folder = _host(ws), _folder(ws)
     if host is None:
         return exists(ws)
@@ -279,15 +338,16 @@ def cached_exists(ws: Any) -> bool:
     key = (host, folder)
     cached = _exists_cache.get(key)
     if cached is None or time.monotonic() - cached[0] >= EXISTS_TTL_S:
-        with _config_lock:
+        with _lock:
             start = key not in _checking
             _checking.add(key)
         if start:
             def check() -> None:
                 try:
-                    exists(ws)
+                    if not asleep(ws):
+                        exists(ws)
                 finally:
-                    with _config_lock:
+                    with _lock:
                         _checking.discard(key)
 
             threading.Thread(target=check, name="remote-exists", daemon=True).start()
@@ -308,8 +368,8 @@ def exists(ws: Any) -> bool:
         check_folder(host, folder, timeout=5.0)
     except FileNotFoundError:
         return False
-    # Only a definite answer was cached; a host ssh could not reach (a
-    # password, the network) does not make the folder missing.
+    # Only a definite answer was cached; a location that could not be reached
+    # (a password, the network) does not make the folder missing.
     cached = _exists_cache.get((host, folder))
     if cached is None or time.monotonic() - cached[0] >= EXISTS_TTL_S:
         _exists_cache[(host, folder)] = (time.monotonic(), True)

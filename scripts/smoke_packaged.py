@@ -199,25 +199,23 @@ def smoke(executable: Path, port: int) -> None:
             if open_status != 400:
                 raise RuntimeError(f"packaged opener route returned {open_status}, expected 400")
             before_status, before_config = _request(base, "/api/config/full", token=token)
+            font_size = 16 if isinstance(before_config, dict) and before_config.get("font_size") == 15 else 15
             config_status, _ = _request(
-                base, "/api/config", token=token, method="PUT", payload={"profiles": [{
-                    "name": "Missing desktop viewer", "cmd": str(Path(isolated) / "missing.exe"),
-                    "terminal_type": "vnc", "connection": {"host": "localhost"},
-                }]},
+                base, "/api/config", token=token, method="PUT", payload={"font_size": font_size},
             )
             if config_status != 204:
-                raise RuntimeError(f"packaged connection config returned {config_status}")
-            connection_status, _ = _request(
-                base, "/api/connections/Missing%20desktop%20viewer/open", token=token, method="POST",
+                raise RuntimeError(f"packaged config save returned {config_status}")
+            unknown_status, _ = _request(
+                base, "/api/sessions", token=token, method="POST", payload={"profile": "Saved terminal"},
             )
-            if connection_status != 400:
-                raise RuntimeError(f"packaged connection route returned {connection_status}, expected 400")
-            desktop_pty_status, _ = _request(
-                base, "/api/sessions", token=token, method="POST",
-                payload={"profile": "Missing desktop viewer"},
-            )
-            if desktop_pty_status != 400:
-                raise RuntimeError("packaged desktop connection must not create a PTY")
+            if unknown_status != 404:
+                raise RuntimeError(f"packaged unknown profile returned {unknown_status}, expected 404")
+            locations_status, locations = _request(base, "/api/locations", token=token)
+            if locations_status != 200 or not isinstance(locations, dict) or not locations.get("locations"):
+                raise RuntimeError(
+                    f"packaged locations route returned {locations_status} "
+                    "(quickterm.ssh_config missing from hiddenimports?)"
+                )
             layout = {"type": "pane", "title": "Package workspace"}
             workspace_status, _ = _request(
                 base, "/api/workspaces/Package", token=token, method="PUT",

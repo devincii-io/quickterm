@@ -1,5 +1,6 @@
-"""Host-facing routes: health, the PTY host, profiles, shell inventory,
-elevation, updates, opening targets, reading a file and browsing folders."""
+"""Host-facing routes: health, the PTY host, shell inventory, workspace
+locations, elevation, updates, opening targets, reading a file and browsing
+folders."""
 
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
-from quickterm import browse, putty_tools, shells
-from quickterm.api.common import asdict, checked_dir, read_json, resolve_request
+from quickterm import browse, shells
+from quickterm.api.common import checked_dir, read_json, resolve_request
 
 if TYPE_CHECKING:
     from quickterm.api.context import ApiContext
@@ -105,12 +106,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             )
         return JSONResponse({"retiring": True}, status_code=202)
 
-    @app.get("/api/profiles")
-    def list_profiles() -> list[dict]:
-        return [asdict(p) for p in cfg.profiles]
-
-    @app.get("/api/system/terminals")
-    async def get_system_terminals(fresh: bool = False) -> dict:
+    async def terminal_inventory(fresh: bool = False) -> dict:
         # Probing every shell path and asking wsl.exe for its distributions
         # takes a third of a second, and installed shells do not change between
         # one sidebar rebuild and the next. Off the loop, and remembered for a
@@ -122,6 +118,20 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         value = await asyncio.to_thread(_terminal_inventory)
         inventory_cache.update(value=value, at=time.monotonic())
         return value
+
+    @app.get("/api/system/terminals")
+    async def get_system_terminals(fresh: bool = False) -> dict:
+        return await terminal_inventory(fresh)
+
+    @app.get("/api/locations")
+    async def get_locations() -> dict:
+        """Where a workspace can live: this PC, each installed WSL
+        distribution, each concrete Host alias in ~/.ssh/config. Starts no
+        distribution and opens no connection (`wsl --list` and a file read)."""
+        inventory = await terminal_inventory()
+        ssh_config = importlib.import_module("quickterm.ssh_config")  # stubbable in tests
+        hosts = await asyncio.to_thread(ssh_config.hosts)
+        return {"locations": _locations(inventory.get("wsl_distributions") or [], hosts)}
 
     @app.get("/api/system/agents")
     async def get_agent_catalog(fresh: bool = False) -> dict:
@@ -202,13 +212,13 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(400, "request body must be a JSON object")
         # Resolved exactly like an ordinary terminal, so an administrator
         # terminal opened from a workspace starts in that workspace's folder.
-        # The PuTTY tools stay off PATH here: the elevated instance resolves
-        # the spec once more and appends them itself.
-        resolved = await resolve_request(ctx, body, append_tools=False)
-        if resolved.remote is not None:
-            # Elevation would only make the local ssh client run as
-            # administrator; the shell on the host is the same either way.
-            raise HTTPException(400, "administrator terminals are not available on a remote workspace")
+        resolved = await resolve_request(ctx, body)
+        if resolved.remote is not None or resolved.wsl is not None:
+            # Elevation would only make the local ssh or wsl.exe run as
+            # administrator; the shell there is the same either way.
+            raise HTTPException(
+                400, "administrator terminals are not available in a WSL or SSH workspace"
+            )
         cmd, args, cwd = resolved.cmd, resolved.args, resolved.cwd
         if resolved.wrap is not None:
             # An agent runs inside the shell here too; the elevated instance
@@ -408,27 +418,35 @@ def _codex_entry() -> dict:
     return {"id": "codex", "label": "Codex CLI", "executable": executable, "available": executable is not None}
 
 
-def _ssh_entries(putty_ssh: str | None, putty_sftp: str | None, *, windows: bool) -> list[dict]:
-    """ssh and sftp with both clients' paths.
-
-    `available` is true when either client exists. On Windows `executable`
-    prefers the bundled PuTTY client, as before OpenSSH was an option. POSIX
-    has no PuTTY build, so there it is OpenSSH.
-    """
-    ssh_config = importlib.import_module("quickterm.ssh_config")
-    entries = []
-    for type_id, label, putty in (("ssh", "SSH", putty_ssh), ("sftp", "SFTP", putty_sftp)):
-        openssh = _optional_str(ssh_config.openssh_path(type_id))
-        executable = (putty or openssh) if windows else openssh
-        entries.append({
-            "id": type_id,
-            "label": label,
-            "executable": executable,
-            "available": executable is not None,
-            "openssh": openssh,
-            "putty": putty,
+def _locations(distributions: list[str], hosts: list[dict]) -> list[dict]:
+    """The `GET /api/locations` entries, in the contract's order."""
+    workspace = importlib.import_module("quickterm.workspace")
+    out: list[dict] = [
+        {"id": None, "kind": "local", "label": "This PC", "detail": None, "browse": None},
+    ]
+    for name in distributions:
+        location = f"wsl:{name}"
+        try:
+            workspace.normalize_host(location)
+        except ValueError:
+            continue
+        out.append({
+            "id": location, "kind": "wsl", "label": f"WSL: {name}", "detail": None,
+            "browse": f"\\\\wsl.localhost\\{name}\\home",
         })
-    return entries
+    for entry in hosts:
+        alias = entry.get("alias")
+        try:
+            if not isinstance(alias, str) or workspace.location_kind(
+                workspace.normalize_host(alias)
+            ) != "ssh":
+                continue
+        except ValueError:
+            continue
+        hostname, user = entry.get("hostname"), entry.get("user")
+        detail = (f"{user}@{hostname}" if user else hostname) if hostname else None
+        out.append({"id": alias, "kind": "ssh", "label": alias, "detail": detail, "browse": None})
+    return out
 
 
 def _terminal_inventory() -> dict:
@@ -512,12 +530,9 @@ def _terminal_inventory() -> dict:
         for type_id, label, executable in shells_found
     ]
     types.insert(1, _codex_entry())
-    types += _ssh_entries(
-        _optional_str(putty_tools.plink_path()), _optional_str(putty_tools.psftp_path()), windows=True
-    )
     git_bash = next(exe for type_id, _label, exe in shells_found if type_id == "git-bash")
     return {
-        "types": types + [{"id": "custom", "label": "Custom command", "executable": None, "available": True}],
+        "types": types,
         "wsl_distributions": distributions,
         "installs": [] if pwsh else [_powershell_install()],
         "shells": shells.entries(
@@ -584,8 +599,6 @@ def _posix_inventory() -> dict:
             "executable": exe or shell,
             "available": exe is not None,
         })
-    types += _ssh_entries(None, None, windows=False)
-    types.append({"id": "custom", "label": "Custom command", "executable": None, "available": True})
     return {
         "types": types, "wsl_distributions": [], "installs": [],
         "shells": shells.entries(windows=False),

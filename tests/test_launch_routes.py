@@ -1,4 +1,4 @@
-"""POST /api/launches with a profile or a workspace, and POST /api/sessions/{id}/input."""
+"""POST /api/launches with an agent or a workspace, and POST /api/sessions/{id}/input."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quickterm.server import create_app
-from tests.test_server import FakeConfig, FakeProfile, FakeSessionManager
+from tests.test_server import FakeConfig, FakeSessionManager
 
 BASE = "http://127.0.0.1:8620"
 
@@ -46,7 +46,7 @@ def workspaces(monkeypatch):
 
 @pytest.fixture
 def client(manager, workspaces):
-    cfg = FakeConfig(profiles=[FakeProfile(name="pwsh", cmd="pwsh.exe")])
+    cfg = FakeConfig()
     with TestClient(create_app(manager, cfg), base_url=BASE) as c:
         yield c
 
@@ -61,15 +61,15 @@ def _claim(client):
 def test_a_launch_carries_only_the_fields_it_named(client, tmp_path):
     queued = client.post(
         "/api/launches",
-        json={"profile": "pwsh", "workspace": " dev ", "cwd": str(tmp_path), "extra": 1},
+        json={"profile": "codex", "workspace": " dev ", "cwd": str(tmp_path), "extra": 1},
     )
     assert queued.status_code == 200
-    item = {"profile": "pwsh", "workspace": "dev", "cwd": str(tmp_path)}
+    item = {"profile": "codex", "workspace": "dev", "cwd": str(tmp_path)}
     assert queued.json() == item
     assert _claim(client).json() == item
 
 
-@pytest.mark.parametrize("body", [{"profile": "pwsh"}, {"workspace": "dev"}])
+@pytest.mark.parametrize("body", [{"profile": "codex"}, {"workspace": "dev"}])
 def test_a_profile_or_a_workspace_alone_is_a_launch(client, body):
     assert client.post("/api/launches", json=body).status_code == 200
     assert _claim(client).json() == body
@@ -82,7 +82,7 @@ def test_an_unknown_profile_or_workspace_is_refused_and_nothing_is_queued(client
     missing = client.post("/api/launches", json={"workspace": "gone"})
     assert missing.status_code == 404
     assert missing.json()["detail"] == "no such workspace: gone"
-    gone = client.post("/api/launches", json={"profile": "pwsh", "cwd": str(tmp_path / "x")})
+    gone = client.post("/api/launches", json={"profile": "codex", "cwd": str(tmp_path / "x")})
     assert gone.status_code == 400
     assert _claim(client).status_code == 204
 

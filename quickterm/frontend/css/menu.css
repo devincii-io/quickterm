@@ -44,7 +44,7 @@
   border-radius: 4px;
   cursor: pointer;
 }
-.qt-menu-item.active { background: var(--surface-soft); }
+.qt-menu-item.active { background: var(--surface-active); }
 .qt-menu-item.disabled { color: var(--muted); cursor: default; }
 .qt-menu-item.danger { color: var(--danger); }
 .qt-menu-item.danger.active { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }

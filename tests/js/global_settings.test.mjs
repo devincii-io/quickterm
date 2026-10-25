@@ -4,15 +4,18 @@ import { settingsPatch, settingsProblems, watchGlobalSettings } from "../../quic
 import { createConfigSync } from "../../quickterm/frontend/js/config_sync.js";
 
 test("a settings save preserves another window's unrelated changes", () => {
-  const baseline = { theme: "graphite", font_size: 14, profiles: [] };
+  const baseline = { theme: "graphite", font_size: 14 };
   const draft = { ...baseline, font_size: 16 };
   assert.deepEqual(settingsPatch(draft, baseline, { ...baseline, theme: "light" }), { font_size: 16 });
   assert.throws(() => settingsPatch(draft, baseline, { ...baseline, font_size: 18 }), /changed in another window/);
   assert.deepEqual(settingsPatch(draft, baseline, { ...baseline, font_size: 16 }), { font_size: 16 });
 });
 
-test("connection edits cannot silently erase another window's profiles", () => {
-  assert.throws(() => settingsPatch({ profiles: [{ name: "SSH" }] }, { profiles: [] }, { profiles: [{ name: "Docker" }] }), /Terminals changed in another window/);
+test("agent edits cannot silently erase another window's", () => {
+  assert.throws(
+    () => settingsPatch({ agents: { codex: { cmd: "a" } } }, { agents: {} }, { agents: { codex: { cmd: "b" } } }),
+    /Agents changed in another window/,
+  );
 });
 
 test("window and overlay are sent whole, as top-level keys", () => {
@@ -40,36 +43,29 @@ test("window and overlay are sent whole, as top-level keys", () => {
 });
 
 test("the footer refuses a draft the backend would refuse, naming the first problem", () => {
-  const ok = { profiles: [{ name: "Dev", env: {} }], snippets: [{ name: "s", text: "ls\r" }] };
+  const ok = { agents: { codex: { env: { A: "1" } } }, snippets: [{ name: "s", text: "ls\r" }] };
   assert.equal(settingsProblems(ok), "");
-  assert.equal(settingsProblems({ profiles: [{ name: " " }] }), "Every terminal needs a name.");
-  assert.equal(settingsProblems({ profiles: [{ name: "a" }, { name: "A" }] }), "Terminal names must be unique.");
-  assert.match(settingsProblems({ profiles: [{ name: "a", env: { "": "x" } }] }), /environment variable name/);
+  assert.match(settingsProblems({ agents: { "claude-code": { env: { "A=B": "x" } } } }), /environment variable name/);
   assert.equal(settingsProblems({ snippets: [{ name: "s", text: "" }] }), "Every snippet needs a name and command.");
   assert.equal(settingsProblems({ snippets: [{ name: "s", text: "a" }, { name: "S", text: "b" }] }), "Snippet names must be unique.");
-  assert.equal(
-    settingsProblems(ok, { profileProblem: (profile) => [`${profile.name} is broken`] }),
-    "Dev is broken",
-    "the Terminals tab's own rules go first",
-  );
+  // Saved terminals are gone (4.5): a stray key from an old draft is not checked.
+  assert.equal(settingsProblems({ profiles: [{ name: " " }] }), "");
 });
 
 test("a new global shortcut without Ctrl, Alt or Win blocks the save", () => {
-  const draft = (summon, key) => ({ summon_hotkey: summon, profiles: [{ name: "Dev", env: {}, keybinding: key }] });
-  assert.match(settingsProblems(draft("enter", null)), /^Summon shortcut: Add Ctrl, Alt or Win/);
-  assert.match(settingsProblems(draft("ctrl+alt+grave", "shift+f5")), /^"Dev" shortcut: Add Ctrl, Alt or Win/);
-  assert.match(settingsProblems(draft("ctrl+alt+1", "alt+ctrl+1")), /Already used by "Dev"/);
-  assert.equal(settingsProblems(draft("ctrl+alt+grave", "ctrl+alt+1")), "");
+  assert.match(settingsProblems({ summon_hotkey: "enter" }), /^Summon shortcut: Add Ctrl, Alt or Win/);
+  assert.equal(settingsProblems({ summon_hotkey: "ctrl+alt+grave" }), "");
+  assert.equal(settingsProblems({ summon_hotkey: "" }), "");
   // 3.x took free text: a plain key already saved does not block other saves.
-  const saved = draft("ctrl+alt+grave", "f5");
+  const saved = { summon_hotkey: "f5" };
   assert.equal(settingsProblems(saved, { baseline: structuredClone(saved) }), "");
 });
 
 test("unrelated config refreshes preserve pane-local font zoom", async () => {
   const previousDocument = globalThis.document;
   globalThis.document = { documentElement: { style: { setProperty() {} }, dataset: {} } };
-  let fresh = { theme: "graphite", font_size: 14, font_family: "Mono", profiles: [], snippets: [] };
-  const state = { cfg: structuredClone(fresh), profiles: [], snippets: [], terminalInventory: {}, scratchRoot: "old folder" };
+  let fresh = { theme: "graphite", font_size: 14, font_family: "Mono", snippets: [] };
+  const state = { cfg: structuredClone(fresh), snippets: [], terminalInventory: {}, scratchRoot: "old folder" };
   const sizes = [];
   const fonts = [];
   try {

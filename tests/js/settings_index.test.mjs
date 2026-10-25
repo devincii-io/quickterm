@@ -1,10 +1,10 @@
 // Settings search: every field is indexed under the id its [data-setting]
-// carries, results are ranked, and saved terminals and snippets join as rows.
+// carries, results are ranked, and snippets join as rows.
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  SETTINGS_INDEX, SETTINGS_TABS, matchScore, searchSettings,
+  SETTINGS_INDEX, SETTINGS_TABS, matchScore, searchSettings, settingsTabId,
 } from "../../quickterm/frontend/js/settings_index.js";
 
 test("ids are unique and every entry belongs to a real tab", () => {
@@ -23,9 +23,13 @@ test("ids are unique and every entry belongs to a real tab", () => {
   ]) assert.ok(ids.includes(id), id);
 });
 
-test("the tab ids are the frozen ones, Terminals keeping the id connections", () => {
-  assert.deepEqual(SETTINGS_TABS.map(([id]) => id), ["general", "window", "shortcuts", "connections", "snippets", "advanced", "about"]);
-  assert.equal(SETTINGS_TABS.find(([id]) => id === "connections")[1], "Terminals");
+test("the tab ids are the frozen ones; Agents replaced Terminals and takes its old ids", () => {
+  assert.deepEqual(SETTINGS_TABS.map(([id]) => id), ["general", "window", "shortcuts", "agents", "snippets", "advanced", "about"]);
+  assert.deepEqual(SETTINGS_TABS.find(([id]) => id === "agents"), ["agents", "Agents", "Claude Code and Codex"]);
+  assert.equal(settingsTabId("connections"), "agents");
+  assert.equal(settingsTabId("terminals"), "agents");
+  assert.equal(settingsTabId("snippets"), "snippets");
+  assert.equal(settingsTabId("gone"), "general", "an unknown tab never lands on a blank one");
 });
 
 test("a label match outranks a keyword match, and a prefix outranks a substring", () => {
@@ -40,19 +44,16 @@ test("a label match outranks a keyword match, and a prefix outranks a substring"
   assert.deepEqual(searchSettings("zzzz qqqq"), []);
 });
 
-test("saved terminals and snippets are searchable rows that name what to select", () => {
+test("snippets and the agents are searchable; saved terminals are no rows any more", () => {
   const draft = {
-    profiles: [{ name: "Deploy box", terminal_type: "ssh", ssh_host: "prod" }, { name: "" }],
-    snippets: [{ name: "git status", text: "git status\r", description: "What changed" }],
+    profiles: [{ name: "Deploy box", terminal_type: "ssh", ssh_host: "prod" }],
+    snippets: [{ name: "git status", text: "git status\r", description: "What changed" }, { name: "" }],
   };
-  const terminal = searchSettings("deploy", draft)[0];
-  assert.deepEqual(
-    { id: terminal.id, tab: terminal.tab, kind: terminal.kind, name: terminal.name },
-    { id: "terminal:Deploy box", tab: "connections", kind: "terminal", name: "Deploy box" },
-  );
-  assert.equal(searchSettings("prod", draft)[0].id, "terminal:Deploy box", "a host finds its terminal");
+  assert.equal(searchSettings("deploy", draft).some((row) => row.kind === "terminal"), false);
   const snippet = searchSettings("git", draft)[0];
   assert.equal(snippet.id, "snippet:git status");
   assert.equal(snippet.tab, "snippets");
-  assert.equal(searchSettings("terminal:", draft).filter((row) => row.kind === "terminal").length, 1, "an unnamed profile is not a row");
+  assert.equal(searchSettings("snippet:", draft).filter((row) => row.kind === "snippet").length, 1, "an unnamed snippet is not a row");
+  assert.equal(searchSettings("codex")[0].id, "agents.codex");
+  assert.equal(searchSettings("claude")[0].tab, "agents");
 });

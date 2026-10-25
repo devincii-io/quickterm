@@ -142,9 +142,8 @@ for (const shortcut of SHORTCUTS) {
 /**
  * What is wrong with a global binding, as `{level, text}` rows. Errors are the
  * ones validate_config refuses on save; warnings say what the key takes away.
- * `selfIndex` is the profile being edited (-1 for the summon key itself).
  */
-export function shortcutWarnings(binding, { summon = "", profiles = [], selfIndex = -1 } = {}) {
+export function shortcutWarnings(binding) {
   const wanted = normalizeBinding(binding);
   if (!wanted) return [];
   const rows = [];
@@ -154,15 +153,6 @@ export function shortcutWarnings(binding, { summon = "", profiles = [], selfInde
   if (!mods.some((mod) => mod === "ctrl" || mod === "alt" || mod === "win")) {
     rows.push({ level: "error", modifier: true, text: "Add Ctrl, Alt or Win. Without one, the shortcut would swallow normal typing." });
   }
-  if (selfIndex !== -1 && summon && normalizeBinding(summon) === wanted) {
-    rows.push({ level: "error", text: "This is already the summon shortcut." });
-  }
-  profiles.forEach((profile, index) => {
-    if (index === selfIndex || !profile?.keybinding) return;
-    if (normalizeBinding(profile.keybinding) === wanted) {
-      rows.push({ level: "error", text: `Already used by "${profile.name || "another terminal"}".` });
-    }
-  });
   const claimed = CLAIMED.get(wanted);
   if (claimed) {
     rows.push({ level: "warning", text: `QuickTerm uses ${claimed.keys} for "${claimed.label}". A global shortcut takes it everywhere.` });

@@ -118,10 +118,10 @@ Type: filesandordirs; Name: "{localappdata}\QuickTerm\host"
 // amount of care on the update path can prevent. Killing by image name reaches
 // every copy of the app, which is what holds the lock on QuickTerm.exe.
 //
-// The pseudoconsole hosts (conpty\OpenConsole.exe) and the bundled PuTTY tools
-// are NOT killed by name. They live in {app} and do hold locks, but those image
-// names are shared with other software (Windows Terminal ships OpenConsole.exe)
-// and killing them by name would reach processes that are none of our business.
+// The pseudoconsole hosts (conpty\OpenConsole.exe) are NOT killed by name.
+// They live in {app} and do hold locks, but that image name is shared with
+// other software (Windows Terminal ships OpenConsole.exe), and killing it by
+// name would reach processes that are none of our business.
 // They exit with the app that owns their pipes; the verify step below is what
 // catches the case where they do not.
 // ------------------------------------------------------------------------

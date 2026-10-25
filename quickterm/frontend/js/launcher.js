@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import { toggleMenu } from "./menu.js";
-import { connectionLabel, connectionTarget } from "./panel_connections.js";
 import { workspaceLabel } from "./boot_context.js";
+import { locationPath, locationTag } from "./locations.js";
 import { itemFor, markEditing, patchList, setAttrs, setClass, setText } from "./render.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { confirmNear } from "./confirm_popover.js";
@@ -41,7 +41,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   el.classList.add("sidebar");
 
   let model = {
-    profiles: [], inventory: null, shell: null, agents: [], logoUrl: null,
+    inventory: null, shell: null, agents: [], logoUrl: null,
     workspaces: [], views: [], sessions: [], attached: {}, owned: {}, here: null,
   };
 
@@ -76,9 +76,9 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   // One split button. "+" (and Alt+N) starts the row picked last in the
   // chevron's menu, the configured shell until something else is picked;
   // picking a row starts it at once and makes it the "+" choice. The menu
-  // also carries the administrator terminal and the terminal settings, so
-  // the row stays two controls. Built once; the rows are recomputed when the
-  // shell, the agents, profiles or inventory change.
+  // also carries the administrator terminal, so the row stays two controls.
+  // Built once; the rows are recomputed when the shell, the agents, the
+  // inventory or the shown workspace change.
   const launch = make("div", "sidebar-launch");
   let menu = [];
   let choiceKey = loadTerminalChoice();
@@ -95,8 +95,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const runRow = (row) => {
     if (row.kind === "shell") return actions.runSystem?.({ kind: "shell", shell: row.value, label: row.label });
     if (row.kind === "remote-shell") return actions.newTerminal?.();
-    if (row.kind === "agent" || row.kind === "profile") return actions.runProfile?.(row.profile);
-    return actions.setup?.();
+    if (row.kind === "agent") return actions.runProfile?.(row.profile);
+    return null;
   };
   // Elevation spawns a separate process, so success is invisible here and a
   // declined UAC prompt is indistinguishable from a dead row; the shell
@@ -106,7 +106,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const elevateRow = (row) => {
     if (elevating) return elevating;
     if (row?.kind === "shell") elevating = actions.elevateSystem?.({ kind: "shell", shell: row.value, label: row.label });
-    else if (row?.kind === "agent" || row?.kind === "profile") elevating = actions.elevateProfile?.(row.profile);
+    else if (row?.kind === "agent") elevating = actions.elevateProfile?.(row.profile);
     return (elevating = elevating && Promise.resolve(elevating).finally(() => { elevating = null; }));
   };
   const choose = (row) => {
@@ -120,14 +120,14 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     Promise.resolve(actions.newTerminal ? actions.newTerminal() : chosen && runRow(chosen)).finally(handBack);
   }, { signal });
 
-  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Pick what + starts: another shell, an agent or a saved terminal");
+  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Pick what + starts: another shell or an agent");
   pick.setAttribute("aria-haspopup", "menu");
   pick.setAttribute("aria-expanded", "false");
   const openTerminalMenu = () => {
     const items = menu.map((row) => {
       if (row.kind === "separator") return { separator: true };
       if (row.kind === "admin") {
-        if (!["shell", "agent", "profile"].includes(chosen?.kind)) return null;
+        if (!["shell", "agent"].includes(chosen?.kind)) return null;
         return {
           label: "As administrator", detail: chosen.label, icon: "shield",
           run: () => Promise.resolve(elevateRow(chosen)).finally(handBack),
@@ -136,10 +136,9 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       return {
         label: row.label,
         detail: row.isDefault ? "default" : row.detail,
-        icon: row.kind === "settings" ? "settings" : undefined,
         selected: row.key === chosen?.key,
         run: () => {
-          if (row.kind !== "settings") choose(row);
+          choose(row);
           return Promise.resolve(runRow(row)).finally(handBack);
         },
       };
@@ -157,17 +156,14 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const patchLaunch = () => {
     const shown = (model.views || []).find((view) => view.active)?.workspace;
     const host = (model.workspaces || []).find((entry) => entry.name === shown)?.host || null;
-    menu = newTerminalMenu({
-      inventory: model.inventory, profiles: model.profiles, shell: model.shell, agents: model.agents, host,
-      admin: !elevated,
-    });
+    menu = newTerminalMenu({ inventory: model.inventory, shell: model.shell, agents: model.agents, host, admin: !elevated });
     chosen = chosenRow(menu, choiceKey);
     describeOpen();
   };
 
   // Workspaces -------------------------------------------------------------
   const section = make("div", "sidebar-section");
-  const add = iconButton("sidebar-section-add", "plus", "New workspace from a folder, on an SSH host, scratch, or a new window");
+  const add = iconButton("sidebar-section-add", "plus", "New workspace on this PC, in WSL or on an SSH host, scratch, or a new window");
   add.setAttribute("aria-haspopup", "menu");
   add.setAttribute("aria-expanded", "false");
   add.addEventListener("click", () => {
@@ -183,8 +179,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
           label: hereLabel(here, true), icon: "folder", detail: folderName(here.folder), title: hereTitle(here),
           run: () => actions.workspaceHere?.(),
         } : null,
-        { label: "New workspace…", icon: "folder", detail: "choose a folder", run: () => actions.newWorkspace?.() },
-        { label: "New workspace on host…", icon: "plus", detail: "a folder on an SSH host", run: () => actions.newRemoteWorkspace?.() },
+        { label: "New workspace…", icon: "folder", detail: "this PC, WSL or SSH", run: () => actions.newWorkspace?.() },
         { separator: true },
         { label: "Scratch", icon: "plus", detail: "disposable", run: () => actions.newScratch?.() },
         { label: "Open in new window…", icon: "new-window", run: () => actions.newWindow?.() },
@@ -483,15 +478,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       finished ? "finished" : "",
     ].filter(Boolean).join(" ");
     setText(name, label);
-    let title = sessionTooltip(session, item.owner || group?.label || "");
-    const profile = (model.profiles || []).find((each) => each.name === session.profile);
-    if (profile) {
-      title += `\n${connectionLabel(profile)}: ${connectionTarget(profile)}`;
-      row.dataset.connectionType = profile.terminal_type || "custom";
-    } else {
-      delete row.dataset.connectionType;
-    }
-    setAttrs(row, { title });
+    setAttrs(row, { title: sessionTooltip(session, item.owner || group?.label || "") });
     const whereText = rowWhere(item, group);
     setText(where, whereText);
     where.hidden = !whereText;
@@ -528,7 +515,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const items = [];
     // The shown workspace opens where its focused terminal is now (a `cd`
     // counts, Alt+Shift+C does the same); any other opens its own folder.
-    // A folder on an SSH host is not on this disk.
+    // A folder in WSL or on an SSH host is not one Explorer opens here.
     const local = !group.host && (group.active || group.path);
     if (local) {
       const openIn = (app) => (group.active ? actions.openFolder?.(app) : actions.openWorkspaceFolder?.(group.name, app));
@@ -545,6 +532,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     }
     items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
     if (group.kind === "workspace") {
+      items.push({ label: "Run setup", icon: "terminal", run: () => actions.runWorkspaceSetup?.(group.name) });
       items.push({ separator: true }, {
         label: "Delete workspace…", icon: "trash", danger: true,
         run: () => openConfirm(`group:${group.key}`, node, kebab, {
@@ -621,7 +609,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const hasRows = group.sessions.length > 0;
     const closed = hasRows && closedGroups.has(foldId(group));
     for (const kind of ["workspace", "scratch", "unassigned", "flat"]) setClass(node, kind, group.kind === kind);
-    setText(host, group.host ? `@${group.host}` : "");
+    setText(host, locationTag(group.host));
     host.hidden = !group.host;
     setText(branch, groupBranch(group));
     branch.hidden = !branch.textContent;
@@ -650,7 +638,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     setText(count, String(group.sessions.length));
     count.hidden = !hasRows;
     const where = group.kind === "unassigned" ? "Live terminals no workspace owns"
-      : group.path ? `${group.host ? `${group.host}:` : ""}${group.path}${group.pathExists === false ? " (missing)" : ""}`
+      : group.path ? `${locationPath(group.host, group.path)}${group.pathExists === false ? " (missing)" : ""}`
         : group.label;
     setAttrs(head, {
       title: `${where} · ${groupSummary(group)}`,
@@ -858,7 +846,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   describeCollapse();
   requestAnimationFrame(() => { if (!dragging) document.body.classList.remove("sidebar-sizing"); });
 
-  const LAUNCH_KEYS = ["profiles", "inventory", "shell", "agents", "views", "workspaces"];
+  const LAUNCH_KEYS = ["inventory", "shell", "agents", "views", "workspaces"];
   const update = (partial = {}) => {
     model = { ...model, ...partial };
     if (LAUNCH_KEYS.some((key) => key in partial)) patchLaunch();

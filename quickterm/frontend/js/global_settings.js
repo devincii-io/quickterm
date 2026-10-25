@@ -4,7 +4,7 @@ import { normalizeBinding, shortcutWarnings } from "./shortcut_input.js";
 const REVISION_KEY = "quickterm.settingsRevision";
 
 // Names a top-level key in the "changed in another window" message.
-const KEY_LABELS = { profiles: "Terminals", snippets: "Snippets", window: "Window", overlay: "Overlay" };
+const KEY_LABELS = { agents: "Agents", snippets: "Snippets", window: "Window", overlay: "Overlay" };
 
 // Every top-level key is compared and sent whole, nested ones (window,
 // overlay, voice) included: two windows editing different fields of one of
@@ -24,19 +24,12 @@ export function settingsPatch(draft, baseline, fresh) {
 
 /**
  * The first thing in the draft the backend would refuse, said the way the
- * footer shows it, or "". `profileProblem(profile, profiles)` adds the
- * per-type rules the Terminals tab knows about.
+ * footer shows it, or "".
  */
-export function settingsProblems(draft, { profileProblem, baseline = null } = {}) {
-  const profiles = draft.profiles || [];
-  const typed = profileProblem ? profiles.flatMap((profile) => profileProblem(profile, profiles)) : [];
-  if (typed.length) return typed[0];
+export function settingsProblems(draft, { baseline = null } = {}) {
   const binding = bindingProblem(draft, baseline);
   if (binding) return binding;
-  if (profiles.some((profile) => !(profile.name || "").trim())) return "Every terminal needs a name.";
-  const names = profiles.map((profile) => profile.name.trim().toLowerCase());
-  if (new Set(names).size !== names.length) return "Terminal names must be unique.";
-  const badEnvironment = profiles.map((profile) => environmentError(profile.env)).find(Boolean);
+  const badEnvironment = Object.values(draft.agents || {}).map((agent) => environmentError(agent?.env)).find(Boolean);
   if (badEnvironment) return badEnvironment;
   const snippets = draft.snippets || [];
   if (snippets.some((snippet) => !(snippet.name || "").trim() || !(snippet.text || "").trim())) {
@@ -47,23 +40,15 @@ export function settingsProblems(draft, { profileProblem, baseline = null } = {}
   return "";
 }
 
-// The red lines under the shortcut fields, as the save refuses them. A
-// binding already saved (3.x took free text) is not refused again, the same
-// rule as config.validate_new_bindings.
+// The red line under the summon field, as the save refuses it. A binding
+// already saved (3.x took free text) is not refused again, the same rule as
+// config.validate_new_bindings.
 function bindingProblem(draft, baseline) {
-  const profiles = draft.profiles || [];
-  const kept = new Set([baseline?.summon_hotkey, ...(baseline?.profiles || []).map((profile) => profile?.keybinding)]
-    .filter(Boolean).map(normalizeBinding));
-  const rows = [["Summon shortcut", draft.summon_hotkey, -1]];
-  profiles.forEach((profile, index) => rows.push([`"${profile.name || "Terminal"}" shortcut`, profile.keybinding, index]));
-  for (const [label, binding, selfIndex] of rows) {
-    if (!binding) continue;
-    const legacy = kept.has(normalizeBinding(binding));
-    const error = shortcutWarnings(binding, { summon: draft.summon_hotkey, profiles, selfIndex })
-      .find((row) => row.level === "error" && !(legacy && row.modifier));
-    if (error) return `${label}: ${error.text}`;
-  }
-  return "";
+  const binding = draft.summon_hotkey;
+  if (!binding) return "";
+  const legacy = Boolean(baseline?.summon_hotkey) && normalizeBinding(baseline.summon_hotkey) === normalizeBinding(binding);
+  const error = shortcutWarnings(binding).find((row) => row.level === "error" && !(legacy && row.modifier));
+  return error ? `Summon shortcut: ${error.text}` : "";
 }
 
 // Only a revision travels between windows; credentials stay in authenticated API calls.

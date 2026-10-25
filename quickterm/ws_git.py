@@ -2,8 +2,8 @@
 staging and the commit/push/pull button.
 
 Every git call goes through `ws_exec.run`, so the same code serves a
-workspace on an SSH host once ws_exec reaches one. Paths in and out are
-relative to the workspace folder (ws_files.clean_rel has checked them), and
+workspace in WSL or on an SSH host. Paths in and out are relative to the
+workspace folder (ws_files.clean_rel has checked them), and
 git gets them with `--literal-pathspecs`, so a file called `*.py` stays one
 file. Blocking: callers run these off the event loop.
 """
@@ -460,6 +460,36 @@ def changes(ws: Any) -> dict:
         "files": files + committed[:CHANGES_CAP],
         "truncated": len(status.files) > CHANGES_CAP or len(committed) > CHANGES_CAP,
     }
+
+
+def board_status(ws: Any) -> dict | None:
+    """The board's git facts from one `git status --porcelain=v2 --branch`:
+    `{branch, upstream, ahead, behind, dirty}` with `dirty` the number of
+    changed paths (untracked included). None when the folder is not in a
+    repository or git cannot be reached."""
+    # Like every public read: a filter driver added since the last read must
+    # not run on the board's unattended refresh.
+    refresh_filters(ws)
+    result = _git(ws, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal"])
+    if result.returncode != 0:
+        return None
+    status = _parse_status(result.stdout, "")
+    return {
+        "branch": status.branch,
+        "upstream": status.upstream,
+        "ahead": status.ahead,
+        "behind": status.behind,
+        "dirty": len({entry["path"] for entry in status.files}),
+    }
+
+
+def commits_since(ws: Any, base: str) -> int | None:
+    """How many commits HEAD has that `base` does not; None when git cannot say."""
+    if base.startswith("-"):
+        return None
+    result = _git(ws, ["rev-list", "--count", f"{base}..HEAD", "--"])
+    text = result.stdout.strip()
+    return int(text) if result.returncode == 0 and text.isdigit() else None
 
 
 def _name_status(output: str) -> dict[str, str]:

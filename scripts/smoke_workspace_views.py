@@ -257,14 +257,13 @@ def main():
             scratch_dir=isolated,
             shell="cmd",
             summon_hotkey="",
-            profiles=[config.Profile("Smoke cmd", "cmd.exe", args=["/q", "/k"], terminal_type="custom")],
         )
         cfg.voice.enabled = False
         config.save_config(cfg)
         for name in ["Primary", "Companion"]:
             workspace.save_workspace(
                 workspace.Workspace(
-                    name=name, path=isolated, layout={"type": "pane", "profile": "Smoke cmd"}
+                    name=name, path=isolated, layout={"type": "pane"}
                 )
             )
         start = webview.start

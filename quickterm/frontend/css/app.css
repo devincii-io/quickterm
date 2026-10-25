@@ -21,8 +21,11 @@
   /* Written by applyChromeTheme(). */
   --bg: #15140f;
   --surface: #24221b;
-  --surface-raised: #2d2b24;
-  --surface-soft: #34332c;
+  --surface-raised: #2e2c24;
+  --surface-soft: #37342d;
+  /* The selected row: the theme's selection colour, held to 4.5:1 for every
+     text token. */
+  --surface-active: #3e3320;
   --well: #15140f;
   --card: #1e1d16;
   --field: #1b1a14;
@@ -44,8 +47,8 @@
   /* The accent as text, lifted to 4.5:1 where the raw accent falls short. */
   --accent-text: #c8973f;
   --sage: #a3b19e;
-  --danger: #dd826d;
-  --danger-soft: rgba(221, 130, 109, 0.1);
+  --danger: #df8975;
+  --danger-soft: rgba(223, 137, 117, 0.1);
   /* Status hues are the theme's own ANSI green and yellow, lifted to 4.5:1 on
      the chrome surfaces. */
   --success: #85a95e;
@@ -59,6 +62,13 @@
   /* What dims the terminals behind a sheet or the palette. On a light theme
      it is a thin layer of ink, because paper over paper is no scrim at all. */
   --scrim: rgba(8, 8, 6, 0.72);
+  /* The terminal's own background, foreground and scrollbar thumb, for the
+     pane gutter and xterm's scrollbar. */
+  --term-bg: #1b1a15;
+  --term-fg: #d9d3c5;
+  --term-scrollbar: #413f38;
+  --term-scrollbar-hover: #58554d;
+  --term-scrollbar-active: #716d64;
   /* The sidebar dot of an open workspace (VIEW_COLORS in workspace_views.js),
      from the theme's ANSI hues, at least 3:1 on the chrome. */
   --view-1: #c8973f;
@@ -167,11 +177,16 @@ body.dragging .pane { pointer-events: none; }
    `.xterm-viewport` is only a background layer now: its native scrollbar
    would draw an empty second track under this one. The fit addon reserves
    the rail's 14px. */
-.term-host .xterm .xterm-viewport { overflow: hidden; }
-.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity: 1; pointer-events: auto; background: var(--surface-raised); box-shadow: inset 1px 0 0 var(--line); }
-.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { box-sizing: border-box; border: 3px solid transparent; border-radius: 7px; background-clip: padding-box; background-color: var(--line-hover); }
-.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover,
-.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { background-color: var(--text-soft); }
+.term-host .xterm .xterm-viewport { overflow: hidden; background-color: var(--term-bg); }
+/* xterm.css paints the IME composition box white on black in every theme. */
+.term-host .xterm .composition-view { background: var(--term-bg); color: var(--term-fg); }
+/* The rail and thumb are the terminal's colours, not the chrome's: on a theme
+   whose terminal differs from its sidebar (One Dark, Cobalt2) a chrome-grey
+   rail read as a strip of another theme down the side of every pane. */
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity: 1; pointer-events: auto; background: var(--term-bg); box-shadow: inset 1px 0 0 color-mix(in srgb, var(--term-fg) 8%, var(--term-bg)); }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { box-sizing: border-box; border: 3px solid transparent; border-radius: 7px; background-clip: padding-box; background-color: var(--term-scrollbar); }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover { background-color: var(--term-scrollbar-hover); }
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { background-color: var(--term-scrollbar-active); }
 /* Nothing to scroll (xterm hides the bar without a fade then): keep the rail
    and drop the full-height thumb, as a native scrollbar does. */
 .term-host .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible:not(.fade) > .slider { display: none; }
@@ -245,7 +260,7 @@ body.dragging .pane { pointer-events: none; }
 .palette input::placeholder { color: var(--muted); }
 .palette-list { max-height: 54vh; overflow-y: auto; padding: 6px; }
 .palette-item { display: flex; align-items: baseline; gap: 11px; padding: 9px 10px; border-radius: 7px; cursor: pointer; }
-.palette-item.sel { background: var(--surface-soft); }
+.palette-item.sel { background: var(--surface-active); }
 .palette-item .kind { flex: none; min-width: 68px; color: var(--muted); font-family: var(--mono); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
 .palette-item .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-item .hint { max-width: 42%; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -319,9 +334,6 @@ body.dragging .pane { pointer-events: none; }
 .theme-picker { margin-top: 18px; }
 .theme-picker-title { margin: 0 0 3px; color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .theme-picker > .field-hint { display: block; margin-bottom: 11px; }
-.custom-theme-editor { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 11px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
-.custom-color-field { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 10px; text-transform: capitalize; }
-.custom-color-field input { width: 34px; height: 28px; flex: none; padding: 2px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); cursor: pointer; }
 .logo-picker { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 13px 0; border-top: 1px solid var(--line); }
 .logo-picker:first-of-type { border-top: 0; padding-top: 0; }
 .logo-picker:last-child { padding-bottom: 0; }
@@ -411,7 +423,6 @@ body.dragging .pane { pointer-events: none; }
   .settings-tab small { display: none; }
   .settings-content { padding: 19px 16px 28px; }
   .settings-grid.two-column { grid-template-columns: 1fr; }
-  .custom-theme-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .logo-picker { grid-template-columns: 46px minmax(0, 1fr); }
   .logo-preview { width: 46px; height: 46px; }
   .logo-picker-actions { grid-column: 1 / -1; }
@@ -444,7 +455,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .grid, .zoom-host { padding: 3px; }
 .splitter { flex-basis: 9px; }
 .splitter:focus-visible::after, .splitter:hover::after { background: var(--accent); }
-.pane { border-radius: 2px; background: var(--surface); transition: border-color .1s ease; }
+.pane { border-radius: 2px; background: var(--term-bg); transition: border-color .1s ease; }
 .pane.focused { border-color: var(--line-hover); }
 .pane::before { top: 0; bottom: 0; width: 2px; border-radius: 0; }
 .pane-tab { height: 23px; padding: 0 8px; background: var(--surface); font-size: 10px; letter-spacing: 0; }
@@ -485,7 +496,7 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
 .settings-content { padding: 18px 22px 28px; }
 .settings-footer { min-height: 56px; }
 .settings-group { padding: 15px; }
-.custom-theme-editor, .settings-json, .ui-input { border-radius: 3px; }
+.settings-json, .ui-input { border-radius: 3px; }
 .primary-button, .secondary-button { min-height: 34px; border-radius: 3px; }
 .text-button, .icon-button, .card-open-button { border-radius: 3px; }
 .about-link { border-radius: 3px; }
@@ -512,7 +523,10 @@ button:focus:not(:focus-visible), input:focus:not(:focus-visible), select:focus:
   display: grid;
   grid-template-columns: 244px minmax(0, 1fr);
   height: 100vh;
-  overflow: hidden;
+  /* clip, not hidden: a hidden box still scrolls when focus or
+     scrollIntoView reaches the off-screen right panel, which slid the
+     whole window sideways. */
+  overflow: clip;
   transition: grid-template-columns .14s ease;
 }
 

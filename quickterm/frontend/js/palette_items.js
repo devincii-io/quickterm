@@ -208,25 +208,17 @@ export function settingRows(app) {
 }
 
 export function configRows(app) {
-  const terminals = list(app?.profiles).map((profile) => ({
-    kind: "config",
-    label: `edit terminal: ${profile.name}`,
-    hint: profile.description || profile.terminal_type || profile.cmd || "",
-    run: () => app?.editTerminalConfig?.(profile.name),
-  }));
-  const snippets = list(app?.snippets).map((snippet) => ({
+  return list(app?.snippets).map((snippet) => ({
     kind: "config",
     label: `edit snippet: ${snippet.name}`,
     hint: snippet.description || "",
     run: () => app?.editSnippet?.(snippet.name),
   }));
-  return [...terminals, ...snippets];
 }
 
-// The "+" menu's entries as palette rows (CONTRACTS 4.3): every shell, then
-// Claude Code and Codex with their modes. Saved profiles have their own
-// "open terminal" rows, and Terminal settings is the "terminals and
-// connections" action, so neither repeats here.
+// The "+" menu's entries as palette rows (CONTRACTS 4.5): every shell (or
+// the shell in a WSL or SSH workspace), then Claude Code and Codex with
+// their modes. "As administrator" stays the sidebar's.
 export function newTerminalRows(app) {
   const rows = [];
   for (const row of app?.newTerminalMenu?.() || []) {
@@ -253,8 +245,8 @@ export function newTerminalRows(app) {
 }
 
 // One row per launch mode the agent type has, plus the split that opens its
-// agent manager beside the focused pane. The profile's own mode leads, so
-// typing its name and Enter does what the Open button does.
+// agent manager beside the focused pane. The agent's own mode leads, so
+// typing its name and Enter starts it as configured.
 export function agentRows(profile, app) {
   const type = agentTypeOf(profile);
   if (!type) return [];

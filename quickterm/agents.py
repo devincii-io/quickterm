@@ -1,8 +1,7 @@
 """Launch arguments and option schema for the agent CLIs: Claude Code and Codex.
 
-Built like connections.py: typed string options in `Profile.agent`, checked by
-`validate` on save and again by `resolve` at launch, argv built without a
-shell. `OPTIONS` is the one source for that validation and for the Settings
+Typed string options in `AgentSettings.agent`, checked by `validate` on save
+and again by `resolve` at launch, argv built without a shell. `OPTIONS` is the one source for that validation and for the Settings
 editor (`GET /api/system/agents`), so the frontend hardcodes no option list.
 """
 

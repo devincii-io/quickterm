@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
-from quickterm import board, git_info, ws_exec
+from quickterm import git_info, ws_exec
 from quickterm import workspace as workspace_store
 from quickterm.api.common import asdict, kill_each, read_json
 
@@ -24,16 +24,53 @@ MAX_GIT_INFO_PATHS = 256
 
 
 def _folder(workspace: object, value: object, host: str | None) -> str | None:
-    """A request's folder: a local path, or a POSIX path on the host."""
+    """A request's folder: a local path, or a POSIX path in WSL or on the host."""
     if host:
         return workspace_store.normalize_remote_root(value)
     return workspace.normalize_root(value)  # type: ignore[attr-defined]
 
 
 def _host_field(host: str | None) -> dict:
-    # Only a remote workspace passes the field, so a local save reads exactly
-    # as it did before hosts existed.
+    # Only a WSL or SSH workspace passes the field, so a local save reads
+    # exactly as it did before hosts existed.
     return {"host": host} if host else {}
+
+
+def _setup_fields(env: dict[str, str], startup: list[dict]) -> dict:
+    # Like `host`: only a workspace with a setup passes them.
+    fields: dict = {}
+    if env:
+        fields["env"] = env
+    if startup:
+        fields["startup"] = startup
+    return fields
+
+
+def _setup(body: dict, existing: object) -> tuple[dict[str, str], list[dict]]:
+    """`env` and `startup` of a save: an absent key keeps the stored value, a
+    value replaces it (null clears). HTTPException 400 for a bad value."""
+    try:
+        env = (
+            workspace_store.validate_env(body["env"]) if "env" in body
+            else dict(getattr(existing, "env", None) or {})
+        )
+        startup = (
+            workspace_store.validate_startup(body["startup"]) if "startup" in body
+            else list(getattr(existing, "startup", None) or [])
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return env, startup
+
+
+def _check_ssh_setup(env: dict[str, str], startup: list[dict], host: str | None) -> None:
+    """Over SSH every value is exported in one remote command line, where a
+    line break cannot be quoted; refuse it at save, not at every launch."""
+    if workspace_store.location_kind(host) != "ssh":
+        return
+    values = [*env.values(), *(v for item in startup for v in (item.get("env") or {}).values())]
+    if any("\n" in value or "\r" in value for value in values):
+        raise HTTPException(400, "Over SSH a variable cannot contain a line break.")
 
 
 def register(app: FastAPI, ctx: ApiContext) -> None:
@@ -51,20 +88,19 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         return await asyncio.to_thread(git_info.git_info_many, paths)
 
     def checked_host(value: object) -> str | None:
-        """A workspace host from a request: None, or an OpenSSH profile's name."""
+        """A workspace location from a request: None (this PC), "wsl:<distro>"
+        or an SSH destination."""
         try:
-            host = workspace_store.normalize_host(value)
-            if host is not None:
-                ws_exec.find_profile(host, list(getattr(ctx.cfg, "profiles", []) or []))
-        except (ValueError, FileNotFoundError) as exc:
+            return workspace_store.normalize_host(value)
+        except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return host
 
     # Before the `{name:path}` routes; they answer other methods anyway.
     @app.post("/api/workspaces/remote-check")
     async def remote_check(request: Request) -> dict:
-        """Is `path` a folder on `host`? `{"ok": bool, "message": str}` with
-        what ssh printed; a failed check does not stop the workspace saving."""
+        """Is `path` a folder at `host` (WSL or SSH)? `{"ok": bool, "message":
+        str}` with what wsl or ssh printed; a failed check does not stop the
+        workspace saving."""
         body = await read_json(request)
         if not isinstance(body, dict):
             raise HTTPException(400, "body must be {'host': ..., 'path': ...}")
@@ -77,9 +113,8 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             raise HTTPException(400, str(exc)) from exc
         if path is None:
             raise HTTPException(400, "path is required")
-        profiles = list(getattr(ctx.cfg, "profiles", []) or [])
         try:
-            ok, message = await asyncio.to_thread(ws_exec.check_folder, host, path, profiles=profiles)
+            ok, message = await asyncio.to_thread(ws_exec.check_folder, host, path)
         except FileNotFoundError as exc:
             return {"ok": False, "message": str(exc)}
         return {"ok": ok, "message": message}
@@ -100,9 +135,12 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
         out = asdict(ws)
         host = getattr(ws, "host", None)
         out["host"] = host
+        # Decrypted: only the token-holding frontend reads this route.
+        out.setdefault("env", {})
+        out.setdefault("startup", [])
         if host:
-            # Nothing here may wait for ssh: the folder check and git answer
-            # from what the background calls last found.
+            # Nothing here may wait for ssh or wsl.exe: the folder check and
+            # git answer from what the background calls last found.
             out["path_exists"] = ws_exec.cached_exists(ws)
             out["git"] = git_info.remote_git_info(ws)
             return out
@@ -140,11 +178,16 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
             # dropped the folder, the logo, and the detached sessions the
             # workspace owns (which the reaper then took).
             existing = None
-            if any(key not in body for key in ("path", "logo", "session_ids", "temporary", "host")):
+            if any(
+                key not in body
+                for key in ("path", "logo", "session_ids", "temporary", "host", "env", "startup")
+            ):
                 existing = await asyncio.to_thread(workspace.load_workspace, name)
+            env, startup = _setup(body, existing)
             # `host` is three-valued like `path`; the folder is read as a
             # path on whichever host the workspace ends up on.
             host = checked_host(body["host"]) if "host" in body else getattr(existing, "host", None)
+            _check_ssh_setup(env, startup, host)
             if "path" in body or ("host" in body and host != getattr(existing, "host", None)):
                 try:
                     path = _folder(workspace, body.get("path", getattr(existing, "path", None)), host)
@@ -176,6 +219,7 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     session_ids=session_ids,
                     temporary=body.get("temporary", getattr(existing, "temporary", False)),
                     **_host_field(host),
+                    **_setup_fields(env, startup),
                 ),
             )
             manager.sync_workspace(name, set(session_ids))
@@ -185,8 +229,11 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
     async def patch_workspace(name: str, request: Request) -> Response:
         workspace = importlib.import_module("quickterm.workspace")
         body = await read_json(request)
-        if not isinstance(body, dict) or not body or set(body) - {"path", "logo", "host"}:
-            raise HTTPException(400, "body must contain path, logo or host only")
+        if (
+            not isinstance(body, dict) or not body
+            or set(body) - {"path", "logo", "host", "env", "startup"}
+        ):
+            raise HTTPException(400, "body must contain path, logo, host, env or startup only")
         if body.get("logo") is not None and not isinstance(body["logo"], str):
             raise HTTPException(400, "logo must be a string or null")
         async with workspace_write_lock:
@@ -202,12 +249,15 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                     path = saved.path
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
+            env, startup = _setup(body, saved)
+            _check_ssh_setup(env, startup, host)
             # Metadata edits must not submit a stale layout from another viewer.
             await asyncio.to_thread(workspace.save_workspace, workspace.Workspace(
                 name=name, layout=saved.layout, path=path,
                 logo=body.get("logo", saved.logo), session_ids=saved.session_ids,
                 temporary=getattr(saved, "temporary", False),
                 **_host_field(host),
+                **_setup_fields(env, startup),
             ))
         return Response(status_code=204)
 
@@ -239,6 +289,5 @@ def register(app: FastAPI, ctx: ApiContext) -> None:
                 if failed:
                     raise HTTPException(500, f"could not stop {len(failed)} terminal process(es)")
             await asyncio.to_thread(workspace.delete_workspace, name)
-            await asyncio.to_thread(board.forget_workspace, name)
             manager.sync_workspace(name, set())
         return Response(status_code=204)

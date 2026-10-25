@@ -45,10 +45,8 @@ export function createConfigSync({ api, state, app, layout, setFontSize, buildLa
     state.cfg = fresh;
     reportLaunchError(fresh.launch_error);
     state.scratchRoot = fresh.scratch_dir || null;
-    state.profiles = fresh.profiles || [];
     state.snippets = fresh.snippets || [];
     state.terminalInventory = saveInventoryCache(freshInventory);
-    app.profiles = state.profiles;
     app.snippets = state.snippets;
     app.idleTimeoutSeconds = fresh.idle_timeout_s ?? 300;
     applyChromeTheme(fresh.theme, fresh.custom_theme);

@@ -2,6 +2,108 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.5.0
+
+Released 2026-10-25.
+
+QuickTerm 4.5 makes the workspace the one thing you set up. A workspace
+lives on this PC, in WSL or on an SSH host, and can carry its own
+environment variables and the terminals it starts with. Saved terminal
+configurations are gone. The board sorts workspaces by what is happening
+in them, and the window, title bar included, follows one of 54 themes.
+
+### Workspaces at a location
+
+- **New workspace…** (the Workspaces "+" menu or the palette) asks where:
+  This PC, a WSL distribution, or an SSH host from `~/.ssh/config` or one
+  you type (`user@host`, `ssh://user@host:port`). Port, key and jump host
+  come from `~/.ssh/config`. Folders on this PC and in WSL are chosen in the
+  folder browser; a WSL folder under `\\wsl.localhost` starts a stopped
+  distribution once. WSL and SSH folders are checked before the workspace
+  is saved.
+- Terminals of a WSL workspace open the distribution's shell in its folder,
+  and Claude Code and Codex there report their state through Windows
+  `curl.exe`. Files, changes, the pull request, the branch and the board
+  work the same in WSL as over SSH.
+- Explorer, VS Code and "make this folder a workspace" stay with folders on
+  this PC. An administrator terminal is refused in a WSL or SSH workspace.
+
+### No saved terminals
+
+- Saved terminal profiles are removed: connection types (SSH, SFTP,
+  Telnet, serial, Docker, Podman, Kubernetes, RDP, VNC, custom commands),
+  per-terminal shortcuts and autostart, and the Terminals settings tab.
+  The shell is a setting and Claude Code and Codex are settings, as before.
+- Settings tabs are General, Window, Shortcuts, Agents, Snippets, Advanced
+  and About.
+- The bundled PuTTY tools are no longer shipped.
+- A 4.4 config is migrated once: it is copied to `config.pre-4.5.json`, a
+  workspace on an SSH profile now connects to that profile's destination,
+  one on a WSL profile opens in that distribution, one on any other saved
+  terminal opens on this PC, and a notice in the window says what could
+  not be carried (a private key, ProxyJump, extra arguments, environment
+  variables, a start command, a bad port).
+- `quickterm new --profile` is removed; `quickterm new claude-code|codex`
+  stays. `GET /api/profiles` and the connection route are gone; `GET
+  /api/locations` lists where a workspace can live.
+
+### Workspace setup
+
+- Workspace settings (the workspace's "⋮" menu) hold environment variables
+  that every terminal of the workspace gets. Values are encrypted at rest
+  and masked until you focus them. On an SSH host they are exported by the
+  remote command, and the settings say that other users of that host can
+  see them.
+- **Start with** lists up to eight terminals: a shell with an optional
+  one-line command, Claude Code or Codex with their own options, each with
+  its own variables. A workspace that opens with nothing running starts
+  them, each in its own pane. **Run setup** (the "⋮" menu, the palette and
+  the settings sheet) starts them again next to what is open.
+- A shell in Start with can use any shell installed on this PC
+  (PowerShell, Command Prompt, Git Bash, a WSL distribution) or the one from
+  Settings. Restarting such a terminal repeats its shell and command.
+- The new-workspace dialog has Start with toggles: Shell, Claude Code and
+  Codex (Shell on by default).
+- A workspace whose terminals are all gone and that has no Start with list
+  still comes back with its saved panes and their Restart and Resume
+  offers.
+- Variables apply in this order, later wins: Settings > Agents, the
+  workspace, the terminal's own, then QuickTerm's own.
+
+### The board sorts itself
+
+- Every workspace sits in one of six columns, by what holds first: Needs
+  you, Working, In review, Changes, Done, Idle. The card says why ("3 files
+  changed · 2 commits not pushed", "PR #12 open · checks passing") and
+  moves by itself when that changes.
+- Dragging cards, Alt+Left/Right moves and the stored `board.json` are
+  gone; the old file is removed once.
+
+### Themes
+
+- 54 themes, 33 of them new. Settings > General and the
+  palette's "color theme…" open a switcher that stays open and previews
+  the whole window as you move through it; Enter or a click applies,
+  Escape goes back.
+- Selected rows wear each theme's own selection colour, and the pane around
+  the terminal and its scrollbar take the terminal's colours.
+- On Windows 11 the title bar and window border follow the theme.
+
+### Fixes
+
+- Git calls over SSH with environment options no longer fail with exit
+  127: the `env` options now come before the variable assignments.
+- A terminal's own variables now add to the agent's variables from
+  Settings instead of replacing them.
+- Claude Code and Codex in WSL now get the variables from Settings >
+  Agents (except `PATH`).
+- Background folder, git and board checks no longer start a stopped WSL
+  distribution.
+- A dropped file path is mapped into WSL in a WSL workspace and refused in
+  an SSH workspace, whatever shell Settings names.
+- The window content no longer slides sideways when focus reaches the
+  hidden right panel.
+
 ## QuickTerm 4.4.0
 
 Released 2026-10-25.

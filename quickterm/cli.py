@@ -204,9 +204,8 @@ def _parser() -> _Parser:
         "agent", nargs="?", choices=("claude-code", "codex"),
         help="start Claude Code or Codex (from Settings > Agents) instead of the shell",
     )
-    new.add_argument("--profile", help="the terminal profile to start")
     new.add_argument(
-        "--cwd", help="the starting folder (default: this folder, unless --profile is given)"
+        "--cwd", help="the starting folder (default: this folder, unless an agent is given)"
     )
     new.add_argument("--workspace", help="the workspace to open it in")
 
@@ -258,17 +257,15 @@ def _ls_row(item: dict) -> list[str]:
 def new_launch(args: argparse.Namespace) -> dict[str, str]:
     """The handoff body for `new`.
 
-    Without --cwd a profile starts in the workspace root, as a profile does
-    everywhere else; without a profile either, the terminal starts in the
+    Without --cwd an agent starts in the workspace root, as it does
+    everywhere else; without an agent either, the terminal starts in the
     folder the command was typed in, which is what "new terminal" means from
     a shell.
     """
     body: dict[str, str] = {}
     agent = getattr(args, "agent", None)
-    if agent and args.profile:
-        raise ValueError("name an agent or --profile, not both")
-    if args.profile or agent:
-        body["profile"] = args.profile or agent
+    if agent:
+        body["profile"] = agent
     if args.cwd:
         body["cwd"] = os.path.abspath(os.path.expanduser(args.cwd))
     elif not body.get("profile"):
@@ -279,11 +276,7 @@ def new_launch(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _new(client: Client, args: argparse.Namespace) -> int:
-    try:
-        body = new_launch(args)
-    except ValueError as exc:
-        sys.stderr.write(f"quickterm new: error: {exc}\n")
-        return EXIT_USAGE
+    body = new_launch(args)
     try:
         client.call("POST", "/api/launches", body)
     except NotRunning:

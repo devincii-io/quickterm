@@ -34,39 +34,6 @@ export function environmentError(env) {
   return "";
 }
 
-// launch.resolve_profile builds these argument lists itself: WSL drops the
-// profile's own, and the shells append their login flag after them, so
-// "bash -c make" would run as "bash -c make -l". A command that carries
-// arguments is therefore never inferred as one of them.
-const DROPS_ARGS = new Set(["wsl", "bash", "zsh", "fish"]);
-
-export function inferTerminalType(profile) {
-  if (profile.terminal_type) return profile.terminal_type;
-  const path = (profile.cmd || "").trim().toLowerCase();
-  const segments = path.split(/[\\/]/);
-  const cmd = segments.pop();
-  const bare = cmd.endsWith(".exe") ? cmd.slice(0, -4) : cmd;
-  // Claude integration is opt-in via terminal_type. A legacy custom command
-  // named `claude` may carry bespoke args and must not silently acquire
-  // continue/picker semantics merely by opening Settings. Codex is inferred
-  // from its command, including the .cmd shim npm installs.
-  let type = "custom";
-  if (bare === "codex" || cmd === "codex.cmd") type = "codex";
-  else if (bare === "pwsh") type = "powershell-core";
-  else if (bare === "powershell") type = "windows-powershell";
-  else if (bare === "cmd") type = "command-prompt";
-  else if (bare === "wsl") type = "wsl";
-  else if (bare === "plink") type = "ssh";
-  else if (bare === "psftp") type = "sftp";
-  else if (bare === "nu") type = "nushell";
-  // Git for Windows ships bash.exe under ...\Git\bin or ...\Git\usr\bin. A
-  // bash.exe anywhere else (System32's is WSL's) is plain bash.
-  else if (bare === "bash") type = segments.includes("git") ? "git-bash" : "bash";
-  else if (bare === "zsh" || bare === "fish") type = bare;
-  if (DROPS_ARGS.has(type) && (profile.args || []).length) return "custom";
-  return type;
-}
-
 // The OS dialog is the secondary route now, not the mechanism. It exists only
 // inside the installed pywebview shell, and it is injected late, so anything
 // that depends on it has to cope with both absence and late arrival.
@@ -182,12 +149,4 @@ export function folderPickerControl(input, options = {}) {
   });
   control.append(input, browse);
   return control;
-}
-
-// Long absolute paths blow up narrow rows. Keep the tail, which is the part
-// that identifies the project.
-export function shortPath(value, max = 46) {
-  const text = String(value || "");
-  if (text.length <= max) return text;
-  return `…${text.slice(-(max - 1))}`;
 }

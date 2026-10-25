@@ -2,15 +2,16 @@ import { icon } from "./icons.js";
 import { make } from "./panel_shared.js";
 
 const SETUP_KEY = "quickterm.setupComplete";
-export function setupNeeded(profiles, storage = globalThis.localStorage) {
-  try { return !profiles.length && storage.getItem(SETUP_KEY) !== "1"; }
-  catch (_) { return !profiles.length; }
+// The tour opens on its own until it was finished or skipped once.
+export function setupNeeded(storage = globalThis.localStorage) {
+  try { return storage.getItem(SETUP_KEY) !== "1"; }
+  catch (_) { return false; }
 }
 
 export function renderSetup(host) {
   const steps = [
     ["One workspace at a time", "The sidebar lists your workspaces and their terminals. The one you pick fills the window; the others keep running behind it."],
-    ["A workspace is a folder", "The + beside Workspaces makes one from a folder. Scratch is a throwaway workspace: cd into a project there and the sidebar offers to make that folder a workspace."],
+    ["A workspace is a folder", "The + beside Workspaces makes one from a folder on this PC, in WSL or over SSH. Scratch is a throwaway workspace: cd into a project there and the sidebar offers to make that folder a workspace."],
     ["Pick what + starts", "The + at the top starts your shell, PowerShell unless Settings says otherwise. Its arrow starts another shell, Claude Code or Codex, and + remembers that pick."],
   ];
   let step = 0;

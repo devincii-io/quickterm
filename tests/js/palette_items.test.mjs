@@ -148,14 +148,14 @@ test("settings rows are found by their keywords and open the setting", () => {
   assert.deepEqual(calls, [["openSetting", "font_size"]]);
 });
 
-test("config rows edit a terminal or a snippet by name", () => {
+test("config rows edit a snippet by name; saved terminals are gone", () => {
   const { calls, app } = recorder();
   app.profiles = [{ name: "Git Bash", terminal_type: "git-bash" }];
   app.snippets = [{ name: "deploy", text: "make deploy\r" }];
   const rows = configRows(app);
-  assert.deepEqual(rows.map((row) => row.label), ["edit terminal: Git Bash", "edit snippet: deploy"]);
+  assert.deepEqual(rows.map((row) => row.label), ["edit snippet: deploy"]);
   for (const row of rows) { assert.equal(rowGroup(row), "setting"); row.run(); }
-  assert.deepEqual(calls, [["editTerminalConfig", "Git Bash"], ["editSnippet", "deploy"]]);
+  assert.deepEqual(calls, [["editSnippet", "deploy"]]);
 });
 
 test("agent rows offer every mode of the type and lead with the profile's own", () => {

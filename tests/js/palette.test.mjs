@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Palette } from "../../quickterm/frontend/js/palette.js";
 import { rowGroup } from "../../quickterm/frontend/js/palette_items.js";
+import { newTerminalMenu } from "../../quickterm/frontend/js/sidebar_model.js";
+import { agentProfile } from "../../quickterm/frontend/js/agent_profile.js";
 
 const SESSION = "0199a6f2-1c2d-7e3f-8a9b-0c1d2e3f4a5b";
 
@@ -27,38 +29,45 @@ function fakePalette(app) {
 const press = (key) => ({ key, preventDefault() {}, stopPropagation() {} });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-test("the palette distinguishes external windows and uses the workspace folder", () => {
+test("the palette lists the + menu's rows, the agents with the workspace folder, and no saved terminals", () => {
+  const claude = agentProfile("claude-code", {});
   const app = {
-    profiles: [
-      { name: "Remote", terminal_type: "rdp", connection: { host: "server" } },
-      { name: "Assistant", terminal_type: "claude-code", cmd: "claude", cwd: "obsolete" },
-    ],
+    // A stray list from an older shell is never read (4.5).
+    profiles: [{ name: "Remote", terminal_type: "rdp" }],
+    newTerminalMenu: () => newTerminalMenu({ inventory: { shells: [] }, shell: "cmd", agents: [claude] }),
     snippets: [], workspacePath: () => "C:/project",
   };
   const items = Palette.prototype._staticItems.call({ app });
-  assert.equal(items.find((item) => item.label === "open window: Remote").kind, "window");
-  assert.equal(items.find((item) => item.label === "open terminal: Assistant").kind, "terminal");
-  assert.equal(items.find((item) => item.label === "Claude continue latest: Assistant").hint, "C:/project");
-  assert.ok(items.some((item) => item.label === "split agent view: Assistant"));
+  const labels = items.map((item) => item.label);
+  assert.ok(labels.includes("new terminal: Command Prompt"));
+  assert.ok(labels.includes("new terminal: Claude Code"));
+  assert.equal(items.find((item) => item.label === "Claude continue latest").hint, "C:/project");
+  assert.ok(labels.includes("split agent view: Claude"));
+  assert.ok(!labels.some((label) => /Remote|open window|open terminal|terminals and connections|on host/.test(label)), labels.join("\n"));
+  assert.ok(labels.includes("agent settings"));
+  assert.ok(labels.includes("new workspace…"));
 });
 
-test("an agent profile's open row names its type and mode once", () => {
+test("in a WSL workspace the palette's new terminal is the shell there", () => {
+  let started = 0;
   const app = {
-    profiles: [
-      { name: "Codex", terminal_type: "codex", cmd: "", agent_mode: "new" },
-      { name: "Box", terminal_type: "ssh", ssh_host: "devbox", ssh_user: "me" },
-    ],
-    snippets: [], workspacePath: () => "C:/project",
+    newTerminalMenu: () => newTerminalMenu({ host: "wsl:Ubuntu", agents: [] }),
+    newTerminal: () => { started += 1; },
+    workspaceHost: () => "wsl:Ubuntu",
+    snippets: [],
   };
   const items = Palette.prototype._staticItems.call({ app });
-  assert.equal(items.find((item) => item.label === "open terminal: Codex").hint, "Codex · new conversation");
-  assert.equal(items.find((item) => item.label === "open terminal: Box").hint, "SSH · PuTTY · me@devbox");
+  items.find((item) => item.label === "new terminal: Shell in WSL: Ubuntu").run();
+  assert.equal(started, 1);
+  assert.ok(!items.some((item) => /open folder in (Explorer|VS Code)/.test(item.label)), "no folder on this PC to open");
+  const local = Palette.prototype._staticItems.call({ app: { ...app, workspaceHost: () => null } });
+  assert.ok(local.some((item) => item.label === "open folder in Explorer"));
 });
 
 test("workspaces are opened from enumerated rows, never loaded in place", () => {
   const calls = [];
   const palette = fakePalette({
-    profiles: [], snippets: [],
+    snippets: [],
     openWorkspace: (name) => calls.push(name),
     openWorkspaces: () => [{ workspace: "web", label: "web" }],
   });
@@ -80,7 +89,7 @@ test("workspaces are opened from enumerated rows, never loaded in place", () => 
 
 test("a prefix narrows the list to one kind and a bare prefix lists it", () => {
   const palette = fakePalette({
-    profiles: [{ name: "Codex", terminal_type: "codex" }],
+    newTerminalMenu: () => newTerminalMenu({ agents: [agentProfile("codex", {})] }),
     snippets: [{ name: "deploy", text: "make deploy\r" }],
     liveTerminals: () => [{ session: { id: "s1", name: "build", alive: true }, workspace: "api", label: "api" }],
     settingEntries: () => [{ id: "font_size", label: "Font size", tab: "general", keywords: "font size zoom px" }],
@@ -93,7 +102,7 @@ test("a prefix narrows the list to one kind and a bare prefix lists it", () => {
     return palette.filtered;
   };
   assert.deepEqual(visible("#").map((item) => item.label),
-    ["setting: Font size", "edit terminal: Codex", "edit snippet: deploy"]);
+    ["setting: Font size", "edit snippet: deploy"]);
   assert.deepEqual(visible("!").map((item) => item.label), ["snippet: deploy"]);
   const places = visible("@");
   assert.ok(places.length > 0 && places.every((item) => rowGroup(item) === "place"));
@@ -101,7 +110,7 @@ test("a prefix narrows the list to one kind and a bare prefix lists it", () => {
   assert.ok(places.some((item) => item.label === "open workspace: api"));
   const actions = visible(">");
   assert.ok(actions.every((item) => rowGroup(item) === "action"));
-  assert.ok(actions.some((item) => item.label === "Codex fork a session: Codex"));
+  assert.ok(actions.some((item) => item.label === "Codex fork a session"));
   assert.deepEqual(visible("#zoom").map((item) => item.label), ["setting: Font size"]);
   // Settings and configs stay out of the bare list but are found by typing.
   assert.ok(!visible("").some((item) => item.kind === "setting" || item.kind === "config"));
@@ -112,7 +121,7 @@ test("kill terminal is a keyboard path: pick, then Enter on the pre-selected kil
   const killed = [];
   const build = { id: "s1", name: "build", alive: true };
   const palette = fakePalette({
-    profiles: [], snippets: [],
+    snippets: [],
     liveTerminals: () => [
       { session: build, workspace: "api", label: "api" },
       { session: { id: "s2", name: "old", alive: false }, workspace: null },
@@ -141,7 +150,7 @@ test("a failed kill keeps the confirmation and says why", async () => {
   let attempts = 0;
   const build = { id: "s1", name: "build", alive: true };
   const palette = fakePalette({
-    profiles: [], snippets: [],
+    snippets: [],
     liveTerminals: () => [{ session: build, workspace: "api", label: "api" }],
     killTerminal: async () => {
       attempts += 1;
@@ -166,7 +175,7 @@ test("a failed kill keeps the confirmation and says why", async () => {
   assert.equal(palette.filtered[palette.sel].label, "kill build…");
 });
 
-test("resume rows arrive late for the first agent profile of each type", async (t) => {
+test("resume rows arrive late for each agent", async (t) => {
   const urls = [];
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
@@ -178,9 +187,9 @@ test("resume rows arrive late for the first agent profile of each type", async (
     return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ sessions }) };
   };
   const resumed = [];
-  const codex = { name: "Codex", terminal_type: "codex" };
+  const codex = { name: "codex", terminal_type: "codex" };
   const palette = fakePalette({
-    profiles: [codex, { name: "Codex 2", terminal_type: "codex" }, { name: "Claude", terminal_type: "claude-code" }],
+    agentProfiles: () => [codex, { name: "claude-code", terminal_type: "claude-code" }],
     snippets: [],
     currentWorkspace: () => "api",
     resumeAgentSession: (profile, id) => resumed.push([profile, id]),
@@ -213,9 +222,9 @@ test("a scratch view gets resume rows for the folder it starts agents in", async
     return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ sessions }) };
   };
   const resumed = [];
-  const claude = { name: "Claude", terminal_type: "claude-code" };
+  const claude = { name: "claude-code", terminal_type: "claude-code" };
   const palette = fakePalette({
-    profiles: [claude],
+    agentProfiles: () => [claude],
     snippets: [],
     currentWorkspace: () => "scratch-view-0123456789ab",
     agentSessionFolder: () => "C:\\Temp\\quickterm-scratch",

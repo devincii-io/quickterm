@@ -44,9 +44,8 @@ import { createTerminalRouting, sessionOwner } from "./shell_routing.js";
 import { watchUpdates } from "./updates.js";
 import { createWindowRegistry } from "./window_registry.js";
 import { createWorkspaceActions, validateWorkspaceName } from "./workspace_actions.js";
-import { createRemoteWorkspace } from "./remote_workspace.js";
-import { createFolderWorkspace } from "./new_workspace.js";
-import { openFolderBrowser } from "./folder_browser.js";
+import { openNewWorkspaceDialog } from "./new_workspace_dialog.js";
+import { openThemeSwitcher } from "./theme_switcher.js";
 import { nativeFolderPickerAvailable, pickNativeFolder } from "./panel_shared.js";
 
 const $ = (id) => document.getElementById(id);
@@ -59,9 +58,10 @@ const KILLED_SESSIONS_KEY = "quickterm.killedSessions";
 export const SHELL_MEMBERS = Object.freeze([
   "openWorkspace", "loadWorkspace", "closeWorkspaceView", "newScratchView", "newWorkspace", "openWorkspaces",
   "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal", "moveTerminalHere",
-  "settingEntries", "openSetting", "editTerminalConfig", "editSnippet", "setupTerminals", "setupTour",
-  "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme",
+  "settingEntries", "openSetting", "editSnippet", "setupTerminals", "setupTour",
+  "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme", "openThemeSwitcher",
   "deleteWorkspace", "revealSearchResult", "cycleWorkspace", "showRightPanel",
+  "runWorkspaceSetup", "saveWorkspaceSetup",
 ]);
 
 // The app object the palette, the panels and the sidebar see.
@@ -83,19 +83,17 @@ export async function bootShell() {
   const identity = captureWindowIdentity();
   captureToken();
   const cachedInventory = loadInventoryCache();
-  const [loadedConfig, loadedProfiles, loadedWorkspaces, loadedInventory] = await Promise.all([
+  const [loadedConfig, loadedWorkspaces, loadedInventory] = await Promise.all([
     api.getConfig().catch(() => null),
-    api.getProfiles().catch(() => null),
     // null, not []: an empty list would read as "every workspace is gone".
     api.listWorkspaces().catch(() => null),
     cachedInventory
       ? Promise.resolve(cachedInventory)
       : api.getTerminalOptions().then(saveInventoryCache).catch(() => ({ types: [], wsl_distributions: [] })),
   ]);
-  const cfg = loadedConfig || { profiles: [], snippets: [] };
+  const cfg = loadedConfig || { snippets: [] };
   const state = createAppState({
     cfg,
-    profiles: loadedProfiles || cfg.profiles || [],
     snippets: cfg.snippets || [],
     workspaceNames: loadedWorkspaces || [],
     terminalInventory: loadedInventory,
@@ -169,29 +167,49 @@ export async function bootShell() {
   async function newScratchView() {
     return Boolean(await views.open(null));
   }
-  // "New workspace…": a folder from the folder browser, which starts where
-  // the focused terminal is (never the disposable scratch folder), becomes a
-  // workspace and opens.
+  // "New workspace…": the dialog asks for the location, the folder there
+  // and the name, and opens the view. On this PC the folder starts where the
+  // focused terminal is (never the disposable scratch folder). Its errors
+  // show in the dialog; closing it hands the keyboard back.
   async function newWorkspace() {
     panels?.close();
-    const folder = await openFolderBrowser({
-      startPath: activeApp()?.suggestedWorkspaceFolder?.() || "",
-      title: "New workspace",
-      label: "Choose the new workspace's folder",
-      confirmLabel: "Create workspace",
+    palette?.close();
+    const local = !folders.get(activeApp()?.currentWorkspace?.())?.host;
+    const name = await openNewWorkspaceDialog({
+      api, folders,
+      takenNames: () => state.workspaceNames,
+      suggestedFolder: local ? activeApp()?.suggestedWorkspaceFolder?.() || "" : "",
       nativePicker: { available: nativeFolderPickerAvailable, pick: pickNativeFolder },
+      openView: (opened) => views.open(opened),
+      onWorkspacesChanged,
     });
-    if (!folder) return false;
-    try {
-      await createFolderWorkspace({
-        api, folder, folders, onWorkspacesChanged, openView: (name) => views.open(name),
-      });
-    } catch (error) {
-      // The palette's row lands here too, and it reports nothing itself.
-      showError(error?.detail || `Could not create a workspace for ${folder}.`);
+    if (!name) views.focusView(views.active);
+    return Boolean(name);
+  }
+  // "Run setup" (sidebar menu, palette, Workspace settings): the workspace's
+  // "Start with" list in its view, next to what is open. A view this opens
+  // runs the list by itself when nothing of it is alive; then once is enough.
+  async function runWorkspaceSetup(name = null) {
+    const target = name || (views.active ? views.workspaceOf(views.active) : null);
+    if (!target || isScratchWorkspace(target)) {
+      showError("Scratch has no setup. Open a workspace to run its setup.");
       return false;
     }
-    return true;
+    const wasOpen = Boolean(views.viewForWorkspace(target));
+    const view = await views.open(target);
+    if (!view || !(await views.whenReady(view))) return false;
+    const app = views.appFor(view);
+    if (!wasOpen && app?.startupRan?.()) return true;
+    return Boolean(await app?.runSetup?.());
+  }
+  // The env and start list from Workspace settings. An open view saves them
+  // with its live layout; otherwise a PATCH, which keeps whatever layout the
+  // backend holds (another window may have the workspace open).
+  async function saveWorkspaceSetup(name, setup) {
+    const view = views.viewForWorkspace(name);
+    const app = view ? views.appFor(view) : null;
+    if (app?.saveSetup) return app.saveSetup(setup);
+    return api.patchWorkspace(name, { env: setup?.env ?? {}, startup: setup?.startup ?? [] });
   }
   // True when no view of this window shows `name` any more. "scratch" names
   // the scratch view, and never when it is also a saved workspace's name.
@@ -326,15 +344,16 @@ export async function bootShell() {
     closeWorkspaceView,
     newScratchView,
     newWorkspace,
+    openThemeSwitcher: (options) => openThemeSwitcher(chromeApp, options),
     openWorkspaces: () => views.list().map(({ workspace: name, label, color, active }) => ({ workspace: name, label, color, active })),
     liveTerminals,
     ...routing,
     settingEntries: () => panels.settingEntries?.() || [],
     openSetting: (id) => panels.showSetting?.(id),
-    editTerminalConfig: (name) => panels.showConfig?.("terminal", name),
     editSnippet: (name) => panels.showConfig?.("snippet", name),
+    // The name is older than 4.5: it opens the agent settings now.
     setupTerminals: () => {
-      panels.settingsTab = "connections";
+      panels.settingsTab = "agents";
       panels.show("settings");
     },
     setupTour: () => panels.show("setup"),
@@ -351,12 +370,16 @@ export async function bootShell() {
     cycleWorkspace: (delta) => views.cycle(delta),
     // The palette's "files", "changes" and "pull request" rows.
     showRightPanel: (tab) => rightPanel?.show(tab),
+    runWorkspaceSetup: (name) => runWorkspaceSetup(name).catch((error) => {
+      showError(error?.detail || "The workspace setup could not be started.");
+      return false;
+    }),
+    saveWorkspaceSetup,
   };
 
   // With no view open, the palette and the panels still need answers. The
-  // config sync writes profiles, snippets and the idle timeout back here.
+  // config sync writes the snippets and the idle timeout back here.
   Object.assign(facade, {
-    profiles: state.profiles,
     snippets: state.snippets,
     idleTimeoutSeconds: state.cfg.idle_timeout_s ?? 300,
     version: state.cfg.version || "",
@@ -421,10 +444,6 @@ export async function bootShell() {
     moveSessionHere: viaView("moveSessionHere"),
     createWorkspaceHere: async () => false,
     saveWorkspace: async () => "Open a workspace view first.",
-    checkRemoteFolder: (host, path) => api.checkRemoteFolder(host, path),
-    createRemoteWorkspace: (host, path) => createRemoteWorkspace({
-      api, host, path, onWorkspacesChanged, openView: (name) => views.open(name),
-    }),
   });
   const chromeApp = shellApp({ shell, facade, activeApp });
   palette = new Palette(chromeApp);
@@ -479,7 +498,7 @@ export async function bootShell() {
     }
   };
   const sidebar = createSidebar({
-    api, state, views, panels, palette, folders,
+    api, state, views, panels, folders,
     actions: {
       newTerminal: () => chromeApp.newTerminal(),
       toggleRightPanel: () => rightPanel?.toggle(),
@@ -489,7 +508,6 @@ export async function bootShell() {
       elevateProfile: (profile) => chromeApp.elevateProfile(profile),
       elevateSystem: (choice) => chromeApp.elevateSystemTerminal(choice),
       selectTerminal: (choice) => { state.selectedTerminal = choice; },
-      setup: () => shell.setupTerminals(),
       openWorkspace: reported(openWorkspace),
       closeWorkspace: reported(closeWorkspaceView),
       newScratch: reported(newScratchView),
@@ -500,6 +518,7 @@ export async function bootShell() {
         palette.newWindowMode();
       },
       editWorkspace: (name) => (panels.showWorkspace ? panels.showWorkspace(name) : panels.show("dashboard")),
+      runWorkspaceSetup: (name) => shell.runWorkspaceSetup(name),
       deleteWorkspace,
       activateTerminal: reported(routing.activateTerminal),
       detachTerminal: reported(routing.detachTerminal),
@@ -738,5 +757,5 @@ export async function bootShell() {
   refreshFolders();
   if (cachedInventory) configSync.refreshCachedInventory();
   watchUpdates({ state, handBack: () => views.focusView(views.active) });
-  if (setupNeeded(state.profiles)) panels.show("setup");
+  if (setupNeeded()) panels.show("setup");
 }

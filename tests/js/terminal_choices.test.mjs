@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { defaultShellRow, newTerminalMenu } from "../../quickterm/frontend/js/launcher.js";
-import { shellLabel } from "../../quickterm/frontend/js/sidebar_model.js";
+import { chosenRow } from "../../quickterm/frontend/js/sidebar_model.js";
 import { agentProfile, agentProfiles, agentCommandLine } from "../../quickterm/frontend/js/agent_profile.js";
 import { availableShells, shellTerminalType, shellValueLabel } from "../../quickterm/frontend/js/shell_choice.js";
 
@@ -20,30 +20,47 @@ const inventory = {
   shells,
 };
 
-test("the + menu is the shells, a separator, the agents and profiles, a separator, settings", () => {
-  const ssh = { name: "prod", cmd: "", terminal_type: "ssh", ssh_host: "box" };
+test("a local + menu is the shells, a separator, the agents, a separator, As administrator", () => {
   const agents = agentProfiles({ agents: {} }, inventory);
-  const menu = newTerminalMenu({ inventory, profiles: [ssh], shell: "cmd", agents });
+  const menu = newTerminalMenu({ inventory, shell: "cmd", agents, admin: true });
   assert.deepEqual(menu.map((row) => row.kind), [
-    "shell", "shell", "shell", "shell", "separator", "agent", "profile", "separator", "settings",
+    "shell", "shell", "shell", "shell", "separator", "agent", "separator", "admin",
   ]);
   assert.deepEqual(menu.filter((row) => row.kind === "shell").map((row) => row.label),
     ["PowerShell", "Command Prompt", "Git Bash", "WSL: Ubuntu"]);
   assert.deepEqual(menu.filter((row) => row.isDefault).map((row) => row.value), ["cmd"]);
   assert.equal(menu[5].label, "Claude Code", "Codex is not installed, so it is not offered");
-  assert.equal(menu[6].detail, "SSH · box");
-  assert.equal(menu.at(-1).label, "Terminal settings…");
-  assert.equal(menu.some((row) => /saved terminals/i.test(row.label || "")), false);
+  assert.equal(menu.some((row) => /settings|saved terminal|profile/i.test(row.label || "")), false);
   assert.equal(defaultShellRow(menu).value, "cmd");
 });
 
+test("a WSL or SSH workspace's + menu: the shell there, the agents, no local shells and no administrator", () => {
+  const agents = [{ name: "claude-code", label: "Claude Code" }, { name: "codex", label: "Codex" }];
+  for (const [host, label] of [["wsl:Ubuntu", "Shell in WSL: Ubuntu"], ["devbox", "Shell in devbox"], ["me@10.0.0.5", "Shell in me@10.0.0.5"]]) {
+    const menu = newTerminalMenu({ inventory, shell: "cmd", agents, host, admin: true });
+    assert.deepEqual(menu.map((row) => row.label || row.kind), [label, "separator", "Claude Code", "Codex"], host);
+    assert.equal(defaultShellRow(menu).kind, "remote-shell");
+    // A remembered local shell is not offered there: "+" starts the shell there.
+    assert.equal(chosenRow(menu, "shell:git-bash").kind, "remote-shell");
+    assert.equal(chosenRow(menu, "agent:codex").label, "Codex");
+  }
+});
+
+test("a remembered row from before 4.5 (a saved terminal) falls back to the configured shell", () => {
+  const menu = newTerminalMenu({ inventory, shell: "cmd", agents: [] });
+  assert.equal(chosenRow(menu, "profile:prod").value, "cmd");
+  assert.equal(chosenRow(menu, "settings").value, "cmd");
+});
+
 test("with nothing to launch but shells, no empty band sits between the separators", () => {
-  const menu = newTerminalMenu({ inventory: { shells }, profiles: [], shell: "powershell", agents: [] });
-  assert.deepEqual(menu.map((row) => row.kind), ["shell", "shell", "shell", "shell", "separator", "settings"]);
+  const menu = newTerminalMenu({ inventory: { shells }, shell: "powershell", agents: [], admin: true });
+  assert.deepEqual(menu.map((row) => row.kind), ["shell", "shell", "shell", "shell", "separator", "admin"]);
+  assert.deepEqual(newTerminalMenu({ inventory: { shells }, shell: "powershell" }).map((row) => row.kind),
+    ["shell", "shell", "shell", "shell"], "the admin instance ends with the shells");
 });
 
 test("an inventory cached by an older build still offers the configured shell", () => {
-  const menu = newTerminalMenu({ inventory: { types: [] }, profiles: [], shell: "git-bash", agents: [] });
+  const menu = newTerminalMenu({ inventory: { types: [] }, shell: "git-bash", agents: [] });
   assert.deepEqual(menu[0], { key: "shell:git-bash", kind: "shell", value: "git-bash", label: "Git Bash", isDefault: true });
   assert.deepEqual(availableShells({ shells: [{ value: "cmd", available: false }] }, "powershell").map((e) => e.value),
     ["powershell"]);
@@ -86,12 +103,4 @@ test("the Settings shell picker lists the installed shells and keeps a saved one
   assert.deepEqual(shellOptions({ shells }, "cmd").map((option) => option.value),
     ["powershell", "cmd", "git-bash", "wsl:Ubuntu"]);
   assert.deepEqual(shellOptions({ shells }, "wsl:Gone").at(-1), { value: "wsl:Gone", label: "WSL: Gone" });
-});
-
-test("ssh and sftp read as the target for either client", () => {
-  const detail = (profile) => shellLabel({ name: "p", cmd: "", ...profile });
-  assert.equal(detail({ terminal_type: "ssh", ssh_host: "box", ssh_user: "me" }), "SSH · me@box");
-  assert.equal(detail({ terminal_type: "ssh", ssh_host: "box", ssh_client: "openssh" }), "SSH · box");
-  assert.equal(detail({ terminal_type: "sftp", ssh_host: "box" }), "SFTP · box");
-  assert.equal(detail({ terminal_type: "ssh" }), "SSH");
 });

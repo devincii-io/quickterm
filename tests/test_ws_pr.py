@@ -58,7 +58,6 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setattr(workspace_mod, "_NAMESPACE", None)
     ws_pr._methods_cache.clear()
-    ws_pr._known.clear()
 
 
 @pytest.fixture
@@ -112,17 +111,6 @@ def test_the_pr_with_checks_and_merge_methods(client, fake):
     # gh runs here, never in the workspace folder (which may be on a host).
     assert {path for path, argv in fake.calls if argv[0] == "gh"} == {os.path.expanduser("~")}
     assert all(path.endswith("repo") for path, argv in fake.calls if argv[0] == "git")
-
-
-def test_the_board_names_the_pr_the_panel_last_saw(client, fake):
-    assert client.get("/api/board").json()["pr"] == {}
-    client.get("/api/ws/demo/pr")
-    assert client.get("/api/board").json()["pr"] == {
-        "demo": {"number": 249, "state": "OPEN", "url": "https://github.com/acme/app/pull/249"},
-    }
-    fake.on(["gh", "pr", "list"], out="[]")
-    client.get("/api/ws/demo/pr")
-    assert client.get("/api/board").json()["pr"] == {}
 
 
 def test_gh_missing_unauthenticated_and_no_pr(client, fake):

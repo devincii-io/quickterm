@@ -1,6 +1,6 @@
-"""Workspaces on an SSH host (CONTRACTS 4.3): the stored host, ws_exec over
-ssh, the terminal and agent launches, the hook socket and token handshake,
-remote git facts and the routes."""
+"""Workspaces on an SSH host (CONTRACTS 4.3, destinations since 4.5): the
+stored host, ws_exec over ssh, the terminal and agent launches, the hook
+socket and token handshake, remote git facts and the routes."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 import quickterm.session_manager as session_manager
 from quickterm import agent_hooks, git_info, launch, ssh_config, ws_exec
 from quickterm import workspace as workspace_mod
-from quickterm.config import AgentSettings, Profile
+from quickterm.config import AgentSettings
 from quickterm.server import create_app
 from quickterm.session_manager import SessionManager
 from tests.test_server import FakeConfig, FakeSessionManager
@@ -29,18 +29,8 @@ HOSTILE = "/srv/it's $(rm -rf ~); `x` \"q\""
 TOKEN = "hooktoken-0123456789"
 
 
-def box(**changes) -> Profile:
-    values = dict(
-        name="devbox", cmd="", terminal_type="ssh", ssh_client="openssh",
-        ssh_host="devbox.example", ssh_user="dev", ssh_port=2222, ssh_key=r"C:\keys\id_ed25519",
-    )
-    values.update(changes)
-    return Profile(**values)
-
-
 @dataclass
 class Cfg:
-    profiles: list = field(default_factory=lambda: [box()])
     agents: dict = field(default_factory=lambda: {"claude-code": AgentSettings(), "codex": AgentSettings()})
     shell: str = "powershell"
     host: str = "127.0.0.1"
@@ -50,7 +40,6 @@ class Cfg:
 @pytest.fixture(autouse=True)
 def openssh(monkeypatch):
     monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: SSH)
-    monkeypatch.setattr(ws_exec, "_saved_profiles", lambda: [box(), box(name="putty-box", ssh_client=None)])
     ws_exec._exists_cache.clear()
     git_info._remote_cache.clear()
 
@@ -99,14 +88,14 @@ def test_quoting_refuses_nul_and_line_breaks():
     assert shlex.split(ws_exec.folder_word(HOSTILE)) == [HOSTILE]
 
 
-def test_remote_argv_is_batch_ssh_with_the_profile_and_a_quoted_cd():
-    ws = workspace_mod.Workspace("api", {}, path=HOSTILE, host="devbox")
+def test_remote_argv_is_batch_ssh_to_the_destination_and_a_quoted_cd():
+    ws = workspace_mod.Workspace("api", {}, path=HOSTILE, host="ssh://dev@devbox.example:2222")
     argv = ws_exec.remote_argv(ws, ["git", "status", "--porcelain"])
     assert argv[0] == SSH
-    assert argv[argv.index("-p") + 1] == "2222"
-    assert argv[argv.index("-i") + 1] == r"C:\keys\id_ed25519"
+    # Port, key and the rest are ssh_config's (or the URL's), never ours.
+    assert "-p" not in argv and "-i" not in argv
     assert "BatchMode=yes" in argv and "ClearAllForwardings=yes" in argv
-    assert argv[-2] == "dev@devbox.example"
+    assert argv[-2] == "ssh://dev@devbox.example:2222"
     command = argv[-1]
     assert command.startswith("cd ")
     words = shlex.split(command)
@@ -129,10 +118,9 @@ def test_run_passes_the_remote_argv_without_a_local_folder(monkeypatch):
     assert seen["stdin"] is subprocess.DEVNULL
 
 
-def test_a_putty_or_unknown_profile_cannot_back_a_workspace():
-    with pytest.raises(ws_exec.RemoteUnavailable, match="remote workspaces need an OpenSSH profile"):
-        ws_exec.find_profile("putty-box")
-    with pytest.raises(FileNotFoundError, match="no SSH profile"):
+def test_without_openssh_a_location_is_unavailable_and_says_where_to_get_it(monkeypatch):
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: None)
+    with pytest.raises(ws_exec.RemoteUnavailable, match="Optional features > OpenSSH Client"):
         ws_exec.run(workspace_mod.Workspace("x", {}, path="/x", host="nobody"), ["ls"])
 
 
@@ -177,8 +165,7 @@ def resolve(**kwargs) -> launch.LaunchSpec:
 def test_a_plain_terminal_is_ssh_t_with_a_quoted_cd_and_the_login_shell():
     spec = resolve()
     assert spec.cmd == SSH
-    assert spec.args[0] == "-p" and "-t" in spec.args
-    assert spec.args[-2] == "dev@devbox.example"
+    assert spec.args[:2] == ["-t", "devbox"]
     assert shell_words(spec.args[-1])[:3] == ["cd", HOSTILE, ";"]
     assert spec.args[-1].endswith('; exec "$SHELL" -l')
     assert spec.cwd is None and spec.agent is None and spec.remote is not None
@@ -212,19 +199,6 @@ def test_a_windows_agent_path_falls_back_to_the_cli_name():
     spec = launch.resolve(cfg, profile="codex", remote=launch.RemoteTarget("devbox", "/srv/x"))
     assert spec.remote.command[0] == "codex"
     assert spec.remote.command[1:3] == ("--cd", "/srv/x")
-
-
-def test_a_putty_host_is_refused_with_the_contract_message():
-    with pytest.raises(launch.LaunchError, match="remote workspaces need an OpenSSH profile"):
-        launch.resolve(Cfg(profiles=[box(ssh_client="putty")]), remote=launch.RemoteTarget("devbox", "/x"))
-
-
-def test_remote_capable_profiles():
-    assert launch.remote_start(Profile(name="dev", cmd="bash", terminal_type="bash", start_command="npm run dev")) == "npm run dev"
-    assert launch.remote_start(Profile(name="top", cmd="htop", terminal_type="custom", args=["-d", "5"])) == "htop -d 5"
-    assert launch.remote_start(Profile(name="w", cmd=r"C:\x\tool.exe", terminal_type="custom")) is None
-    assert launch.remote_start(Profile(name="ps", cmd="pwsh.exe", terminal_type="powershell-core", start_command="x")) is None
-    assert launch.remote_start(Profile(name="wsl", cmd="wsl.exe", terminal_type="wsl", start_command="x")) is None
 
 
 # --- the hook socket and the token -----------------------------------------------
@@ -273,7 +247,7 @@ async def test_an_agent_gets_the_socket_forward_and_never_the_token_in_argv(monk
     assert re.fullmatch(r"/tmp/quickterm-[0-9a-f]{16}\.sock", socket)
     assert rest == "127.0.0.1:8741"
     assert "ExitOnForwardFailure=no" in args
-    assert args.index("-R") < args.index("dev@devbox.example")
+    assert args.index("-R") < args.index("devbox")
     assert all(TOKEN not in arg for arg in [pty.cmd, *args])
     script = shlex.split(args[-1])
     assert script[:3] == ["exec", "sh", "-c"]
@@ -515,7 +489,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setattr(workspace_mod, "_NAMESPACE", None)
     cfg = FakeConfig()
-    cfg.profiles = [box(), box(name="putty-box", ssh_client="putty")]
     with TestClient(create_app(FakeSessionManager(), cfg), base_url="http://127.0.0.1:8620") as c:
         yield c
 
@@ -532,19 +505,19 @@ def test_put_validates_the_host_and_reads_the_folder_on_it(client, monkeypatch):
     # A layout autosave without the key keeps the host and folder.
     assert client.put("/api/workspaces/api", json={"layout": {"type": "pane"}}).status_code == 204
     assert client.get("/api/workspaces/api").json()["host"] == "devbox"
-    refused = client.put("/api/workspaces/p", json={"layout": {}, "host": "putty-box", "path": "/x"})
+    refused = client.put("/api/workspaces/p", json={"layout": {}, "host": "-oProxyCommand=calc", "path": "/x"})
     assert refused.status_code == 400
-    assert refused.json()["detail"] == "remote workspaces need an OpenSSH profile"
+    assert refused.json()["detail"] == "an SSH destination must not start with -"
     bad = client.put("/api/workspaces/q", json={"layout": {}, "host": "devbox", "path": "rel/x"})
     assert bad.status_code == 400
 
 
 def test_remote_check_route(client, monkeypatch):
     monkeypatch.setattr(ws_exec, "check_folder",
-                        lambda host, path, profiles=None: (False, f"{path} is not a folder on {host}"))
+                        lambda host, path: (False, f"{path} is not a folder on {host}"))
     answer = client.post("/api/workspaces/remote-check", json={"host": "devbox", "path": "/nope"})
     assert answer.json() == {"ok": False, "message": "/nope is not a folder on devbox"}
-    assert client.post("/api/workspaces/remote-check", json={"host": "putty-box", "path": "/x"}).status_code == 400
+    assert client.post("/api/workspaces/remote-check", json={"host": "two words", "path": "/x"}).status_code == 400
     assert client.post("/api/workspaces/remote-check", json={"host": "devbox", "path": "/a\nb"}).status_code == 400
 
 
@@ -557,13 +530,15 @@ def test_no_administrator_terminal_on_a_remote_workspace(client, monkeypatch):
     monkeypatch.setattr("quickterm.elevation.launch", lambda spec: launched.append(spec))
     refused = client.post("/api/elevate", json={"workspace": "api"})
     assert refused.status_code == 400
-    assert "remote workspace" in refused.json()["detail"]
+    assert "WSL or SSH workspace" in refused.json()["detail"]
     assert launched == []
 
 
 def test_env_travels_as_an_env_prefix_on_a_host_and_never_takes_a_bad_name():
+    # Options before assignments: env reads everything after the first
+    # assignment as the command, so "-u" there would be run as a program.
     assert ws_exec._with_env(["git", "status"], {"GIT_TERMINAL_PROMPT": "0", "GIT_DIR": None}) == [
-        "env", "GIT_TERMINAL_PROMPT=0", "-u", "GIT_DIR", "git", "status",
+        "env", "-u", "GIT_DIR", "GIT_TERMINAL_PROMPT=0", "git", "status",
     ]
     with pytest.raises(ValueError):
         ws_exec._with_env(["git"], {"A=B; rm": "x"})

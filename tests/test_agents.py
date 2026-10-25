@@ -9,19 +9,19 @@ from dataclasses import dataclass, field
 import pytest
 
 from quickterm import agents
-from quickterm.config import Profile
+from quickterm.config import AgentProfile
 
 CWD = os.path.join(os.sep, "work", "project")
 SESSION = "0199a3b2-7c41-7d10-9e55-2f1a3c4b5d6e"
 
 
-def claude(mode=None, agent=None, args=None, cmd="C:/bin/claude.exe") -> Profile:
-    return Profile(name="c", cmd=cmd, terminal_type="claude-code", agent_mode=mode,
+def claude(mode=None, agent=None, args=None, cmd="C:/bin/claude.exe") -> AgentProfile:
+    return AgentProfile(name="c", cmd=cmd, terminal_type="claude-code", agent_mode=mode,
                    agent=agent or {}, args=args or [])
 
 
-def codex(mode=None, agent=None, args=None, cmd="C:/bin/codex.exe") -> Profile:
-    return Profile(name="x", cmd=cmd, terminal_type="codex", agent_mode=mode,
+def codex(mode=None, agent=None, args=None, cmd="C:/bin/codex.exe") -> AgentProfile:
+    return AgentProfile(name="x", cmd=cmd, terminal_type="codex", agent_mode=mode,
                    agent=agent or {}, args=args or [])
 
 

@@ -466,7 +466,7 @@ def test_the_shown_row_is_highlighted_in_the_sidebar():
     card = sidebar_css[sidebar_css.index(".session-group.active {"):]
     card = card[: card.index("}")]
     assert "border-color: var(--accent-border);" in card
-    assert "background: var(--surface);" in card
+    assert "background: var(--surface-active);" in card
     assert 'setClass(node, "active", group.active);' in launcher
     assert '"aria-current": group.active ? "true" : false,' in launcher
 

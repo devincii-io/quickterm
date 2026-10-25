@@ -43,26 +43,6 @@ _OWNER_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 _methods_cache: dict[str, tuple[float, list[str]]] = {}
 _methods_lock = threading.Lock()
-# The last PR the panel saw per workspace name, so the board can name it
-# without asking GitHub itself. Memory only; gone with the backend.
-_known: dict[str, dict] = {}
-
-
-def known_prs() -> dict[str, dict]:
-    """{workspace name: {"number", "state", "url"}} as the panel last saw it."""
-    with _methods_lock:
-        return {name: dict(pr) for name, pr in _known.items()}
-
-
-def _remember(ws: Any, pr: dict | None) -> None:
-    name = getattr(ws, "name", None)
-    if not isinstance(name, str) or not name:
-        return
-    with _methods_lock:
-        if pr is None:
-            _known.pop(name, None)
-        else:
-            _known[name] = {"number": pr.get("number"), "state": pr.get("state"), "url": pr.get("url")}
 
 
 class PrError(Exception):
@@ -248,9 +228,7 @@ def status(ws: Any) -> dict:
             return _empty(state)
         number = pr.get("number") if pr else None
         if not isinstance(number, int):
-            _remember(ws, None)
             return _empty("ok", "no pull request for this branch")
-        _remember(ws, pr)
         pr["merge_methods"] = merge_methods(repo)
         return {"gh": "ok", "pr": pr, "checks": _checks(repo, number), "reason": None}
     except FileNotFoundError:

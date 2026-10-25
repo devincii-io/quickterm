@@ -95,11 +95,12 @@ class SessionInfo:
     cwd: str | None = None  # directory the shell was started in
     # Where the shell says it is now (OSC 7 or OSC 9;9), None until it says so.
     current_cwd: str | None = None
-    # The SSH profile a remote workspace's terminal runs on; None locally.
+    # The SSH destination a remote workspace's terminal runs on; None
+    # elsewhere (a WSL workspace's terminals included).
     host: str | None = None
     # The shell an agent runs inside ("powershell", "wsl:Ubuntu", ...), None
-    # when the PTY runs no wrapped agent. A WSL agent reports no state, so
-    # the pane waits for the wrap's exit marker instead.
+    # when the PTY runs no wrapped agent. A WSL agent's process is out of
+    # sight, so the pane also takes the wrap's exit marker as its end.
     agent_shell: str | None = None
 
 
@@ -169,7 +170,8 @@ class Session:
         # nor push the token line through to the agent.
         self.held_input: list[bytes] = []
         self.hold_until = 0.0
-        # Runs on an SSH host: paths its hooks name are the host's.
+        # Runs on an SSH host or in WSL: paths its hooks name are not this
+        # computer's.
         self.remote = False
 
     def scrollback_chunks(self) -> tuple[tuple[bytes, ...], int, int]:
@@ -286,10 +288,15 @@ class SessionManager:
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
         shell: str | None = None,
+        wsl: str | None = None,
+        command: str | None = None,
     ) -> SessionInfo:
         """Start a session synchronously (loop thread: app startup, hotkeys).
 
         ``agent`` ("claude" or "codex") adds QuickTerm's hooks to the launch.
+        ``wsl`` names the distribution of a terminal in a WSL workspace; its
+        ``cwd`` is then a path there. ``command`` is what a plain ``shell``
+        runs once before its prompt, kept when the integration rebuilds it.
         """
         self._check_limit()
         session = self._build(
@@ -306,6 +313,8 @@ class SessionManager:
             wrap=wrap,
             remote=remote,
             shell=shell,
+            wsl=wsl,
+            command=command,
         )
         self._sessions[session.info.id] = session
         return session.info
@@ -326,6 +335,8 @@ class SessionManager:
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
         shell: str | None = None,
+        wsl: str | None = None,
+        command: str | None = None,
     ) -> SessionInfo:
         """``spawn`` for request handlers: the PTY is built off the loop.
 
@@ -352,6 +363,8 @@ class SessionManager:
                 wrap=wrap,
                 remote=remote,
                 shell=shell,
+                wsl=wsl,
+                command=command,
             )
         )
         build.add_done_callback(self._finish_async_spawn)
@@ -385,6 +398,8 @@ class SessionManager:
         wrap: shells.Wrap | None = None,
         remote: launch.RemoteLaunch | None = None,
         shell: str | None = None,
+        wsl: str | None = None,
+        command: str | None = None,
     ) -> Session:
         """Create the Session and start its PTY. Blocking; touches no registry."""
         sid = uuid.uuid4().hex
@@ -393,14 +408,22 @@ class SessionManager:
         child_env.update(hook_env)
         child_env["QUICKTERM_SESSION_ID"] = sid
         start_dir = cwd or default_cwd()
-        args = list(args or [])
-        # No hooks for an agent inside WSL: the Windows curl and these
-        # variables do not reach the Linux side.
-        local_hooks = remote is None and not (wrap and shells.is_wsl(wrap.value))
-        if agent in agent_hooks.AGENTS and hook_env and local_hooks:
-            args = agent_hooks.launch_args(agent, cmd, args, start_dir)
-        title = name or profile or cmd
         pty_dir: str | None = start_dir
+        if wsl is not None:
+            # The folder is a path in the distribution; wsl.exe --cd goes
+            # there, the PTY itself starts in the home folder here.
+            start_dir = cwd or "~"
+            pty_dir = default_cwd()
+        args = list(args or [])
+        # An agent inside WSL reaches the backend through Windows' curl.exe
+        # (WSL interop), with the variables carried in by WSLENV.
+        wsl_agent = wrap is not None and shells.is_wsl(wrap.value)
+        if agent in agent_hooks.AGENTS and hook_env:
+            if wsl_agent:
+                args, child_env = agent_hooks.wsl_launch(agent, args, child_env)
+            elif remote is None:
+                args = agent_hooks.launch_args(agent, cmd, args, start_dir)
+        title = name or profile or cmd
         marker = None
         nonce = ""
         if remote is not None:
@@ -425,7 +448,12 @@ class SessionManager:
             except ValueError as exc:
                 raise SpawnError(str(exc)) from exc
         elif shell_value is not None and integration is not None:
-            cmd, args, pty_dir = shells.interactive(shell_value, cmd, start_dir, integration)
+            try:
+                cmd, args, pty_dir = shells.interactive(
+                    shell_value, cmd, start_dir, integration, command=command,
+                )
+            except ValueError as exc:
+                raise SpawnError(str(exc)) from exc
         info = SessionInfo(
             id=sid,
             name=title,
@@ -459,7 +487,7 @@ class SessionManager:
         session.hook_nonce = nonce
         if marker is not None:
             session.ready_marker = launch.ready_marker(nonce)
-        session.remote = remote is not None
+        session.remote = remote is not None or wsl is not None or wsl_agent
         if os.path.basename(cmd).casefold() in {"wsl", "wsl.exe"}:
             session.resource_scope = "host-process-tree-partial-wsl"
         try:
@@ -675,8 +703,8 @@ class SessionManager:
             s.info.name = s.agent.title
 
     def is_remote(self, sid: str) -> bool:
-        """Whether the session runs on an SSH host. An unknown id counts as
-        remote: nothing a hook names is read for it."""
+        """Whether the session runs on an SSH host or in WSL. An unknown id
+        counts as remote: nothing a hook names is read for it."""
         s = self._sessions.get(sid)
         return s is None or s.remote
 

@@ -13,15 +13,12 @@ import { renderSnippetSettings } from "./panel_settings_snippets.js";
 import { renderAboutSettings, renderAdvancedSettings } from "./panel_settings_about.js";
 import { settingsSearchResults } from "./panel_settings_kit.js";
 import { renderHelp } from "./panel_help.js";
-import { renderConnections, connectionProblems, profileTypeLabel } from "./panel_connections.js";
 import { renderAgentSettings } from "./panel_settings_agents.js";
 import { renderSetup } from "./setup.js";
 import { settingsPatch, settingsProblems } from "./global_settings.js";
 import { snapshotItems } from "./config_list.js";
 import { captureActive } from "./shortcut_input.js";
-import { SETTINGS_INDEX, SETTINGS_TABS, searchSettings } from "./settings_index.js";
-
-export { terminalTypeLabel } from "./panel_connections.js";
+import { SETTINGS_INDEX, SETTINGS_TABS, searchSettings, settingsTabId } from "./settings_index.js";
 
 // Who gets Escape or Tab while the sheet is open, in order: a shortcut field
 // that is recording, a menu opened from the sheet, a destructive
@@ -275,8 +272,6 @@ export class Panels {
     return renderDashboard.call(this);
   }
 
-  _terminalLabel(profile) { return profileTypeLabel(profile); }
-
   async _settings() {
     this._themePreviewDirty = false;
     let ready;
@@ -296,15 +291,9 @@ export class Panels {
     this.settingsDraft = JSON.parse(JSON.stringify(cfg));
     this.settingsBaseline = structuredClone(cfg);
     this.terminalInventory = inventory;
-    // Read once per opening of the sheet; Settings never waits for them.
-    this.sshHostsLoad = null;
-    this.sshHostList = undefined;
+    // Read once per opening of the sheet; Settings never waits for it.
     this.agentCatalogLoad = null;
     this._snapshot();
-    // No type is stamped here. A hand-edited profile without one launches as
-    // a plain command, and stamping the inferred type at load would save it
-    // with that type, which changes how it starts (bash becomes a login
-    // shell). The editor sets it only once a type-bound field is edited.
 
     const shell = make("div", "settings-shell");
     const nav = make("nav", "settings-tabs");
@@ -323,7 +312,7 @@ export class Panels {
     let shownResults = [];
 
     const render = () => {
-      if (this.settingsTab === "terminals") this.settingsTab = "connections";
+      this.settingsTab = settingsTabId(this.settingsTab);
       for (const button of nav.querySelectorAll(".settings-tab")) {
         const current = button.dataset.tab === this.settingsTab;
         button.classList.toggle("active", current);
@@ -345,10 +334,7 @@ export class Panels {
       if (tab === "general") renderGeneralSettings.call(this, content);
       else if (tab === "window") renderWindowSettings.call(this, content);
       else if (tab === "shortcuts") renderShortcutSettings.call(this, content);
-      else if (tab === "connections") {
-        renderAgentSettings.call(this, content);
-        renderConnections.call(this, content);
-      }
+      else if (tab === "agents") renderAgentSettings.call(this, content);
       else if (tab === "snippets") renderSnippetSettings.call(this, content);
       else if (tab === "about") renderAboutSettings.call(this, content);
       else renderAdvancedSettings.call(this, content);
@@ -359,7 +345,7 @@ export class Panels {
       render();
     };
     const pick = (result) => {
-      if (result.kind === "terminal" || result.kind === "snippet") this.configFocus = { kind: result.kind, name: result.name };
+      if (result.kind === "snippet") this.configFocus = { kind: result.kind, name: result.name };
       go(result.tab);
       if (result.kind === "setting") this._revealSetting(result.id);
     };
@@ -407,16 +393,15 @@ export class Panels {
     ready();
   }
 
-  // What "unsaved" is measured against: every profile and snippet as it was
-  // when Settings opened or last saved.
+  // What "unsaved" is measured against: every snippet as it was when
+  // Settings opened or last saved.
   _snapshot() {
     this.savedSnapshots = new WeakMap();
-    snapshotItems(this.savedSnapshots, this.settingsDraft?.profiles);
     snapshotItems(this.savedSnapshots, this.settingsDraft?.snippets);
   }
 
   // The one way Settings persists: the footer Save, Ctrl+S in the sheet, and
-  // the Save button beside a terminal or snippet editor all land here.
+  // the Save button beside a snippet editor all land here.
   async _saveSettings() {
     const view = this._settingsView;
     if (!view || this._saving) return;
@@ -426,7 +411,7 @@ export class Panels {
       message.title = text;
       message.classList.add("error");
     };
-    const problem = settingsProblems(this.settingsDraft, { profileProblem: connectionProblems, baseline: this.settingsBaseline });
+    const problem = settingsProblems(this.settingsDraft, { baseline: this.settingsBaseline });
     if (problem) { fail(problem); return; }
     this._saving = true;
     save.disabled = true;
@@ -467,6 +452,7 @@ export class Panels {
   }
 
   async _openSettingsTab(tab) {
+    tab = settingsTabId(tab);
     this.settingsTab = tab;
     if (this.open !== "settings") this.show("settings");
     else if (this._settingsView) this._settingsView.go(tab);
@@ -498,10 +484,12 @@ export class Panels {
     return entry ? this._revealSetting(text) : false;
   }
 
-  /** Open Terminals or Snippets with `name` selected; null opens Add. */
+  /** Open Snippets with `name` selected (null opens Add). Saved terminals
+   *  are gone since 4.5; "terminal" lands on the agent settings. */
   async showConfig(kind, name = null) {
-    this.configFocus = { kind: kind === "snippet" ? "snippet" : "terminal", name: name || null };
-    await this._openSettingsTab(kind === "snippet" ? "snippets" : "connections");
+    if (kind !== "snippet") return this._openSettingsTab("agents");
+    this.configFocus = { kind: "snippet", name: name || null };
+    await this._openSettingsTab("snippets");
   }
 
   /** Open the settings of workspace `name`: folder, logo, layout. */

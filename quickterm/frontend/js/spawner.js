@@ -6,6 +6,7 @@ import { SCRATCH_WS } from "./boot_context.js";
 import { AGENT_TYPES, agentProfile, isAgentType } from "./agent_profile.js";
 import { launchOptions, repeatLaunchOptions } from "./launch_options.js";
 import { shellTerminalType, shellValueLabel } from "./shell_choice.js";
+import { locationKind } from "./locations.js";
 import { splitDirectory } from "./split_policy.js";
 import { insidePath, samePath } from "./here.js";
 
@@ -16,7 +17,16 @@ export function serializableSpec(spec) {
   if (typeof spec.shell === "string" && !spec.cmd) {
     const out = { shell: spec.shell, name: spec.name || shellValueLabel(spec.shell) };
     if (spec.cwd) out.cwd = spec.cwd;
+    // A Start with shell's one-line command (never its variables: the layout
+    // is saved as plain text, the workspace's setup sealed).
+    if (typeof spec.command === "string" && spec.command) out.command = spec.command;
     out.terminal_type = shellTerminalType(spec.shell);
+    return out;
+  }
+  if (typeof spec.command === "string" && spec.command && !spec.cmd) {
+    // The same in the configured shell, which the backend resolves per start.
+    const out = { command: spec.command, name: spec.name || "Shell" };
+    if (spec.cwd) out.cwd = spec.cwd;
     return out;
   }
   const out = {
@@ -30,6 +40,15 @@ export function serializableSpec(spec) {
     out.terminal_type = spec.terminalType || spec.terminal_type;
   }
   return out;
+}
+
+// The pane type of a plain shell: in a WSL or SSH workspace the location's
+// own shell (WSL panes map dropped Windows paths, remote ones refuse them),
+// on this PC the shell it was started with or the configured one.
+export function plainShellType(host, shell) {
+  const where = locationKind(host);
+  if (where !== "local") return where;
+  return shellTerminalType(shell ?? "");
 }
 
 export function commandTerminalType(spec) {
@@ -66,25 +85,17 @@ export function sameFolderCwd(paneCwd, root) {
   return samePath(paneCwd, root) || insidePath(paneCwd, root) ? paneCwd : null;
 }
 
-// The profile whose agent can pick a dead pane's conversation up again: an
-// agent (Claude Code or Codex), or a shell profile that was running claude.
+// The agent (Claude Code or Codex) that can pick a dead pane's conversation
+// up again. `profiles` are the agents (allProfiles()).
 export function claudeProfileForPane(profiles, pane) {
   const profile = profiles.find((item) => item.name === pane.profileName) || null;
-  if (!profile) return agentForLostProfile(profiles, pane);
-  if (isAgentType(profile.terminal_type)) return profile;
-  const hint = [profile.name, profile.cmd, profile.start_command, pane.title]
-    .filter(Boolean).join(" ");
-  const mentionsClaude = /\bclaude(?:\.cmd|\.exe)?\b/i.test(hint);
-  const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
-  const resumableShell = [
-    "powershell-core", "windows-powershell", "command-prompt", "wsl", "bash", "zsh", "fish",
-  ].includes(profile.terminal_type);
-  return mentionsClaude && (directClaude || resumableShell) ? profile : null;
+  if (profile) return isAgentType(profile.terminal_type) ? profile : null;
+  return agentForLostProfile(profiles, pane);
 }
 
-// A pane whose profile is gone: 4.3 turned the agent profiles into settings,
-// so a layout still names "Claude New". Its pane type, else a profile name or
-// title naming the agent, picks the agent from `profiles` (allProfiles()).
+// A pane whose profile is gone: 4.3 turned the agent profiles into settings
+// and 4.5 removed saved terminals, so a layout may still name "Claude New".
+// Its pane type, else a profile name or title naming the agent, picks it.
 function agentForLostProfile(profiles, pane) {
   const hint = [pane.profileName, pane.title].filter(Boolean).join(" ");
   const kind = isAgentType(pane.terminalType) ? pane.terminalType
@@ -96,14 +107,11 @@ function agentForLostProfile(profiles, pane) {
 export function createSpawner({
   api, state, layout, ownSession, scheduleWorkspaceSave, refreshStatusSoon, refreshInventory, showError,
 }) {
-  // Saved profiles, and Claude Code and Codex from the agent settings under
-  // their kind as the name ("claude-code"), which is how a request names them.
+  // The only profiles left (4.5): Claude Code and Codex from the agent
+  // settings, under their kind as the name ("claude-code"), which is how a
+  // request names them.
   function allProfiles() {
-    const saved = state.profiles || [];
-    const agents = AGENT_TYPES
-      .filter((kind) => !saved.some((profile) => profile.name === kind))
-      .map((kind) => agentProfile(kind, state.cfg?.agents?.[kind]));
-    return [...saved, ...agents];
+    return AGENT_TYPES.map((kind) => agentProfile(kind, state.cfg?.agents?.[kind]));
   }
 
   // Where a new terminal should start when the caller has no directory of its
@@ -138,7 +146,8 @@ export function createSpawner({
   async function spawnInto(pane, profileName, cwd, options) {
     if (!profileByName(profileName)) {
       // A pane saved with a profile that is gone (4.3 removed the shell and
-      // agent profiles) still opens: in the shell, saying why.
+      // agent profiles, 4.5 every saved terminal) still opens: in the shell,
+      // saying why.
       const info = await spawnShellInto(pane, cwd, null);
       if (info) pane.flashNotice?.(`[profile "${profileName}" no longer exists · started the shell]`, 5000);
       return info;
@@ -150,7 +159,6 @@ export function createSpawner({
         profile: profileName,
         cwd: cwd || undefined,
         workspace: spawnWorkspaceTag(),
-        ...(launch.startCommand !== undefined ? { start_command: launch.startCommand } : {}),
         ...(launch.agentMode !== undefined ? { agent_mode: launch.agentMode } : {}),
         ...(launch.agentSession !== undefined ? { agent_session: launch.agentSession } : {}),
         ...(launch.args !== undefined ? { args: launch.args } : {}),
@@ -159,6 +167,7 @@ export function createSpawner({
       pane.terminalType = profileTerminalType(profileName);
       pane.launchSpec = null;
       pane.launchOptions = launchOptions(launch);
+      pane.restartWith = null;
       // The backend resolves the workspace folder, so its answer, not the
       // hint we sent, is what this pane actually opened in.
       pane.setLaunchCwd(info.cwd || cwd || null);
@@ -178,17 +187,22 @@ export function createSpawner({
   async function spawnSpecInto(pane, spec) {
     const legacy = legacyAgentSpec(spec);
     if (legacy) return spawnInto(pane, legacy.kind, spec.cwd || null, { agentMode: legacy.mode });
-    if (typeof spec.shell === "string" && !spec.cmd) return spawnShellInto(pane, spec.cwd || null, spec.shell);
+    if (typeof spec.shell === "string" && !spec.cmd) {
+      return spawnShellInto(pane, spec.cwd || null, spec.shell, spec.command || null);
+    }
     if (!pane.beginSpawn()) return null;
     const launchSpec = serializableSpec(spec);
     try {
       // workspace tags the request only (not the persisted launchSpec).
       const info = await api.createSession({ ...launchSpec, workspace: spawnWorkspaceTag() });
       pane.profileName = null;
-      pane.terminalType = commandTerminalType(launchSpec);
+      // A command with no program runs in the configured shell.
+      pane.terminalType = commandTerminalType(launchSpec)
+        ?? (launchSpec.command ? plainShellType(state.workspaceHost, state.cfg?.shell) : null);
       pane.setLaunchCwd(info.cwd || launchSpec.cwd);
       pane.launchSpec = launchSpec;
       pane.launchOptions = null;
+      pane.restartWith = null;
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -205,7 +219,7 @@ export function createSpawner({
   // A shell with no profile. `shell` null is the configured one, resolved by
   // the backend on every start, so a restart follows a changed setting; a
   // named one (a "+" menu row) is remembered on the pane.
-  async function spawnShellInto(pane, cwd, shell = null) {
+  async function spawnShellInto(pane, cwd, shell = null, command = null) {
     if (!pane.beginSpawn()) return null;
     const named = typeof shell === "string";
     try {
@@ -213,12 +227,14 @@ export function createSpawner({
         cwd: cwd || undefined,
         workspace: spawnWorkspaceTag(),
         ...(named ? { shell } : {}),
+        ...(command ? { command } : {}),
       });
       pane.profileName = null;
-      pane.terminalType = shellTerminalType(named ? shell : (state.cfg?.shell ?? ""));
+      pane.terminalType = plainShellType(state.workspaceHost, named ? shell : state.cfg?.shell);
       pane.setLaunchCwd(info.cwd || cwd || null);
-      pane.launchSpec = named ? serializableSpec({ shell }) : null;
+      pane.launchSpec = named ? serializableSpec({ shell, command }) : null;
       pane.launchOptions = null;
+      pane.restartWith = null;
       pane.attach(info);
       pane.spawnedFresh = true;
       ownSession(info.id);
@@ -254,13 +270,6 @@ export function createSpawner({
   }
 
   async function runProfile(profile) {
-    if (["rdp", "vnc"].includes(profile.terminal_type)) {
-      try {
-        await api.openDesktopConnection(profile.name);
-        layout.focused?.flashNotice(`[${profile.name} opened in a separate desktop window]`);
-      } catch (error) { showError(error.detail || "Could not open the desktop client"); }
-      return;
-    }
     let pane = layout.focused || layout.init();
     if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
     if (!pane) return;
@@ -412,6 +421,7 @@ export function createSpawner({
     pane.profileName = info.profile || null;
     pane.launchSpec = null;
     pane.launchOptions = null;
+    pane.restartWith = null;
     pane.attach(info);
     ownSession(info.id);
     scheduleWorkspaceSave();
@@ -421,6 +431,8 @@ export function createSpawner({
 
   // No options: spawnInto repeats the pane's own launch options.
   async function restartSavedPane(pane) {
+    // A Start with item started in this session repeats itself in full.
+    if (typeof pane.restartWith === "function") return pane.restartWith();
     if (pane.profileName) return spawnInto(pane, pane.profileName, pane.cwd);
     if (pane.launchSpec) return spawnSpecInto(pane, pane.launchSpec);
     return spawnDefaultInto(pane, pane.cwd);
@@ -432,17 +444,7 @@ export function createSpawner({
     // Explicit recovery only: continue the latest project conversation or let
     // the agent present its own native picker. Neither path impersonates the
     // old PTY. Both agent types accept "continue" and "resume".
-    if (isAgentType(profile.terminal_type)) {
-      return spawnInto(pane, profile.name, pane.cwd, { agentMode: mode });
-    }
-    const flag = mode === "resume" ? "--resume" : "--continue";
-    const directClaude = /(^|[\\/])claude(?:\.cmd|\.exe)?$/i.test(profile.cmd || "");
-    if (directClaude) {
-      return spawnInto(pane, profile.name, pane.cwd, {
-        args: [...(profile.args || []), flag],
-      });
-    }
-    return spawnInto(pane, profile.name, pane.cwd, { startCommand: `claude ${flag}` });
+    return spawnInto(pane, profile.name, pane.cwd, { agentMode: mode });
   }
 
   return {
