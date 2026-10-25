@@ -2,8 +2,10 @@
 // and no terminal. It owns what the whole window shares: the sidebar, the
 // palette and the panels, the launch loop, the settings watcher, the theme,
 // the update check, the setup tour and the error banner, plus the stage
-// (workspace_views.js), which shows one workspace view at a time. Every
-// workspace, scratch included, is one of those views.
+// (workspace_views.js), which shows one workspace view, or up to four side
+// by side. Every workspace, scratch included, is one of those views; the
+// one with the keyboard is the active one, and that is the one the chrome
+// talks to.
 //
 // The palette, the panels and the sidebar talk to one app object
 // (`chromeApp`). Members that concern the whole window are answered here;
@@ -26,8 +28,9 @@ import { WorkspaceViews, openViewsStore, workspaceSlots } from "./workspace_view
 import { RecentTerminals } from "./recent_terminals.js";
 import { createSwitcher } from "./switcher.js";
 import { createRightPanel } from "./right_panel.js";
-import { CMD_PROMPT_MAX, PROMPT_MAX, SCRATCH_PANEL_NAME, cmdSafe, panelShows } from "./right_panel_model.js";
+import { CMD_PROMPT_MAX, PROMPT_MAX, SCRATCH_PANEL_NAME, cmdSafe } from "./right_panel_model.js";
 import { markNavToggle } from "./sidebar_dom.js";
+import { groupBranch, groupState } from "./sidebar_model.js";
 import { windowChoiceMessage, windowChoices } from "./windows.js";
 import { createAppState } from "./app_state.js";
 import {
@@ -60,7 +63,7 @@ export const SHELL_MEMBERS = Object.freeze([
   "liveTerminals", "activateTerminal", "killTerminal", "killAllSessions", "detachTerminal", "moveTerminalHere",
   "settingEntries", "openSetting", "editSnippet", "setupTerminals", "setupTour",
   "openPanel", "onConfigSaved", "onWorkspacesChanged", "previewTheme", "appliedTheme", "openThemeSwitcher",
-  "deleteWorkspace", "revealSearchResult", "cycleWorkspace", "showRightPanel",
+  "deleteWorkspace", "revealSearchResult", "cycleWorkspace", "showRightPanel", "showBeside", "showAlone",
   "runWorkspaceSetup", "saveWorkspaceSetup",
 ]);
 
@@ -127,11 +130,16 @@ export async function bootShell() {
   // them nor write over them.
   const keepsOpenViews = identity.workspace === undefined && state.windowIsPrimary;
   const views = new WorkspaceViews({
-    fit: () => views.appFor(views.active)?.fitAll?.(),
+    fit: () => { for (const view of views.shown) views.appFor(view)?.fitAll?.(); },
     error: showError,
     store: keepsOpenViews ? openViewsStore() : null,
     newScratch: () => newScratchView(),
     parentId: () => state.windowId,
+    // A column header's branch and state dot, as the sidebar sees them.
+    columnInfo: () => new Map((sidebar?.groups() || []).filter((group) => group.name)
+      .map((group) => [group.name, { branch: groupBranch(group), state: groupState(group) }])),
+    // A click or the keyboard in a terminal: an unpinned files panel hides.
+    onTouch: () => rightPanel?.terminalTouched(),
   });
   window.quicktermViews = views;
   const activeApp = () => views.appFor(views.active);
@@ -346,7 +354,13 @@ export async function bootShell() {
     newScratchView,
     newWorkspace,
     openThemeSwitcher: (options) => openThemeSwitcher(chromeApp, options),
-    openWorkspaces: () => views.list().map(({ workspace: name, label, color, active }) => ({ workspace: name, label, color, active })),
+    openWorkspaces: () => views.list().map(({ workspace: name, label, color, active, shown }) => ({
+      workspace: name, label, color, active, shown,
+    })),
+    // Side by side: a workspace joins the split as a column (opened first
+    // when needed) or leaves it; "show alone" ends the split.
+    showBeside: (name) => views.open(name || null, { beside: true }).then(Boolean),
+    showAlone: () => views.showAlone(),
     liveTerminals,
     ...routing,
     settingEntries: () => panels.settingEntries?.() || [],
@@ -510,6 +524,7 @@ export async function bootShell() {
       elevateSystem: (choice) => chromeApp.elevateSystemTerminal(choice),
       selectTerminal: (choice) => { state.selectedTerminal = choice; },
       openWorkspace: reported(openWorkspace),
+      toggleBeside: reported((name) => shell.showBeside(name)),
       closeWorkspace: reported(closeWorkspaceView),
       newScratch: reported(newScratchView),
       newWorkspace: reported(newWorkspace),
@@ -630,14 +645,14 @@ export async function bootShell() {
     activeApp,
     fixWithClaude,
     focusBack: () => views.focusView(views.active),
-    fit: () => views.fit(),
     showError,
     // The left footer's "right panel" icon is on while the panel shows.
-    onMode: (mode) => markNavToggle($("launcher"), "right panel", panelShows(mode)),
+    onOpen: (open) => markNavToggle($("launcher"), "right panel", open),
   });
 
   const windowKeys = {
     toggleRightPanel: () => rightPanel.toggle(),
+    focusColumn: (delta) => views.stepColumn(delta),
     showWorkspace: (n) => views.showSlot(workspaceSlots(sidebar.groups(), views.list().map((item) => item.workspace)), n),
     cycleWorkspace: (delta) => views.cycle(delta),
     recentTerminals: (delta) => switcher.step(delta),

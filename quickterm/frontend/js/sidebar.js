@@ -105,7 +105,7 @@ export function sidebarModel({
         startup: folders.get(name)?.startup ?? [],
         git: (folders.get(name)?.host ? folders.get(name)?.git : git.get(folders.get(name)?.path)) ?? null,
       })),
-    views: views.map(({ workspace, label, color, active }) => ({ workspace, label, color, active })),
+    views: views.map(({ workspace, label, color, active, shown }) => ({ workspace, label, color, active, shown })),
     sessions,
     attached: { ...(context.attached || {}) },
     owned: { ...(context.owned || {}) },

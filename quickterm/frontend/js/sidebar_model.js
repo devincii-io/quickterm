@@ -332,6 +332,8 @@ export function sidebarGroups(sessions = [], { workspaces = [], views = [], atta
       kind,
       open: Boolean(view),
       active: Boolean(view?.active),
+      // On screen: alone, or a column of the split.
+      shown: Boolean(view?.shown ?? view?.active),
       color: view?.color || null,
       path: info?.path ?? null,
       pathExists: info?.pathExists ?? null,
@@ -499,6 +501,28 @@ export function groupSummary(group) {
   if (quiet > 0) parts.push(`${quiet} background`);
   if (finished) parts.push(`${finished} finished`);
   return parts.join(" · ");
+}
+
+// One dot for a whole group (a side by side column's header): the loudest
+// state among its terminals, or null when nothing is worth a dot.
+const GROUP_STATES = [
+  ["attention", "needs you"], ["failed", "failed"], ["done", "done"], ["busy", "busy"], ["unread", "new output"],
+];
+export function groupState(group) {
+  const counts = group?.counts || {};
+  const found = GROUP_STATES.find(([key]) => (counts[key] || 0) > 0);
+  return found ? { key: found[0], label: found[1] } : null;
+}
+
+// The ⋮ menu's side by side row for a group, or null: a workspace that is
+// not on screen can join the split, a column can leave it; the only
+// workspace on screen has nothing to leave.
+export function besideRow(group, shownCount) {
+  if (!group?.name || (group.kind === "scratch" && !group.open)) return null;
+  if (group.shown && shownCount < 2) return null;
+  return group.shown
+    ? { label: "Remove from side by side", title: "It stays open (Ctrl+click)" }
+    : { label: "Show side by side", title: "As a column next to the shown ones (Ctrl+click)" };
 }
 
 // The workspace folder is the one fact about a workspace worth a permanent

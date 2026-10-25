@@ -80,7 +80,10 @@ because the `.iss` relaunch entry is `skipifsilent`.
   (or H/V) split; Alt+Shift+Left/Up open the "+" menu; Alt+Shift+S
   cycles the sidebar (full, rail, hidden; plain Alt+B is readline's
   backward-word and Ctrl+B the tmux prefix, so neither is ours);
-  Alt+Shift+E the right panel (also while the panel holds the keyboard;
+  Ctrl+Alt+Left/Right the column beside (claimed only while there is a
+  split; terminal Emacs loses C-M-left/right then, older Intel graphics
+  drivers may rotate the screen first, and AltGr+arrow on German layouts
+  switches columns too); Alt+Shift+E the right panel (also while the panel holds the keyboard;
   Explorer is the palette row and the workspace's "⋮" menu); Alt+Shift+C VS Code;
   Ctrl+Shift+1..9 the nth workspace in the sidebar (matched on `code`
   Digit1..9, never on `key`, which is the layout's shifted symbol; not
@@ -217,7 +220,10 @@ because the `.iss` relaunch entry is `skipifsilent`.
 - The top-level document is the shell and hosts no workspace. Every
   workspace, scratch included, is an equal iframe view with its own claim,
   LayoutManager and autosave; there is no primary view. The stage shows one
-  view at a time: no view header, frame, divider or view drag.
+  view, or 2 to 4 side by side (4.7, `stage_columns.js`, `stage_chrome.js`):
+  a CSS grid where a shown view only gets its column track, so views still
+  never move in the DOM. One-line column headers appear only with 2+
+  columns; no frames, view drag or docking.
   The hidden ones keep their full box (`visibility: hidden` plus `inert`,
   never `display: none`, or xterm loses its size) and are told
   `setHidden(true)`. A view stays on one workspace for its whole life: the
@@ -252,13 +258,13 @@ because the `.iss` relaunch entry is `skipifsilent`.
   cards for dots.
   The shell inventory is cached in localStorage
   and served from a 60 s server-side cache, so boot never waits for it.
-  The right panel (`right_panel.js`) is the sidebar's mirror, not a second
-  chrome: same modes, surface, row heights, icon buttons, grip and slide.
-  `#app` always has three columns and a hidden side is a 0px one, so mode
-  changes slide; never give a side `display: none` or drop its column. A
-  body class must not share a name with an element's class (`rp-rail` on the
-  body once matched the rail element's rule and collapsed the stage); the
-  panel's mode classes are `rp-mode-*`.
+  The right panel (`right_panel.js`) is an overlay on the stage (4.7):
+  hidden by default, it slides over the terminals without resizing them,
+  follows the active column, hides when a terminal takes the keyboard or a
+  click, and stays when pinned. `#app` has two columns; the panel's classes
+  are `rp-open` / `rp-pinned`. A body class must not share a name with an
+  element's class (`rp-rail` once collapsed the stage, `split` once matched
+  `.split` in app.css; the stage uses `side-by-side`).
 - Every chooser in the chrome is a `menu.js` menu, never a native `<select>`
   (the OS list cannot show a folder under a name, a colour dot, or a second
   action on a row). A trigger's click handler calls `toggleMenu`, not

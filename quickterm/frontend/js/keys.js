@@ -17,11 +17,12 @@
 //   Alt+Shift+Down     split below
 //   Alt+Shift+Left/Up  open the new-terminal menu
 //   Alt+Shift+S        sidebar: full, rail, hidden
-//   Alt+Shift+E        right panel: files, changes, pull request
+//   Alt+Shift+E        files panel: files, changes, pull request
 //   Alt+Shift+C        open the focused terminal's folder in VS Code
 //   Ctrl+Shift+1..9    show the nth workspace in the sidebar (by `code`, so
 //                      the shifted symbol of the layout does not matter)
-//   Alt+PgDn / PgUp    next / previous open workspace
+//   Alt+PgDn / PgUp    next / previous open workspace, shown alone
+//   Ctrl+Alt+Left/Right  the side by side column on the left / right
 //   Ctrl+Tab           recent terminals: Tab / Shift+Tab move while Ctrl is
 //                      held, releasing Ctrl shows the chosen one
 // Ctrl+Shift+F (find in the terminal) is the pane's own, in pane.js.
@@ -59,7 +60,8 @@ export const SHORTCUTS = [
   { id: "sidebar", keys: "Alt+Shift+S", label: "Sidebar: full, rail, hidden", group: "Window", bindings: ["alt+shift+s"] },
   { id: "workspace-n", keys: "Ctrl+Shift+1…9", label: "Show the first to ninth workspace in the sidebar", group: "Window", bindings: [..."123456789"].map((digit) => `ctrl+shift+${digit}`) },
   { id: "workspace-cycle", keys: "Alt+PgDn / Alt+PgUp", label: "Next / previous open workspace", group: "Window", bindings: ["alt+pagedown", "alt+pageup"] },
-  { id: "right-panel", keys: "Alt+Shift+E", label: "Right panel: files, changes, pull request", group: "Window", bindings: ["alt+shift+e"] },
+  { id: "columns", keys: "Ctrl+Alt+← / →", label: "Side by side: move to the workspace column on the left or right", group: "Window", bindings: ["ctrl+alt+left", "ctrl+alt+right"] },
+  { id: "right-panel", keys: "Alt+Shift+E", label: "Files panel over the terminals: files, changes, pull request", group: "Window", bindings: ["alt+shift+e"] },
   { id: "editor", keys: "Alt+Shift+C", label: "Open the focused terminal's folder in VS Code", group: "Window", bindings: ["alt+shift+c"] },
   { id: "font-bigger", keys: "Ctrl++", label: "Bigger terminal text", group: "Text", bindings: ["ctrl+equal", "ctrl+shift+equal"] },
   { id: "font-smaller", keys: "Ctrl+-", label: "Smaller terminal text", group: "Text", bindings: ["ctrl+minus"] },
@@ -136,6 +138,19 @@ export function initKeys(actions) {
     // two numpad operators always produce + and -, so they need no guard.
     // Numpad0 is guarded too: with NumLock off it is Insert, and Ctrl+Insert
     // is copy.
+    // Ctrl+Alt+Left/Right: the side by side column beside this one. Taken
+    // only while there is a split; with one workspace on screen the key
+    // reaches the terminal as before. AltGr is Ctrl+Alt too, but no layout
+    // puts a character on the arrows.
+    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      if (actions.paletteOpen?.()) return;
+      const step = windowAction(actions, "focusColumn");
+      if (step && step(e.key === "ArrowLeft" ? -1 : 1) !== false) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
+    }
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
       // The nth workspace in the sidebar; it belongs to the window, like
       // Alt+PgUp/PgDn, and stands down while the palette has the keyboard.

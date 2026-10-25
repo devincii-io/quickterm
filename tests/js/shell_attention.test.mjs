@@ -91,7 +91,7 @@ test("the sidebar model lists saved workspaces with their folders, the views and
   const model = sidebarModel({
     state,
     sessions,
-    views: [{ workspace: "api", label: "api", color: "#fff", active: true, window: {} }],
+    views: [{ workspace: "api", label: "api", color: "#fff", active: true, shown: true, window: {} }],
     context: { attached: { a: "api" }, owned: { a: "api" } },
     folders: new Map([["api", { path: "/work/api", pathExists: false }]]),
     here,
@@ -101,7 +101,7 @@ test("the sidebar model lists saved workspaces with their folders, the views and
     { name: "api", path: "/work/api", pathExists: false, host: null, startup: [], git: null },
     { name: "docs", path: null, pathExists: null, host: null, startup: [], git: null },
   ], "scratch is never a saved workspace, and an unread folder is unknown, not missing");
-  assert.deepEqual(model.views, [{ workspace: "api", label: "api", color: "#fff", active: true }]);
+  assert.deepEqual(model.views, [{ workspace: "api", label: "api", color: "#fff", active: true, shown: true }]);
   assert.equal(model.sessions, sessions);
   assert.deepEqual(model.attached, { a: "api" });
   assert.deepEqual(model.owned, { a: "api" });

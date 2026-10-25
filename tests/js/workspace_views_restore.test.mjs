@@ -154,6 +154,30 @@ test("nothing coming back is said once, and the store keeps an empty record", as
   assert.deepEqual(JSON.parse(store.current), { version: 1, open: [], shown: null });
 });
 
+test("a reload brings the split back with its widths and the column that had the keyboard", async () => {
+  const { moves } = installDom();
+  const record = { version: 1, open: ["api", "", "docs"], shown: "docs", split: ["docs", "api"], widths: [0.3, 0.7] };
+  const store = memoryStore({ current: JSON.stringify(record) });
+  const { views } = makeViews(store);
+  await views.restoreSaved();
+  assert.deepEqual(views.shown.map((view) => view.workspace), ["docs", "api"]);
+  assert.equal(views.active?.workspace, "docs");
+  assert.deepEqual(views.fractions, [0.3, 0.7]);
+  assert.equal(views.pendingFocus, views.active);
+  assert.deepEqual(JSON.parse(store.current), record);
+  assert.deepEqual(moves, []);
+});
+
+test("a split whose columns did not all come back keeps the rest at equal widths", async () => {
+  installDom({ refused: new Set(["web"]) });
+  const record = { version: 1, open: ["api", "web", "docs"], shown: "web", split: ["api", "web", "docs"], widths: [0.2, 0.2, 0.6] };
+  const { views } = makeViews(memoryStore({ current: JSON.stringify(record) }));
+  await views.restoreSaved();
+  assert.deepEqual(views.shown.map((view) => view.workspace), ["api", "docs"]);
+  assert.equal(views.active?.workspace, "api", "the active column stayed away; the first one takes the keyboard");
+  assert.deepEqual(views.fractions, [0.5, 0.5]);
+});
+
 test("nothing stored is neither stored nor migrated, and a window without a store never restores", async () => {
   const { claims } = installDom();
   const store = memoryStore();

@@ -99,7 +99,33 @@ export function workspaceRows(app, names = [], details = new Map()) {
       run: () => app?.closeWorkspaceView?.(name),
     });
   }
-  // The stage shows one workspace; these walk the open ones in sidebar order.
+  // Side by side: every workspace not on screen can join as a column (up to
+  // four; the oldest leaves), and the one with the keyboard can end the split.
+  if (app?.showBeside) {
+    const shownNames = new Set(open.filter((view) => view?.shown ?? view?.active).map(viewName));
+    for (const name of sorted) {
+      if (isScratchWorkspace(name) || shownNames.has(name)) continue;
+      rows.push({
+        kind: "workspace", label: `show side by side: ${name}`, hint: "a column next to the shown ones · Ctrl+click",
+        run: () => app.showBeside(name),
+      });
+    }
+    const scratch = open.find((view) => isScratchWorkspace(viewName(view)) && !shownNames.has(viewName(view)));
+    if (scratch) {
+      rows.push({
+        kind: "workspace", label: "show side by side: scratch", hint: "a column next to the shown ones",
+        run: () => app.showBeside(viewName(scratch)),
+      });
+    }
+    if (shownNames.size > 1 && app.showAlone) {
+      rows.push({
+        kind: "workspace", label: "show alone",
+        hint: `${open.find((view) => view?.active)?.label || shownName || "the active column"} fills the window again`,
+        run: () => app.showAlone(),
+      });
+    }
+  }
+  // These walk the open workspaces in sidebar order, each shown alone.
   if (open.length > 1) {
     rows.push(
       { kind: "workspace", label: "next workspace", hint: "the next open one in the sidebar · Alt+PgDn", run: () => app?.cycleWorkspace?.(1) },

@@ -1,21 +1,31 @@
-// The stage: the window shows one workspace at a time, chosen in the sidebar.
+// The stage: the window shows one workspace, or up to four side by side as
+// columns, chosen in the sidebar.
 //
 // The window's own document is the shell: it hosts no workspace. Every
 // workspace, scratch included, is a same-origin iframe view running the app on
 // that one workspace, with its own layout, autosave, registry claim and
-// heartbeat. Any number of views can be open (loaded) in one window; exactly
-// one is shown, full size. The others stay loaded and keep their box, hidden
-// with `visibility: hidden` and `inert`, so xterm keeps its size, and each is
-// told `setHidden(true)` so its panes release their WebGL renderers.
+// heartbeat. Any number of views can be open (loaded) in one window. `shown`
+// are the ones on screen, in the order their columns were added, and `active`
+// is the one with the keyboard. The others stay loaded and keep the full stage
+// box, hidden with `visibility: hidden` and `inert`, so xterm keeps its size,
+// and each is told `setHidden(true)` so its panes release their WebGL
+// renderers.
 //
 // One rule shapes the DOM here: an iframe that moves in the DOM reloads its
 // document, terminals and all. So a view element is appended to the stage
-// once and never moved; showing another workspace only flips classes.
+// once and never moved; the stage is a CSS grid and a shown view only gets
+// its grid column (stage_columns.js has the rules, stage_chrome.js draws the
+// column headers and gutters).
 
 import * as api from "./api.js";
 import { isScratchWorkspace } from "./boot_context.js";
 import { focusOwners } from "./focus.js";
 import { readStoredViews, restoreFailureMessage, restorePlan, describeOpenViews } from "./open_views.js";
+import {
+  addColumn, columnTrack, equalFractions, focusColumn, gridTemplate, normalizeFractions, removeColumn, sameColumns,
+  showAlone, stepColumn, toggleColumn,
+} from "./stage_columns.js";
+import { createStageChrome } from "./stage_chrome.js";
 
 export {
   OPEN_VIEWS_KEY, LEGACY_ARRANGEMENT_KEY, describeOpenViews, migrateArrangement, openViewsStore,
@@ -74,14 +84,22 @@ export class WorkspaceViews {
   // `store` (openViewsStore) is given only to the window whose open views
   // outlive a restart. It stays silent until restoreSaved() has read it, so
   // an early boot cannot erase what it is about to restore. `fit` re-fits
-  // the shown view's terminals; `newScratch` is the empty stage's button.
+  // the shown views' terminals; `newScratch` is the empty stage's button.
   // `parentId` is this shell window's registry id: every view registers
   // under it, so closing the native window frees the views' claims at once.
-  constructor({ fit = () => {}, error, store = null, newScratch = null, parentId = () => null }) {
+  // `columnInfo()` maps a workspace name to what its column header shows
+  // besides the name ({branch, state}). `onTouch(view)` hears every click
+  // and focus that lands in a shown view's document (the files panel hides).
+  constructor({
+    fit = () => {}, error, store = null, newScratch = null, parentId = () => null, columnInfo = () => null,
+    onTouch = () => {},
+  }) {
     this.fit = fit;
+    this.onTouch = onTouch;
     this.error = error;
     this.store = store;
     this.parentId = parentId;
+    this.columnInfo = columnInfo;
     // Opens, closes and restores run one after another. Refusing while one
     // was running dropped a sidebar click or an Explorer handoff silently.
     this.queue = Promise.resolve();
@@ -91,6 +109,9 @@ export class WorkspaceViews {
     // Most recently shown last; closing the shown view falls back along it.
     this.recent = [];
     this.active = null;
+    // On screen, left to right; `fractions` their widths.
+    this.shown = [];
+    this.fractions = [1];
     this.pendingFocus = null;
     this.stage = document.createElement("div");
     this.stage.className = "workspace-views";
@@ -101,6 +122,16 @@ export class WorkspaceViews {
     shell.remove();
     this.empty = this._emptyState(newScratch || (() => this.open(null)));
     this.stage.append(this.empty);
+    this.chrome = createStageChrome({
+      stage: this.stage,
+      activate: (view) => this.focusView(view),
+      remove: (view) => this.removeShown(view),
+      resize: (fractions, done) => {
+        this.fractions = fractions;
+        this.stage.style.setProperty("--stage-columns", gridTemplate(this.fractions));
+        if (done) this._persist();
+      },
+    });
     this._paint();
   }
 
@@ -152,13 +183,15 @@ export class WorkspaceViews {
   }
 
   // For the sidebar and the palette: which workspace each view shows, its
-  // label and colour, whether it is the shown one, and its child window.
+  // label and colour, whether it has the keyboard (`active`), whether it is
+  // on screen (`shown`), and its child window.
   list() {
     return this.items.map((view) => ({
       workspace: this.workspaceOf(view),
       label: this.nameOf(view),
       color: viewColorFor(this.nameOf(view)),
       active: view === this.active,
+      shown: this.shown.includes(view),
       window: view.frame?.contentWindow || null,
     }));
   }
@@ -169,6 +202,8 @@ export class WorkspaceViews {
       view.el.setAttribute("aria-label", `Workspace: ${name}`);
       if (view.frame) view.frame.title = `Workspace: ${name}`;
     }
+    // The column headers follow names, branches and states.
+    this._paintChrome();
     // A scratch view promoted to a named workspace renames itself in place,
     // and the stored list has to follow the name.
     this._persist();
@@ -176,7 +211,8 @@ export class WorkspaceViews {
 
   _persist() {
     if (!this.store || !this.persisting) return;
-    const text = JSON.stringify(describeOpenViews(this.items, this.active, (view) => this.workspaceOf(view)));
+    const columns = { shown: this.shown, fractions: this.fractions };
+    const text = JSON.stringify(describeOpenViews(this.items, this.active, (view) => this.workspaceOf(view), columns));
     if (text === this.lastStored) return;
     this.lastStored = text;
     this.store.save(text);
@@ -214,13 +250,26 @@ export class WorkspaceViews {
     });
   }
 
-  // ---- showing one ----
+  // ---- showing one, or a few side by side ----
 
-  // Show `target` and hide every other view. The keyboard is not moved
-  // here; focusView() does that.
-  activate(target) {
+  // Make `target` the view with the keyboard. A column of the split stays in
+  // it; any other view is shown alone, as is every view with `alone`. The
+  // keyboard is not moved here; focusView() does that.
+  activate(target, { alone = false } = {}) {
     const view = this.viewFor(target);
-    if (!view || this.active === view) return;
+    if (!view) return;
+    this._setColumns(alone ? showAlone(view) : focusColumn(this, view));
+  }
+
+  // The one place `shown` and `active` change. Widths start equal whenever
+  // the set of columns changes; `fractions` overrides that (a restore).
+  _setColumns(next, fractions = null) {
+    if (sameColumns(next, this) && !fractions) return false;
+    const sameSet = next.shown.length === this.shown.length && next.shown.every((view) => this.shown.includes(view));
+    this.fractions = fractions ? normalizeFractions(fractions, next.shown.length)
+      : sameSet ? this.fractions : equalFractions(next.shown.length);
+    this.shown = next.shown;
+    const view = next.active;
     this.active = view;
     this.recent = [...this.recent.filter((each) => each !== view), view];
     for (const each of this.items) {
@@ -229,6 +278,66 @@ export class WorkspaceViews {
     this._paint();
     this._persist();
     window.quicktermChrome?.refreshSoon?.();
+    return true;
+  }
+
+  // Ctrl+click in the sidebar and the card menu: `target` joins the split as
+  // a column with the keyboard, or leaves it when it is a column already.
+  toggleShown(target) {
+    const view = this.viewFor(target);
+    if (!view) return false;
+    const wasActive = this.active;
+    this._setColumns(toggleColumn(this, view));
+    if (this.active !== wasActive || this.active === view) this.focusView(this.active);
+    return this.shown.includes(view);
+  }
+
+  // A column's ×: out of the split, still open and running.
+  removeShown(target) {
+    const view = this.viewFor(target);
+    if (!view || !this.shown.includes(view) || this.shown.length < 2) return false;
+    const wasActive = this.active === view;
+    this._setColumns(removeColumn(this, view));
+    if (wasActive) this.focusView(this.active);
+    return true;
+  }
+
+  // The palette's "show alone": the active column fills the stage again.
+  showAlone() {
+    if (!this.active || this.shown.length < 2) return false;
+    this.focusView(this.active, { alone: true });
+    return true;
+  }
+
+  // Ctrl+Alt+Left/Right: the keyboard to the column beside the active one.
+  // True whenever there is a split, so the key never reaches a terminal as
+  // something else; at the edge nothing moves.
+  stepColumn(delta) {
+    if (this.shown.length < 2) return false;
+    const next = stepColumn(this, delta);
+    if (next) this.focusView(next);
+    return true;
+  }
+
+  // A click or a focus inside a view's document. A column of the split
+  // takes the keyboard; a hidden view never does. True when `target` is the
+  // view with the keyboard afterwards.
+  takeColumn(target) {
+    const view = this.viewFor(target);
+    if (!view || !this.shown.includes(view)) return false;
+    this.onTouch(view);
+    if (view !== this.active) {
+      // A column still booting must not take the keyboard back later.
+      if (this.pendingFocus && this.pendingFocus !== view) this.pendingFocus = null;
+      this.activate(view);
+    }
+    return true;
+  }
+
+  // Whether `target` (a view's window) is the column with the keyboard.
+  isActiveWindow(target) {
+    const view = this.viewFor(target);
+    return Boolean(view) && view === this.active;
   }
 
   // While a shell overlay (palette, panel, menu, sidebar confirm or rename)
@@ -236,9 +345,9 @@ export class WorkspaceViews {
   // contentWindow.focus() would pull the keyboard out of the overlay into the
   // terminal behind it. The overlay's own hand-back focuses the shown view
   // once it releases.
-  focusView(view) {
+  focusView(view, options = {}) {
     if (!view) return;
-    this.activate(view);
+    this.activate(view, options);
     if (focusOwners().length) {
       this.pendingFocus = view;
       return;
@@ -267,22 +376,28 @@ export class WorkspaceViews {
     return true;
   }
 
-  // The next (1) or previous (-1) open workspace in sidebar order, wrapping.
+  // The next (1) or previous (-1) open workspace in sidebar order, wrapping,
+  // shown alone.
   cycle(delta) {
     if (this.items.length < 2) return false;
     const order = sidebarOrder(this.items.map((view) => this.workspaceOf(view)));
     const at = order.indexOf(this.active ? this.workspaceOf(this.active) : null);
     const next = order[(at + (delta < 0 ? order.length - 1 : 1)) % order.length];
-    this.focusView(this.viewForWorkspace(next));
+    this.focusView(this.viewForWorkspace(next), { alone: true });
     return true;
   }
 
-  // The nth (1-based) of `slots` (workspaceSlots), shown and focused; a saved
-  // workspace that is not open yet opens, as a sidebar click would.
+  // The nth (1-based) of `slots` (workspaceSlots), shown alone and focused;
+  // a saved workspace that is not open yet opens, as a sidebar click would.
   async showSlot(slots, n) {
     const name = slots[n - 1];
     if (!name) return false;
-    if (isScratchWorkspace(name)) return this.focusWorkspace(name);
+    const view = this.viewForWorkspace(name);
+    if (view) {
+      this.focusView(view, { alone: true });
+      return true;
+    }
+    if (isScratchWorkspace(name)) return false;
     return Boolean(await this.open(name));
   }
 
@@ -299,8 +414,9 @@ export class WorkspaceViews {
   // Shows `name` (null for the window's scratch view), opening it first when
   // it is not open yet. With `cwd` on scratch, a scratch view already open
   // starts a terminal there; a new one starts its first terminal there.
-  // Resolves with the view once its document has booted, or false when
-  // nothing was opened.
+  // `beside` adds it to the split as a column instead, or takes it out when
+  // it is a column already (toggleShown). Resolves with the view once its
+  // document has booted, or false when nothing was opened.
   async open(name, options = {}) {
     const view = await this._serial(() => this._open(name, options));
     if (!view) return false;
@@ -308,10 +424,11 @@ export class WorkspaceViews {
     return view;
   }
 
-  async _open(name, { cwd = null, first = false } = {}) {
+  async _open(name, { cwd = null, first = false, beside = false } = {}) {
     const shown = name ? this.viewForWorkspace(name) : this.scratchView();
     if (shown) {
-      this.focusView(shown);
+      if (beside) this.toggleShown(shown);
+      else this.focusView(shown);
       if (!name && cwd) this._startIn(shown, cwd);
       return shown;
     }
@@ -320,7 +437,8 @@ export class WorkspaceViews {
       this._place(view);
       // The keyboard goes in once the new document can take it.
       this.pendingFocus = view;
-      this.activate(view);
+      if (beside) this._setColumns(addColumn(this, view));
+      else this.activate(view);
       return view;
     } catch (error) {
       this.error(error?.detail || (name
@@ -398,8 +516,14 @@ export class WorkspaceViews {
     // Terminals a closed scratch kept are listed under "scratch <id>", so
     // they never read as the scratch view opened next.
     window.quicktermChrome?.scratchLabels?.delete(view.workspace);
-    if (this.active === view) {
+    if (this.shown.includes(view) && this.shown.length > 1) {
+      // A column closes out of the split; the others keep their places.
+      const wasActive = this.active === view;
+      this._setColumns(removeColumn(this, view));
+      if (wasActive) this.focusView(this.active);
+    } else if (this.active === view) {
       this.active = null;
+      this.shown = [];
       const heir = this.recent.at(-1) || this.items.at(-1) || null;
       if (heir) this.focusView(heir);
     }
@@ -466,26 +590,62 @@ export class WorkspaceViews {
         result.failed.push(name);
       }
     }
-    const shown = byName.get(plan.shown) || this.items[0];
-    if (!shown) return;
+    // The split comes back with the columns that did; their stored widths
+    // only when every one of them did.
+    const columns = (plan.split?.names || []).map((name) => byName.get(name)).filter(Boolean);
+    const first = byName.get(plan.shown) || columns[0] || this.items[0];
+    if (!first) return;
+    const shown = columns.length > 1 && !columns.includes(first) ? columns[0] : first;
     // An iframe cannot take the keyboard before its document exists;
     // ready() hands it over.
     this.pendingFocus = shown;
-    this.activate(shown);
+    if (columns.length > 1) {
+      const whole = columns.length === plan.split.names.length;
+      this._setColumns({ shown: columns, active: shown }, whole ? plan.split.widths : null);
+    } else {
+      this.activate(shown);
+    }
   }
 
   // ---- drawing ----
 
-  // Every view keeps the full stage box; only the shown one is visible.
+  // Every hidden view keeps the full stage box; the shown ones are visible,
+  // each in its grid column once there are two or more.
   _paint() {
     this.stage.classList.toggle("empty", !this.items.length);
     this.empty.hidden = this.items.length > 0;
+    const split = this.shown.length > 1;
+    this.stage.classList.toggle("side-by-side", split);
+    this.stage.style.setProperty("--stage-columns", gridTemplate(split ? this.fractions : [1]));
     for (const view of this.items) {
-      const shown = view === this.active;
+      const at = this.shown.indexOf(view);
+      const shown = at >= 0;
       view.el.classList.toggle("shown", shown);
+      view.el.classList.toggle("column", split && shown);
+      view.el.classList.toggle("keyboard", split && view === this.active);
+      view.el.style.gridColumn = split && shown ? String(columnTrack(at)) : "";
       view.el.inert = !shown;
       this._tellHidden(view);
     }
+    this._paintChrome();
+  }
+
+  // The column headers and gutters: only with two or more columns.
+  _paintChrome() {
+    if (!this.chrome) return;
+    let info = null;
+    if (this.shown.length > 1) {
+      try { info = this.columnInfo(); } catch (_) { info = null; }
+    }
+    const columns = this.shown.length > 1 ? this.shown.map((view) => {
+      const label = this.nameOf(view);
+      const extra = info?.get?.(this.workspaceOf(view)) || null;
+      return {
+        key: view.id, view, label, color: viewColorFor(label),
+        branch: extra?.branch || "", state: extra?.state || null, active: view === this.active,
+      };
+    }) : [];
+    this.chrome.paint(columns, this.fractions);
   }
 
   // A hidden view lets its panes release their WebGL renderers (pane.js
@@ -493,7 +653,7 @@ export class WorkspaceViews {
   // view element changes neither the iframe's visibilityState nor anything
   // it can observe reliably. A view still booting is told by ready().
   _tellHidden(view) {
-    const hidden = view !== this.active;
+    const hidden = !this.shown.includes(view);
     if (view.toldHidden === hidden) return;
     try {
       const child = view.frame?.contentWindow?.quicktermView;

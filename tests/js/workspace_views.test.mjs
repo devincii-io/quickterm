@@ -87,10 +87,13 @@ test("list names each view's workspace, label, colour, whether it is shown and i
   const scratch = await views.open(null, { first: true });
   assert.equal(scratch.frame.src.includes("first=1"), true);
   assert.deepEqual(views.list(), [
-    { workspace: "api", label: "api", color: viewColorFor("api"), active: false, window: api.frame.contentWindow },
+    {
+      workspace: "api", label: "api", color: viewColorFor("api"), active: false, shown: false,
+      window: api.frame.contentWindow,
+    },
     {
       workspace: `scratch-view-${scratch.id}`, label: SCRATCH_LABEL, color: viewColorFor(SCRATCH_LABEL), active: true,
-      window: scratch.frame.contentWindow,
+      shown: true, window: scratch.frame.contentWindow,
     },
   ]);
   assert.equal(SCRATCH_LABEL, "scratch");
@@ -266,6 +269,186 @@ test("next and previous workspace wrap around the open ones in sidebar order", a
   await views.close(api);
   await views.close(web);
   assert.equal(views.cycle(1), false, "one open workspace has nowhere to go");
+});
+
+// ---- side by side (4.7) ----
+
+const columns = (views) => views.views().filter((view) => view.el.classList.contains("column"));
+const heads = (views) => views.stage.children.filter((el) => el.classList.contains("stage-column-head") && el.parentNode);
+const gutters = (views) => views.stage.children.filter((el) => el.classList.contains("stage-gutter") && el.parentNode);
+
+test("one workspace has no header, no gutter and no column track", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  assert.deepEqual(views.shown, [api]);
+  assert.equal(views.stage.classList.contains("side-by-side"), false);
+  assert.deepEqual(columns(views), []);
+  assert.equal(api.el.style.gridColumn, "");
+  assert.deepEqual(heads(views), []);
+  assert.deepEqual(gutters(views), []);
+});
+
+test("beside adds columns in order with the keyboard, never moving an iframe", async () => {
+  const { moves } = installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  const web = await views.open("web", { beside: true });
+  assert.deepEqual(views.shown, [api, docs, web]);
+  assert.equal(views.active, web);
+  assert.deepEqual(shown(views), [api, docs, web]);
+  assert.deepEqual([api, docs, web].map((view) => view.el.style.gridColumn), ["1", "3", "5"]);
+  assert.equal(views.stage.classList.contains("side-by-side"), true);
+  assert.equal(heads(views).length, 3);
+  assert.equal(gutters(views).length, 2);
+  assert.deepEqual(views.list().map((item) => [item.workspace, item.shown, item.active]),
+    [["api", true, false], ["docs", true, false], ["web", true, true]]);
+  assert.deepEqual(moves, []);
+});
+
+test("Ctrl+click on a column takes it out; it stays open and running", async () => {
+  const { closed } = installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  await views.open("docs", { beside: true });
+  assert.deepEqual(views.shown, [api]);
+  assert.equal(views.active, api);
+  assert.equal(views.views().includes(docs), true);
+  assert.equal(docs.el.inert, true);
+  assert.deepEqual(closed, []);
+  assert.deepEqual(heads(views), [], "back to one column, no header");
+});
+
+test("a column's × leaves the split; the left neighbour takes the keyboard", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  const web = await views.open("web", { beside: true });
+  views.focusView(docs);
+  assert.equal(views.removeShown(docs), true);
+  assert.deepEqual(views.shown, [api, web]);
+  assert.equal(views.active, api);
+  assert.equal(views.removeShown(api), true);
+  assert.equal(views.removeShown(web), false, "the last column stays");
+});
+
+test("a sidebar click on a column focuses it; on any other workspace shows that alone", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  const web = await views.open("web");
+  assert.deepEqual(views.shown, [web], "web was not a column");
+  await views.open("api", { beside: true });
+  await views.open("docs", { beside: true });
+  assert.deepEqual(views.shown, [web, api, docs]);
+  await views.open("api");
+  assert.deepEqual(views.shown, [web, api, docs]);
+  assert.equal(views.active, api);
+  assert.equal(views.showAlone(), true);
+  assert.deepEqual(views.shown, [api]);
+  assert.equal(views.showAlone(), false);
+  void docs;
+});
+
+test("Alt+PgDn shows the next workspace alone; Ctrl+Alt+arrows walk the columns", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  assert.equal(views.stepColumn(-1), true);
+  assert.equal(views.active, api);
+  assert.equal(views.stepColumn(-1), true, "the edge still takes the key");
+  assert.equal(views.active, api);
+  assert.equal(views.stepColumn(1), true);
+  assert.equal(views.active, docs);
+  views.cycle(1);
+  assert.equal(views.shown.length, 1);
+  assert.equal(views.stepColumn(1), false, "one column lets the key through");
+});
+
+test("a click in a column gives it the keyboard; a hidden view never takes it", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs", { beside: true });
+  const web = await views.open("web");
+  views.focusView(api);
+  await views.open("docs", { beside: true });
+  const suspended = new Map();
+  for (const view of [api, docs, web]) {
+    view.frame.contentWindow.quicktermView.suspend = (value) => suspended.set(view.workspace, value);
+  }
+  assert.equal(views.takeColumn(api.frame.contentWindow), true);
+  assert.equal(views.active, api);
+  assert.deepEqual([...suspended], [["api", false], ["docs", true], ["web", true]]);
+  assert.equal(views.takeColumn(web.frame.contentWindow), false);
+  assert.equal(views.active, api);
+});
+
+test("a click in any shown view is reported, so the files panel can hide", async () => {
+  installDom();
+  const touched = [];
+  const { views } = makeViews({ onTouch: (view) => touched.push(view.workspace) });
+  const api = await views.open("api");
+  const docs = await views.open("docs");
+  views.takeColumn(docs.frame.contentWindow);
+  views.takeColumn(api.frame.contentWindow);
+  assert.deepEqual(touched, ["docs"], "a hidden view reports nothing");
+});
+
+test("each shown column keeps its renderers; only hidden views are told they are hidden", async () => {
+  installDom();
+  const { views } = makeViews();
+  const api = await views.open("api");
+  const docs = await views.open("docs");
+  const said = { api: [], docs: [] };
+  for (const view of [api, docs]) {
+    view.frame.contentWindow.quicktermView.setHidden = (value) => said[view.workspace].push(value);
+    views.ready(view.frame.contentWindow);
+  }
+  await views.open("api", { beside: true });
+  assert.deepEqual(said, { api: [true, false], docs: [false] });
+});
+
+test("past four columns the oldest leaves; closing a column keeps the others", async () => {
+  installDom();
+  const { views } = makeViews();
+  const a = await views.open("a");
+  const b = await views.open("b", { beside: true });
+  const c = await views.open("c", { beside: true });
+  const d = await views.open("d", { beside: true });
+  views.focusView(a);
+  const e = await views.open("e", { beside: true });
+  assert.deepEqual(views.shown, [a, c, d, e]);
+  assert.equal(b.el.inert, true);
+  await views.close(e);
+  assert.deepEqual(views.shown, [a, c, d]);
+  assert.equal(views.active, d);
+  assert.equal(gutters(views).length, 2);
+});
+
+test("a gutter drag resizes the columns and is stored with the split", async () => {
+  installDom();
+  const { memoryStore } = await import("./stage_dom.mjs");
+  const store = memoryStore();
+  const { views } = makeViews({ store });
+  await views.restoreSaved();
+  await views.open("api");
+  await views.open("docs", { beside: true });
+  assert.deepEqual(JSON.parse(store.current), {
+    version: 1, open: ["api", "docs"], shown: "docs", split: ["api", "docs"], widths: [0.5, 0.5],
+  });
+  views.chrome.paint([], [1]);
+  views._paint();
+  views.fractions = [0.7, 0.3];
+  views._persist();
+  assert.deepEqual(JSON.parse(store.current).widths, [0.7, 0.3]);
+  await views.open("docs", { beside: true });
+  assert.deepEqual(JSON.parse(store.current), { version: 1, open: ["api", "docs"], shown: "api" });
 });
 
 test("a boot releases the views a previous page left registered under this window", async () => {

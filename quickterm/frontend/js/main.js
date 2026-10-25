@@ -129,16 +129,24 @@ async function bootView() {
     if (suspended === value) return;
     suspended = value;
     if (value) claimFocus("inactive-view"); else releaseFocus("inactive-view");
+    // Side by side, only the column with the keyboard marks its focused pane.
+    document.body.classList.toggle("view-suspended", value);
   }
   suspendView(true);
-  // Only the shown view can be clicked or focused (the hidden ones are
-  // inert); a stray focus in a hidden one must not take the keyboard.
+  // Only shown views can be clicked or focused (the hidden ones are inert);
+  // a stray focus in a hidden one must not take the keyboard. A click in a
+  // side by side column makes it the one with the keyboard.
   const shownHere = () => {
     const host = viewHost();
-    return !host || host.active === host.viewFor(window);
+    return !host || host.takeColumn(window);
   };
   document.addEventListener("pointerdown", () => { if (shownHere()) suspendView(false); }, true);
-  window.addEventListener("focus", () => { if (shownHere()) suspendView(false); });
+  // Focus alone never switches columns (a program in a background column
+  // could otherwise take the keyboard); focusView activates before it focuses.
+  window.addEventListener("focus", () => {
+    const host = viewHost();
+    if (!host || host.isActiveWindow?.(window)) suspendView(false);
+  });
 
   applyChromeTheme(state.cfg.theme, state.cfg.custom_theme);
   if (state.cfg.elevated) document.body.classList.add("elevated");

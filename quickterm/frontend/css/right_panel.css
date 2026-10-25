@@ -1,27 +1,27 @@
-/* The right panel (js/right_panel.js) and the file view and diff it opens
-   over the stage. It mirrors the left sidebar (sidebar.css): the same
-   surface, a hairline on the inner edge, a 36px header row, the footer
-   icon-button component, a 29px footer with the collapse chevron in the outer
-   corner, the same rail width, grip and slide. The grid columns live in
-   sidebar.css. Every colour is a theme token: git marks use the status hues,
-   syntax colours the view hues the theme derives from its ANSI palette. */
+/* The files panel (js/right_panel.js) and the file view and diff it opens
+   over the stage. Hidden by default; open, it slides over the right edge of
+   the stage with a shadow, above the terminals, which keep their size. It
+   keeps the left sidebar's look: the same surface, a hairline on the inner
+   edge, a 36px header row of the footer icon-button component, the same
+   grip and slide. Every colour is a theme token: git marks use the status
+   hues, syntax colours the view hues the theme derives from its ANSI
+   palette. */
 
-/* ---------- the column ---------- */
+/* ---------- the overlay ---------- */
 
 body.rp-resizing, body.rp-resizing * { cursor: col-resize !important; user-select: none; }
-body.rp-resizing #app { transition: none; }
 body.rp-resizing .workspace-views iframe { pointer-events: none; }
 
-/* Pinned to its inner edge at its own width while the column slides; #app
-   clips the rest, so nothing inside reflows. */
-#app > .right-panel {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: start;
+/* Out past the stage's right edge while hidden (the stage clips), in over
+   the columns while open. The shadow travels with it, so hidden moves it a
+   little further than its own width. */
+.workspace-views > .right-panel {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: var(--rp-width, 340px);
-  height: 100vh;
-  position: relative;
-  z-index: 20;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -30,14 +30,21 @@ body.rp-resizing .workspace-views iframe { pointer-events: none; }
   background: var(--bg);
   color: var(--text);
   font-size: 12px;
+  box-shadow: -14px 0 32px -12px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  transform: translateX(calc(100% + 48px));
+  visibility: hidden;
+  transition: transform .14s ease, visibility 0s linear .14s;
 }
-body.rp-mode-rail #app > .right-panel,
-body.rp-mode-hidden.rp-mode-was-rail #app > .right-panel { width: var(--sidebar-rail); }
-body.rp-mode-hidden #app > .right-panel { visibility: hidden; transition: visibility 0s linear .14s; }
+body.rp-open .workspace-views > .right-panel {
+  transform: none;
+  visibility: visible;
+  transition: transform .14s ease, visibility 0s;
+}
+body.rp-sizing .workspace-views > .right-panel { transition: none; }
 
 /* The left grip, mirrored: a hairline on the inner edge whose grab target
    grows inward only (the panel clips its overflow). */
-#app > .right-panel > .rp-grip {
+.workspace-views > .right-panel > .rp-grip {
   position: absolute;
   z-index: 30;
   top: 0;
@@ -51,58 +58,17 @@ body.rp-mode-hidden #app > .right-panel { visibility: hidden; transition: visibi
 .rp-grip::after { content: ""; position: absolute; inset: 0 -6px 0 0; }
 .rp-grip:hover, .rp-grip.dragging { background: var(--accent); }
 .rp-grip:focus-visible { background: var(--accent); outline: 1px solid var(--accent); outline-offset: -1px; }
-body.rp-mode-rail .rp-grip, body.rp-mode-hidden .rp-grip { display: none; }
 
 /* The header row is as tall as the left's top row (sidebar-launch: 6 + 26 +
-   4); the tabs are the left footer's icon buttons. */
-.rp-tabs { flex: none; height: 36px; display: flex; align-items: center; gap: 1px; padding: 0 5px; }
+   4): the tabs on the left, the pin and the close button on the right, all
+   the left footer's icon buttons. */
+.rp-head { flex: none; height: 36px; display: flex; align-items: center; gap: 1px; padding: 0 5px; }
+.rp-tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 1px; }
 .rp-tab.active { background: var(--surface-active); color: var(--accent-text); }
-
-/* The rail: the three tab icons stacked, with the left rail's state dots. */
-.rp-railbar { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 7px 0; }
-body:not(.rp-mode-rail):not(.rp-mode-was-rail) .rp-railbar { display: none; }
-body.rp-mode-rail .rp-tabs, body.rp-mode-rail .rp-body,
-body.rp-mode-was-rail .rp-tabs, body.rp-mode-was-rail .rp-body { display: none; }
-.rp-rail-button { position: relative; }
-.rp-rail-dot {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
-}
-.rp-rail-dot[hidden] { display: none; }
-.rp-rail-dot[data-state="failing"] { background: var(--danger); }
-.rp-rail-dot[data-state="pending"] { background: var(--warning); }
-.rp-rail-dot[data-state="passing"] { background: var(--success); }
-
-/* The footer: the left one's height and line. The chevron mirrors the left's
-   (bottom right there, pointing left): bottom left here, pointing right while
-   the panel is full. The id-level selectors outweigh the left rail's
-   `body.sidebar-collapsed .sidebar-collapse`. */
-#app > .right-panel > .rp-footer {
-  position: relative;
-  flex: none;
-  height: 29px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 30px;
-  border-top: 1px solid var(--line);
-}
-#app > .right-panel .rp-collapse { position: absolute; top: 3px; left: 4px; right: auto; }
-#app > .right-panel .rp-collapse svg { transform: none; transition: transform .14s ease; }
-body.rp-mode-rail #app > .right-panel > .rp-footer,
-body.rp-mode-was-rail #app > .right-panel > .rp-footer { padding: 3px 0; }
-body.rp-mode-rail #app > .right-panel .rp-collapse,
-body.rp-mode-was-rail #app > .right-panel .rp-collapse { position: static; }
-body.rp-mode-rail #app > .right-panel .rp-collapse svg,
-body.rp-mode-was-rail #app > .right-panel .rp-collapse svg { transform: rotate(180deg); }
+.rp-pin[aria-pressed="true"] { color: var(--accent-text); }
 
 @media (prefers-reduced-motion: reduce) {
-  body.rp-mode-hidden #app > .right-panel, .rp-grip, #app > .right-panel .rp-collapse svg { transition: none; }
+  .workspace-views > .right-panel, body.rp-open .workspace-views > .right-panel, .rp-grip { transition: none; }
 }
 
 .rp-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -380,6 +346,8 @@ body.rp-mode-was-rail #app > .right-panel .rp-collapse svg { transform: rotate(1
 /* ---------- the file view and the diff, over the stage ---------- */
 
 .rp-overlay-host { position: absolute; inset: 0; z-index: 20; display: flex; background: var(--bg); }
+/* Beside the open panel, not under it. */
+body.rp-open .rp-overlay-host { right: var(--rp-width, 340px); }
 .rp-overlay-host[hidden] { display: none; }
 .rp-viewer { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; outline: 0; }
 .rp-viewer-head {
