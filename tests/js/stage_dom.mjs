@@ -27,6 +27,7 @@ export function installDom({ refused = new Set(), windows = [] } = {}) {
         contains: (name) => classes.has(name),
       };
       this.attributes = {};
+      this.dataset = {};
       this.hidden = false;
       this.inert = false;
       this.listeners = {};
@@ -73,6 +74,7 @@ export function installDom({ refused = new Set(), windows = [] } = {}) {
   const shell = new Element("div");
   globalThis.document = {
     createElement: (tag) => new Element(tag),
+    createElementNS: (_, tag) => new Element(tag),
     getElementById: () => null,
     querySelector: (selector) => (selector === "#app > .workspace-shell" ? shell : null),
   };

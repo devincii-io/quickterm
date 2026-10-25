@@ -13,27 +13,25 @@
   --sidebar-rail: 30px;
 }
 
-/* Three columns always: the left sidebar, the stage and the right panel
-   (js/right_panel.js). A hidden side is a 0px column, never a missing one, so
-   every mode change is the same track list with other sizes and the grid
-   slides between them (app.css transitions grid-template-columns). */
+/* Two columns: the left sidebar and the stage. A hidden sidebar is a 0px
+   column, never a missing one, so every mode change is the same track list
+   with other sizes and the grid slides between them (app.css transitions
+   grid-template-columns). The files panel (js/right_panel.js) is no column:
+   it slides over the stage's right edge. */
 #app {
   --sidebar-col: var(--sidebar-w, 200px);
-  --rp-col: 0px;
-  grid-template-columns: var(--sidebar-col) minmax(0, 1fr) var(--rp-col);
+  grid-template-columns: var(--sidebar-col) minmax(0, 1fr);
 }
 
 /* A mode wins over any stored width. A rail that remembered 380px would be a
    very wide column of centred dots. */
 body.sidebar-collapsed #app { --sidebar-col: var(--sidebar-rail); }
 body.sidebar-hidden #app { --sidebar-col: 0px; }
-body.rp-mode-full #app { --rp-col: var(--rp-width, 340px); }
-body.rp-mode-rail #app { --rp-col: var(--sidebar-rail); }
 
-/* Each side keeps its own width while its column slides, pinned to its inner
-   edge, and #app clips what is past the window: the content moves, it never
-   reflows. Hidden turns invisible once the slide is over. Hidden from the
-   rail keeps the rail (sidebar-collapsed stays set, launcher.js). */
+/* The sidebar keeps its own width while its column slides, pinned to its
+   inner edge, and #app clips what is past the window: the content moves, it
+   never reflows. Hidden turns invisible once the slide is over. Hidden from
+   the rail keeps the rail (sidebar-collapsed stays set, launcher.js). */
 #app > .launcher.sidebar {
   grid-column: 1;
   grid-row: 1;
@@ -502,6 +500,9 @@ body .session-where[hidden] { display: none; }
   background: var(--group-color, var(--accent));
 }
 .session-group-dot.hollow { border-color: var(--muted); background: transparent; }
+/* Side by side, a filled dot means on screen; an open workspace that is not
+   keeps only its colour's ring. With one workspace shown nothing changes. */
+.sidebar-groups.side-by-side .session-group.open:not(.shown) .session-group-dot { background: transparent; }
 .session-group.unassigned .session-group-dot,
 .session-group.flat .session-group-dot { display: none; }
 /* Terminals sit inside the card, each state dot under the workspace's colour

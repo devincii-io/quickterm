@@ -2,6 +2,23 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.7.0
+
+Released 2026-10-25.
+
+- Up to four workspaces side by side. **Ctrl+click** a workspace in the
+  sidebar, or **Show side by side** in its **⋮** menu, adds it as a column;
+  a plain click on a shown one moves the keyboard there. Columns get a
+  one-line header (name, branch, state, `×`) only when there are two or
+  more; drag the gap to resize, double-click it for equal widths,
+  `Ctrl+Alt+Left` / `Ctrl+Alt+Right` to move between them. The split comes
+  back after a reload. `×` takes a workspace out of the split; its
+  terminals keep running.
+- The files panel is hidden by default and slides over the terminals
+  instead of pushing them aside. It shows the active column's workspace
+  and hides again when you click or type in a terminal or press Escape; the
+  pin keeps it open. The icon rail is gone.
+
 ## QuickTerm 4.6.0
 
 Released 2026-10-25.

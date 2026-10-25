@@ -1,19 +1,19 @@
-// The right panel: the left sidebar's mirror on the right of the stage, with
-// the same three modes. Full shows three icon tabs (Files, Changes, Pull
-// request) in a header row as tall as the left one and a footer with the
-// collapse chevron in its outer corner; rail is the three icons with their
-// state dots; hidden takes no space. It belongs to the window and always
-// shows the shown workspace. The width is dragged at the inner edge and
-// remembered per machine. The file view and the diff open over the stage,
-// one at a time, with the terminals still loaded behind them.
+// The files panel (the right panel): Files, Changes and Pull request for the
+// workspace in the active column. It is hidden by default and, when opened,
+// slides over the right edge of the stage with a shadow; the terminals under
+// it keep their size. It hides by itself when the keyboard or a click goes
+// back to a terminal, on Escape, and when the active column shows a
+// workspace with no folder, unless the pin in its header holds it. The width
+// is dragged at the inner edge and remembered per machine. The file view and
+// the diff open over the stage, one at a time, with the terminals still
+// loaded behind them.
 
 import * as api from "./api.js";
 import * as wsApi from "./ws_api.js";
 import { claimFocus, releaseFocus } from "./focus.js";
 import { quoteDroppedPath, windowsPathForWsl } from "./pane.js";
 import {
-  PANEL_WIDTH_DEFAULT, chevronPanelMode, clampPanelWidth, keyPanelMode, loadPanelMode, railMarks,
-  savePanelMode,
+  PANEL_WIDTH_DEFAULT, clampPanelWidth, loadPanelPin, panelHides, savePanelPin,
 } from "./right_panel_model.js";
 import { copyText, icon, make } from "./rp_dom.js";
 import { createFilesTab } from "./rp_files.js";
@@ -27,12 +27,9 @@ const STORE_KEY = "quickterm.rightPanel.v1";
 const CHANGES_FRESH_MS = 10000;
 const OVERLAY_OWNER = "rp-viewer";
 const PANEL_OWNER = "right-panel";
-// The slide's length in sidebar.css plus a margin, for when no transitionend
-// comes (reduced motion, a hidden window).
-const SLIDE_FALLBACK_MS = 260;
 
-function storage() {
-  try { return window.localStorage; } catch (_) { return null; }
+function windowStorage() {
+  try { return window.sessionStorage; } catch (_) { return null; }
 }
 
 function loadStored() {
@@ -58,25 +55,25 @@ export function joinPath(folder, rel) {
 }
 
 // `views` is the stage (workspace_views.js); `shownWorkspace()` names the
-// workspace on it (".scratch" for the scratch view), or null for an empty
-// stage; `details(name)` resolves to its record ({path, host, ...});
-// `activeApp()` is the shown view's app; `fixWithClaude(name, build)` starts
-// Claude Code in that workspace; `focusBack()` hands the keyboard to the
-// shown terminal; `fit()` re-fits the terminals after the stage changed
-// size; `onMode(mode)` hears every mode change (the left footer's toggle).
+// workspace in the active column (".scratch" for the scratch view), or null
+// for an empty stage; `details(name)` resolves to its record ({path, host,
+// ...}); `activeApp()` is the active column's app; `fixWithClaude(name,
+// build)` starts Claude Code in that workspace; `focusBack()` hands the
+// keyboard to the active column's terminal; `onOpen(open)` hears every show
+// and hide (the left footer's toggle).
 export function createRightPanel({
-  views, shownWorkspace, details, activeApp, fixWithClaude, focusBack, fit, showError, onMode = () => {},
+  views, shownWorkspace, details, activeApp, fixWithClaude, focusBack, showError, onOpen = () => {},
 }) {
   const stored = loadStored();
   let width = clampPanelWidth(Number(stored.width) || PANEL_WIDTH_DEFAULT, window.innerWidth);
   let tabId = ["files", "changes", "pr"].includes(stored.tab) ? stored.tab : "files";
-  let mode = loadPanelMode(storage());
+  let pinned = loadPanelPin(windowStorage());
+  let open = false;
   let workspace = null;
   let record = null;
   let timer = 0;
   let overlay = null;
   let changesSeen = null;
-  let prSeen = null;
 
   const el = make("aside", "right-panel");
   el.setAttribute("aria-label", "Files, changes and pull request");
@@ -84,20 +81,24 @@ export function createRightPanel({
   grip.tabIndex = 0;
   grip.setAttribute("role", "separator");
   grip.setAttribute("aria-orientation", "vertical");
-  grip.setAttribute("aria-label", "Resize the right panel");
-  grip.title = "Drag to resize the right panel, double-click to reset";
+  grip.setAttribute("aria-label", "Resize the files panel");
+  grip.title = "Drag to resize the files panel, double-click to reset";
+  const head = make("div", "rp-head");
   const tabsRow = make("div", "rp-tabs");
   tabsRow.setAttribute("role", "tablist");
+  const pin = make("button", "sidebar-nav-button rp-pin");
+  pin.type = "button";
+  pin.append(icon("pin", 14));
+  const closeButton = make("button", "sidebar-nav-button rp-close");
+  closeButton.type = "button";
+  closeButton.title = "Hide the files panel (Alt+Shift+E)";
+  closeButton.setAttribute("aria-label", "Hide the files panel");
+  closeButton.append(icon("x", 14));
+  head.append(tabsRow, pin, closeButton);
   const bodyEl = make("div", "rp-body");
-  const rail = make("nav", "rp-railbar");
-  rail.setAttribute("aria-label", "Right panel");
-  const footer = make("div", "rp-footer");
-  const collapse = make("button", "sidebar-collapse rp-collapse");
-  collapse.type = "button";
-  collapse.append(icon("chevron-right", 14));
-  footer.append(collapse);
-  el.append(grip, tabsRow, rail, bodyEl, footer);
-  document.getElementById("app").append(el);
+  el.append(grip, head, bodyEl);
+  // Over the stage, not beside it: the stage's grid never makes room for it.
+  views.stage.append(el);
 
   const overlayHost = make("div", "rp-overlay-host");
   overlayHost.hidden = true;
@@ -132,11 +133,6 @@ export function createRightPanel({
     },
     noteChanges: (name, answer) => {
       changesSeen = { name, at: Date.now(), answer };
-      paintRail();
-    },
-    notePr: (name, answer) => {
-      prSeen = { name, answer };
-      paintRail();
     },
     // Whether git reports `path` changed: from the Changes tab's last answer
     // while it is fresh, else from one request that refreshes it.
@@ -160,33 +156,21 @@ export function createRightPanel({
 
   const tabs = [createFilesTab(ctx), createChangesTab(ctx), createPrTab(ctx)];
   const tabButtons = new Map();
-  const railButtons = new Map();
   // The tabs use the left footer's icon-button component, so both sides
   // draw the same buttons at the same size.
-  const navButton = (tab, className) => {
-    const button = make("button", `sidebar-nav-button ${className}`);
+  for (const tab of tabs) {
+    const button = make("button", "sidebar-nav-button rp-tab");
     button.type = "button";
     button.title = tab.title;
     button.setAttribute("aria-label", tab.title);
     button.dataset.tab = tab.id;
     button.append(icon(tab.icon, 14));
-    return button;
-  };
-  for (const tab of tabs) {
-    const button = navButton(tab, "rp-tab");
     button.setAttribute("role", "tab");
     button.addEventListener("click", () => select(tab.id, { focus: false }));
     tabsRow.append(button);
     tabButtons.set(tab.id, button);
     tab.el.setAttribute("role", "tabpanel");
     bodyEl.append(tab.el);
-    const railButton = navButton(tab, "rp-rail-button");
-    const dot = make("span", "rp-rail-dot");
-    dot.hidden = true;
-    railButton.append(dot);
-    railButton.addEventListener("click", () => select(tab.id));
-    rail.append(railButton);
-    railButtons.set(tab.id, railButton);
   }
   tabsRow.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -198,7 +182,6 @@ export function createRightPanel({
   });
 
   const currentTab = () => tabs.find((tab) => tab.id === tabId);
-  const tabById = (id) => tabs.find((tab) => tab.id === id);
 
   function paintTabs() {
     for (const tab of tabs) {
@@ -211,24 +194,18 @@ export function createRightPanel({
     }
   }
 
-  function paintRail() {
-    const marks = railMarks(
-      changesSeen?.name === workspace ? changesSeen.answer : null,
-      prSeen?.name === workspace ? prSeen.answer : null,
-    );
-    const changes = railButtons.get("changes").querySelector(".rp-rail-dot");
-    changes.hidden = !marks.changes;
-    const pr = railButtons.get("pr").querySelector(".rp-rail-dot");
-    pr.hidden = !marks.pr;
-    pr.dataset.state = marks.pr || "";
-    railButtons.get("changes").title = marks.changes ? "Changes: the working tree has changes" : "Changes";
-    railButtons.get("pr").title = marks.pr ? `Pull request: checks ${marks.pr}` : "Pull request";
+  function paintPin() {
+    const label = pinned ? "Unpin: hide when a terminal takes the keyboard" : "Pin: keep the panel open";
+    pin.title = label;
+    pin.setAttribute("aria-label", label);
+    pin.setAttribute("aria-pressed", String(pinned));
+    document.body.classList.toggle("rp-pinned", pinned);
   }
 
   // ---- polling ----
-  // Full polls the tab on screen; rail polls Changes and Pull request for
-  // their dots; hidden polls nothing. A tick while the last one still waits
-  // is skipped, so a slow git or ssh never piles requests up.
+  // Open polls the tab on screen; hidden polls nothing. A tick while the
+  // last one still waits is skipped, so a slow git or ssh never piles
+  // requests up.
 
   const ticking = new Set();
   const tick = (tab) => {
@@ -237,10 +214,8 @@ export function createRightPanel({
     Promise.resolve(tab.refresh({ poll: true })).finally(() => ticking.delete(tab.id));
   };
   function polled() {
-    if (document.hidden || !workspace) return [];
-    if (mode === "full") return [currentTab()];
-    if (mode === "rail") return [tabById("changes"), tabById("pr")];
-    return [];
+    if (document.hidden || !workspace || !open) return [];
+    return [currentTab()];
   }
   function schedule() {
     for (const id of timer || []) clearInterval(id);
@@ -258,70 +233,41 @@ export function createRightPanel({
   // shows at once rather than on the next poll.
   window.addEventListener("focus", () => refreshShown());
 
-  // ---- modes ----
+  // ---- open and hidden ----
 
   function applyWidth() {
     document.documentElement.style.setProperty("--rp-width", `${width}px`);
   }
 
-  // The terminals refit once, when the slide has ended, never per frame.
-  let fitWait = null;
-  function fitAfterSlide() {
-    const app = document.getElementById("app");
-    if (fitWait) fitWait();
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      app.removeEventListener("transitionend", onEnd);
-      clearTimeout(timeout);
-      fitWait = null;
-      fit();
-    };
-    const onEnd = (event) => {
-      if (event.target === app && event.propertyName === "grid-template-columns") finish();
-    };
-    const timeout = setTimeout(finish, SLIDE_FALLBACK_MS);
-    app.addEventListener("transitionend", onEnd);
-    fitWait = () => { done = true; app.removeEventListener("transitionend", onEnd); clearTimeout(timeout); };
+  function applyOpen() {
+    document.body.classList.toggle("rp-open", open);
+    el.inert = !open;
+    el.setAttribute("aria-hidden", String(!open));
+    onOpen(open);
   }
 
-  function describeCollapse() {
-    const title = mode === "rail" ? "Expand the right panel" : "Collapse the right panel to icons";
-    collapse.title = `${title} (Alt+Shift+E opens and closes it)`;
-    collapse.setAttribute("aria-label", title);
-    collapse.setAttribute("aria-expanded", String(mode === "full"));
-  }
-
-  function applyMode(previous) {
-    const body = document.body.classList;
-    body.toggle("rp-mode-full", mode === "full");
-    body.toggle("rp-mode-rail", mode === "rail");
-    body.toggle("rp-mode-hidden", mode === "hidden");
-    // Hidden from the rail slides the rail out, not the full panel.
-    body.toggle("rp-mode-was-rail", mode === "hidden" && previous === "rail");
-    el.inert = mode === "hidden";
-    el.setAttribute("aria-hidden", String(mode === "hidden"));
-    describeCollapse();
-    onMode(mode);
-  }
-
-  function setMode(next) {
-    if (next === mode) return;
-    const previous = mode;
-    mode = next;
-    savePanelMode(storage(), mode);
-    if (mode !== "full") {
+  // `handBack` gives the keyboard to the terminal when it was in the panel;
+  // a hide because a terminal already took it leaves it there.
+  function setOpen(next, { handBack = true } = {}) {
+    if (next === open) return;
+    open = next;
+    if (!open) {
       const inside = el.contains(document.activeElement);
       releasePanelFocus();
-      if (inside) focusBack();
+      if (inside && handBack) focusBack();
     }
-    applyMode(previous);
+    applyOpen();
     // A workspace change refreshes inside follow; asking again would run
     // every tab's git calls twice.
-    if (mode !== "hidden" && !follow(true)) refreshShown();
+    if (open && !follow(true)) refreshShown();
     schedule();
-    fitAfterSlide();
+  }
+
+  // A hide nobody asked for, if the rules let it happen.
+  function autoHide(reason) {
+    if (!open || !panelHides(reason, { pinned, viewer: Boolean(overlay) })) return false;
+    setOpen(false, { handBack: reason !== "terminal" });
+    return true;
   }
 
   function select(id, { focus = true } = {}) {
@@ -330,26 +276,35 @@ export function createRightPanel({
     saveStored({ width, tab: tabId });
     paintTabs();
     // Choosing the tab already shown refreshes it.
-    if (mode !== "full") setMode("full");
+    if (!open) setOpen(true);
     else currentTab().refresh();
     schedule();
-    if (focus) currentTab().focus();
+    if (!focus) return;
+    currentTab().focus();
+    // A tab with nothing to focus yet (a note while it loads) still takes
+    // the keyboard on its button.
+    if (!el.contains(document.activeElement)) tabButtons.get(tabId).focus();
   }
 
-  // The key and the left footer's toggle: hidden or rail opens full, full
-  // closes. With a tab named, a closed panel opens on that tab.
+  // The key and the left footer's toggle: a hidden panel opens (on `id`
+  // when named), an open one hides, pinned or not.
   function toggle(id = null) {
-    if (mode === "full" && (!id || id === tabId)) {
-      setMode(keyPanelMode(mode));
+    if (open && (!id || id === tabId)) {
+      if (panelHides("toggle")) setOpen(false);
       return;
     }
     select(id || tabId);
   }
 
-  collapse.addEventListener("click", () => setMode(chevronPanelMode(mode)));
+  pin.addEventListener("click", () => {
+    pinned = !pinned;
+    savePanelPin(windowStorage(), pinned);
+    paintPin();
+  });
+  closeButton.addEventListener("click", () => setOpen(false));
 
-  // The shown workspace changed (or the panel opened): start over on it.
-  // True when it refreshed the tabs.
+  // The active column changed (or the panel opened): start over on it. True
+  // when it refreshed the tabs.
   function follow(force = false) {
     const name = shownWorkspace();
     if (!force && name === workspace) return false;
@@ -359,17 +314,18 @@ export function createRightPanel({
       record = null;
       closeOverlay({ handBack: false });
       for (const tab of tabs) tab.reset();
-      paintRail();
       if (workspace) {
         const asked = workspace;
         Promise.resolve(details(asked)).then((value) => {
-          if (workspace === asked) record = value || null;
+          if (workspace !== asked) return;
+          record = value || null;
+          if (record && !record.path) autoHide("no-folder");
         }, () => {});
       }
-      if (mode !== "hidden") refreshShown();
+      if (open) refreshShown();
       schedule();
     }
-    return changed && mode !== "hidden";
+    return changed && open;
   }
 
   // ---- the keyboard inside the panel ----
@@ -388,9 +344,11 @@ export function createRightPanel({
   el.addEventListener("focusout", (event) => {
     if (!el.contains(event.relatedTarget)) releasePanelFocus();
   });
+  // Escape hides it; pinned, it only hands the keyboard back.
   el.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     event.preventDefault();
+    if (autoHide("escape")) return;
     releasePanelFocus();
     focusBack();
   });
@@ -398,7 +356,7 @@ export function createRightPanel({
   // ---- width: the left sidebar's grip, on this side's inner edge ----
 
   grip.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || mode !== "full") return;
+    if (event.button !== 0 || !open) return;
     event.preventDefault();
     grip.setPointerCapture(event.pointerId);
     grip.classList.add("dragging");
@@ -420,7 +378,6 @@ export function createRightPanel({
       grip.classList.remove("dragging");
       document.body.classList.remove("rp-resizing");
       saveStored({ width, tab: tabId });
-      fit();
     };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);
@@ -430,7 +387,6 @@ export function createRightPanel({
     width = clampPanelWidth(PANEL_WIDTH_DEFAULT, window.innerWidth);
     applyWidth();
     saveStored({ width, tab: tabId });
-    fit();
   });
   grip.addEventListener("keydown", (event) => {
     const step = event.shiftKey ? 32 : 8;
@@ -440,7 +396,6 @@ export function createRightPanel({
     width = clampPanelWidth(width + delta, window.innerWidth);
     applyWidth();
     saveStored({ width, tab: tabId });
-    fit();
   });
   window.addEventListener("resize", () => {
     const next = clampPanelWidth(width, window.innerWidth);
@@ -492,7 +447,10 @@ export function createRightPanel({
     overlayHost.replaceChildren();
     overlayHost.hidden = true;
     releaseFocus(OVERLAY_OWNER);
-    if (handBack) focusBack();
+    if (!handBack) return;
+    // Back where the file was opened from: the panel, while it is open.
+    if (open) currentTab().focus?.();
+    else focusBack();
   }
 
   // ---- Alt+click and "paste path into terminal" ----
@@ -522,25 +480,28 @@ export function createRightPanel({
     return true;
   }
 
-  // The stored width and mode land before the grid can animate, so a start
-  // does not slide the panel in from the stylesheet's default.
-  document.body.classList.add("sidebar-sizing");
+  // The stored width lands before anything can slide, so a start does not
+  // animate the panel from the stylesheet's default. A pinned panel comes
+  // back open after a reload of this window, without taking the keyboard.
+  document.body.classList.add("rp-sizing");
   applyWidth();
   paintTabs();
-  paintRail();
-  applyMode(null);
-  requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("sidebar-sizing")));
-  if (mode !== "hidden") follow(true);
+  paintPin();
+  applyOpen();
+  if (pinned) setOpen(true);
+  requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("rp-sizing")));
 
   return {
     el,
     toggle,
     show: (id) => select(id || tabId),
-    close: () => setMode("hidden"),
-    setMode: (next) => setMode(next),
-    mode: () => mode,
+    close: () => setOpen(false),
+    open: () => select(tabId),
     follow: () => follow(false),
-    isOpen: () => mode === "full",
+    isOpen: () => open,
+    isPinned: () => pinned,
+    // A click or the keyboard went into a terminal (WorkspaceViews.onTouch).
+    terminalTouched: () => autoHide("terminal"),
     closeViewer: () => closeOverlay(),
   };
 }

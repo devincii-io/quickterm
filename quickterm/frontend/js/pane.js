@@ -922,6 +922,9 @@ export class Pane {
     // OSC 52 is driven by terminal *output*, so this can run for a pane the
     // user is not looking at. Put focus back exactly where it was rather than
     // pulling it into this pane.
+    // A column you are not typing in must not pull the keyboard over by
+    // selecting a textarea (OSC 52 output in a side by side column).
+    if (!document.hasFocus()) return false;
     const previous = document.activeElement;
     try {
       const ta = document.createElement("textarea");

@@ -365,9 +365,19 @@ export function createChangesTab(ctx) {
 
   // ---- lifecycle ----
 
+  // Commit messages typed but not committed, per workspace.
+  const drafts = new Map();
+  let draftFor = null;
+
   async function refresh() {
     const run = generation;
     const workspace = name();
+    if (workspace !== draftFor) {
+      // The draft typed for this workspace comes back with it.
+      draftFor = workspace;
+      message.value = drafts.get(workspace) || "";
+      fitMessage();
+    }
     if (!workspace) {
       data = null;
       setText(note, ctx.emptyText());
@@ -408,6 +418,12 @@ export function createChangesTab(ctx) {
   function reset() {
     generation++;
     data = null;
+    // A click into another column must not throw away a half-typed message.
+    if (draftFor) {
+      if (message.value.trim()) drafts.set(draftFor, message.value);
+      else drafts.delete(draftFor);
+    }
+    draftFor = null;
     message.value = "";
     fitMessage();
     paintOutput();

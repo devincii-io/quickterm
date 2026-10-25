@@ -3663,3 +3663,113 @@ spawn `cmd.exe /c echo hi` style short-lived processes. Server tests use
 `fastapi.testclient.TestClient` with a stub/real manager. Keep tests fast (<30 s
 total). Run: `uv run --no-sync pytest` (env is pre-synced; do NOT run uv sync,
 uv add, or uv lock).
+
+### Side by side workspaces and a files panel that slides over (4.7, frozen 2026-10-25)
+
+Devin asked for several workspaces on screen at once again, with the files
+panel hidden by default, sliding over the terminals when opened and hiding
+by itself. The old 4.0 tiled views (view headers, coloured frames, view
+drag and dock, dividers) stay gone; this is a small, quiet split.
+
+Stage
+- The stage shows 1 to 4 workspaces side by side as columns, left to right
+  in the order they were added. One shown workspace fills the window as in
+  4.6. Views are never moved in the DOM (an iframe that moves reloads): the
+  stage is a CSS grid and each shown view gets its column through
+  `grid-column`; hidden views keep `visibility: hidden` and `inert` as now.
+- `WorkspaceViews` gains `shown` (an ordered list, at most 4) next to
+  `active` (the column with the keyboard, always one of `shown`).
+  `show(view)` keeps today's meaning: that workspace alone. `addShown(view)`
+  adds a column (the oldest non-active column leaves when 4 are shown),
+  `removeShown(view)` takes one out (the view stays open and running, as a
+  hidden view does today). The open-views store keeps `shown` so a reload
+  or restart restores the split.
+- Each column has a one-line header only when 2 or more are shown: the
+  workspace's colour dot, name, branch, its state dot (the same states as
+  the sidebar), and `×` (remove from the split, never close or kill). The
+  active column's header is marked with the accent; the others are muted.
+  Clicking anywhere in a column makes it active. With one column there is
+  no header (as today).
+- Columns are resized by dragging the 1 px gutter between them (min 320 px
+  each); widths are fractions saved with `shown`. Double-click a gutter to
+  make all columns equal.
+- Sidebar: click a workspace shows it alone (unchanged); Ctrl+click (and
+  the card's ⋮ menu "Show side by side") adds it as a column, or removes it
+  when already shown. Shown workspaces get a filled colour dot; the active
+  one also the card highlight. Palette rows: "show side by side: <name>"
+  for every workspace not shown, "show alone" for the active one.
+- Keys: `Ctrl+Alt+Left` / `Ctrl+Alt+Right` move the keyboard to the column
+  left or right (they reach the focused pane of that column). Alt+PgUp/PgDn
+  and Ctrl+Shift+1..9 keep showing one workspace alone. `Alt+Z` zooms a pane
+  inside its column only.
+- Scratch can be a column like any workspace. A window opens with one
+  column, as today.
+
+Files panel (the right panel)
+- Hidden by default. Opening it (`Alt+Shift+E`, the sidebar footer icon,
+  the palette rows, a tab's rail icon) slides it in over the right edge of
+  the stage, above the terminals (an overlay with a shadow; the terminals
+  do not resize). It shows the active column's workspace and follows the
+  active column.
+- It hides by itself when the keyboard or a click goes back to a terminal,
+  on Escape, and when the active column changes to a workspace with no
+  folder. A pin button in its header keeps it open (it still overlays);
+  the pin is remembered per window. `Alt+Shift+E` toggles it either way.
+- The rail mode (icons only) and the pushed layout are removed; the
+  overlay's width is resizable as now (`clampPanelWidth`), and remembered.
+- Opening it gives it the keyboard (focus.js claim), hiding it hands the
+  keyboard back to the pane that had it.
+
+Not in scope: dragging panes between columns, more than 4 columns, rows.
+
+As built (2026-10-25)
+- Modules: `stage_columns.js` (pure: the `{shown, active}` rules, widths,
+  the grid template, the stored split), `stage_chrome.js` (column headers
+  and gutters, plain elements in the stage grid). `WorkspaceViews` gains
+  `shown`, `fractions`, `toggleShown`, `removeShown`, `showAlone`,
+  `stepColumn`, `takeColumn`, and `open(name, {beside: true})`; there is no
+  separate `addShown`, `open(..., {beside})` and `toggleShown` cover it.
+  `activate(view, {alone})`: a view that is already a column only takes the
+  keyboard, any other is shown alone.
+- Deviation: a plain sidebar click on a workspace that is already a column
+  moves the keyboard there and keeps the split, so one stray click does not
+  undo a split built with Ctrl+click. On any other workspace it shows it
+  alone, as written. Alt+PgUp/PgDn and Ctrl+Shift+1..9 always show alone.
+- An added column takes the keyboard. A removed column that had it hands it
+  to its left neighbour (the new first column when it was the first).
+  Widths reset to equal whenever the set of columns changes.
+- Record: `quickterm.openViews.v1` keeps version 1 and `shown` (the column
+  with the keyboard) and adds `split` (names in column order) and `widths`
+  (fractions, 3 decimals), written only with 2+ columns. A bad `split` is
+  dropped on its own (bad names skipped, past 4 cut, mismatched widths made
+  equal); the record still opens. Widths come back only when every column
+  did.
+- Headers are 24px: colour dot, name, branch, state dot (attention, failed,
+  done, busy, new output; nothing when quiet), and `×` on hover. The active
+  one has full-strength text and a 2px accent underline. Inside a column
+  without the keyboard the focused pane loses its accent bar
+  (`body.view-suspended`), so one pane in the window wears it. Ctrl+Alt+
+  Left/Right are claimed only with 2+ columns; at the edge nothing moves.
+- Sidebar: a group carries `shown`. While 2+ columns show, an open
+  workspace that is not on screen keeps only its colour's ring; with one
+  column the dots are as before. The ⋮ row reads "Show side by side" or
+  "Remove from side by side" and is first in the menu. Palette: "show side
+  by side: <name>" for each saved workspace not on screen and for an open
+  scratch, "show alone" with 2+ columns.
+- Files panel: appended to the stage, absolutely positioned on its right
+  edge (z-index above the columns, `--shadow-md`), slid with `transform`
+  (.14s, off under reduced motion). `#app` has two columns now
+  (`--rp-col`, `rp-mode-*`, the rail, the footer and its chevron are gone;
+  `quickterm.rightPanelMode` is no longer read). The header holds the three
+  tabs, the pin and a close button. Body classes: `rp-open`, `rp-pinned`.
+  The pin is `sessionStorage["quickterm.rightPanelPinned"]`; a pinned panel
+  reopens after a reload of that window without taking the keyboard.
+- Auto-hide: every pointerdown or window focus in a shown view's document
+  reaches `takeColumn`, which calls `onTouch`, which hides an unpinned panel
+  (`panelHides` in right_panel_model.js). A window blur was not enough: when
+  the keyboard is already in a view, a click in another column blurs
+  nothing in the shell. A file view or diff open from the panel keeps it.
+  Escape hides an unpinned panel and hands the keyboard back; pinned, it
+  only hands it back. The no-folder hide runs when the column's workspace
+  record arrives without a path. Opening focuses the tab, or its button
+  when the tab has nothing to focus yet.

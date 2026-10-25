@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-async function captureHandler({ paletteOpen = false, acceptKill = undefined } = {}) {
+async function captureHandler({ paletteOpen = false, acceptKill = undefined, columns = 2 } = {}) {
   let handler = null;
   globalThis.window = {
     addEventListener(type, fn, capture) {
@@ -40,6 +40,7 @@ async function captureHandler({ paletteOpen = false, acceptKill = undefined } = 
     cycleWorkspace: (delta) => calls.push(`cycleWorkspace:${delta}`),
     recentTerminals: (delta) => calls.push(`recentTerminals:${delta}`),
     ctrlReleased: () => calls.push("ctrlReleased"),
+    focusColumn: (delta) => { calls.push(`focusColumn:${delta}`); return columns > 1; },
   });
   return { handler, calls };
 }
@@ -273,7 +274,10 @@ test("SHORTCUTS lists every key the layer claims, and nothing it leaves to the s
   const listed = new Set(SHORTCUTS.flatMap((item) => item.bindings));
   const { handler } = await captureHandler();
   const claimed = [];
-  for (const mods of [{ altKey: true }, { altKey: true, shiftKey: true }, { ctrlKey: true }, { ctrlKey: true, shiftKey: true }]) {
+  for (const mods of [
+    { altKey: true }, { altKey: true, shiftKey: true }, { ctrlKey: true }, { ctrlKey: true, shiftKey: true },
+    { ctrlKey: true, altKey: true },
+  ]) {
     for (const [code, [plain, shifted]] of Object.entries(US)) {
       const event = keyEvent({ code, key: mods.shiftKey ? shifted : plain, ...mods });
       handler(event);
@@ -462,4 +466,25 @@ test("Alt+Shift+E closes the right panel while the panel holds the keyboard", as
   handler(event);
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(calls, ["toggleRightPanel"]);
+});
+
+test("Ctrl+Alt+Left/Right move between side by side columns, and pass through with one", async () => {
+  const split = await captureHandler({ columns: 2 });
+  const left = keyEvent({ key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true, altKey: true });
+  split.handler(left);
+  const right = keyEvent({ key: "ArrowRight", code: "ArrowRight", ctrlKey: true, altKey: true });
+  split.handler(right);
+  assert.equal(left.defaultPrevented && right.defaultPrevented, true);
+  assert.deepEqual(split.calls, ["focusColumn:-1", "focusColumn:1"]);
+
+  const alone = await captureHandler({ columns: 1 });
+  const event = keyEvent({ key: "ArrowRight", code: "ArrowRight", ctrlKey: true, altKey: true });
+  alone.handler(event);
+  assert.equal(event.defaultPrevented, false, "the terminal gets the key");
+
+  const typing = await captureHandler({ paletteOpen: true });
+  const held = keyEvent({ key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true, altKey: true });
+  typing.handler(held);
+  assert.equal(held.defaultPrevented, false);
+  assert.deepEqual(typing.calls, []);
 });

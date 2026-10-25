@@ -69,9 +69,12 @@ lives:
   Terminals are SSH sessions that start in the folder; port, key and jump
   host come from `~/.ssh/config`.
 
-The window shows one workspace at a time; the others keep running behind it.
-Files, changes, the pull request, the branch and the board work the same at
-every location.
+The window shows one workspace, or up to four side by side: **Ctrl+click**
+a workspace in the sidebar (or **Show side by side** in its **⋮** menu) to
+add it as a column, drag the gap between columns to resize, and
+`Ctrl+Alt+Left` / `Ctrl+Alt+Right` to move between them. Workspaces that are
+not shown keep running behind. Files, changes, the pull request, the branch
+and the board work the same at every location.
 
 **Scratch** is a throwaway workspace in a temp folder. `cd` into a project
 there and the sidebar offers **make <folder> a workspace**.
@@ -199,9 +202,11 @@ Splits place themselves: a new pane takes half of the focused one along its
 longer side. `×` on a pane detaches it and the terminal keeps running; kill
 is a separate action that always asks first.
 
-`Alt+Shift+E` opens the right panel: the workspace's files (click to read,
-Alt+click to paste the path), its git changes with stage, commit, push and
-pull, and the branch's pull request with its checks.
+`Alt+Shift+E` slides the files panel over the terminals: the active
+workspace's files (click to read, Alt+click to paste the path), its git
+changes with stage, commit, push and pull, and the branch's pull request with
+its checks. It hides again when you click or type in a terminal; the pin
+keeps it open.
 
 ## Command line
 
@@ -234,13 +239,14 @@ through.
 | `Alt+Shift+Right` / `Alt+Shift+Down` | Split right / below |
 | `Alt+Shift+Left` / `Alt+Shift+Up` | Open the new-terminal menu |
 | `Alt+Arrows` | Move between panes |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Move to the workspace column beside |
 | `Alt+Z` | Zoom the focused pane |
 | `Alt+D` | Detach the pane; the terminal keeps running |
 | `Alt+W` | Kill the focused terminal (asks first; a second `Alt+W` confirms) |
 | `Alt+J` | Next terminal that needs you |
 | `Alt+G` / `Alt+S` / `Alt+I` | Board / Settings / Help |
 | `Alt+Shift+S` | Sidebar: full, rail, hidden |
-| `Alt+Shift+E` | Right panel |
+| `Alt+Shift+E` | Files panel |
 | `Alt+Shift+C` | Open the focused terminal's folder in VS Code |
 | `Ctrl+Shift+1..9` | Show the nth workspace |
 | `Alt+PageDown` / `Alt+PageUp` | Next / previous open workspace |

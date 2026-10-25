@@ -405,9 +405,15 @@ def test_the_stage_shows_one_workspace_and_never_reparents_an_iframe():
     assert "view.el.inert = !shown;" in paint
     assert "this._tellHidden(view);" in paint
     assert "child.setHidden(hidden);" in views
-    # Hidden by visibility, at the full stage rect.
-    assert ".workspace-view { position: absolute; inset: 0; display: flex; visibility: hidden; }" in views_css
+    # Hidden by visibility, over the whole stage grid (4.7: the stage is a
+    # grid and a shown view of a split only gets its column track).
+    assert "display: grid;" in views_css
+    assert (
+        ".workspace-view { grid-area: 1 / 1 / -1 / -1; position: relative; min-width: 0; min-height: 0;"
+        " display: flex; visibility: hidden; }"
+    ) in views_css
     assert ".workspace-view.shown { visibility: visible; }" in views_css
+    assert 'view.el.style.gridColumn = split && shown ? String(columnTrack(at)) : "";' in paint
     for line in views_css.splitlines():
         if line.startswith(".workspace-view ") or line.startswith(".workspace-view."):
             assert "display: none" not in line, line
@@ -421,9 +427,12 @@ def test_the_stage_shows_one_workspace_and_never_reparents_an_iframe():
     assert "viewHost()?.ready(window);" in main
     assert main.index("window.quicktermView = {") < main.index("viewHost()?.ready(window);")
     assert "setHidden: (hidden) => layout.setViewHidden(hidden)," in main
-    # A stray focus in a hidden view never takes the keyboard or switches.
+    # A stray focus in a hidden view never takes the keyboard or switches;
+    # a click in a side by side column makes that column the active one.
     assert "viewHost()?.activate(window)" not in main
-    assert "return !host || host.active === host.viewFor(window);" in main
+    assert "return !host || host.takeColumn(window);" in main
+    take = _function(views, "  takeColumn(target) {", "\n  }\n")
+    assert "if (!view || !this.shown.includes(view)) return false;" in take
 
 
 def test_every_view_closes_and_the_shown_one_hands_over_to_the_last_shown():

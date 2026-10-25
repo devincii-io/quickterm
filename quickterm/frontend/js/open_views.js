@@ -3,10 +3,13 @@
 // WorkspaceViews in workspace_views.js uses it.
 //
 //   localStorage["quickterm.openViews.v1"] =
-//     {"version": 1, "open": [<name>, ...], "shown": <name> | null}
+//     {"version": 1, "open": [<name>, ...], "shown": <name> | null,
+//      "split": [<name>, ...], "widths": [<fraction>, ...]}
 //
 // A name is a saved workspace, or "" for the window's scratch view. The list
-// is in the order the views were opened.
+// is in the order the views were opened. `shown` is the view with the
+// keyboard. `split` and `widths` are there only while 2 to 4 workspaces are
+// side by side (stage_columns.js): the columns in order and their shares.
 //
 // Up to 4.2 the window tiled its views and stored the tiling under
 // "quickterm.workspaceViews" (version 2, or version 1 from 3.x with a
@@ -15,6 +18,7 @@
 // tree order, with its active leaf as the shown one, and removes it.
 
 import { isScratchWorkspace } from "./boot_context.js";
+import { describeSplit, keepSplit, parseSplit } from "./stage_columns.js";
 
 export const OPEN_VIEWS_KEY = "quickterm.openViews.v1";
 export const LEGACY_ARRANGEMENT_KEY = "quickterm.workspaceViews";
@@ -26,13 +30,17 @@ const MAX_TREE_DEPTH = 16;
 const scratchOrName = (name) => (isScratchWorkspace(name) ? "" : name);
 
 // The record for `views` (in the order they were opened) with `shown` the
-// view on screen. `nameOf(view)` is the workspace it shows.
-export function describeOpenViews(views, shown, nameOf) {
+// view with the keyboard. `nameOf(view)` is the workspace it shows;
+// `columns` ({shown, fractions}) the split, written with 2+ columns only.
+export function describeOpenViews(views, shown, nameOf, columns = null) {
   const open = views.map((view) => scratchOrName(nameOf(view)));
+  const split = describeSplit(columns?.shown?.filter((view) => views.includes(view)), columns?.fractions,
+    (view) => scratchOrName(nameOf(view)));
   return {
     version: OPEN_VIEWS_VERSION,
     open,
     shown: shown && views.includes(shown) ? scratchOrName(nameOf(shown)) : null,
+    ...(split || {}),
   };
 }
 
@@ -57,7 +65,9 @@ export function parseOpenViews(raw) {
     if (!open.includes(name)) open.push(name);
   }
   const shown = storedName(value.shown);
-  return { open, shown: shown !== null && open.includes(shown) ? shown : null };
+  // A split that does not hold up is dropped on its own; the list still opens.
+  const split = parseSplit(value.split, value.widths, open);
+  return { open, shown: shown !== null && open.includes(shown) ? shown : null, ...(split ? { split } : {}) };
 }
 
 // The leaves of a 4.2 (version 2) or 3.x (version 1) tiling record, as an
@@ -104,7 +114,8 @@ export function restorePlan(record, { exists = () => true } = {}) {
     skipped.push({ workspace: name, reason: "missing" });
     return false;
   });
-  return { open, shown: open.includes(record.shown) ? record.shown : null, skipped };
+  const split = keepSplit(record.split, open);
+  return { open, shown: open.includes(record.shown) ? record.shown : null, skipped, ...(split ? { split } : {}) };
 }
 
 // localStorage behind the two keys. Every access can throw (storage

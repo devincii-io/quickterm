@@ -48,56 +48,32 @@ export function splitPath(path) {
   return at < 0 ? { name: text, dir: "" } : { name: text.slice(at + 1), dir: text.slice(0, at) };
 }
 
-// ---- modes: the same three as the left sidebar ----
+// ---- open, pinned, and when it hides by itself ----
 
-export const PANEL_MODES = Object.freeze(["full", "rail", "hidden"]);
-export const PANEL_MODE_KEY = "quickterm.rightPanelMode";
+// The panel is hidden at every start. The pin is remembered per window
+// (sessionStorage: it survives a reload, not a second window).
+export const PANEL_PIN_KEY = "quickterm.rightPanelPinned";
 
-// The stored mode, per machine; hidden when there is none or the storage
-// cannot be read.
-export function loadPanelMode(storage) {
-  try {
-    const value = storage?.getItem(PANEL_MODE_KEY);
-    return PANEL_MODES.includes(value) ? value : "hidden";
-  } catch (_) {
-    return "hidden";
-  }
+export function loadPanelPin(storage) {
+  try { return storage?.getItem(PANEL_PIN_KEY) === "1"; } catch (_) { return false; }
 }
 
-export function savePanelMode(storage, mode) {
-  if (!PANEL_MODES.includes(mode)) return;
-  try { storage?.setItem(PANEL_MODE_KEY, mode); } catch (_) { /* per-machine nicety only */ }
+export function savePanelPin(storage, pinned) {
+  try { storage?.setItem(PANEL_PIN_KEY, pinned ? "1" : "0"); } catch (_) { /* per-window nicety only */ }
 }
 
-// Alt+Shift+E and the left footer's toggle open and close: hidden or rail
-// goes to full, full to hidden.
-export function keyPanelMode(mode) {
-  return mode === "full" ? "hidden" : "full";
-}
+// Why the panel might hide without being asked: the keyboard or a click went
+// into a terminal ("terminal"), Escape in the panel ("escape"), the active
+// column now shows a workspace with no folder ("no-folder"). The pin keeps
+// it open through all of them; only the key, the footer icon and the panel's
+// own close button ("toggle") hide a pinned panel. A file view or diff open
+// over the stage holds it too: it was opened from the panel.
+export const AUTO_HIDE_REASONS = Object.freeze(["terminal", "escape", "no-folder"]);
 
-// The footer chevron steps between full and rail, as the left one does.
-export function chevronPanelMode(mode) {
-  return mode === "full" ? "rail" : "full";
-}
-
-// Whether the left footer's "right panel" toggle shows as on.
-export function panelShows(mode) {
-  return mode === "full" || mode === "rail";
-}
-
-// The rail's state dots: Changes when the tree has changes, Pull request in
-// the colour of its checks (failing wins over pending over passing).
-export function railMarks(changes, pr) {
-  const files = changes?.files || [];
-  const changed = files.some((file) => file.group !== "committed");
-  let checks = null;
-  if (pr?.pr) {
-    const groups = checkGroups(pr.checks || []);
-    if (groups.failing.length) checks = "failing";
-    else if (groups.pending.length) checks = "pending";
-    else if (groups.passing.length) checks = "passing";
-  }
-  return { changes: changed, pr: checks };
+export function panelHides(reason, { pinned = false, viewer = false } = {}) {
+  if (reason === "toggle") return true;
+  if (!AUTO_HIDE_REASONS.includes(reason) || pinned) return false;
+  return !(viewer && reason === "terminal");
 }
 
 // The width the panel may take: never less than the minimum, never so much

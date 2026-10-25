@@ -10,7 +10,7 @@ import {
   clampSidebarWidth, isWideSidebar, rowWhere, sessionTooltip, sidebarGroups, groupSummary,
   folderName, newTerminalMenu, chosenRow, loadTerminalChoice, saveTerminalChoice, loadMode, saveMode, loadWidth, saveWidth,
   loadClosedGroups, saveClosedGroups, foldId, visibleGroups, activitySeconds, relativeTime, groupBranch, worktreeNote,
-  nextNeedsYou as findNeedsYou, NAV_ICONS,
+  nextNeedsYou as findNeedsYou, NAV_ICONS, besideRow,
 } from "./sidebar_model.js";
 import { createViewControls } from "./sidebar_view_menu.js";
 import { mountUsageFooter } from "./usage_footer.js";
@@ -531,6 +531,8 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     if (group.kind === "workspace") {
       items.push({ label: "Open in new window", icon: "new-window", run: () => actions.openWorkspaceInWindow?.(group.name) });
     }
+    const beside = besideRow(group, (model.views || []).filter((view) => view.shown).length);
+    if (beside) items.unshift({ ...beside, icon: "workspaces", run: () => actions.toggleBeside?.(group.name) });
     items.push({ label: "Workspace settings", icon: "settings", run: () => actions.editWorkspace?.(group.name) });
     if (group.kind === "workspace") {
       const again = startupMenuLabel(group.startup);
@@ -589,7 +591,9 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
         toggleFold(node);
         return;
       }
-      actions.openWorkspace?.(group.name);
+      // Ctrl+click: a column beside the shown workspaces, or out of the split.
+      if (event.ctrlKey || event.metaKey) actions.toggleBeside?.(group.name);
+      else actions.openWorkspace?.(group.name);
     });
     head.addEventListener("keydown", (event) => {
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -621,6 +625,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     setAttrs(worktree, { title: note?.title || false });
     setClass(node, "open", group.open);
     setClass(node, "active", group.active);
+    setClass(node, "shown", group.shown);
     setClass(node, "has-attention", group.counts.attention > 0);
     setClass(node, "folded", closed);
     setClass(head, "warning", group.pathExists === false);
@@ -675,6 +680,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       update: updateGroup,
     });
     if (!nodes.some((node) => itemFor(node)?.active)) parkActive();
+    setClass(groupList, "side-by-side", (model.views || []).filter((each) => each.shown).length > 1);
     emptyNote.hidden = groups.length > 0 || hidden > 0;
     hiddenNote.hidden = hidden === 0;
     setText(hiddenNote, `Show ${hidden} empty workspace${hidden === 1 ? "" : "s"}`);
