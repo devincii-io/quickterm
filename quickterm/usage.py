@@ -2,20 +2,24 @@
 
 Claude Code hands its rate limits only to a status line command, so
 QuickTerm's per-launch settings run ``statusline_chain.py``, which posts them
-to the agent-event route; ``ClaudeLimits`` keeps the latest numbers in memory,
-for the whole backend rather than per session, and never on disk.
+to the agent-event route; ``ClaudeLimits`` keeps the latest numbers for the
+whole backend rather than per session, and the running backend also keeps
+them in ``claude-usage.json`` in the config folder, so a restart still shows
+them before Claude reports again.
 
 Codex writes its limits into every ``token_count`` event of the session
 rollout it is recording. ``CodexReader`` reads the end of the newest rollout
-file and caches the answer by path and mtime. Nothing here writes a file,
-reads a credential, or talks to anything but the local disk.
+file and caches the answer by path and mtime. Nothing here reads a
+credential or talks to anything but the local disk.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -24,8 +28,14 @@ from typing import Any, Callable
 
 from quickterm.statusline_chain import EVENT as CLAUDE_EVENT
 
-__all__ = ["CLAUDE_EVENT", "ClaudeLimits", "CodexReader", "codex_sessions_dir"]
+__all__ = [
+    "CLAUDE_EVENT", "ClaudeLimits", "CodexReader", "claude_usage_file", "codex_sessions_dir",
+]
 
+log = logging.getLogger(__name__)
+
+CLAUDE_FILE = "claude-usage.json"
+CLAUDE_FILE_MAX_BYTES = 64 * 1024
 CLAUDE_WINDOWS = ("five_hour", "seven_day")
 CODEX_WINDOWS = ("primary", "secondary")
 CODEX_TAIL_BYTES = 256 * 1024
@@ -62,13 +72,73 @@ def _percent(value: Any) -> float | None:
     return None if number is None else round(max(0.0, number), 2)
 
 
+def claude_usage_file() -> Path:
+    """Where the latest Claude limits survive a restart. Blocking: creates
+    the config folder."""
+    from quickterm.config import config_dir
+
+    return config_dir() / CLAUDE_FILE
+
+
+def _stored_windows(value: Any) -> list[dict[str, Any]] | None:
+    """The windows of a stored snapshot, checked like a report; None when
+    the file holds anything else."""
+    if not isinstance(value, list):
+        return None
+    windows = []
+    for window in value:
+        if not isinstance(window, dict) or window.get("id") not in CLAUDE_WINDOWS:
+            return None
+        used = _percent(window.get("used_percent"))
+        resets_at = window.get("resets_at")
+        if used is None or not (resets_at is None or _epoch(resets_at) is not None):
+            return None
+        windows.append({
+            "id": window["id"],
+            "used_percent": used,
+            "resets_at": _epoch(resets_at) if resets_at is not None else None,
+        })
+    return windows or None
+
+
 class ClaudeLimits:
-    """The latest Claude rate limits any QuickTerm terminal reported."""
+    """The latest Claude rate limits any QuickTerm terminal reported.
+
+    With a ``path`` (``attach_file``), the snapshot is loaded from it and
+    written back whenever a window's numbers or reset time changed. The
+    status line reports many times a minute, so an unchanged report never
+    writes; the stored ``updated_at`` is then the time of the last change.
+    """
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._latest: dict[str, Any] | None = None
+        self._path: Path | None = None
+        # The windows the file holds (or held when loaded).
+        self._saved: list[dict[str, Any]] | None = None
+
+    def attach_file(self, path: Path) -> None:
+        """Load the stored snapshot from ``path`` and save there from now on.
+        Blocking: reads the file. A missing or broken file starts empty."""
+        loaded = None
+        try:
+            if path.stat().st_size <= CLAUDE_FILE_MAX_BYTES:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    windows = _stored_windows(data.get("windows"))
+                    updated = _number(data.get("updated_at"))
+                    if windows is not None and updated is not None:
+                        loaded = {"windows": windows, "updated_at": int(updated)}
+        except (OSError, ValueError, RecursionError):
+            loaded = None
+        with self._lock:
+            self._path = path
+            if loaded is not None:
+                self._saved = [dict(w) for w in loaded["windows"]]
+                if self._latest is None:
+                    self._latest = loaded
 
     def record(self, rate_limits: Any) -> bool:
         """Keep ``rate_limits`` (the status line's object). False, keeping the
@@ -93,6 +163,41 @@ class ClaudeLimits:
         with self._lock:
             self._latest = {"windows": windows, "updated_at": int(self._clock())}
         return True
+
+    def needs_save(self) -> bool:
+        """Whether the windows differ from what the file holds."""
+        with self._lock:
+            return (
+                self._path is not None
+                and self._latest is not None
+                and self._latest["windows"] != self._saved
+            )
+
+    def save(self) -> None:
+        """Write the snapshot when it changed. Blocking: call it off the loop."""
+        with self._write_lock:
+            with self._lock:
+                path = self._path
+                latest = self._latest
+                if path is None or latest is None or latest["windows"] == self._saved:
+                    return
+                windows = [dict(w) for w in latest["windows"]]
+                text = json.dumps({"windows": windows, "updated_at": latest["updated_at"]})
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                        handle.write(text + "\n")
+                    os.replace(tmp, path)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            except OSError:
+                log.warning("could not store Claude usage in %s", path, exc_info=True)
+                return
+            with self._lock:
+                self._saved = windows
 
     def snapshot(self) -> dict[str, Any] | None:
         with self._lock:

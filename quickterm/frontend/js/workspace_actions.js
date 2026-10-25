@@ -42,10 +42,6 @@ export function createWorkspaceActions({
     const here = hereState();
     if (!here || state.transitioning) return false;
     const { folder, name } = here;
-    if (here.action === "clash") {
-      showError(`A workspace named "${name}" already exists with a different folder. Name this one with "save workspace as" in the palette.`);
-      return false;
-    }
     const problem = validateWorkspaceName(name);
     if (problem) {
       showError(`"${name}" cannot be a workspace name (${problem.replace(/\.$/, "")}). Name it with "save workspace as" in the palette.`);

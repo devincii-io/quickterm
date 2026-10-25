@@ -432,9 +432,16 @@ def codex_args(cmd: str, args: list[str], base: Path) -> list[str]:
     """
     if args[:1] == ["agents"] or _is_batch(cmd):
         return args
+    notify = _codex_notify(base)
+    return args if notify is None else [*notify, *args]
+
+
+def _codex_notify(base: Path) -> list[str] | None:
+    """The ``-c notify=...`` pair of a Codex launch, or None when the user's
+    own notify cannot be read."""
     user = _codex_user_notify()
     if user is None:
-        return args
+        return None
     if user:
         from quickterm.codex_notify import FLAG
 
@@ -443,7 +450,34 @@ def codex_args(cmd: str, args: list[str], base: Path) -> list[str]:
         # Codex appends the notification JSON as the last argument, which
         # becomes the --data-binary body.
         notify = [curl_program(), "-K", (base / CODEX_CURL_FILE).as_posix(), "--data-binary"]
-    return ["-c", "notify=" + toml_strings(notify), *args]
+    return ["-c", "notify=" + toml_strings(notify)]
+
+
+def shell_hooks(base: Path | None = None) -> dict[str, tuple[tuple[str, ...], bool]]:
+    """What the user's own ``claude`` and ``codex`` get in a PowerShell
+    terminal QuickTerm started: per agent, the hook arguments and whether a
+    .cmd/.bat program may be given them. Blocking: writes the hook files.
+
+    Empty when hooks are unavailable; an agent is missing when its part
+    cannot be built. Claude gets the static settings file only: a user's own
+    ``--settings`` on the command line makes the shell pass everything through.
+    """
+    base = base if base is not None else hooks_dir()
+    if _SHELL_UNSAFE.search(base.as_posix()) or not curl_usable():
+        return {}
+    try:
+        ensure_files(base)
+        out: dict[str, tuple[tuple[str, ...], bool]] = {}
+        arg = f"--settings={(base / CLAUDE_SETTINGS_FILE).as_posix()}"
+        out["claude"] = ((arg,), not _BATCH_UNSAFE.search(arg))
+        notify = _codex_notify(base)
+        if notify is not None:
+            # codex_args never hands a .cmd/.bat Codex its notify.
+            out["codex"] = (tuple(notify), False)
+        return out
+    except OSError:
+        log.warning("agent hooks unavailable for this shell", exc_info=True)
+        return {}
 
 
 def launch_args(

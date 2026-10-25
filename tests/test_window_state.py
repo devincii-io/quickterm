@@ -136,7 +136,8 @@ def test_screen_list_reads_pywebviews_module_property(monkeypatch):
     raised TypeError and the remembered bounds were never restored."""
     import sys
 
-    from proxy_tools import Proxy
+    # pywebview's own dependency; the Linux test image has no pywebview.
+    Proxy = pytest.importorskip("proxy_tools").Proxy
 
     from quickterm import app
 

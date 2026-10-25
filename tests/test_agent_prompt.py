@@ -72,8 +72,15 @@ def test_launch_refuses_a_prompt_where_it_does_not_belong(tmp_path, fields, mess
     assert caught.value.status == 400
 
 
-def test_a_remote_launch_carries_a_multiline_prompt_on_one_line():
+def test_a_remote_launch_carries_a_multiline_prompt_on_one_line(monkeypatch):
+    from quickterm import ssh_config
+    from tests.test_remote_workspace import SSH, box
     from tests.test_remote_workspace import resolve as resolve_remote
+
+    # The stubs test_remote_workspace.py applies to all its tests: the ssh
+    # client and the saved profile, so the test needs no OpenSSH installed.
+    monkeypatch.setattr(ssh_config, "openssh_path", lambda kind: SSH)
+    monkeypatch.setattr("quickterm.ws_exec._saved_profiles", lambda: [box()])
 
     spec = resolve_remote(profile="claude-code", agent_mode="new",
                           prompt="The hook failed.\r\n\nlint: x.py:1\nFix it.")
@@ -88,6 +95,7 @@ class CmdCfg(Cfg):
         self.shell = "cmd"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="POSIX always launches the login shell, never cmd.exe")
 def test_cmd_takes_at_most_7000_prompt_characters(tmp_path):
     folder = str(tmp_path)
     ok = launch.resolve(CmdCfg(), profile="claude-code", request_cwd=folder, prompt="x" * 7000)

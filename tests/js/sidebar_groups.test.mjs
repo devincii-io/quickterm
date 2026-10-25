@@ -74,14 +74,15 @@ test("an attention row does not move, it only marks its group", () => {
   assert.equal(ws.counts.attention, 1);
 });
 
-test("rows sort by name with numbers in order, then by id", () => {
+test("rows sort by name with numbers in order, then by start order", () => {
   const groups = sidebarGroups([
     session("id-3", { name: "shell 10", workspace: "ws" }),
     session("id-2", { name: "shell 2", workspace: "ws" }),
     session("id-b", { name: "same", workspace: "ws" }),
     session("id-a", { name: "same", workspace: "ws" }),
   ], { workspaces: [{ name: "ws" }] });
-  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["id-a", "id-b", "id-2", "id-3"]);
+  // The list is in start order, so id-b (listed first) leads the two "same".
+  assert.deepEqual(groups[0].sessions.map((entry) => entry.session.id), ["id-b", "id-a", "id-2", "id-3"]);
 });
 
 test("scratch views follow the named workspaces, ordered by label", () => {
@@ -186,4 +187,31 @@ test("open, active and colour come from this window's views", () => {
   assert.deepEqual([byName.zeta.open, byName.zeta.active, byName.zeta.color], [true, false, "#e0a"]);
   assert.deepEqual([byName.beta.open, byName.beta.active, byName.beta.color], [true, true, "#0ae"]);
   assert.deepEqual([byName.Alpha.open, byName.Alpha.active, byName.Alpha.color], [false, false, null]);
+});
+
+test("two terminals of one name in a group are numbered in start order", () => {
+  const groups = sidebarGroups([
+    session("id-b", { name: "PowerShell", workspace: "zeta", activity: { idle_seconds: 1 } }),
+    session("id-a", { name: "PowerShell", workspace: "zeta", activity: { idle_seconds: 50 } }),
+    session("id-c", { name: "Codex", workspace: "zeta" }),
+  ], { workspaces });
+  const zeta = groups.find((group) => group.name === "zeta");
+  assert.deepEqual(zeta.sessions.map((entry) => [entry.session.id, entry.label]),
+    [["id-c", "Codex"], ["id-b", "PowerShell"], ["id-a", "PowerShell 2"]]);
+  // A terminal started later is the next number, whatever its random id;
+  // the ones already shown keep theirs.
+  const more = sidebarGroups([
+    session("id-b", { name: "PowerShell", workspace: "zeta" }),
+    session("id-a", { name: "PowerShell", workspace: "zeta" }),
+    session("id-0", { name: "PowerShell", workspace: "zeta" }),
+  ], { workspaces }).find((group) => group.name === "zeta");
+  assert.deepEqual(more.sessions.map((entry) => [entry.session.id, entry.label]),
+    [["id-b", "PowerShell"], ["id-a", "PowerShell 2"], ["id-0", "PowerShell 3"]]);
+  // The activity sort moves the rows, never the numbers.
+  const recent = sidebarGroups([
+    session("id-b", { name: "PowerShell", workspace: "zeta", activity: { idle_seconds: 1 } }),
+    session("id-a", { name: "PowerShell", workspace: "zeta", activity: { idle_seconds: 50 } }),
+  ], { workspaces, view: { sort: "activity" } }).find((group) => group.name === "zeta");
+  assert.deepEqual(recent.sessions.map((entry) => [entry.session.id, entry.label]),
+    [["id-b", "PowerShell"], ["id-a", "PowerShell 2"]]);
 });

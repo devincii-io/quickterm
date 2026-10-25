@@ -519,6 +519,14 @@ async def _serve(
         if hotkeys is not None:
             hotkeys.stop()
         raise
+    from quickterm import usage
+    from quickterm.api import usage as api_usage
+
+    # Claude's last limits survive a restart; only the real backend keeps the
+    # file, so app tests never touch the config folder.
+    await asyncio.to_thread(
+        api_usage.claude_limits(app).attach_file, usage.claude_usage_file()
+    )
     server = UvicornServer(
         UvicornConfig(
             app,

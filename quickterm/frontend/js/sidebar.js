@@ -212,16 +212,9 @@ export function createSidebar({ api, state, views, actions, panels, palette, fol
       // One entry point each. The palette already has Alt+K, and the
       // Dashboard used to sit here and directly above as "Manage
       // workspaces", pixel-identical once the sidebar is collapsed.
+      // A new window is a row of the Workspaces "+" menu and the palette's
+      // "new window…", not a footer icon of its own.
       chrome: [
-        // The discoverable half of the palette's "new window…" row. Both land
-        // in the same picker, because which workspace a second window opens on
-        // is a choice and the free/taken list only exists in one place. No
-        // shortcut: keys.js may claim only cold Alt combos, and the letters
-        // still free are readline/PSReadLine bindings the shell needs.
-        ["new window", () => {
-          panels.close();
-          palette.newWindowMode();
-        }],
         ["workspace board", () => panels.toggle("dashboard"), "alt+g"],
         ["settings", () => panels.toggle("settings"), "alt+s"],
         ["help", () => panels.toggle("help"), "alt+i"],

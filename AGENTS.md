@@ -81,7 +81,7 @@ because the `.iss` relaunch entry is `skipifsilent`.
   cycles the sidebar (full, rail, hidden; plain Alt+B is readline's
   backward-word and Ctrl+B the tmux prefix, so neither is ours);
   Alt+Shift+E the right panel (also while the panel holds the keyboard;
-  Explorer is the palette row and the sidebar button); Alt+Shift+C VS Code;
+  Explorer is the palette row and the workspace's "⋮" menu); Alt+Shift+C VS Code;
   Ctrl+Shift+1..9 the nth workspace in the sidebar (matched on `code`
   Digit1..9, never on `key`, which is the layout's shifted symbol; not
   Alt+Shift, which is readline's M-! M-@ M-$ completion on US layouts, and
@@ -223,7 +223,15 @@ because the `.iss` relaunch entry is `skipifsilent`.
   keeps its header and its zoom control stays drawn, because that control is
   the way back (Alt+Z on one pane only says so). Focusing a pane the zoom
   hides, from the sidebar or Alt+arrows, unzooms first. Before adding a
-  control, ask whether the palette (Alt+K) or a tooltip already carries it.
+  control, ask whether the palette (Alt+K), a tooltip or an existing menu
+  already carries it: the launch row is one split button (`+ <choice>` and
+  its menu, which also holds the administrator terminal and Terminal
+  settings), the Workspaces header draws only `+` until hovered, and a
+  workspace card's hover tray is Close and `⋮` (Explorer and VS Code are
+  rows of that menu). "+" and Alt+N start the menu row picked last
+  (`quickterm.newTerminalChoice`), never only the configured shell. Each
+  workspace is a card around its head and terminals; the rail drops the
+  cards for dots.
   The shell inventory is cached in localStorage
   and served from a 60 s server-side cache, so boot never waits for it.
   The right panel (`right_panel.js`) is the sidebar's mirror, not a second
@@ -290,6 +298,18 @@ because the `.iss` relaunch entry is `skipifsilent`.
   profile, and Claude Code and Codex run inside it: the PTY's process is the
   shell, `SessionManager._build` adds the hooks to the agent's argv and then
   wraps it (`shells.wrap`), so the pane ends at a prompt when the agent exits.
+  On Windows that shell (PowerShell, cmd, Git Bash; plain or wrapping an
+  agent) gets QuickTerm's integration in `_build` (`shell=` from
+  `launch.resolve`): each prompt reports the folder as OSC 9;9, because
+  PowerShell reports none and the "workspace here" offer needs it. PowerShell
+  gets a script through `QUICKTERM_PS_INIT` (inline `-Command`, never a file,
+  which the execution policy would block); its prompt wrapper calls the
+  original prompt first so `$?` and `$LASTEXITCODE` stay the user's, and it
+  runs no program. Its `claude`/`codex` functions are skipped when the
+  profile already defines a function of that name (a user's own wrapper
+  wins), and under Constrained Language Mode the boot line only removes the
+  variable, because `ScriptBlock.Create` would print an error in every
+  terminal. cmd gets a PROMPT prefix, Git Bash a PROMPT_COMMAND.
   The agents are settings (`AppConfig.agents`, launched as profile
   `claude-code` / `codex`), not profiles; a saved profile is a connection, a
   custom command or a shell with a start command, and config.py refuses the
@@ -320,12 +340,18 @@ because the `.iss` relaunch entry is `skipifsilent`.
   token is not in a terminal's environment (it is still in
   `runtime.token`, which `quickterm send` reads). No hooks in the elevated
   instance: their curl configs live where a normal process can rewrite them.
+  A `claude` or `codex` the user types in a QuickTerm PowerShell is a global
+  function from the integration that adds the same static hook arguments
+  (`agent_hooks.shell_hooks`); it passes everything through for subcommands
+  without them, a user's own `--settings`, and an unsafe .cmd/.bat.
   Hooks run Windows' curl async: a Python process per PreToolUse would slow
   every tool call. Claude's usage limits reach QuickTerm only through the
   per-launch `statusLine` (`statusline_chain.py`), which must keep running
   the user's own status line and must never resolve its own command again;
   it is the one per-update Python process, so it imports nothing but itself
-  from source. Git facts of a local workspace are read from `.git` files
+  from source. The latest limits are kept in `claude-usage.json`, written
+  only when a window changed (the status line reports many times a
+  minute). Git facts of a local workspace are read from `.git` files
   (`git_info.py`); a program that must run in a workspace's folder (git for
   the right panel, git over ssh for a remote workspace's branch) goes through
   `ws_exec.py`, off the loop, with a list argv and no shell. QuickTerm creates

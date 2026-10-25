@@ -175,11 +175,12 @@ def test_a_second_window_is_openable_from_the_sidebar_and_the_palette():
     palette = PALETTE_JS.read_text(encoding="utf-8")
     keys = KEYS_JS.read_text(encoding="utf-8")
 
-    # Two entry points, one picker: the sidebar footer button and the palette
-    # row both land in the same list of workspaces a new window may open on.
-    # The footer is built from the `chrome` array, so that is where it goes.
-    assert '["new window", () => {' in sidebar
-    assert "palette.newWindowMode()" in sidebar
+    # Two entry points, one picker: the sidebar's Workspaces "+" row and the
+    # palette row both land in the same list of workspaces a new window may
+    # open on. The footer has no new-window icon of its own any more.
+    assert '["new window", () => {' not in sidebar
+    assert 'label: "Open in new window…", icon: "new-window", run: () => actions.newWindow?.()' in LAUNCHER_JS.read_text(encoding="utf-8")
+    assert "palette.newWindowMode();" in shell
     assert "openWorkspaceInWindow: (name) => registry.openNewWindow(name)," in shell
     assert 'label: "new window…"' in palette
     assert "run: () => this._newWindowMode()" in palette
@@ -460,8 +461,12 @@ def test_the_shown_row_is_highlighted_in_the_sidebar():
     launcher = LAUNCHER_JS.read_text(encoding="utf-8")
     head = sidebar_css[sidebar_css.index(".session-group.active > .session-group-headline > .session-group-head {"):]
     head = head[: head.index("}")]
-    assert "background: var(--surface-raised);" in head
-    assert "box-shadow: inset 2px 0 var(--accent);" in head
+    assert "font-weight: 600;" in head
+    # The shown workspace's card carries the highlight: lifted and edged.
+    card = sidebar_css[sidebar_css.index(".session-group.active {"):]
+    card = card[: card.index("}")]
+    assert "border-color: var(--accent-border);" in card
+    assert "background: var(--surface);" in card
     assert 'setClass(node, "active", group.active);' in launcher
     assert '"aria-current": group.active ? "true" : false,' in launcher
 

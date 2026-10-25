@@ -1170,7 +1170,46 @@ def append_tools_path(env: dict[str, str]) -> dict[str, str]
   `[-d <distro>] --cd <folder or ~>`). The session is named after the shell
   ("PowerShell") unless the request names it. `shells.program` resolves
   PowerShell to `pwsh.exe` on PATH or under Program Files, else
-  `powershell.exe`; a missing Git Bash or WSL is a 400.
+  `powershell.exe`; a missing Git Bash or WSL is a 400. For PowerShell, cmd
+  and Git Bash the spec also carries `shell=<value>` (`LaunchSpec.shell`,
+  passed as the `shell` keyword of `SessionManager.spawn`/`spawn_async`),
+  and the session manager adds the shell integration (below).
+- Shell integration (Windows, local terminals only; `shells.INTEGRATED`).
+  `SessionManager._build` applies it to a plain shell launch (`shell=`) and
+  to an agent wrap in the same shells; WSL, POSIX, SSH and saved profiles
+  are unchanged. Each prompt reports the folder as
+  `ESC ] 9 ; 9 ; <Windows path> ESC \` (unquoted):
+  - PowerShell: argv `-NoLogo -NoExit -Command <boot>`, where `<boot>` is
+    `& ([ScriptBlock]::Create($env:QUICKTERM_PS_INIT))` in FullLanguage mode
+    and only `Remove-Item Env:QUICKTERM_PS_INIT` under Constrained Language
+    Mode (which refuses ScriptBlock.Create with an error); an agent wrap puts
+    `<boot>` and a line break before its own `-Command` text. The script in
+    `QUICKTERM_PS_INIT` (`shells.ps_integration`) removes that variable,
+    then replaces `prompt` with one that runs the original prompt first and
+    writes the report with `[Console]::Write` when the location is a
+    FileSystem one. The profile still loads (no `-NoProfile`), and an inline
+    `-Command` is not subject to the execution policy. Where hooks are on
+    (not elevated, curl usable, a safe hooks folder:
+    `agent_hooks.shell_hooks`), it also defines global `claude` and `codex`
+    functions, unless the profile already defined a function of that name,
+    which then stays as it is and gets no hooks. Each resolves the program (`Get-Command -CommandType
+    Application`, first hit) on every call and runs it with the static
+    `--settings=<hooks>/claude-settings.json` after the user's arguments, or
+    with Codex's `-c notify=...` before them. The arguments pass through
+    untouched when the first one is a subcommand in `shells.CLAUDE_PLAIN` /
+    `shells.CODEX_PLAIN`, when Claude gets the user's own `--settings`, and
+    when the program is a .cmd/.bat that may not get them (always for Codex,
+    for Claude when the path holds a character cmd.exe re-reads). Without a
+    program the function steps aside so PowerShell runs the name itself.
+    QuickTerm's own agent launch calls the exe by path and never reaches
+    these functions. Such a session counts as an agent shell for clearing
+    agent state once the shell has no child left.
+  - cmd: `PROMPT=$E]9;9;$P$E\` followed by the user's own `PROMPT` (from the
+    launch env, else QuickTerm's), or `$P$G`. The argv is unchanged.
+  - Git Bash: `PROMPT_COMMAND` (the user's own from the environment, then
+    `shells.GIT_BASH_PROMPT_COMMAND`), which turns `/c/x` into `C:\x` and
+    asks `pwd -W` for anything else. A bashrc that sets its own
+    `PROMPT_COMMAND` replaces it; then nothing is reported.
 - `profile` `"claude-code"` or `"codex"` names the agent from `cfg.agents`
   unless a saved profile has that exact name; the session's `profile` is the
   kind and its name "Claude Code" or "Codex". An agent launch carries
@@ -1472,8 +1511,12 @@ shapes). Both modules are stdlib only.
 # usage.py
 CLAUDE_EVENT = "QuickTermRateLimits"
 class ClaudeLimits:                          # one per app, on app.state
+    def attach_file(self, path) -> None      # blocking; load, then save there
     def record(self, rate_limits) -> bool    # False keeps the previous numbers
+    def needs_save(self) -> bool             # windows differ from the file
+    def save(self) -> None                   # blocking; writes only a change
     def snapshot(self) -> dict | None        # the "claude" value of GET /api/usage
+def claude_usage_file() -> Path              # <config dir>/claude-usage.json
 class CodexReader:                           # one per app, on app.state
     def read(self) -> dict | None            # blocking; the "codex" value
 def read_rollout_tail(path, tail=256 * 1024) -> dict | None
@@ -1487,6 +1530,14 @@ def user_command(status: dict) -> str | None
 - `ClaudeLimits.record` keeps `five_hour` and `seven_day` windows whose
   `used_percentage` is a number; `resets_at` may be epoch seconds or an ISO
   string. A report with no such window changes nothing.
+- The running backend (`app._serve`) attaches `claude_usage_file()` once
+  at start, off the loop: a valid file is the snapshot until Claude reports
+  again, a missing or broken one starts empty. The agent-event route saves
+  through `asyncio.to_thread` only when `needs_save()`, that is when a
+  window's `used_percent` or `resets_at` changed; the file is
+  `{"windows": [...], "updated_at": <epoch s>}`, written atomically, and its
+  `updated_at` is the time of the last change. `create_app` alone keeps the
+  numbers in memory, so app tests never touch the config folder.
 - `CodexReader` walks `<CODEX_HOME or ~/.codex>/sessions` for
   `rollout-*.jsonl`, takes the newest by mtime and falls back to the next
   two when the newest has no limits yet (a session that just started). A
@@ -1714,10 +1765,13 @@ def user_command(status: dict) -> str | None
   patched through `launcherView.updateHere` on every status refresh) when
   the focused terminal's folder is outside the current workspace's folder
   or in scratch: a folder that already is a workspace's root offers to open
-  that workspace, any other offers to create one named after the folder.
-  `createWorkspaceHere()` writes the terminal into the target's layout
-  first, retains and detaches it here, then opens or focuses the target's
-  view, whose restore attaches it again; a name clash, an invalid folder name or a workspace
+  that workspace, any other offers to create one named after the folder
+  (`folderWorkspaceName` in `here.js`: characters a name cannot hold become
+  dashes, a taken name gets " 2", " 3"...). The offer is the inline
+  "make <name> a workspace" line under the active head and the first row of
+  the Workspaces "+" menu. `createWorkspaceHere()` writes the terminal into
+  the target's layout first, retains and detaches it here, then opens or
+  focuses the target's view, whose restore attaches it again; a workspace
   held elsewhere is reported and nothing moves. Folder roots come from one
   `GET /api/workspaces/{name}` per saved workspace, off the boot path.
 - Workspace saves are serialized per name in `workspace.js`, with argument
@@ -1738,7 +1792,7 @@ def user_command(status: dict) -> str | None
   workspace's view retains every terminal it owns.
 - The sidebar footer is built from the `chrome` array the shell passes to
   `initLauncher`, each entry `[label, onClick, shortcut?]`, with the labels
-  "new window", "workspace board", "settings" and "help". `launcher.js` maps
+  "workspace board", "settings", "help" and "right panel". `launcher.js` maps
   the label to a glyph through `NAV_ICONS` in `sidebar_model.js`; an
   unmapped label falls back to the terminal icon, so a new entry needs one
   line there as well.
@@ -1774,27 +1828,35 @@ def user_command(status: dict) -> str | None
   flashes "[only one pane]".
 - Sidebar (`launcher.js` builds the DOM; `sidebar_model.js` holds its pure
   model: modes, width, groups, row states, the "+" menu rows
-  (`newTerminalMenu`, `defaultShellRow`) and their storage, re-exported from
-  `launcher.js`). `cycleTerminal` opens the "+" menu since 4.3; there is no
-  selected choice. Each view app answers `noteSessions(list)` from the
+  (`newTerminalMenu`, `defaultShellRow`, `chosenRow`) and their storage,
+  re-exported from `launcher.js`). `cycleTerminal` opens the "+" menu since
+  4.3; `newTerminalChoice()` is the row "+" starts, or null while that is
+  the configured shell, and a view's Alt+N asks it through
+  `state.launcherView`. Each view app answers `noteSessions(list)` from the
   sidebar's poll, so an agent pane knows when its agent has left the shell
   (`pane.agentGone`: no Shift+Enter newline, no working label). The shell calls `initLauncher(el, {actions, chrome,
   elevated})` once and gets `{update(partialModel), updateHere(here),
-  cycleTerminal, mode, setMode, cycleMode}`; every data change goes through
+  cycleTerminal, newTerminalChoice, nextNeedsYou, mode, setMode, cycleMode}`;
+  every data change goes through
   `update`, which patches groups keyed `group:<key>` and rows keyed
   `session:<id>` with `render.js patchList`. An open kill popover, menu or
   rename input survives the 10 s poll; a popover whose row disappears closes
   itself. One flat list, top to bottom:
-  1. The launch row: `+ <choice>` opens a saved terminal, the chooser chevron,
-     the gear (terminal manager), the admin shield. The chooser lists
-     configured profiles only; detecting a shell never makes it a default or
-     adds it to the launch menu. With no saved terminals, the launch action
-     opens setup.
+  1. The launch row: one split button, `+ <choice>` and the menu chevron
+     (see "The "+" menu"). The administrator terminal and the terminal
+     settings are rows of that menu, not buttons of their own.
   2. A **Workspaces** label with three buttons: search (`actions.search`,
-     opens the palette on `@`), the view menu (`menu.js`, see below) and a
-     `+` menu: **Scratch** (shows the window's scratch view, opening it
-     when needed), **Workspace here: <name>** when the shown view offers
-     it, **Open in new window…**.
+     opens the palette on `@`) and the view menu (`menu.js`, see below)
+     draw on hover or focus only (a filtered view keeps its tinted button
+     drawn), and a `+` menu that always shows: **Make <name> a workspace**
+     or **Open <name>** when the shown view offers workspace here,
+     **New workspace…** (`new_workspace.js`: the in-app folder browser
+     starts at `suggestedWorkspaceFolder()`, never the scratch folder; the
+     chosen folder becomes a workspace named after it with an empty layout
+     and its view opens; a folder that already is a local workspace's opens
+     that one), **New workspace on host…**, a separator, **Scratch** (shows
+     the window's scratch view, opening it when needed) and **Open in new
+     window…**. The palette has "new workspace…" too.
   3. One group per saved workspace in case-insensitive alphabetical order;
      scratch groups next, ordered by label; then **Unassigned**. By default
      a workspace with no listed terminal that is not open in this window is
@@ -1808,23 +1870,27 @@ def user_command(status: dict) -> str | None
      stage, opening it when needed; the **active** group is the shown one and
      its head is highlighted (raised surface, accent edge, `aria-current`).
      Left and Right fold. Hover and focus-within actions: **Close** (`x`,
-     only when open; saves and retains) and a kebab menu with Open in new
-     window, Workspace settings (folder, logo and saved layout preview in
+     only when open; saves and retains) and a kebab menu with Open in
+     Explorer and Open in VS Code (a local workspace: the shown one at the
+     focused terminal's folder, `openFolder`, also Alt+Shift+C and two
+     palette rows; any other at its own folder, `openWorkspaceFolder`), Open
+     in new window, Workspace settings (folder, logo and saved layout preview in
      its own small sheet, `Panels#showWorkspace`) and Delete
      workspace… (confirm popover: "Delete workspace <name>? Detached
      terminals it owns are killed; attached ones keep running."). The
      **active** group keeps one head row: the folder name after the label
      (hidden when it equals the label), the one `#sb-save` dot after the
-     count (same id and `data-state` contract, driven by `feedback.js`), and
-     Explorer and VS Code in the hover tray before Close (`openFolder`;
-     also Alt+Shift+C and two palette rows). Only the
-     **workspace here** button takes a line below the head, and only while
-     it is offered. A terminal row is one line too: past `SIDEBAR_WIDE_AT`
+     count (same id and `data-state` contract, driven by `feedback.js`).
+     Only the **workspace here** button takes a line below the head, and
+     only while it is offered. A terminal row is one line too: past `SIDEBAR_WIDE_AT`
      its folder follows the name, and under a workspace only when it differs
      from the workspace folder (for scratch, from where the terminal
-     started).
-  4. The footer: new window, workspace board, settings, help, centred, and the
-     collapse chevron on the right edge.
+     started). Two terminals of one name in one group are told apart by a
+     number ("PowerShell", "PowerShell 2") in the order they were started
+     (the index in `GET /api/sessions`, which lists them that way), so a
+     new one gets the next number and the activity sort never moves it.
+  4. The footer: workspace board, settings, help, right panel, centred, and
+     the collapse chevron on the right edge.
 
   The view menu (per window, `quickterm.sidebarView`, normalised by
   `normalizeView`): **Show** empty workspaces (default off) and finished
@@ -1833,8 +1899,8 @@ def user_command(status: dict) -> str | None
   Terminals whose rows name their workspace), **Sort by** name (default) or
   recent activity, and **Reset view**. A non-default view tints the button.
 
-  With the default sort, order is stable: groups as above, rows by name,
-  then id (`localeCompare` with `numeric: true`). Recent activity is opt-in
+  With the default sort, order is stable: groups as above, rows by name
+  (`localeCompare` with `numeric: true`), then start order. Recent activity is opt-in
   and orders rows, then groups, by `activity.idle_seconds` (busy and
   attention count as now, finished last). Under the default sort, state
   never reorders anything: "needs you" is a chip,
@@ -2629,13 +2695,24 @@ Changing anything here goes through the integrator.
 
 The sidebar's new-terminal button:
 
-- Main click: a new terminal in `shell`.
+- Main click (and Alt+N): the row picked last in its menu, a new terminal in
+  `shell` until another row is picked (`chosenRow(menu, key)`; the key is
+  `quickterm.newTerminalChoice` in localStorage, per machine, and is cleared
+  when the configured shell itself is picked). A remembered row the menu no
+  longer has (a remote workspace has no local shells, a deleted profile)
+  falls back to `shell`. A shell starts in the focused terminal's folder as
+  before; an agent or saved terminal starts as from its menu row.
 - Its menu (menu.js, no native select), in this order: one row per entry of
   `shells` that is available ("PowerShell", "Command Prompt", "Git Bash",
-  "WSL: Ubuntu"...), the default one marked; a separator; "Claude Code" and
-  "Codex" when installed; then the user's saved profiles other than the
-  built-in ones, if any; a separator; "Terminal settings…". The old "SAVED
-  TERMINALS" heading goes.
+  "WSL: Ubuntu"...), "default" under the configured one; a separator;
+  "Claude Code" and "Codex" when installed; then the user's saved profiles
+  other than the built-in ones, if any; a separator; "As administrator"
+  with the choice as its detail (local shells, agents and saved terminals,
+  not in the admin instance and not on an SSH host; a second pick while the
+  first request is in flight does nothing, so a double click raises one UAC
+  prompt); "Terminal settings…". The check marks
+  the row "+" starts. Picking a row starts it at once and makes it the "+"
+  choice. The old "SAVED TERMINALS" heading goes.
 - The palette's new-terminal items list the same entries.
 - Settings gets one "Shell" row (menu.js picker over `shells`) that writes
   `shell`.
@@ -2719,7 +2796,10 @@ Backend:
   then local) with the same stdin and prints its stdout unchanged. With no
   user status line it prints nothing. It always exits 0 and never blocks the
   status line longer than the user's own command plus 2 s. The backend keeps
-  only the latest Claude numbers in memory (not per session, not on disk).
+  only the latest Claude numbers (not per session), and stores them in
+  `claude-usage.json` in the config folder when they change, so a restart
+  still shows them. A `claude` typed in a QuickTerm PowerShell terminal gets
+  the same settings file (shell integration, above), so it reports too.
   `agent_events` ignore this event for agent state.
 - Codex's numbers come from the newest `rollout-*.jsonl` under
   `~/.codex/sessions` (respecting `CODEX_HOME`): the last line with

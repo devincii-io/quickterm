@@ -8,7 +8,7 @@ import { confirmNear } from "./confirm_popover.js";
 import {
   SIDEBAR_MODES, nextSidebarMode, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MIN, maxSidebarWidth,
   clampSidebarWidth, isWideSidebar, rowWhere, sessionTooltip, sidebarGroups, groupSummary,
-  folderName, newTerminalMenu, defaultShellRow, loadMode, saveMode, loadWidth, saveWidth,
+  folderName, newTerminalMenu, chosenRow, loadTerminalChoice, saveTerminalChoice, loadMode, saveMode, loadWidth, saveWidth,
   loadClosedGroups, saveClosedGroups, foldId, visibleGroups, activitySeconds, relativeTime, groupBranch, worktreeNote,
   nextNeedsYou as findNeedsYou, NAV_ICONS,
 } from "./sidebar_model.js";
@@ -73,21 +73,24 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   };
 
   // New terminal -----------------------------------------------------------
-  // The "+" button starts the configured shell; the chevron (or a
-  // right click) opens the menu of shells, agents and saved profiles, and
-  // every row there starts its terminal at once. Built once; the rows are
-  // recomputed when the shell, the agents, profiles or inventory change.
+  // One split button. "+" (and Alt+N) starts the row picked last in the
+  // chevron's menu, the configured shell until something else is picked;
+  // picking a row starts it at once and makes it the "+" choice. The menu
+  // also carries the administrator terminal and the terminal settings, so
+  // the row stays two controls. Built once; the rows are recomputed when the
+  // shell, the agents, profiles or inventory change.
   const launch = make("div", "sidebar-launch");
   let menu = [];
-  let shellRow = null;
+  let choiceKey = loadTerminalChoice();
+  let chosen = null;
 
   const open = make("button", "sidebar-new");
   open.type = "button";
   const openLabel = make("span", "sidebar-label");
   open.append(icon("plus", 15), openLabel);
   const describeOpen = () => {
-    setText(openLabel, shellRow ? shellRow.label : "New terminal");
-    open.title = `New ${shellRow ? shellRow.label : "terminal"} terminal (Alt+N)`;
+    setText(openLabel, chosen ? chosen.label : "New terminal");
+    open.title = `New ${chosen ? chosen.label : "terminal"} (Alt+N) · the arrow beside it picks another`;
   };
   const runRow = (row) => {
     if (row.kind === "shell") return actions.runSystem?.({ kind: "shell", shell: row.value, label: row.label });
@@ -95,22 +98,50 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     if (row.kind === "agent" || row.kind === "profile") return actions.runProfile?.(row.profile);
     return actions.setup?.();
   };
+  // Elevation spawns a separate process, so success is invisible here and a
+  // declined UAC prompt is indistinguishable from a dead row; the shell
+  // reports the outcome.
+  // One request at a time, so a double click raises one UAC prompt.
+  let elevating = null;
+  const elevateRow = (row) => {
+    if (elevating) return elevating;
+    if (row?.kind === "shell") elevating = actions.elevateSystem?.({ kind: "shell", shell: row.value, label: row.label });
+    else if (row?.kind === "agent" || row?.kind === "profile") elevating = actions.elevateProfile?.(row.profile);
+    return (elevating = elevating && Promise.resolve(elevating).finally(() => { elevating = null; }));
+  };
+  const choose = (row) => {
+    // The configured shell is no choice to remember: a changed setting moves it.
+    choiceKey = row.isDefault ? null : row.key;
+    saveTerminalChoice(choiceKey);
+    chosen = row;
+    describeOpen();
+  };
   open.addEventListener("click", () => {
-    Promise.resolve(actions.newTerminal ? actions.newTerminal() : shellRow && runRow(shellRow)).finally(handBack);
+    Promise.resolve(actions.newTerminal ? actions.newTerminal() : chosen && runRow(chosen)).finally(handBack);
   }, { signal });
 
-  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "New terminal in another shell, an agent or a saved profile");
+  const pick = iconButton("sidebar-terminal-pick", "chevron-down", "Pick what + starts: another shell, an agent or a saved terminal");
   pick.setAttribute("aria-haspopup", "menu");
   pick.setAttribute("aria-expanded", "false");
   const openTerminalMenu = () => {
     const items = menu.map((row) => {
       if (row.kind === "separator") return { separator: true };
+      if (row.kind === "admin") {
+        if (!["shell", "agent", "profile"].includes(chosen?.kind)) return null;
+        return {
+          label: "As administrator", detail: chosen.label, icon: "shield",
+          run: () => Promise.resolve(elevateRow(chosen)).finally(handBack),
+        };
+      }
       return {
         label: row.label,
         detail: row.isDefault ? "default" : row.detail,
         icon: row.kind === "settings" ? "settings" : undefined,
-        selected: Boolean(row.isDefault),
-        run: () => Promise.resolve(runRow(row)).finally(handBack),
+        selected: row.key === chosen?.key,
+        run: () => {
+          if (row.kind !== "settings") choose(row);
+          return Promise.resolve(runRow(row)).finally(handBack);
+        },
       };
     });
     toggleMenu({ anchor: launch, trigger: pick, items, label: "New terminal", onClose: handBack });
@@ -121,19 +152,6 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     openTerminalMenu();
   }, { signal });
   launch.append(open, pick);
-  launch.append(iconButton("sidebar-setup", "settings", "Terminal settings", () => actions.setup?.()));
-  if (!elevated) {
-    // Elevation spawns a separate process, so success is invisible here and a
-    // declined UAC prompt is indistinguishable from a dead button. Hold the
-    // button while the request is in flight and let the shell report the outcome.
-    const admin = iconButton("sidebar-admin", "shield", "New administrator terminal", () => {
-      if (shellRow?.kind !== "shell" || admin.disabled) return;
-      admin.disabled = true;
-      const request = actions.elevateSystem?.({ kind: "shell", shell: shellRow.value, label: shellRow.label });
-      Promise.resolve(request).finally(() => { admin.disabled = false; });
-    });
-    launch.append(admin);
-  }
   el.append(launch);
 
   const patchLaunch = () => {
@@ -141,14 +159,15 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const host = (model.workspaces || []).find((entry) => entry.name === shown)?.host || null;
     menu = newTerminalMenu({
       inventory: model.inventory, profiles: model.profiles, shell: model.shell, agents: model.agents, host,
+      admin: !elevated,
     });
-    shellRow = defaultShellRow(menu);
+    chosen = chosenRow(menu, choiceKey);
     describeOpen();
   };
 
   // Workspaces -------------------------------------------------------------
   const section = make("div", "sidebar-section");
-  const add = iconButton("sidebar-section-add", "plus", "Scratch, workspace here, a workspace on an SSH host, or a new window");
+  const add = iconButton("sidebar-section-add", "plus", "New workspace from a folder, on an SSH host, scratch, or a new window");
   add.setAttribute("aria-haspopup", "menu");
   add.setAttribute("aria-expanded", "false");
   add.addEventListener("click", () => {
@@ -158,12 +177,16 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       trigger: add,
       label: "Workspaces",
       items: [
-        { label: "Scratch", icon: "plus", detail: "this window's disposable workspace", run: () => actions.newScratch?.() },
+        // The folder the focused terminal is in comes first when it is no
+        // workspace yet: that is the folder a person who just `cd`'d wants.
         here ? {
-          label: `Workspace here: ${here.name}`, icon: "folder", detail: folderName(here.folder), title: hereTitle(here),
+          label: hereLabel(here, true), icon: "folder", detail: folderName(here.folder), title: hereTitle(here),
           run: () => actions.workspaceHere?.(),
         } : null,
+        { label: "New workspace…", icon: "folder", detail: "choose a folder", run: () => actions.newWorkspace?.() },
         { label: "New workspace on host…", icon: "plus", detail: "a folder on an SSH host", run: () => actions.newRemoteWorkspace?.() },
+        { separator: true },
+        { label: "Scratch", icon: "plus", detail: "disposable", run: () => actions.newScratch?.() },
         { label: "Open in new window…", icon: "new-window", run: () => actions.newWindow?.() },
       ],
       onClose: (reason) => { if (reason !== "run") handBack(); },
@@ -178,10 +201,11 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   el.append(section);
 
   // What the active workspace adds, all on its one head row: the folder after
-  // the name, the save dot at the end, Explorer and VS Code in the hover tray.
-  // Only the "workspace here" offer takes a line of its own, and only while
-  // it is offered. The nodes move to whichever group is active, so #sb-save
-  // is always the same element.
+  // the name and the save dot at the end. Only the "workspace here" offer
+  // takes a line of its own, and only while it is offered. The nodes move to
+  // whichever group is active, so #sb-save is always the same element.
+  // Explorer and VS Code live in the group's "⋮" menu: two more hover icons
+  // covered the folder name.
   const activeLine = make("div", "sidebar-active-line");
   activeLine.hidden = true;
   const folderLine = make("small", "sidebar-folder");
@@ -194,21 +218,6 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     actions.workspaceHere?.();
     handBack();
   }, { signal });
-  const tools = make("span", "sidebar-folder-tools");
-  const openIn = (app, iconName, label) => {
-    const button = iconButton("sidebar-folder-open", iconName, label, () => {
-      actions.openFolder?.(app);
-      handBack();
-    });
-    button.dataset.app = app;
-    return button;
-  };
-  // The folder is resolved by the shell at click time, so it is where the
-  // focused terminal is right now (a `cd` counts), else the workspace folder.
-  tools.append(
-    openIn("explorer", "folder", "Open the focused terminal's folder in Explorer"),
-    openIn("vscode", "code", "Open the focused terminal's folder in VS Code (Alt+Shift+C)"),
-  );
   const save = make("span", "sidebar-save");
   save.id = "sb-save";
   save.setAttribute("role", "status");
@@ -217,21 +226,23 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   // Where these wait while no view is open, so #sb-save stays in the DOM.
   const parking = make("div", "sidebar-parking");
   parking.hidden = true;
-  parking.append(folderLine, save, tools, activeLine);
+  parking.append(folderLine, save, activeLine);
   const parkActive = () => {
-    if (save.parentNode !== parking) parking.append(folderLine, save, tools, activeLine);
+    if (save.parentNode !== parking) parking.append(folderLine, save, activeLine);
   };
-  // The folder goes right after the name, the save dot after the count, the
-  // tools before Close view. insertBefore only when a node is not already in
-  // place: moving a focused button would drop the keyboard out of it.
-  const placeActive = ({ head, count, tray, closeView, slot }) => {
+  // The folder goes right after the name, the save dot after the count.
+  // insertBefore only when a node is not already in place: moving a focused
+  // button would drop the keyboard out of it.
+  const placeActive = ({ head, count, slot }) => {
     if (folderLine.parentNode !== head) head.insertBefore(folderLine, count);
     if (save.parentNode !== head) head.append(save);
-    if (tools.parentNode !== tray) tray.insertBefore(tools, closeView);
     if (activeLine.parentNode !== slot) slot.append(activeLine);
   };
 
-  const hereLabel = (here) => (here.action === "open" ? `open ${here.name}` : `workspace here: ${here.name}`);
+  const hereLabel = (here, menuRow = false) => {
+    if (here.action === "open") return menuRow ? `Open ${here.name}` : `open ${here.name}`;
+    return menuRow ? `Make ${here.name} a workspace` : `make ${here.name} a workspace`;
+  };
   function hereTitle(here) {
     return here.action === "open"
       ? `${here.folder} is the folder of workspace ${here.name}. Open it and take this terminal along.`
@@ -250,8 +261,10 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const patchActiveLine = (group) => {
     const path = group?.path || "";
     const folder = folderName(path);
-    // Scratch says where its terminals start, so the line is never blank.
-    const fallback = group?.kind === "workspace" ? "no folder" : group?.kind === "scratch" ? "scratch folder" : "";
+    // A workspace without a folder says so; scratch needs no note, its head's
+    // title says where its terminals start.
+    // pathExists is null until the folders are read: no note while unknown.
+    const fallback = group?.kind === "workspace" && group.pathExists != null ? "no folder" : "";
     setText(folderLine, folder || fallback);
     // "acme / acme" says nothing twice.
     folderLine.hidden = !folderLine.textContent
@@ -309,7 +322,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     const item = itemFor(entry);
     if (!item?.session || item.session.alive === false) return;
     const { kill, row } = parts.get(entry);
-    const name = item.session.name || item.session.id;
+    const name = item.label || item.session.name || item.session.id;
     // In rail mode the row's actions are display:none, and a trigger without
     // a box drops the confirmation in the corner and closes it on the first
     // scroll as "gone". The row itself is the visible trigger then.
@@ -398,7 +411,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       anchor: row,
       trigger: row,
       items,
-      label: `Terminal ${session.name || session.id}`,
+      label: `Terminal ${item.label || session.name || session.id}`,
       onClose: (reason) => { if (reason !== "run") handBack(); },
     });
   };
@@ -458,7 +471,7 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
   const updateRow = (entry, item, group) => {
     const { session, state, attachedIn, finished } = item;
     const { row, name, chip, where, age, subagents, detach: detachButton, kill } = parts.get(entry);
-    const label = session.name || String(session.id).slice(0, 8);
+    const label = item.label || session.name || String(session.id).slice(0, 8);
     setClass(entry, "needs-you", state.key === "attention");
     setClass(entry, "has-subagents", patchSubagents(subagents, session.agent));
     setText(age, relativeTime(activitySeconds(session)));
@@ -513,6 +526,20 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
     if (!group?.name) return;
     const { kebab, headline } = parts.get(node);
     const items = [];
+    // The shown workspace opens where its focused terminal is now (a `cd`
+    // counts, Alt+Shift+C does the same); any other opens its own folder.
+    // A folder on an SSH host is not on this disk.
+    const local = !group.host && (group.active || group.path);
+    if (local) {
+      const openIn = (app) => (group.active ? actions.openFolder?.(app) : actions.openWorkspaceFolder?.(group.name, app));
+      items.push(
+        { label: "Open in Explorer", icon: "folder", run: () => openIn("explorer") },
+        {
+          label: "Open in VS Code", icon: "code", title: group.active ? "Alt+Shift+C" : undefined,
+          run: () => openIn("vscode"),
+        },
+      );
+    }
     if (group.kind === "workspace") {
       items.push({ label: "Open in new window", icon: "new-window", run: () => actions.openWorkspaceInWindow?.(group.name) });
     }
@@ -853,6 +880,9 @@ export function initLauncher(el, { actions = {}, chrome = [], elevated = false }
       openTerminalMenu();
       return null;
     },
+    // What "+" starts, for Alt+N in a view: the picked row, or null while
+    // that is the configured shell.
+    newTerminalChoice: () => (chosen && !chosen.isDefault && chosen.kind !== "remote-shell" ? chosen : null),
     // Alt+J: the next terminal that needs you after the focused one, in the
     // order the list shows them, folded groups included.
     nextNeedsYou() {

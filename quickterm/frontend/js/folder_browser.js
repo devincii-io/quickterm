@@ -66,7 +66,8 @@ function el(tag, className, text) {
  *  optional escape hatch to the OS dialog, injected rather than imported so
  *  this module stays free of a cycle with panel_shared.js: it is
  *  `{available(), pick(startIn)}` where `pick` resolves
- *  `{available, path, failed}`.
+ *  `{available, path, failed}`. `options.confirmLabel` names the button
+ *  that takes the folder ("Use this folder" when left out).
  */
 export function openFolderBrowser(options = {}) {
   const native = options.nativePicker || null;
@@ -117,7 +118,7 @@ export function openFolderBrowser(options = {}) {
   const spacer = el("span", "fb-foot-gap");
   const cancelBtn = el("button", "fb-cancel", "Cancel");
   cancelBtn.type = "button";
-  const useBtn = el("button", "fb-use", "Use this folder");
+  const useBtn = el("button", "fb-use", options.confirmLabel || "Use this folder");
   useBtn.type = "button";
   useBtn.disabled = true;
   foot.append(nativeBtn, spacer, cancelBtn, useBtn);
@@ -217,7 +218,7 @@ export function openFolderBrowser(options = {}) {
       pathInput.value = here;
       upBtn.disabled = !parent;
       useBtn.disabled = false;
-      useBtn.title = `Use ${here}`;
+      useBtn.title = `${options.confirmLabel || "Use"}: ${here}`;
       renderRoots(data.roots || []);
 
       listEl.textContent = "";

@@ -17,6 +17,27 @@ export const insidePath = (child, parent) => Boolean(child) && Boolean(parent)
   && pathKey(child).startsWith(`${pathKey(parent)}/`);
 export const baseName = (value) => pathKey(value).split("/").filter(Boolean).pop() || "";
 
+// The last part of a Windows or POSIX path, case kept: "C:\code\Acme" is
+// "Acme", "C:\" is "C".
+export function folderBase(folder) {
+  const parts = String(folder || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  const last = parts[parts.length - 1] || "";
+  return last.replace(/:$/, "");
+}
+
+// A new workspace is named after its folder. Characters a workspace name
+// cannot hold become dashes; a name already taken (or reserved) gets a number.
+export function folderWorkspaceName(folder, taken = []) {
+  const clean = folderBase(folder)
+    .replace(/[^A-Za-z0-9._ -]+/g, "-")
+    .replace(/^[.\-\s]+|[.\s-]+$/g, "");
+  const base = clean && !/^scratch-view-/i.test(clean) ? clean : "workspace";
+  const used = new Set((taken || []).map((name) => String(name).toLowerCase()));
+  const free = (name) => !used.has(name.toLowerCase()) && name.toLowerCase() !== "scratch";
+  if (free(base)) return base;
+  for (let n = 2; ; n++) if (free(`${base} ${n}`)) return `${base} ${n}`;
+}
+
 export function createHere({ api, workspace, state, layout, showError }) {
   let workspaceRootsRefresh = null;
 
@@ -94,9 +115,8 @@ export function createHere({ api, workspace, state, layout, showError }) {
       if (name === SCRATCH_WS || !samePath(root, folder)) continue;
       return name === state.currentWorkspace ? null : { folder, name, action: "open" };
     }
-    const name = baseName(folder);
-    if (!name) return null;
-    return { folder, name, action: state.workspaceNames.includes(name) ? "clash" : "create" };
+    // A name another folder already has gets a number rather than a refusal.
+    return { folder, name: folderWorkspaceName(folder, state.workspaceNames), action: "create" };
   }
 
   return {

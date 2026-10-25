@@ -192,12 +192,13 @@ def test_the_chrome_is_the_sidebar_and_nothing_else():
     assert "cycleMode() { setMode(nextSidebarMode(mode)); return mode; }," in launcher
     # The save dot keeps its id and contract: feedback.js drives it through
     # data-state only, on the active group's head. The head stays one row:
-    # folder and save dot go into it, Explorer and VS Code into its tray, and
-    # only the "workspace here" offer takes a line below.
+    # folder and save dot go into it, Explorer and VS Code are rows of its
+    # "⋮" menu, and only the "workspace here" offer takes a line below.
     assert 'save.id = "sb-save";' in launcher
     assert 'save.setAttribute("role", "status");' in launcher
     assert "if (save.parentNode !== head) head.append(save);" in launcher
-    assert "if (tools.parentNode !== tray) tray.insertBefore(tools, closeView);" in launcher
+    assert '{ label: "Open in Explorer", icon: "folder", run: () => openIn("explorer") },' in launcher
+    assert "sidebar-folder-tools" not in launcher and ".sidebar-folder-open" not in sidebar_css
     assert "activeLine.hidden = !here;" in launcher
     assert "flex-wrap: wrap" not in sidebar_css.split(".session-row {", 1)[1].split("}", 1)[0]
     assert ".sidebar-save[data-state=\"saving\"]" in sidebar_css

@@ -65,7 +65,9 @@ export function remoteWorkspaceName(path, host, taken = []) {
 // Saves the workspace with its host and folder and an empty layout, then
 // opens its view, whose restore starts the first remote terminal.
 export async function createRemoteWorkspace({ api, host, path, openView, onWorkspacesChanged }) {
-  const names = await api.listWorkspaces().catch(() => []);
+  // An unreadable list must not read as "nothing is taken": the PUT would
+  // replace a workspace of the same name.
+  const names = await api.listWorkspaces();
   const name = remoteWorkspaceName(path, host, names);
   await api.putRemoteWorkspace(name, host, path.trim());
   await Promise.resolve(onWorkspacesChanged?.()).catch(() => {});

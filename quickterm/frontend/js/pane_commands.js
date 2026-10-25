@@ -11,7 +11,7 @@ import { sameFolderCwd } from "./spawner.js";
 
 export function createPaneCommands({
   api, state, layout,
-  spawnSplitInto, spawnDefaultInto, forgetSession, ensureScratchWorkspace,
+  spawnSplitInto, spawnDefaultInto, runProfile = () => null, forgetSession, ensureScratchWorkspace,
   scheduleWorkspaceSave, persistCurrentWorkspace, refreshStatusSoon, showError,
 }) {
   const paneFor = (id) => layout.panes().find((pane) => pane.session?.id === id) || null;
@@ -27,14 +27,19 @@ export function createPaneCommands({
       const pane = layout.splitFocused("v");
       if (pane) spawnSplitInto(pane, source);
     },
-    // Alt+N and the "+": in the focused terminal's folder when that lies
-    // inside the workspace folder, else in the workspace folder.
+    // Alt+N and the "+": whatever the sidebar's "+" starts (the configured
+    // shell until another row was picked in its menu). A shell starts in the
+    // focused terminal's folder when that lies inside the workspace folder,
+    // else in the workspace folder; an agent or saved terminal as from the menu.
     newTerminal: () => {
+      const choice = state.launcherView?.newTerminalChoice?.() || null;
+      if (choice?.profile) return runProfile(choice.profile);
       const source = layout.focused;
       const cwd = sameFolderCwd(source?.bestKnownCwd?.() || null, state.workspacePath);
       let pane = source || layout.init();
       if (!pane.canReplace) pane = layout.splitPane(pane, layout.autoDir(pane));
-      if (pane) spawnDefaultInto(pane, cwd);
+      const shell = choice?.kind === "shell" && !choice.isDefault ? choice.value : null;
+      if (pane) spawnDefaultInto(pane, cwd, shell);
     },
     // The palette's terminal rows: the focused pane's screen reset in place,
     // and its whole buffer copied as text.

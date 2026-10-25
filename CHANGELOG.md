@@ -2,6 +2,75 @@
 
 Release history is also available on the [GitHub Releases page](https://github.com/devincii-io/quickterm/releases).
 
+## QuickTerm 4.4.0
+
+Released 2026-10-25.
+
+QuickTerm 4.4 makes the sidebar easier to use. You can make a workspace
+from any folder, the new-terminal button remembers what you picked, and
+there are fewer buttons. Each workspace is a card. PowerShell, Command
+Prompt and Git Bash tell QuickTerm which folder they are in, and a
+`claude` or `codex` you type yourself shows its state and usage like one
+QuickTerm started.
+
+### Workspaces
+
+- The Workspaces "+" menu has **New workspace…**. Choose a folder and the
+  workspace is created with the folder's name and opens with a terminal
+  there. Choosing a folder that already belongs to a workspace opens that
+  workspace. The palette (Alt+K) has "new workspace…" too.
+- `cd` into a project in a scratch terminal and the sidebar offers to make
+  that folder a workspace, taking the terminal along. The offer is also the
+  first row of the "+" menu. A name that is already taken gets a number
+  ("acme 2") instead of an error.
+- Each workspace is a card around its name and its terminals. The one on
+  screen is raised and edged in the accent colour.
+- Two terminals with the same name in one workspace read "PowerShell" and
+  "PowerShell 2", numbered in the order they were started.
+
+### New terminals
+
+- The "+" at the top starts what you picked last from its arrow menu:
+  another shell, Claude Code, Codex or a saved terminal. Alt+N does the
+  same. Until you pick something it starts your shell from Settings.
+- That menu also holds **As administrator** and **Terminal settings…**, so
+  the row is one button with an arrow.
+
+### Fewer buttons
+
+- Find and the view menu beside "Workspaces" appear when you point at the
+  header; only "+" is always shown.
+- Explorer and VS Code moved from a workspace's hover buttons into its "⋮"
+  menu, where they no longer cover the folder name.
+- The footer's new-window icon is gone. "Open in new window…" is in the
+  Workspaces "+" menu and the palette.
+- The first-start tour describes one workspace at a time and ends in your
+  terminal.
+
+### Shells and agents
+
+- PowerShell, Command Prompt and Git Bash report their folder at every
+  prompt (OSC 9;9), so the sidebar, the new-terminal folder and "workspace
+  here" follow a `cd`. Your profile still loads, and your own prompt
+  function still draws the prompt.
+- In PowerShell, a `claude` or `codex` you type yourself gets QuickTerm's
+  hooks: the sidebar shows its state, and Claude's usage appears in the
+  footer next to Codex's. Subcommands such as `claude mcp` and your own
+  `--settings` pass through untouched, and a `claude` function from your
+  profile stays yours.
+- Claude's last usage numbers are kept in `claude-usage.json` in the
+  QuickTerm settings folder, so the footer shows them right after a
+  restart.
+- Under Constrained Language Mode (AppLocker, WDAC) PowerShell starts
+  without an error; QuickTerm leaves its integration out there.
+
+### Fixes
+
+- The right panel refuses a path through a folder link that Windows will
+  not follow instead of failing with an error.
+- Creating a workspace stops with a message when the workspace list
+  cannot be read, instead of risking overwriting one of the same name.
+
 ## QuickTerm 4.3.0
 
 Released 2026-10-25.
